@@ -1,0 +1,72 @@
+{% extends "base.html" %}{% from "_macros.html" import grade, status_pill, ext %}
+{% block title %}{{ lead.company.name }} · Lead{% endblock %}
+{% block content %}
+{% set c = lead.company %}
+<h1>{{ grade(lead.grade) }} {{ c.name }} <span class="muted small">lead #{{ lead.id }} · {{ lead.source }}</span> {{ status_pill(lead.status) }}
+  {% if lead.is_sample %}<span class="pill">sample data</span>{% endif %}</h1>
+<div class="two">
+  <div class="card">
+    <h2 style="margin-top:0">Company</h2>
+    <table>
+      <tr><th>Website</th><td>{{ ext(c.website, c.website) if c.website else '—' }}</td></tr>
+      <tr><th>Location</th><td>{{ c.city or '' }}{{ ', ' if c.city and c.state }}{{ c.state or '' }} {{ c.country }}{% if c.location_text %}<div class="small muted">{{ c.location_text }}</div>{% endif %}</td></tr>
+      <tr><th>Industry</th><td>{{ c.industry|industry }}</td></tr>
+      <tr><th>Source</th><td>{{ c.source }} · {{ ext(c.source_url) }} {% if c.verified %}<span class="pill ok">verified registry</span>{% else %}<span class="pill">self-reported</span>{% endif %}</td></tr>
+      {% if c.phone %}<tr><th>Phone (filed)</th><td>{{ c.phone }}</td></tr>{% endif %}
+      {% if c.is_competitor %}<tr><th>Flag</th><td><span class="pill bad">possible competitor</span></td></tr>{% endif %}
+      <tr><th>Lifecycle</th><td>{{ c.lifecycle_stage }}</td></tr>
+    </table>
+    {% if lead.contact %}
+    <h2>Contact</h2>
+    <table>
+      <tr><th>Name</th><td>{{ lead.contact.display_name }}{% if lead.contact.title %} · {{ lead.contact.title }}{% endif %}</td></tr>
+      <tr><th>Email</th><td>{{ lead.contact.email or '—' }}</td></tr>
+      <tr><th>Consent</th><td>{{ status_pill(lead.contact.consent_status) }} <span class="small muted">{{ lead.contact.consent_source or '' }}</span></td></tr>
+    </table>
+    {% else %}<p class="muted small">No contact person on file. Research leads are never contacted automatically.</p>{% endif %}
+  </div>
+  <div class="card">
+    <h2 style="margin-top:0">Score {{ lead.score }}/100</h2>
+    <p class="small">Fit {{ lead.fit_score }}/35 · Need {{ lead.need_score }}/35 · Intent {{ lead.intent_score }}/20 · Data {{ lead.data_score }}/10</p>
+    <ul class="reasons small">{% for r in lead.score_breakdown or [] %}<li>{{ r }}</li>{% endfor %}</ul>
+    <p class="small">Matched services: {% for s in lead.matched_services or [] %}<span class="pill">{{ s|service }}</span> {% else %}none{% endfor %}</p>
+    {% if lead.disqualify_reason %}<p class="small"><span class="pill bad">{{ lead.disqualify_reason }}</span></p>{% endif %}
+    <h2>Actions</h2>
+    <form method="post" action="/leads/{{ lead.id }}/status" class="filters">
+      <select name="status">{% for st in LEAD_STATUSES %}<option {{ 'selected' if lead.status == st }}>{{ st }}</option>{% endfor %}</select>
+      <input name="note" placeholder="Reason (optional)"><button>Update status</button>
+    </form>
+    <form method="post" action="/leads/{{ lead.id }}/note" class="filters"><input name="note" placeholder="Add a note" style="flex:1" required><button class="secondary">Add note</button></form>
+    {% if lead.contact %}<form method="post" action="/leads/{{ lead.id }}/replied"><button class="secondary">They replied — stop follow-ups</button></form>{% endif %}
+  </div>
+</div>
+
+<h2>Evidence</h2>
+<div class="card table-wrap"><table>
+  <tr><th>Type</th><th>Observed</th><th>Evidence</th><th>Services</th><th>Source</th></tr>
+  {% for s in signals %}
+  <tr><td>{{ s.signal_type }}</td><td class="small">{{ s.observed_at|local }}</td><td class="small" style="max-width:520px">{{ s.text[:600] }}</td>
+      <td class="small">{% for x in s.matched_services %}<span class="pill">{{ x|service }}</span> {% endfor %}</td><td>{{ ext(s.source_url) }}</td></tr>
+  {% else %}<tr><td colspan="5" class="muted">No evidence recorded.</td></tr>{% endfor %}
+</table></div>
+
+<div class="two">
+  <div>
+    <h2>Follow-ups</h2>
+    <div class="card table-wrap"><table>
+      <tr><th>Step</th><th>Channel</th><th>Subject</th><th>Status</th></tr>
+      {% for f in fups %}<tr><td>{{ f.step }}</td><td>{{ f.channel }}</td><td><a href="/followups#f{{ f.id }}">{{ f.subject }}</a>{% if f.blocked_reason %}<div class="small muted">{{ f.blocked_reason }}</div>{% endif %}</td><td>{{ status_pill(f.status) }}</td></tr>
+      {% else %}<tr><td colspan="4" class="muted">None.</td></tr>{% endfor %}
+    </table></div>
+    <h2>Opportunities</h2>
+    <div class="card">{% for o in opps %}<div><a href="/pipeline">{{ o.name }}</a> {{ status_pill(o.stage) }}</div>{% else %}<span class="muted">None.</span>{% endfor %}</div>
+  </div>
+  <div>
+    <h2>Activity</h2>
+    <div class="card">
+      {% for a in acts %}<div class="small" style="margin-bottom:6px"><span class="muted">{{ a.created_at|local }} · {{ a.actor }}</span><br>{{ a.subject }}</div>
+      {% else %}<span class="muted">No activity.</span>{% endfor %}
+    </div>
+  </div>
+</div>
+{% endblock %}

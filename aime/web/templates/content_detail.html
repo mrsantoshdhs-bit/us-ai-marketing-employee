@@ -1,0 +1,37 @@
+{% extends "base.html" %}{% from "_macros.html" import status_pill, ext %}
+{% block title %}{{ item.title }} · Content{% endblock %}
+{% block content %}
+<h1>{{ item.title }} {{ status_pill(item.status) }}</h1>
+<p class="small muted">{{ item.service|service }} · {{ item.industry|industry }} · scheduled {{ item.scheduled_for|et }} · written by {{ item.generator }}
+  {% if item.approved_by %} · approved by {{ item.approved_by }} {{ item.approved_at|local }}{% endif %}</p>
+{% if item.publish_blocked_reason %}<div class="flash">Publishing blocked: {{ item.publish_blocked_reason }}</div>{% endif %}
+{% if item.last_publish_error %}<div class="flash">Last publish error: {{ item.last_publish_error }}</div>{% endif %}
+{% if item.external_url %}<div class="flash">Published: {{ ext(item.external_url, item.external_id) }} at {{ item.published_at|local }}</div>{% endif %}
+<div class="two">
+  <div class="card">
+    <h2 style="margin-top:0">Preview</h2>
+    {% if item.image_path %}<img class="preview" src="/assets/{{ item.image_path }}" alt="{{ item.image_alt }}">{% endif %}
+    <div class="post" style="margin-top:10px">{{ item.full_text }}</div>
+    <p class="small muted">Quality checks: {{ 'passed' if item.quality.get('passed') else 'see notes' }} · {{ item.quality.get('words') }} words
+      {% if item.quality.get('llm_rejected') %}<br>LLM drafts rejected by the quality gate: {{ item.quality.get('llm_rejected')|join(' | ') }}{% endif %}</p>
+  </div>
+  <div class="card">
+    <h2 style="margin-top:0">Edit and approve</h2>
+    {% if item.status != 'published' %}
+    <form method="post" action="/content/{{ item.id }}/save">
+      <label class="small">Title</label><input name="title" value="{{ item.title }}" style="width:100%">
+      <label class="small">Body</label><textarea name="body" style="min-height:300px">{{ item.body }}</textarea>
+      <label class="small">Hashtags</label><input name="hashtags" value="{{ item.hashtags|join(' ') }}" style="width:100%">
+      <label class="small">Scheduled time (US Eastern)</label>
+      <input type="datetime-local" name="scheduled_et" value="{{ item.scheduled_for|et('%Y-%m-%dT%H:%M') }}">
+      <div class="row-actions" style="margin-top:10px"><button class="secondary">Save changes</button></div>
+    </form>
+    <div class="row-actions" style="margin-top:10px">
+      {% if item.status in ['awaiting_approval', 'draft', 'failed'] %}<form class="inline" method="post" action="/content/{{ item.id }}/approve"><button>Approve for publishing</button></form>{% endif %}
+      {% if item.status != 'rejected' %}<form class="inline" method="post" action="/content/{{ item.id }}/reject"><button class="danger">Reject</button></form>{% endif %}
+    </div>
+    <p class="small muted">Editing an approved post sends it back for approval.</p>
+    {% else %}<p class="muted">Published posts are read-only here.</p>{% endif %}
+  </div>
+</div>
+{% endblock %}

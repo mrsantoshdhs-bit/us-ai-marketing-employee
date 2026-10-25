@@ -1,0 +1,18 @@
+{% macro state_pill(state) -%}
+{%- set ok = ['CONNECTED', 'CONFIGURED', 'AVAILABLE', 'READY', 'ENABLED', 'RUNNING', 'success'] -%}
+{%- set bad = ['BLOCKED', 'NOT RUNNING', 'STALE', 'failed', 'UNAVAILABLE'] -%}
+<span class="pill {{ 'ok' if state in ok else ('bad' if state in bad else 'warn') }}">{{ state }}</span>
+{%- endmacro %}
+
+{% macro status_pill(s) -%}
+{%- set cls = {'success': 'ok', 'published': 'ok', 'qualified': 'ok', 'sent': 'ok', 'done': 'ok', 'processed': 'ok', 'won': 'ok', 'approved': 'ok',
+               'failed': 'bad', 'rejected': 'bad', 'disqualified': 'bad', 'lost': 'bad', 'cancelled': 'bad',
+               'awaiting_approval': 'warn', 'partial': 'warn', 'pending': 'warn', 'nurture': 'warn', 'running': 'warn'} -%}
+<span class="pill {{ cls.get(s, '') }}">{{ s }}</span>
+{%- endmacro %}
+
+{% macro grade(g) -%}<span class="grade {{ g or '' }}">{{ g or '–' }}</span>{%- endmacro %}
+
+{% macro ext(url, label='source') -%}
+{%- set u = url|safe_url -%}{% if u %}<a href="{{ u }}" target="_blank" rel="noopener noreferrer">{{ label }}</a>{% else %}<span class="muted">{{ url or '—' }}</span>{% endif %}
+{%- endmacro %}

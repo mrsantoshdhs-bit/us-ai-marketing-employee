@@ -1,0 +1,19 @@
+{% extends "base.html" %}{% from "_macros.html" import grade, ext %}
+{% block title %}Companies · AI Marketing Employee{% endblock %}
+{% block content %}
+<h1>Companies <span class="muted small">{{ rows|length }} shown (latest 300)</span></h1>
+<form class="filters" method="get">
+  <input name="q" placeholder="Company name" value="{{ f.q }}">
+  <select name="state"><option value="">Any state</option>{% for code, name in STATES|dictsort %}<option value="{{ code }}" {{ 'selected' if f.state == code }}>{{ code }} · {{ name }}</option>{% endfor %}</select>
+  <select name="industry"><option value="">Any industry</option>{% for k, v in INDUSTRIES.items() %}<option value="{{ k }}" {{ 'selected' if f.industry == k }}>{{ v.label }}</option>{% endfor %}</select>
+  <button>Filter</button> <a href="/companies">Reset</a>
+</form>
+<div class="card table-wrap"><table>
+  <tr><th>Company</th><th>Website</th><th>State</th><th>Industry</th><th>Source</th><th>Lifecycle</th><th>Lead</th><th>Added</th></tr>
+  {% for c in rows %}{% set l = lead_by_co.get(c.id) %}
+  <tr><td>{% if l %}<a href="/leads/{{ l.id }}">{{ c.name }}</a>{% else %}{{ c.name }}{% endif %}{% if c.is_competitor %} <span class="pill bad">competitor?</span>{% endif %}{% if c.is_sample %} <span class="pill">sample</span>{% endif %}</td>
+      <td>{{ ext(c.website, c.domain) if c.website else '—' }}</td><td>{{ c.state or '—' }}</td><td>{{ c.industry|industry }}</td>
+      <td>{{ c.source }} · {{ ext(c.source_url) }}</td><td>{{ c.lifecycle_stage }}</td><td>{% if l %}{{ grade(l.grade) }} {{ l.score }}{% else %}—{% endif %}</td><td class="small">{{ c.created_at|local }}</td></tr>
+  {% else %}<tr><td colspan="8" class="muted">No companies yet.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

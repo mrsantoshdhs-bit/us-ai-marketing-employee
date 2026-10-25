@@ -1,0 +1,55 @@
+"""Local inference through Ollama (free, runs on this machine)."""
+
+from __future__ import annotations
+
+import httpx
+
+from aime.llm.base import LLMError, LLMProvider
+
+
+class OllamaProvider(LLMProvider):
+    name = "ollama"
+
+    def __init__(self, url: str, model: str, timeout: float = 180.0, transport: httpx.BaseTransport | None = None):
+        self.url = url.rstrip("/")
+        self.model = model
+        self.timeout = timeout
+        self.transport = transport
+
+    @property
+    def label(self) -> str:
+        return f"ollama:{self.model}"
+
+    def _client(self, timeout: float) -> httpx.Client:
+        return httpx.Client(timeout=timeout, transport=self.transport)
+
+    def available(self) -> bool:
+        try:
+            with self._client(5.0) as client:
+                resp = client.get(f"{self.url}/api/tags")
+                resp.raise_for_status()
+                names = {m.get("name") for m in resp.json().get("models", [])}
+                base = self.model.split(":")[0]
+                return self.model in names or any((n or "").split(":")[0] == base for n in names)
+        except (httpx.HTTPError, ValueError):
+            return False
+
+    def generate(self, prompt: str, system: str | None = None, max_tokens: int = 500, temperature: float = 0.7) -> str:
+        body = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }
+        if system:
+            body["system"] = system
+        try:
+            with self._client(self.timeout) as client:
+                resp = client.post(f"{self.url}/api/generate", json=body)
+                resp.raise_for_status()
+                text = resp.json().get("response", "")
+        except httpx.HTTPError as exc:
+            raise LLMError(f"Ollama request failed: {exc}") from exc
+        if not text.strip():
+            raise LLMError("Ollama returned an empty response")
+        return text.strip()

@@ -1,0 +1,26 @@
+[project]
+name = "aime"
+version = "0.1.0"
+description = "Autonomous US AI Marketing Employee: research, content, CRM, lead qualification and reporting agents"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "sqlalchemy>=2.0",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "python-dotenv>=1.0",
+    "pillow>=10.4",
+    "tzdata>=2024.1",
+]
+
+[project.scripts]
+aime = "aime.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+filterwarnings = ["ignore:Using `httpx` with `starlette.testclient`"]

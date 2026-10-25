@@ -1,0 +1,36 @@
+{% extends "base.html" %}{% from "_macros.html" import status_pill %}
+{% block title %}Inbound · AI Marketing Employee{% endblock %}
+{% block content %}
+<h1>Inbound inquiries</h1>
+<div class="card small">
+  Inquiries arrive three ways: this form (e.g. a phone call or email you log), <code>POST /api/inbound</code> (JSON, for a website
+  form webhook), or JSON/CSV files dropped in <code>data/inbox/</code>. The <strong>inbound</strong> job runs every 30 minutes.
+  <form class="inline" method="post" action="/inbound/process"><button class="secondary">Process now</button></form>
+</div>
+<form class="card" method="post" action="/inbound">
+  <div class="filters">
+    <input name="first_name" placeholder="First name"><input name="last_name" placeholder="Last name">
+    <input name="email" type="email" placeholder="Email"><input name="phone" placeholder="Phone">
+    <input name="company" placeholder="Company"><input name="website" placeholder="Website">
+    <select name="state"><option value="">State</option>{% for code, name in STATES|dictsort %}<option value="{{ code }}">{{ code }} · {{ name }}</option>{% endfor %}</select>
+    <input name="city" placeholder="City">
+    <select name="industry"><option value="">Industry</option>{% for k, v in INDUSTRIES.items() %}<option value="{{ k }}">{{ v.label }}</option>{% endfor %}</select>
+  </div>
+  <textarea name="message" placeholder="What did they ask for? (their words)" required style="min-height:90px"></textarea>
+  <div class="filters" style="margin-top:8px">
+    {% for k, v in SERVICES.items() %}<label class="small"><input type="checkbox" name="services_interested" value="{{ k }}"> {{ v.name }}</label>{% endfor %}
+  </div>
+  <div class="filters"><input name="timeline" placeholder="Timeline (if stated)"><input name="budget" placeholder="Budget (if stated)">
+    <label class="small"><input type="checkbox" name="consent_marketing"> They opted in to marketing email</label>
+    <button>Record inquiry</button></div>
+</form>
+<div class="card table-wrap"><table>
+  <tr><th>Received</th><th>Channel</th><th>From</th><th>Message</th><th>Status</th></tr>
+  {% for r in rows %}
+  <tr><td class="small">{{ r.received_at|local }}</td><td>{{ r.channel }}</td>
+      <td class="small">{{ r.payload.get('company') or '—' }}<br>{{ r.payload.get('email') or '' }}</td>
+      <td class="small">{{ (r.payload.get('message') or '')[:200] }}</td>
+      <td>{{ status_pill(r.status) }}{% if r.error %}<div class="small muted">{{ r.error }}</div>{% endif %}{% if r.lead_id %}<div><a href="/leads/{{ r.lead_id }}">lead #{{ r.lead_id }}</a></div>{% endif %}</td></tr>
+  {% else %}<tr><td colspan="5" class="muted">No inquiries yet.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

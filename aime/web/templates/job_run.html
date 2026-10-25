@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% from "_macros.html" import status_pill %}
+{% block title %}Job run {{ run.id }}{% endblock %}
+{% block content %}
+<h1>{{ run.job }} <span class="muted small">run #{{ run.id }} · {{ run.trigger }}</span> {{ status_pill(run.status) }}</h1>
+<p class="small muted">Started {{ run.started_at|local }} · {{ run.duration_ms or 0 }} ms</p>
+{% if run.error %}<h2>Error</h2><pre>{{ run.error }}</pre>{% endif %}
+{% for step in run.detail.get('steps', []) %}
+<div class="card"><strong>{{ step.agent }}</strong> {{ status_pill(step.status) }} <span class="small muted">{{ step.get('duration_ms', '') }} ms · attempts {{ step.get('attempts', '') }}</span>
+  {% if step.get('error') %}<pre>{{ step.error }}</pre>{% endif %}
+  <pre>{{ step.get('output')|tojson(indent=2) }}</pre></div>
+{% endfor %}
+{% endblock %}

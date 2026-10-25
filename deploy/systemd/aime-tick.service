@@ -1,0 +1,10 @@
+[Unit]
+Description=AI Marketing Employee - run due jobs once
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=aime
+WorkingDirectory=/opt/us-ai-marketing-employee
+ExecStart=/opt/us-ai-marketing-employee/.venv/bin/python -m aime tick --trigger scheduler --quiet
+TimeoutStartSec=3600

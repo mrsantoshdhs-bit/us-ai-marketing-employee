@@ -1,0 +1,26 @@
+{% extends "base.html" %}{% from "_macros.html" import state_pill %}
+{% block title %}Integrations · AI Marketing Employee{% endblock %}
+{% block content %}
+<h1>Integrations</h1>
+<div class="card table-wrap"><table>
+  <tr><th>Component</th><th>State</th><th>Detail</th></tr>
+  {% for r in statuses %}<tr><td>{{ r.name }}</td><td>{{ state_pill(r.state) }}</td><td class="small">{{ r.detail }}{% if r.action %}<br><span class="muted">→ {{ r.action }}</span>{% endif %}</td></tr>{% endfor %}
+</table></div>
+
+<h2>LinkedIn (official API only)</h2>
+<div class="card">
+  <p>{{ state_pill('CONNECTED' if auth.can_publish else ('NOT CONFIGURED' if not auth.configured else ('NOT CONNECTED' if not auth.connected else 'BLOCKED'))) }} {{ auth.reason }}</p>
+  {% if auth.connected %}<p class="small">Authorized as {{ auth.member_name or 'unknown' }} · author {{ auth.author_urn or '—' }} · scopes {{ auth.scopes }} · token expires {{ auth.expires_at|local }}</p>{% endif %}
+  <div class="row-actions">
+    {% if auth.configured %}<a class="btn" href="/integrations/linkedin/connect">{{ 'Reconnect' if auth.connected else 'Connect' }} LinkedIn</a>{% endif %}
+    {% if auth.connected %}<form class="inline" method="post" action="/integrations/linkedin/disconnect"><button class="danger">Disconnect</button></form>{% endif %}
+  </div>
+  <ol class="small">
+    <li>Create an app at linkedin.com/developers (free) and add the products <em>Sign In with LinkedIn using OpenID Connect</em> and <em>Share on LinkedIn</em>.</li>
+    <li>Add the redirect URL <code>{{ settings.linkedin_redirect_uri }}</code> to the app's Auth settings.</li>
+    <li>Put the client ID and secret in <code>.env</code> (LINKEDIN_CLIENT_ID / LINKEDIN_CLIENT_SECRET), restart the dashboard, then click Connect.</li>
+    <li>Set <code>PUBLISHING_ENABLED=true</code> when you want approved posts to go out. Each post still needs your approval.</li>
+  </ol>
+  <p class="small muted">Not implemented by design: scraping, browser bots, cookie reuse, automated connection requests or messages, CAPTCHA bypass, or artificial engagement.</p>
+</div>
+{% endblock %}

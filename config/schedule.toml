@@ -1,0 +1,41 @@
+# Job schedule. Times use this computer's local time zone unless `timezone` is set.
+# Windows Task Scheduler runs `tick` every `tick_minutes`; each tick runs the jobs that are due.
+
+tick_minutes = 15
+timezone = "local"
+
+[jobs.crm_maintenance]
+daily_at = "06:30"
+description = "CRM Management Agent: dedupe, hygiene, stale leads, lifecycle"
+
+[jobs.plan]
+daily_at = "06:45"
+description = "Marketing Manager Agent: daily focus states, industries, campaign and content briefs"
+
+[jobs.research]
+daily_at = "07:00"
+description = "Research Agent (authorized public sources) -> Qualification -> Sales Workflow"
+
+[jobs.content]
+daily_at = "07:30"
+description = "LinkedIn Content Agent: keep the content calendar filled"
+
+[jobs.inbound]
+every_minutes = 30
+description = "CRM Agent ingests inbound inquiries -> Qualification -> Sales Workflow"
+
+[jobs.followups]
+every_minutes = 60
+description = "Sales Workflow Agent: permitted follow-ups, drafts and tasks"
+
+[jobs.publish]
+every_minutes = 30
+description = "Authorized Publishing Agent: publish approved, due posts via official API"
+
+[jobs.daily_report]
+daily_at = "20:00"
+description = "Analytics and Reporting Agent: daily summary report"
+
+[jobs.monitor]
+every_minutes = 30
+description = "Health monitor: failed or stale jobs, agent error rates"

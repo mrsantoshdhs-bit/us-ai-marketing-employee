@@ -1,0 +1,40 @@
+{% extends "base.html" %}{% from "_macros.html" import status_pill, state_pill %}
+{% block title %}Follow-ups · AI Marketing Employee{% endblock %}
+{% block content %}
+<h1>Follow-ups and tasks</h1>
+<div class="card small">
+  Outbound email: {{ state_pill('READY' if email_ready else 'DISABLED') }} {{ email_reason }}.
+  Emails are drafted only for people who contacted you or opted in, and every email needs your approval.
+  Research leads get a review task instead of a message.
+  <a href="?show={{ 'all' if show == 'open' else 'open' }}">{{ 'Show all' if show == 'open' else 'Show open only' }}</a>
+</div>
+{% for f in rows %}
+<div class="card" id="f{{ f.id }}">
+  <div class="filters" style="justify-content:space-between">
+    <div><strong>{{ f.subject }}</strong> {{ status_pill(f.status) }} <span class="pill">{{ f.channel }} · step {{ f.step }}</span>
+      <div class="small muted">Lead: <a href="/leads/{{ f.lead_id }}">{{ f.lead.company.name }}</a>{% if f.contact %} · to {{ f.contact.display_name }} &lt;{{ f.contact.email }}&gt;{% endif %} · due {{ f.due_at|local }}</div>
+      {% if f.blocked_reason %}<div class="small"><span class="pill warn">{{ f.blocked_reason }}</span></div>{% endif %}
+    </div>
+  </div>
+  {% if f.channel == 'email' and f.status == 'awaiting_approval' %}
+  <form method="post" action="/followups/{{ f.id }}/approve">
+    <input name="subject" value="{{ f.subject }}" style="width:100%;margin:8px 0">
+    <textarea name="body">{{ f.body }}</textarea>
+    <div class="row-actions" style="margin-top:8px"><button>Approve (send when enabled)</button>
+      <button class="danger" formaction="/followups/{{ f.id }}/reject">Reject</button></div>
+  </form>
+  {% else %}
+  <div class="post small">{{ f.body }}</div>
+  <div class="row-actions" style="margin-top:8px">
+    {% if f.channel == 'task' and f.status == 'pending' %}<form class="inline" method="post" action="/followups/{{ f.id }}/done"><button>Mark done</button></form>{% endif %}
+    {% if f.status in ['pending', 'approved'] %}<form class="inline" method="post" action="/followups/{{ f.id }}/reject"><button class="danger">Cancel</button></form>{% endif %}
+  </div>
+  {% endif %}
+</div>
+{% else %}<div class="card muted">Nothing waiting. Drafts appear when qualified inbound leads arrive.</div>{% endfor %}
+
+<h2>Do-not-contact list</h2>
+<form class="card filters" method="post" action="/suppress">
+  <input name="value" placeholder="email or domain" required><input name="reason" placeholder="Reason" value="Requested by contact"><button class="secondary">Add to suppression list</button>
+</form>
+{% endblock %}

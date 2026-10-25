@@ -1,0 +1,30 @@
+{% extends "base.html" %}{% from "_macros.html" import status_pill, state_pill, ext %}
+{% block title %}Content · AI Marketing Employee{% endblock %}
+{% block content %}
+<h1>LinkedIn content calendar</h1>
+<div class="card small">
+  Publishing: {{ state_pill('CONNECTED' if auth.can_publish else ('NOT CONFIGURED' if not auth.configured else 'BLOCKED')) }} {{ auth.reason }}.
+  Posts publish only when approved here, due, and LinkedIn authorization is in place. A post is shown as published only after LinkedIn confirms it.
+</div>
+<form class="filters" method="get">
+  <select name="status"><option value="">All statuses</option>{% for st in ['awaiting_approval', 'approved', 'published', 'failed', 'rejected'] %}<option {{ 'selected' if status == st }}>{{ st }}</option>{% endfor %}</select>
+  <button>Filter</button>
+</form>
+<div class="card table-wrap"><table>
+  <tr><th>Scheduled (ET)</th><th>Post</th><th>Service / industry</th><th>Status</th><th>Writer</th></tr>
+  {% for c in rows %}
+  <tr><td class="small">{{ c.scheduled_for|et }}</td>
+      <td><a href="/content/{{ c.id }}">{{ c.title }}</a><div class="small muted">{{ c.body[:140] }}…</div>
+        {% if c.publish_blocked_reason %}<div class="small"><span class="pill warn">{{ c.publish_blocked_reason }}</span></div>{% endif %}</td>
+      <td class="small">{{ c.service|service }}<br>{{ c.industry|industry }}</td>
+      <td>{{ status_pill(c.status) }}{% if c.external_url %}<div>{{ ext(c.external_url, 'view on LinkedIn') }}</div>{% endif %}</td>
+      <td class="small">{{ c.generator }}</td></tr>
+  {% else %}<tr><td colspan="5" class="muted">No posts yet. The content job fills the next two weeks of posting slots.</td></tr>{% endfor %}
+</table></div>
+
+<h2>Researched topics (public discussion, last runs)</h2>
+<div class="card">
+  {% for t in topics %}<div class="small">{{ ext(t.source_url, t.topic) }} {% if t.service %}<span class="pill">{{ t.service|service }}</span>{% endif %} <span class="muted">{{ t.score|int }} points</span></div>
+  {% else %}<span class="muted">No topics researched yet.</span>{% endfor %}
+</div>
+{% endblock %}

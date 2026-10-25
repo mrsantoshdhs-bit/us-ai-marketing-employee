@@ -1,0 +1,38 @@
+# Always-on deployment: dashboard + a scheduler loop that calls `tick` every 15 minutes.
+# Ports are bound to 127.0.0.1 only. Put an authenticating reverse proxy in front before any remote access.
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    env_file: ../.env
+    environment:
+      OLLAMA_URL: http://ollama:11434
+      LINKEDIN_REDIRECT_URI: ${LINKEDIN_REDIRECT_URI:-http://127.0.0.1:8765/integrations/linkedin/callback}
+    volumes:
+      - aime-data:/app/data
+    ports:
+      - "127.0.0.1:8765:8765"
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    env_file: ../.env
+    environment:
+      OLLAMA_URL: http://ollama:11434
+    volumes:
+      - aime-data:/app/data
+    command: ["sh", "-c", "while true; do python -m aime tick --trigger scheduler --quiet; sleep 900; done"]
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:0.35.0  # same version as the local install; then: docker compose exec ollama ollama pull llama3.2
+    volumes:
+      - ollama-models:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  aime-data:
+  ollama-models:

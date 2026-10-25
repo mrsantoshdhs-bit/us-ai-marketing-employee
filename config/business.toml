@@ -1,0 +1,70 @@
+# Business configuration for the AI marketing employee.
+# Edit freely; the agents read this file on every run.
+
+[company]
+# Your brand name appears in generated content, images and email drafts.
+name = "Your Company"
+website = ""
+tagline = "Custom CRM, AI agents and automation for US businesses"
+
+[targeting]
+country = "US"
+# "ALL" = all 50 states, or a list such as ["CA", "TX", "NY"]
+states = "ALL"
+industries = [
+    "saas",
+    "real_estate",
+    "marketing_agencies",
+    "professional_services",
+    "b2b_sales",
+    "tech_startups",
+    "ecommerce",
+    "smb",
+]
+services = [
+    "custom_crm",
+    "ai_agents",
+    "agent_orchestration",
+    "bpa",
+    "sales_automation",
+    "leadgen_automation",
+    "saas_dev",
+    "custom_software",
+    "ai_consulting",
+]
+
+[content]
+posts_per_week = 3
+posting_days = ["Tue", "Wed", "Thu"]
+posting_time = "09:30"
+timezone = "America/New_York"
+queue_horizon_days = 14
+max_pending_items = 9
+max_posts_per_generation_run = 3
+max_hashtags = 5
+min_words = 70
+max_words = 260
+
+[research]
+max_new_companies_per_run = 40
+states_per_run = 5
+industries_per_run = 2
+cache_hours = 12
+
+[qualification]
+grade_a = 75
+grade_b = 55
+grade_c = 35
+
+[publishing]
+max_posts_per_run = 1
+# Approved posts whose slot passed by more than this are rescheduled instead of burst-published.
+max_overdue_hours = 24
+
+[followup]
+max_touches = 3
+intervals_days = [0, 3, 7]
+send_window_start = "08:00"
+send_window_end = "18:00"
+send_window_timezone = "America/New_York"
+stale_lead_days = 30

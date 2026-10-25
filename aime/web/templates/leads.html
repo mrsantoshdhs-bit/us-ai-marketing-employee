@@ -1,0 +1,30 @@
+{% extends "base.html" %}{% from "_macros.html" import grade, status_pill %}
+{% block title %}Leads · AI Marketing Employee{% endblock %}
+{% block content %}
+<h1>Leads <span class="muted small">{{ total }} matching</span></h1>
+<form class="filters" method="get">
+  <input name="q" placeholder="Company name" value="{{ f.q }}">
+  <select name="grade"><option value="">Any grade</option>{% for g in "ABCD" %}<option {{ 'selected' if f.grade == g }}>{{ g }}</option>{% endfor %}</select>
+  <select name="status"><option value="">Any status</option>{% for st in LEAD_STATUSES %}<option {{ 'selected' if f.status == st }}>{{ st }}</option>{% endfor %}</select>
+  <select name="source"><option value="">Any source</option>{% for so in ['research', 'inbound', 'import', 'manual'] %}<option {{ 'selected' if f.source == so }}>{{ so }}</option>{% endfor %}</select>
+  <select name="state"><option value="">Any state</option>{% for code, name in STATES|dictsort %}<option value="{{ code }}" {{ 'selected' if f.state == code }}>{{ code }} · {{ name }}</option>{% endfor %}</select>
+  <select name="industry"><option value="">Any industry</option>{% for k, v in INDUSTRIES.items() %}<option value="{{ k }}" {{ 'selected' if f.industry == k }}>{{ v.label }}</option>{% endfor %}</select>
+  <button>Filter</button> <a href="/leads">Reset</a>
+</form>
+<div class="card table-wrap"><table>
+  <tr><th>Grade</th><th class="n">Score</th><th>Company</th><th>State</th><th>Industry</th><th>Source</th><th>Status</th><th>Best-fit service</th><th class="n">Intent</th><th>Created</th></tr>
+  {% for l in rows %}
+  <tr>
+    <td>{{ grade(l.grade) }}</td><td class="n">{{ l.score }}</td>
+    <td><a href="/leads/{{ l.id }}">{{ l.company.name }}</a>{% if l.is_sample %} <span class="pill">sample</span>{% endif %}{% if l.contact %}<div class="small muted">{{ l.contact.display_name }}</div>{% endif %}</td>
+    <td>{{ l.company.state or '—' }}</td><td>{{ l.company.industry|industry }}</td><td>{{ l.source }}</td>
+    <td>{{ status_pill(l.status) }}</td><td>{{ l.primary_service|service }}</td><td class="n">{{ l.intent_score }}</td>
+    <td class="small">{{ l.created_at|local }}</td>
+  </tr>
+  {% else %}<tr><td colspan="10" class="muted">No leads yet. They appear after the research or inbound jobs run.</td></tr>{% endfor %}
+</table></div>
+{% set qs %}{% for k, v in f.items() if v %}{{ k }}={{ v|urlencode }}&{% endfor %}{% endset %}
+{% if total > 100 %}<p>{% if page > 1 %}<a href="?{{ qs }}page={{ page - 1 }}">← Previous</a>{% endif %}
+  Page {{ page }} {% if page * 100 < total %}<a href="?{{ qs }}page={{ page + 1 }}">Next →</a>{% endif %}</p>{% endif %}
+<p class="muted small">Scores are evidence-based: fit (35) + evidenced need (35) + recorded intent (20) + data quality (10). Intent is never inferred.</p>
+{% endblock %}

@@ -1,0 +1,27 @@
+{% extends "base.html" %}{% from "_macros.html" import status_pill %}
+{% block title %}Agents · AI Marketing Employee{% endblock %}
+{% block content %}
+<h1>AI employee team</h1>
+<div class="two">
+  {% for a in team %}{% set st = stats.get(a.name) %}
+  <div class="card">
+    <strong>{{ a.title }}</strong> <span class="muted small">({{ a.name }})</span>
+    {% if st %}<span class="pill {{ 'ok' if st.success_rate >= 90 else 'warn' }}">{{ st.success_rate }}% · {{ st.runs }} runs · avg {{ st.avg_ms }} ms</span>{% else %}<span class="pill">no runs yet</span>{% endif %}
+    <ul class="reasons small">{% for r in a.responsibilities %}<li>{{ r }}</li>{% endfor %}</ul>
+    <details class="small"><summary>Contracts and retry policy</summary>
+      <div><strong>Input</strong>: {% for k, v in a.input.items() %}<code>{{ k }}: {{ v }}</code> {% endfor %}</div>
+      <div><strong>Output</strong>: {% for k, v in a.output.items() %}<code>{{ k }}: {{ v }}</code> {% endfor %}</div>
+      <div><strong>Retries</strong>: {{ a.retry_policy }}</div>
+    </details>
+  </div>
+  {% endfor %}
+</div>
+<h2>Execution log {% if agent %}<span class="muted small">· {{ agent }} · <a href="/agents">all agents</a></span>{% endif %}</h2>
+<div class="card table-wrap"><table>
+  <tr><th>Started</th><th>Agent</th><th>Job</th><th>Status</th><th class="n">Attempts</th><th class="n">Duration</th><th>Error</th></tr>
+  {% for r in runs %}
+  <tr><td class="small"><a href="/agents/runs/{{ r.id }}">{{ r.started_at|local }}</a></td><td><a href="/agents?agent={{ r.agent }}">{{ r.agent }}</a></td><td>{{ r.job or '—' }}</td>
+      <td>{{ status_pill(r.status) }}</td><td class="n">{{ r.attempts }}</td><td class="n">{{ r.duration_ms or 0 }} ms</td><td class="small">{{ (r.error or '')[:160] }}</td></tr>
+  {% else %}<tr><td colspan="7" class="muted">No runs yet.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

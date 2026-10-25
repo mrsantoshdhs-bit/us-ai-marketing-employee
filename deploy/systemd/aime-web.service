@@ -1,0 +1,12 @@
+[Unit]
+Description=AI Marketing Employee dashboard (localhost only)
+After=network-online.target
+
+[Service]
+User=aime
+WorkingDirectory=/opt/us-ai-marketing-employee
+ExecStart=/opt/us-ai-marketing-employee/.venv/bin/python -m aime serve --host 127.0.0.1 --port 8765
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

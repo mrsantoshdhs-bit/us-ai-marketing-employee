@@ -1,0 +1,9 @@
+{% extends "base.html" %}{% from "_macros.html" import status_pill %}
+{% block title %}Agent run {{ run.run_id }}{% endblock %}
+{% block content %}
+<h1>{{ run.agent }} run <span class="muted small">{{ run.run_id }}</span> {{ status_pill(run.status) }}</h1>
+<p class="small muted">Job {{ run.job or '—' }} · started {{ run.started_at|local }} · {{ run.duration_ms or 0 }} ms · {{ run.attempts }} attempt(s)</p>
+{% if run.error %}<h2>Error</h2><pre>{{ run.error }}</pre>{% endif %}
+<h2>Input</h2><pre>{{ run.input_summary|tojson(indent=2) }}</pre>
+<h2>Output</h2><pre>{{ run.output_summary|tojson(indent=2) }}</pre>
+{% endblock %}

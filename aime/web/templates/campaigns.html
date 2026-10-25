@@ -1,0 +1,31 @@
+{% extends "base.html" %}{% from "_macros.html" import status_pill %}
+{% block title %}Campaigns · AI Marketing Employee{% endblock %}
+{% block content %}
+<h1>Campaigns</h1>
+<div class="card table-wrap"><table>
+  <tr><th>Name</th><th>Objective</th><th>Dates</th><th>Status</th><th class="n">Posts</th><th>Targets</th><th></th></tr>
+  {% for c in rows %}
+  <tr><td>{{ c.name }}<div class="small muted">by {{ c.created_by }}</div></td><td class="small">{{ c.objective }}</td>
+      <td class="small">{{ c.start_date }} → {{ c.end_date }}</td><td>{{ status_pill(c.status) }}</td>
+      <td class="n">{{ post_counts.get(c.id, 0) }}</td><td class="small">{% for k, v in c.kpis.items() %}{{ k }}: {{ v }}<br>{% endfor %}</td>
+      <td><form method="post" action="/campaigns/{{ c.id }}/status" class="filters"><select name="status">{% for st in ['planned', 'active', 'paused', 'completed'] %}<option {{ 'selected' if c.status == st }}>{{ st }}</option>{% endfor %}</select><button class="secondary">Set</button></form></td></tr>
+  {% else %}<tr><td colspan="7" class="muted">No campaigns yet; the Marketing Manager creates a monthly campaign automatically.</td></tr>{% endfor %}
+</table></div>
+
+<h2>New campaign</h2>
+<form class="card" method="post" action="/campaigns">
+  <div class="filters">
+    <input name="name" placeholder="Name" required size="30"><input name="objective" placeholder="Objective" required size="40">
+    <select name="service"><option value="">Any service</option>{% for k, v in SERVICES.items() %}<option value="{{ k }}">{{ v.name }}</option>{% endfor %}</select>
+    <select name="industry"><option value="">Any industry</option>{% for k, v in INDUSTRIES.items() %}<option value="{{ k }}">{{ v.label }}</option>{% endfor %}</select>
+    <input type="date" name="start_date" required><input type="date" name="end_date" required><button>Create</button>
+  </div>
+</form>
+
+<h2>Recent marketing plans</h2>
+<div class="card">
+  {% for p in plans %}<div class="small" style="margin-bottom:8px"><strong>{{ p.plan_date }}</strong> · {{ p.focus_states|join(', ') }} · {{ p.focus_industries|map('industry')|join(', ') }}
+    <div class="muted">{{ p.rationale|join(' ') }}</div></div>
+  {% else %}<span class="muted">No plans yet.</span>{% endfor %}
+</div>
+{% endblock %}

@@ -1,0 +1,415 @@
+"""SQLite data model for the CRM, content pipeline, and agent operations."""
+
+from __future__ import annotations
+
+from datetime import date, datetime
+from typing import Any
+
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from aime.timeutil import utcnow
+
+
+class Base(DeclarativeBase):
+    type_annotation_map = {dict[str, Any]: JSON, list[Any]: JSON}
+
+
+class Timestamped:
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+# --------------------------------------------------------------------------- CRM
+
+
+class Company(Timestamped, Base):
+    __tablename__ = "companies"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    normalized_name: Mapped[str] = mapped_column(String(200), index=True)
+    domain: Mapped[str | None] = mapped_column(String(200), index=True)
+    website: Mapped[str | None] = mapped_column(String(300))
+    industry: Mapped[str | None] = mapped_column(String(50), index=True)
+    state: Mapped[str | None] = mapped_column(String(2), index=True)
+    city: Mapped[str | None] = mapped_column(String(100))
+    country: Mapped[str] = mapped_column(String(2), default="US")
+    location_text: Mapped[str | None] = mapped_column(String(300))
+    employee_range: Mapped[str | None] = mapped_column(String(40))
+    description: Mapped[str | None] = mapped_column(Text)
+    phone: Mapped[str | None] = mapped_column(String(40))  # only from official filings / the company itself
+    source: Mapped[str] = mapped_column(String(50))
+    source_url: Mapped[str | None] = mapped_column(String(500))
+    source_record_id: Mapped[str | None] = mapped_column(String(120), index=True)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_competitor: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_sample: Mapped[bool] = mapped_column(Boolean, default=False)
+    lifecycle_stage: Mapped[str] = mapped_column(String(30), default="prospect")
+    merged_into_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"))
+
+    signals: Mapped[list["Signal"]] = relationship(back_populates="company", cascade="all")
+    leads: Mapped[list["Lead"]] = relationship(back_populates="company")
+    contacts: Mapped[list["Contact"]] = relationship(back_populates="company")
+
+
+class Signal(Base):
+    """Evidence of a business requirement, always traceable to a source."""
+
+    __tablename__ = "signals"
+    __table_args__ = (UniqueConstraint("company_id", "fingerprint", name="uq_signal_company_fp"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
+    signal_type: Mapped[str] = mapped_column(String(30))  # hiring | inbound | filing | import | manual
+    text: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(50))
+    source_url: Mapped[str | None] = mapped_column(String(500))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    observed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    matched_services: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    keywords: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    strength: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    company: Mapped[Company] = relationship(back_populates="signals")
+
+
+class Contact(Timestamped, Base):
+    """People records come only from inbound inquiries, manual entry, or user-provided imports."""
+
+    __tablename__ = "contacts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"), index=True)
+    first_name: Mapped[str | None] = mapped_column(String(80))
+    last_name: Mapped[str | None] = mapped_column(String(80))
+    email: Mapped[str | None] = mapped_column(String(200), index=True)
+    phone: Mapped[str | None] = mapped_column(String(40))
+    title: Mapped[str | None] = mapped_column(String(120))
+    source: Mapped[str] = mapped_column(String(50))
+    # inquiry = may reply about their inquiry; opt_in = marketing consent; opted_out = never contact
+    consent_status: Mapped[str] = mapped_column(String(20), default="none")
+    consent_source: Mapped[str | None] = mapped_column(String(200))
+    consent_at: Mapped[datetime | None] = mapped_column(DateTime)
+    is_sample: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    company: Mapped[Company | None] = relationship(back_populates="contacts")
+
+    @property
+    def display_name(self) -> str:
+        parts = [p for p in (self.first_name, self.last_name) if p]
+        return " ".join(parts) or (self.email or "Unknown contact")
+
+
+class Lead(Timestamped, Base):
+    __tablename__ = "leads"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
+    contact_id: Mapped[int | None] = mapped_column(ForeignKey("contacts.id"))
+    campaign_id: Mapped[int | None] = mapped_column(ForeignKey("campaigns.id"))
+    source: Mapped[str] = mapped_column(String(30))  # research | inbound | import | manual
+    # new | qualified | nurture | disqualified | converted | merged
+    status: Mapped[str] = mapped_column(String(20), default="new", index=True)
+    score: Mapped[int] = mapped_column(Integer, default=0)
+    grade: Mapped[str | None] = mapped_column(String(1))
+    fit_score: Mapped[int] = mapped_column(Integer, default=0)
+    need_score: Mapped[int] = mapped_column(Integer, default=0)
+    intent_score: Mapped[int] = mapped_column(Integer, default=0)
+    data_score: Mapped[int] = mapped_column(Integer, default=0)
+    score_breakdown: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    matched_services: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    primary_service: Mapped[str | None] = mapped_column(String(40))
+    disqualify_reason: Mapped[str | None] = mapped_column(String(200))
+    last_scored_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime)
+    notes: Mapped[str | None] = mapped_column(Text)
+    is_sample: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    company: Mapped[Company] = relationship(back_populates="leads")
+    contact: Mapped[Contact | None] = relationship()
+    opportunities: Mapped[list["Opportunity"]] = relationship(back_populates="lead")
+
+
+class Opportunity(Timestamped, Base):
+    __tablename__ = "opportunities"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lead_id: Mapped[int | None] = mapped_column(ForeignKey("leads.id"), index=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
+    name: Mapped[str] = mapped_column(String(250))
+    service: Mapped[str | None] = mapped_column(String(40))
+    # new | discovery | proposal | negotiation | won | lost
+    stage: Mapped[str] = mapped_column(String(20), default="new", index=True)
+    est_value: Mapped[float | None] = mapped_column(Float)  # only when a human enters it
+    probability: Mapped[int] = mapped_column(Integer, default=10)
+    next_step: Mapped[str | None] = mapped_column(String(300))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    lost_reason: Mapped[str | None] = mapped_column(String(200))
+
+    lead: Mapped[Lead | None] = relationship(back_populates="opportunities")
+    company: Mapped[Company] = relationship()
+
+
+class Activity(Base):
+    __tablename__ = "activities"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"), index=True)
+    lead_id: Mapped[int | None] = mapped_column(ForeignKey("leads.id"), index=True)
+    opportunity_id: Mapped[int | None] = mapped_column(ForeignKey("opportunities.id"))
+    type: Mapped[str] = mapped_column(String(40))
+    subject: Mapped[str] = mapped_column(String(300))
+    body: Mapped[str | None] = mapped_column(Text)
+    actor: Mapped[str] = mapped_column(String(60))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class FollowUp(Timestamped, Base):
+    __tablename__ = "followups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id"), index=True)
+    contact_id: Mapped[int | None] = mapped_column(ForeignKey("contacts.id"))
+    company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"))
+    channel: Mapped[str] = mapped_column(String(20))  # email | task
+    step: Mapped[int] = mapped_column(Integer, default=1)
+    due_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # pending | awaiting_approval | approved | sent | done | cancelled | rejected
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    subject: Mapped[str] = mapped_column(String(300))
+    body: Mapped[str | None] = mapped_column(Text)
+    blocked_reason: Mapped[str | None] = mapped_column(String(300))
+    approved_by: Mapped[str | None] = mapped_column(String(80))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime)
+    message_id: Mapped[str | None] = mapped_column(String(200))
+
+    lead: Mapped[Lead] = relationship()
+    contact: Mapped[Contact | None] = relationship()
+
+
+class Suppression(Base):
+    __tablename__ = "suppressions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    value: Mapped[str] = mapped_column(String(200), unique=True)
+    kind: Mapped[str] = mapped_column(String(10))  # email | domain
+    reason: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class InboundInquiry(Base):
+    __tablename__ = "inbound_inquiries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    channel: Mapped[str] = mapped_column(String(30))  # api | web_form | inbox_file | manual
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)  # pending | processed | rejected
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    lead_id: Mapped[int | None] = mapped_column(ForeignKey("leads.id"))
+    error: Mapped[str | None] = mapped_column(String(300))
+    is_sample: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+# --------------------------------------------------------------------------- Marketing
+
+
+class Campaign(Timestamped, Base):
+    __tablename__ = "campaigns"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    objective: Mapped[str] = mapped_column(String(300))
+    service: Mapped[str | None] = mapped_column(String(40))
+    industry: Mapped[str | None] = mapped_column(String(50))
+    states: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    channel: Mapped[str] = mapped_column(String(30), default="linkedin")
+    start_date: Mapped[date] = mapped_column(Date)
+    end_date: Mapped[date] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(20), default="active")  # planned | active | paused | completed
+    kpis: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # targets, never reported as results
+    created_by: Mapped[str] = mapped_column(String(60), default="marketing_manager")
+
+
+class ContentItem(Timestamped, Base):
+    __tablename__ = "content_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    campaign_id: Mapped[int | None] = mapped_column(ForeignKey("campaigns.id"))
+    platform: Mapped[str] = mapped_column(String(20), default="linkedin")
+    service: Mapped[str] = mapped_column(String(40))
+    industry: Mapped[str] = mapped_column(String(50))
+    title: Mapped[str] = mapped_column(String(250))
+    body: Mapped[str] = mapped_column(Text)
+    hashtags: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    image_path: Mapped[str | None] = mapped_column(String(400))
+    image_alt: Mapped[str | None] = mapped_column(String(300))
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime, index=True)
+    # draft | awaiting_approval | approved | published | failed | rejected
+    status: Mapped[str] = mapped_column(String(20), default="awaiting_approval", index=True)
+    generator: Mapped[str] = mapped_column(String(60))
+    quality: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    fingerprint: Mapped[str] = mapped_column(String(120), index=True)
+    publish_blocked_reason: Mapped[str | None] = mapped_column(String(300))
+    publish_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_publish_error: Mapped[str | None] = mapped_column(String(500))
+    external_id: Mapped[str | None] = mapped_column(String(200))
+    external_url: Mapped[str | None] = mapped_column(String(400))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime)
+    approved_by: Mapped[str | None] = mapped_column(String(80))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    @property
+    def full_text(self) -> str:
+        tags = " ".join(self.hashtags or [])
+        return f"{self.body}\n\n{tags}".strip()
+
+
+class ContentMetric(Base):
+    __tablename__ = "content_metrics"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    content_id: Mapped[int | None] = mapped_column(ForeignKey("content_items.id"), index=True)
+    external_ref: Mapped[str | None] = mapped_column(String(400))
+    impressions: Mapped[int] = mapped_column(Integer, default=0)
+    reactions: Mapped[int] = mapped_column(Integer, default=0)
+    comments: Mapped[int] = mapped_column(Integer, default=0)
+    shares: Mapped[int] = mapped_column(Integer, default=0)
+    clicks: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(30))  # csv_import | api
+    collected_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ResearchTopic(Base):
+    __tablename__ = "research_topics"
+    __table_args__ = (UniqueConstraint("source_url", name="uq_topic_url"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    topic: Mapped[str] = mapped_column(String(300))
+    service: Mapped[str | None] = mapped_column(String(40))
+    source: Mapped[str] = mapped_column(String(50))
+    source_url: Mapped[str] = mapped_column(String(500))
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class MarketSegment(Base):
+    __tablename__ = "market_segments"
+    __table_args__ = (UniqueConstraint("state", "naics", "year", name="uq_segment"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    state: Mapped[str] = mapped_column(String(2))
+    naics: Mapped[str] = mapped_column(String(10))
+    industry: Mapped[str] = mapped_column(String(50))
+    label: Mapped[str | None] = mapped_column(String(200))
+    establishments: Mapped[int] = mapped_column(Integer, default=0)
+    employees: Mapped[int | None] = mapped_column(Integer)
+    year: Mapped[int] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(String(50), default="census_cbp")
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class MarketingPlan(Base):
+    __tablename__ = "marketing_plans"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    plan_date: Mapped[date] = mapped_column(Date, index=True)
+    focus_industries: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    focus_states: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    briefs: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    rationale: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    campaign_id: Mapped[int | None] = mapped_column(ForeignKey("campaigns.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+# --------------------------------------------------------------------------- Operations
+
+
+class AgentRun(Base):
+    __tablename__ = "agent_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(32), index=True)
+    agent: Mapped[str] = mapped_column(String(60), index=True)
+    job: Mapped[str | None] = mapped_column(String(60))
+    status: Mapped[str] = mapped_column(String(20))  # running | success | failed
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    input_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    output_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text)
+
+
+class JobRun(Base):
+    __tablename__ = "job_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job: Mapped[str] = mapped_column(String(60), index=True)
+    trigger: Mapped[str] = mapped_column(String(20))  # scheduler | manual | dashboard | cli
+    status: Mapped[str] = mapped_column(String(20))  # running | success | partial | failed | skipped
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text)
+
+
+class JobState(Base):
+    __tablename__ = "job_state"
+
+    job: Mapped[str] = mapped_column(String(60), primary_key=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_status: Mapped[str | None] = mapped_column(String(20))
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class Alert(Base):
+    __tablename__ = "alerts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    level: Mapped[str] = mapped_column(String(10))  # info | warning | error
+    source: Mapped[str] = mapped_column(String(60))
+    message: Mapped[str] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class Report(Base):
+    __tablename__ = "reports"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    report_date: Mapped[date] = mapped_column(Date, index=True)
+    kind: Mapped[str] = mapped_column(String(20), default="daily")
+    path_md: Mapped[str] = mapped_column(String(400))
+    path_html: Mapped[str] = mapped_column(String(400))
+    summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class OAuthToken(Base):
+    __tablename__ = "oauth_tokens"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(30), unique=True)
+    access_token: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+    scope: Mapped[str] = mapped_column(String(300), default="")
+    subject: Mapped[str | None] = mapped_column(String(120))  # e.g. LinkedIn member id
+    subject_name: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class KeyValue(Base):
+    __tablename__ = "kv_store"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

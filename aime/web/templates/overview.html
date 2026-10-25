@@ -1,0 +1,54 @@
+{% extends "base.html" %}{% from "_macros.html" import state_pill, status_pill %}
+{% block title %}Overview · AI Marketing Employee{% endblock %}
+{% block content %}
+<h1>Overview <span class="muted small">{{ company_name }}</span></h1>
+<div class="grid">
+  {% for label, value, href in kpis %}
+  <a class="kpi" href="{{ href }}"><div class="v">{{ value }}</div><div class="l">{{ label }}</div></a>
+  {% endfor %}
+</div>
+
+<div class="two">
+  <div>
+    <h2>System status</h2>
+    <div class="card table-wrap"><table>
+      <tr><th>Component</th><th>State</th><th>Detail</th></tr>
+      {% for r in statuses %}
+      <tr><td>{{ r.name }}</td><td>{{ state_pill(r.state) }}</td><td class="small">{{ r.detail }}{% if r.action %}<br><span class="muted">→ {{ r.action }}</span>{% endif %}</td></tr>
+      {% endfor %}
+    </table></div>
+  </div>
+  <div>
+    <h2>Today's plan</h2>
+    <div class="card">
+      {% if plan %}
+        <div><strong>{{ plan.plan_date }}</strong> · states: {{ plan.focus_states|join(', ') }} · industries: {{ plan.focus_industries|map('industry')|join(', ') }}</div>
+        <ul class="reasons small">{% for r in plan.rationale %}<li>{{ r }}</li>{% endfor %}</ul>
+      {% else %}<span class="muted">No plan yet — the Marketing Manager runs on the schedule (or run the "plan" job).</span>{% endif %}
+    </div>
+    <h2>Unacknowledged alerts</h2>
+    <div class="card">
+      {% for a in alerts %}
+        <div style="margin-bottom:6px">{{ state_pill(a.level|upper) }} <span class="small">{{ a.created_at|local }}</span> {{ a.message }}
+          <form class="inline" method="post" action="/alerts/{{ a.id }}/ack"><button class="secondary">Acknowledge</button></form></div>
+      {% else %}<span class="muted">No alerts.</span>{% endfor %}
+    </div>
+  </div>
+</div>
+
+<h2>Recent job runs {% if heartbeat %}<span class="muted small">· last scheduler tick {{ heartbeat.at }} ({{ heartbeat.trigger }})</span>{% endif %}</h2>
+<div class="card table-wrap"><table>
+  <tr><th>Job</th><th>Trigger</th><th>Status</th><th>Started</th><th class="n">Duration</th></tr>
+  {% for r in runs %}
+  <tr><td><a href="/jobs/runs/{{ r.id }}">{{ r.job }}</a></td><td>{{ r.trigger }}</td><td>{{ status_pill(r.status) }}</td><td>{{ r.started_at|local }}</td><td class="n">{{ r.duration_ms or 0 }} ms</td></tr>
+  {% else %}<tr><td colspan="5" class="muted">No runs yet.</td></tr>{% endfor %}
+</table></div>
+
+<h2>Agent performance (7 days)</h2>
+<div class="card table-wrap"><table>
+  <tr><th>Agent</th><th class="n">Runs</th><th class="n">Success</th><th class="n">Avg</th><th class="n">p95</th><th class="n">Retries</th><th>Last error</th></tr>
+  {% for a in stats %}
+  <tr><td><a href="/agents?agent={{ a.agent }}">{{ a.agent }}</a></td><td class="n">{{ a.runs }}</td><td class="n">{{ a.success_rate }}%</td><td class="n">{{ a.avg_ms }} ms</td><td class="n">{{ a.p95_ms }} ms</td><td class="n">{{ a.retries }}</td><td class="small">{{ (a.last_error or '')[:120] }}</td></tr>
+  {% else %}<tr><td colspan="7" class="muted">No agent runs yet.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

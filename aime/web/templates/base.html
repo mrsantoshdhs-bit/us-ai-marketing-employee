@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}AI Marketing Employee{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <span class="brand">AI Marketing Employee</span>
+  <nav>
+    {% set p = request.url.path %}
+    <a href="/" class="{{ 'active' if p == '/' }}">Overview</a>
+    <a href="/leads" class="{{ 'active' if p.startswith('/leads') }}">Leads</a>
+    <a href="/companies" class="{{ 'active' if p.startswith('/companies') }}">Companies</a>
+    <a href="/pipeline" class="{{ 'active' if p.startswith('/pipeline') }}">Pipeline</a>
+    <a href="/followups" class="{{ 'active' if p.startswith('/followups') }}">Follow-ups</a>
+    <a href="/content" class="{{ 'active' if p.startswith('/content') }}">Content</a>
+    <a href="/campaigns" class="{{ 'active' if p.startswith('/campaigns') }}">Campaigns</a>
+    <a href="/inbound" class="{{ 'active' if p.startswith('/inbound') }}">Inbound</a>
+    <a href="/agents" class="{{ 'active' if p.startswith('/agents') }}">Agents</a>
+    <a href="/jobs" class="{{ 'active' if p.startswith('/jobs') }}">Jobs</a>
+    <a href="/reports" class="{{ 'active' if p.startswith('/reports') }}">Reports</a>
+    <a href="/integrations" class="{{ 'active' if p.startswith('/integrations') }}">Integrations</a>
+  </nav>
+</header>
+<main>
+  {% if msg %}<div class="flash">{{ msg }}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>
