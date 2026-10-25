@@ -2,8 +2,10 @@
 # Edit freely; the agents read this file on every run.
 
 [company]
-# Your brand name appears in generated content, images and email drafts.
-name = "Digital Hub Solution Private Limited"
+# Marketing brand name: appears in generated content, images and email drafts.
+name = "Digital Hub Solution"
+# Legal entity name, kept unchanged for compliance records; not used in marketing content.
+legal_name = "Digital Hub Solution Private Limited"
 # Leave empty until you have a real URL to publish; nothing is invented here.
 website = ""
 tagline = "Custom CRM, AI agents and automation for US businesses"
