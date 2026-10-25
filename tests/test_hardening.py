@@ -249,6 +249,26 @@ def test_contractor_signal_and_categories():
     assert categorize("research", "D", None, True).startswith("disqualified")
 
 
+def test_requalified_lead_gets_a_new_review_task(ctx):
+    from aime.agents import SalesWorkflowAgent
+    from aime.models import FollowUp
+    with ctx.db.session() as s:
+        co = Company(name="Back Co", normalized_name="back co", source="hn_hiring", state="CA")
+        s.add(co)
+        s.flush()
+        lead = Lead(company_id=co.id, source="research", status="qualified", score=60, grade="B")
+        s.add(lead)
+        s.flush()
+        s.add(FollowUp(lead_id=lead.id, company_id=co.id, channel="task", step=1, status="cancelled",
+                       subject="Review Back Co", blocked_reason="Score fell below the qualification threshold"))
+        lead_id = lead.id
+    assert SalesWorkflowAgent(ctx).run({}).output.tasks_created == 1
+    with ctx.db.session() as s:
+        statuses = sorted(f.status for f in s.execute(select(FollowUp).where(FollowUp.lead_id == lead_id)).scalars())
+    assert statuses == ["cancelled", "pending"]
+    assert SalesWorkflowAgent(ctx).run({}).output.tasks_created == 0  # no duplicates
+
+
 def test_downgraded_research_lead_returns_to_nurture(ctx):
     with ctx.db.session() as s:
         co = Company(name="Weak Co", normalized_name="weak co", source="hn_hiring", state=None, country="US")

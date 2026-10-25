@@ -140,7 +140,9 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 self._new_draft(session, lead, last.step + 1, now, out)
 
     def _ensure_task(self, session: Session, lead: Lead, out: SalesOutput) -> None:
-        exists = session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task")).first()
+        # A cancelled task (lead dropped below the threshold) does not block a fresh one if it re-qualifies.
+        exists = session.execute(select(FollowUp.id).where(
+            FollowUp.lead_id == lead.id, FollowUp.channel == "task", FollowUp.status.in_(("pending", "done")))).first()
         if exists:
             return
         evidence = session.execute(select(Signal).where(Signal.company_id == lead.company_id)
