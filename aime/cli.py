@@ -105,7 +105,13 @@ def cmd_scheduler(args, ctx) -> int:
     if args.action == "verify":
         return cmd_scheduler_verify(ctx)
     if args.action == "install":
-        res = windows.install(ctx.settings, args.interval)
+        res = windows.install(ctx.settings, args.interval, run_when_logged_off=args.run_when_logged_off)
+    elif args.action == "restore-previous":
+        res = windows.restore_previous(ctx.settings)
+    elif args.action == "install-watchdog":
+        res = windows.install_watchdog(ctx.settings)
+    elif args.action == "uninstall-watchdog":
+        res = windows.uninstall(windows.WATCHDOG_TASK)
     elif args.action == "uninstall":
         res = windows.uninstall()
     elif args.action == "run":
@@ -284,6 +290,11 @@ def cmd_scheduler_verify(ctx) -> int:
             problems.append(f"Last Result is {task.get('Last Result')}")
         if task.get("Scheduled Task State", "Enabled") != "Enabled":
             problems.append("Task is disabled")
+        if task.get("Logon Mode", "").lower().startswith("interactive only"):
+            print("NOTE: the task runs only while you are logged on. To keep it running when you sign out:"
+                  " `python -m aime scheduler install --run-when-logged-off` (Windows asks for your password).")
+    if not windows.query(windows.WATCHDOG_TASK).get("installed"):
+        print("NOTE: no watchdog task. Install it with `python -m aime scheduler install-watchdog`.")
     hb = read_heartbeat(ctx.settings)
     tick = int(ctx.settings.schedule.get("tick_minutes", 15))
     if not hb:
@@ -323,8 +334,11 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--port", type=int)
     sv.add_argument("--data-dir", help="Serve another data folder (e.g. the demo database)")
     sc = sub.add_parser("scheduler", help="Manage the Windows Task Scheduler task")
-    sc.add_argument("action", choices=["install", "uninstall", "status", "run", "verify"])
+    sc.add_argument("action", choices=["install", "uninstall", "status", "run", "verify", "restore-previous",
+                                       "install-watchdog", "uninstall-watchdog"])
     sc.add_argument("--interval", type=int)
+    sc.add_argument("--run-when-logged-off", action="store_true",
+                    help="Keep running while signed out and after reboot (Windows prompts for your password)")
     sub.add_parser("doctor", help="Integrity, isolation, compliance and scheduler self-checks")
     bk = sub.add_parser("backup", help="Write and verify an online backup of the database")
     bk.add_argument("--label", default="manual")

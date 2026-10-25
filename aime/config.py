@@ -84,6 +84,9 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "ollama_url": ("OLLAMA_URL", str),
     "ollama_model": ("OLLAMA_MODEL", str),
     "llm_timeout": ("LLM_TIMEOUT_SECONDS", float),
+    "ollama_autostart": ("OLLAMA_AUTOSTART", bool),
+    "ollama_exe": ("OLLAMA_EXE", str),
+    "alert_toast": ("ALERT_TOAST", bool),
     "linkedin_client_id": ("LINKEDIN_CLIENT_ID", str),
     "linkedin_client_secret": ("LINKEDIN_CLIENT_SECRET", str),
     "linkedin_redirect_uri": ("LINKEDIN_REDIRECT_URI", str),
@@ -132,6 +135,11 @@ class Settings:
     ollama_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "llama3.2:latest"
     llm_timeout: float = 180.0
+    # Start a local `ollama serve` when the model is unreachable (local URL only). Off unless you enable it.
+    ollama_autostart: bool = False
+    ollama_exe: str = ""  # empty = %LOCALAPPDATA%\Programs\Ollama\ollama.exe
+    # Windows desktop notification for each new warning/error alert (never in the test data role).
+    alert_toast: bool = True
 
     linkedin_client_id: str = ""
     # Secrets use repr=False so printing or logging a Settings object can never show them.

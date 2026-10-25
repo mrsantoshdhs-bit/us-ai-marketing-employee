@@ -76,9 +76,30 @@ alert). If no slot is free it is never published late: it returns to "awaiting a
 ## Scheduler recovery
 
 - Locks left by a crashed process are taken over immediately (the owner PID is checked).
-- Runs left "running" for over two hours are marked `abandoned` at the next tick.
+- Runs left "running" for over two hours are marked `abandoned` at the next tick (and by manual runs).
 - Failed daily/weekly jobs retry after 30, 60, then 120 minutes, then wait for the next slot.
-- Reinstall the task at any time: `scheduler install` (per-user, no admin rights, no stored password).
+- A job running longer than `job_budget_minutes` (config/schedule.toml, default 30) raises a warning.
+- Reinstall the task at any time: `scheduler install` (per-user, no admin rights, no stored password;
+  runs only while you are logged on).
+- **Keep running while signed out / after a reboot:** `scheduler install --run-when-logged-off`.
+  Windows asks for your Windows password in the console and stores it in Task Scheduler; the app never
+  sees it. Undo with `scheduler restore-previous` (the previous definition is saved in `data/`).
+- **Watchdog:** `scheduler install-watchdog` adds an hourly task that shows a desktop notification if
+  ticks have stopped for 45 minutes (log: `data/logs/watchdog.log`). Remove: `scheduler uninstall-watchdog`.
+
+## Local AI model (Ollama)
+
+- The `monitor` job checks the model every 30 minutes; two failed checks in a row raise a warning
+  ("Local AI model unreachable since …"). Posts then use the template writer.
+- Windows: make sure **Ollama is enabled in Task Manager → Startup apps** so it starts when you log in.
+- Optional `OLLAMA_AUTOSTART=true` lets the app start `ollama serve` itself when the local server is
+  down (local URL only; it never stops or restarts a running server).
+- The Integrations page re-checks the model each minute instead of showing the state from start-up.
+
+## Desktop notifications
+
+New warning and error alerts also appear as a Windows notification (`ALERT_TOAST=true`, the default).
+Alerts are always stored and shown on the dashboard; notifications are an extra nudge.
 
 ## Keeping secrets out of GitHub
 

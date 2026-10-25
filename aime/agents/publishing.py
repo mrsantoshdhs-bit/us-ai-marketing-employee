@@ -24,10 +24,11 @@ from aime.agents.base import BaseAgent, RetryPolicy
 from aime.agents.contracts import BlockedItem
 from aime.calendar_slots import free_slots
 from aime.crm_ops import log_activity
+from aime.monitoring import alert_once
 from aime.integrations.linkedin import (LinkedInAPIError, LinkedInAuthStatus, LinkedInClient, access_token,
                                         format_commentary, get_auth_status, get_token, normalize_commentary,
                                         post_url)
-from aime.models import Alert, ContentItem, PublishAttempt
+from aime.models import ContentItem, PublishAttempt
 from aime.publish_journal import confirmed, record_success
 from aime.redact import redact
 from aime.timeutil import utcnow
@@ -295,8 +296,4 @@ class AuthorizedPublishingAgent(BaseAgent[PublishInput, PublishOutput]):
                 session.commit()
 
     def _alert_once(self, session: Session, message: str, level: str = "warning") -> None:
-        since = utcnow() - timedelta(hours=24)
-        exists = session.execute(select(Alert.id).where(
-            Alert.source == self.name, Alert.created_at >= since, Alert.message == message[:500])).first()
-        if not exists:
-            session.add(Alert(level=level, source=self.name, message=message[:500]))
+        alert_once(session, level, self.name, message, self.settings)

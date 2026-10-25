@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from datetime import timedelta
+from collections.abc import Callable
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aime.config import Settings
+from aime.db import kv_get, kv_set
+from aime.llm.ollama import OllamaProvider
 from aime.models import AgentRun, Alert, JobState
+from aime.notify import notify_alert
 from aime.timeutil import utcnow
 
 
@@ -43,23 +47,48 @@ def agent_stats(session: Session, days: int = 7) -> list[dict]:
     return out
 
 
-def alert_once(session: Session, level: str, source: str, message: str) -> bool:
-    """Create an alert unless the same one was raised in the last 24 hours."""
+def alert_once(session: Session, level: str, source: str, message: str, settings: Settings | None = None) -> bool:
+    """Create an alert unless the same one was raised in the last 24 hours; new ones can raise a desktop toast."""
     since = utcnow() - timedelta(hours=24)
     if session.execute(select(Alert.id).where(Alert.source == source, Alert.message == message[:500],
                                               Alert.created_at >= since)).first():
         return False
     session.add(Alert(level=level, source=source, message=message[:500]))
+    notify_alert(settings, level, message)
     return True
 
 
-def check_health(session: Session, settings: Settings) -> dict:
-    """Create alerts for failing/stale jobs and unhealthy agents. Returns a summary."""
+def check_llm(session: Session, settings: Settings, probe: Callable[[], bool] | None = None) -> dict:
+    """Probe the local model when one is expected. Two failed probes in a row (about 30-60 min) raise an alert."""
+    provider = (settings.llm_provider or "auto").lower()
+    if provider not in ("auto", "ollama"):
+        return {"expected": False}
+    ok = (probe or OllamaProvider(settings.ollama_url, settings.ollama_model).available)()
+    now = utcnow()
+    prev = kv_get(session, "llm.health") or {}
+    if ok:
+        state = {"ok": True, "last_ok_at": now.isoformat(), "failures": 0}
+    else:
+        state = {"ok": False, "last_ok_at": prev.get("last_ok_at"), "failures": int(prev.get("failures", 0)) + 1,
+                 "down_since": prev.get("down_since") or now.isoformat()}
+    kv_set(session, "llm.health", state)
+    if not ok and state["failures"] >= 2:
+        since = datetime.fromisoformat(state["down_since"])
+        alert_once(session, "warning", "monitor", f"Local AI model (Ollama) unreachable since {since:%Y-%m-%d %H:%M} "
+                   "UTC; new posts use the template writer. Start Ollama or enable OLLAMA_AUTOSTART.", settings)
+    return {"expected": True, **state}
+
+
+def check_health(session: Session, settings: Settings, llm_probe: Callable[[], bool] | None = None) -> dict:
+    """Create alerts for failing/stale jobs, unhealthy agents and an unreachable local model. Returns a summary."""
     from aime.scheduler.runner import load_job_specs
 
     created = 0
     issues: list[str] = []
     now = utcnow()
+    llm = check_llm(session, settings, llm_probe)
+    if llm["expected"] and not llm["ok"]:
+        issues.append(f"Local AI model unreachable ({llm['failures']} check(s) in a row)")
     states = {s.job: s for s in session.execute(select(JobState)).scalars()}
     for spec in load_job_specs(settings):
         st = states.get(spec.name)
@@ -68,7 +97,7 @@ def check_health(session: Session, settings: Settings) -> dict:
         if st.consecutive_failures >= 2:
             msg = f"Job '{spec.name}' failed {st.consecutive_failures} times in a row"
             issues.append(msg)
-            created += alert_once(session, "error", "monitor", msg)
+            created += alert_once(session, "error", "monitor", msg, settings)
         if spec.every_minutes:
             expected = timedelta(minutes=spec.every_minutes * 3)
         else:
@@ -76,12 +105,12 @@ def check_health(session: Session, settings: Settings) -> dict:
         if st.last_success_at and now - st.last_success_at > expected:
             msg = f"Job '{spec.name}' has not succeeded since {st.last_success_at:%Y-%m-%d %H:%M} UTC"
             issues.append(msg)
-            created += alert_once(session, "warning", "monitor", msg)
+            created += alert_once(session, "warning", "monitor", msg, settings)
     for row in agent_stats(session, days=1):
         if row["runs"] >= 3 and row["success_rate"] < 80:
             msg = f"Agent '{row['agent']}' success rate {row['success_rate']}% over the last 24h"
             issues.append(msg)
-            created += alert_once(session, "warning", "monitor", msg)
+            created += alert_once(session, "warning", "monitor", msg, settings)
     return {"issues": issues, "alerts_created": created}
 
 
