@@ -175,8 +175,50 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         sep = "&" if "?" in url else "?"
         return RedirectResponse(f"{url}{sep}msg={quote(msg)}", status_code=303)
 
-    # ------------------------------------------------------------------ overview
+    # ------------------------------------------------------------------ today (Sales Manager home)
     @app.get("/", response_class=HTMLResponse)
+    def today(request: Request):
+        ctx = C()
+        with ctx.db.session() as s:
+            cnt = lambda m, *c: s.execute(select(func.count(m.id)).where(*c)).scalar_one()  # noqa: E731
+            posts = s.execute(select(ContentItem).where(ContentItem.status == "awaiting_approval")
+                              .order_by(ContentItem.scheduled_for).limit(10)).scalars().all()
+            emails = s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "awaiting_approval")
+                               .order_by(FollowUp.due_at).limit(10)).scalars().all()
+            tasks = s.execute(select(FollowUp).where(FollowUp.channel == "task", FollowUp.status == "pending")
+                              .order_by(FollowUp.id).limit(6)).scalars().all()
+            for f in emails + tasks:
+                _ = f.lead.company
+            exceptions = (
+                [("Post outcome unknown", f"/content/{p.id}", p.title) for p in s.execute(select(ContentItem).where(
+                    ContentItem.status == "uncertain")).scalars()]
+                + [("Email outcome unknown", "/followups?show=all", f.subject or "") for f in s.execute(select(FollowUp).where(
+                    FollowUp.status == "uncertain")).scalars()]
+                + [("Approved post blocked", f"/content/{p.id}", f"{p.title}: {p.publish_blocked_reason}")
+                   for p in s.execute(select(ContentItem).where(ContentItem.status == "approved",
+                                                                ContentItem.publish_blocked_reason.is_not(None))).scalars()]
+            )
+            alerts = s.execute(select(Alert).where(Alert.acknowledged.is_(False), Alert.level.in_(("error", "warning")))
+                               .order_by(Alert.id.desc()).limit(8)).scalars().all()
+            stages = dict(s.execute(select(Opportunity.stage, func.count(Opportunity.id)).group_by(Opportunity.stage)).all())
+            open_leads = (Company.merged_into_id.is_(None),)
+            funnel = [
+                ("Companies found", cnt(Company, *open_leads), "/companies", ""),
+                ("Websites verified", cnt(Company, Company.website_status == "verified", *open_leads), "/companies", ""),
+                ("Decision-makers found", None, None, "not built yet"),
+                ("Qualified companies", cnt(Lead, Lead.status == "qualified"), "/leads?status=qualified", ""),
+                ("Posts scheduled", cnt(ContentItem, ContentItem.status.in_(("awaiting_approval", "approved"))), "/content", ""),
+                ("Posts published", cnt(ContentItem, ContentItem.status == "published"), "/content?status=published", ""),
+                ("Open opportunities", cnt(Opportunity, Opportunity.stage.not_in(("won", "lost"))), "/pipeline", ""),
+                ("Deals won", stages.get("won", 0), "/pipeline", ""),
+            ]
+            task_total = cnt(FollowUp, FollowUp.channel == "task", FollowUp.status == "pending")
+            health = health_strip(ctx, s)
+        return render(request, "today.html", posts=posts, emails=emails, tasks=tasks, task_total=task_total,
+                      exceptions=exceptions, alerts=alerts, funnel=funnel, stages=stages, health=health)
+
+    # ------------------------------------------------------------------ system overview
+    @app.get("/system", response_class=HTMLResponse)
     def overview(request: Request):
         ctx = C()
         with ctx.db.session() as s:
@@ -687,3 +729,47 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             } for l in rows]
 
     return app
+
+
+def health_strip(ctx: AppContext, s) -> list[tuple[str, str, str]]:
+    """(label, ok|warn|bad, detail) for the things a Sales Manager needs to trust before reading anything else."""
+    from aime.backup import offsite_status
+    from aime.design.render import find_browser
+    from aime.integrations.status import llm_reachable
+
+    st = ctx.settings
+    rows: list[tuple[str, str, str]] = []
+    hb = read_heartbeat(st)
+    if hb is None:
+        rows.append(("Scheduler", "bad", "no tick recorded yet"))
+    else:
+        age = int((utcnow() - datetime.fromisoformat(hb["at"].rstrip("Z"))).total_seconds() // 60)
+        rows.append(("Scheduler", "ok" if age <= 35 or hb.get("state") == "maintenance" else "bad",
+                     f"last tick {age} min ago" + (" (maintenance)" if hb.get("state") == "maintenance" else "")))
+    failed = s.execute(select(func.count(JobRun.id)).where(JobRun.status.in_(("failed", "partial")),
+                                                           JobRun.started_at >= utcnow() - timedelta(hours=24))).scalar_one()
+    rows.append(("Jobs (24 h)", "ok" if failed == 0 else "warn", f"{failed} failed or partial"))
+    if (st.llm_provider or "auto").lower() in ("auto", "ollama"):
+        ok = llm_reachable(ctx)
+        rows.append(("Local AI model", "ok" if ok else "warn", "available" if ok else "unreachable: template writer in use"))
+    browser = find_browser(st.browser_path or None) if (st.image_renderer or "auto") != "pillow" else None
+    rows.append(("Post images", "ok" if browser else "warn",
+                 f"designed ({browser.stem})" if browser else "simple cards (no designer)"))
+    li = get_auth_status(st, s)
+    if li.expires_at:
+        days = (li.expires_at - utcnow()).days
+        rows.append(("LinkedIn connection", "ok" if days > 14 else "warn", f"connected, {days} days left"))
+    else:
+        rows.append(("LinkedIn connection", "warn", "not connected"))
+    rows.append(("Publishing", "ok", "ON: approved posts go out at their slot") if st.publishing_enabled
+                else ("Publishing", "ok", "off: nothing is posted"))
+    rows.append(("Outbound email", "ok", "ON") if st.outbound_email_enabled else ("Outbound email", "ok", "off"))
+    last = kv_get(s, "backup.last_verified")
+    if last:
+        hours = int((utcnow() - datetime.fromisoformat(last["at"])).total_seconds() // 3600)
+        rows.append(("Backup", "ok" if hours <= 30 else "bad", f"verified {hours} h ago"))
+    else:
+        rows.append(("Backup", "warn", "no verified backup recorded yet"))
+    ready, reason = offsite_status(st)
+    rows.append(("Off-machine backup", "ok" if ready else "warn", "configured" if ready else reason))
+    return rows

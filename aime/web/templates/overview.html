@@ -1,7 +1,7 @@
 {% extends "base.html" %}{% from "_macros.html" import state_pill, status_pill %}
-{% block title %}Overview · AI Marketing Employee{% endblock %}
+{% block title %}System · AI Marketing Employee{% endblock %}
 {% block content %}
-<h1>Overview <span class="muted small">{{ company_name }}</span></h1>
+<h1>System <span class="muted small">{{ company_name }}</span></h1>
 <div class="grid">
   {% for label, value, href in kpis %}
   <a class="kpi" href="{{ href }}"><div class="v">{{ value }}</div><div class="l">{{ label }}</div></a>

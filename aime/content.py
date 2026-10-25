@@ -5,22 +5,24 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from aime.knowledge.content_bank import ANGLES, BULLET_INTROS, CTAS
+from aime.knowledge.content_bank import ANGLES, BRAND_LINES, BULLET_INTROS, CLICHES, CTAS
 from aime.knowledge.industries import INDUSTRIES
 from aime.knowledge.services import SERVICES
 from aime.llm.base import LLMError, LLMProvider
 
 SYSTEM_PROMPT = (
     "You are a senior B2B content writer for {company}, a software firm. "
-    "Write one LinkedIn post in professional US English.\n"
+    "Write one LinkedIn post in plain, professional US English for business readers in the US and abroad.\n"
     "Rules:\n"
     "- 120 to 200 words.\n"
-    "- Start with a one-sentence hook on its own line.\n"
+    "- Start with a one-sentence hook on its own line: a specific observation, not a general statement.\n"
+    "- Include one concrete example from the reader's day-to-day work.\n"
     "- Short paragraphs. Up to three bullet points, each starting with the character •\n"
     "- End with one open question that invites comments.\n"
     "- Do NOT include hashtags, emojis, statistics, percentages, dollar amounts, numbers of clients, "
-    "client names, testimonials, case studies, or promises of guaranteed results.\n"
-    "- Do not invent facts. Speak from practical experience in general terms.\n"
+    "client names, company names, testimonials, case studies, or promises of guaranteed results.\n"
+    "- Do not invent facts. Speak from practical experience in general terms. No idioms or slang.\n"
+    "- Never use these phrases: " + "; ".join(f'"{c}"' for c in CLICHES) + ".\n"
     "- Output only the post text, with no title and no preamble."
 )
 
@@ -82,6 +84,17 @@ def compose_template(service_id: str, industry_id: str, angle_idx: int, pain_idx
     return Draft(title=angle["title"], body=body, generator="template")
 
 
+def add_brand_line(body: str, company: str, service_id: str) -> str:
+    """Add the service's factual brand line just before the closing question (once)."""
+    line = BRAND_LINES.get(service_id, "").format(company=company)
+    if not line or company.lower() in body.lower():
+        return body
+    paragraphs = body.rstrip().split("\n\n")
+    if paragraphs and paragraphs[-1].strip().endswith("?"):
+        return "\n\n".join(paragraphs[:-1] + [line, paragraphs[-1]])
+    return f"{body.rstrip()}\n\n{line}"
+
+
 def sanitize(text: str) -> str:
     text = text.strip().strip('"').strip()
     text = _PREAMBLE_RE.sub("", text)
@@ -135,6 +148,7 @@ def quality_check(body: str, min_words: int = 70, max_words: int = 260) -> dict:
 def write_post(llm: LLMProvider | None, company: str, service_id: str, industry_id: str,
                angle_idx: int, pain_idx: int, cta_idx: int, min_words: int = 70, max_words: int = 260) -> Draft:
     template = compose_template(service_id, industry_id, angle_idx, pain_idx, cta_idx)
+    template.body = add_brand_line(template.body, company, service_id)
     template.quality = quality_check(template.body, min_words, max_words)
     if llm is None:
         template.quality["llm"] = "not available"
@@ -152,7 +166,7 @@ def write_post(llm: LLMProvider | None, company: str, service_id: str, industry_
         except LLMError as exc:
             attempts.append(f"error: {exc}")
             break
-        body = sanitize(raw)
+        body = add_brand_line(sanitize(raw), company, service_id)
         q = quality_check(body, min_words, max_words)
         if q["passed"]:
             q["llm_attempts"] = attempts

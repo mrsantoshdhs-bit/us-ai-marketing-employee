@@ -64,7 +64,7 @@ FastAPI dashboard (127.0.0.1) ── SQLite (data/aime.db, WAL) ── Ollama ll
 | Analytics & Reporting | Daily and weekly reports: KPIs from records only, segments, period comparison, blockers, agent health | 3 attempts |
 
 Every run is logged to `agent_runs` (dashboard → Agents) and `data/logs/agent_runs.jsonl`;
-job runs to `job_runs`; health metrics (success rate, avg/p95 latency, retries) are on the Overview.
+job runs to `job_runs`; health metrics (success rate, avg/p95 latency, retries) are on the System page.
 
 ## Lead sources (authorized, $0)
 

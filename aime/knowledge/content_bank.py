@@ -234,3 +234,26 @@ CTAS = [
     "How is your team handling this today?",
     "What would you add to this list?",
 ]
+
+# One factual line per service saying what the company does (no results, clients or numbers).
+# "{company}" is filled with the marketing brand name from business.toml.
+BRAND_LINES = {
+    "custom_crm": "At {company}, we build CRMs around how a team actually sells and serves customers.",
+    "ai_agents": "At {company}, we build AI agents that complete real tasks inside your systems, with human oversight.",
+    "agent_orchestration": "At {company}, we design multi-agent workflows with retries, approvals, and audit logs.",
+    "bpa": "At {company}, we build automation that removes copy-paste work between the tools your team already uses.",
+    "sales_automation": ("At {company}, we build sales automation for logging, quoting, and next steps, so reps "
+                         "spend less time on admin."),
+    "leadgen_automation": "At {company}, we build lead capture, scoring, and routing that is fast and transparent.",
+    "saas_dev": "At {company}, we build multi-tenant SaaS products designed to grow without a rewrite.",
+    "custom_software": "At {company}, we build custom software that removes the bottleneck without replacing what works.",
+    "ai_consulting": "At {company}, we help teams bring practical AI into the tools they already use.",
+}
+
+# Filler that made AI drafts weak in the CTO content audit (25 Oct 2026). The writer is told to avoid
+# these and the quality checks reject drafts that use them.
+CLICHES = ["in today's fast-paced", "the future of", "is here", "well-oiled machine", "beautiful thing to behold",
+           "ever-changing landscape", "continue to grow and evolve", "what matters most", "leverag", "seamless",
+           "boost productivity", "game-changer", "game changer", "unlock the power", "take it to the next level",
+           "in this day and age", "costly reality", "makeshift solution", "maximizing efficiency", "revolutioniz",
+           "cutting-edge", "synerg"]

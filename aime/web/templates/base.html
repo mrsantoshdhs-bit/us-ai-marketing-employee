@@ -11,7 +11,7 @@
   <span class="brand">AI Marketing Employee</span>
   <nav>
     {% set p = request.url.path %}
-    <a href="/" class="{{ 'active' if p == '/' }}">Overview</a>
+    <a href="/" class="{{ 'active' if p == '/' }}">Today</a>
     <a href="/leads" class="{{ 'active' if p.startswith('/leads') }}">Leads</a>
     <a href="/companies" class="{{ 'active' if p.startswith('/companies') }}">Companies</a>
     <a href="/pipeline" class="{{ 'active' if p.startswith('/pipeline') }}">Pipeline</a>
@@ -23,6 +23,7 @@
     <a href="/jobs" class="{{ 'active' if p.startswith('/jobs') }}">Jobs</a>
     <a href="/reports" class="{{ 'active' if p.startswith('/reports') }}">Reports</a>
     <a href="/integrations" class="{{ 'active' if p.startswith('/integrations') }}">Integrations</a>
+    <a href="/system" class="{{ 'active' if p.startswith('/system') }}">System</a>
   </nav>
   {% if current_user %}<form class="inline user" method="post" action="/logout">
     <span class="small muted">Signed in as {{ current_user.username }}</span> <button class="secondary">Sign out</button>
