@@ -12,6 +12,7 @@ from aime.crm_ops import add_signal, ensure_lead, log_activity, upsert_company
 from aime.dedupe import find_duplicate
 from aime.sources.base import ResearchFocus
 from aime.sources.registry import get_sources
+from aime.validation import validate_candidate
 
 
 class ResearchInput(BaseModel):
@@ -26,6 +27,9 @@ class ResearchOutput(BaseModel):
     non_us_skipped: int = 0
     unknown_location_skipped: int = 0
     competitors_flagged: int = 0
+    invalid_skipped: int = 0
+    invalid_reasons: dict[str, int] = Field(default_factory=dict)
+    fixes_applied: int = 0
     companies_created: int = 0
     companies_matched_existing: int = 0
     signals_added: int = 0
@@ -40,7 +44,7 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
     title = "US Business Research Agent"
     responsibilities = [
         "Query enabled, authorized public sources (HN hiring API, SEC EDGAR, your CSV imports)",
-        "Keep only companies with explicit US location evidence",
+        "Keep only companies with explicit US location evidence; reject malformed records",
         "Extract stated requirements and map them to our nine services",
         "Deduplicate against the CRM and store companies, evidence signals, and research leads",
         "Never store personal contact data from public posts and never infer buying intent",
@@ -89,10 +93,17 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             if cand.is_us is None:
                 out.unknown_location_skipped += 1
                 continue
+            problems, fixes = validate_candidate(cand)
+            if problems:
+                out.invalid_skipped += 1
+                for p in problems:
+                    out.invalid_reasons[p] = out.invalid_reasons.get(p, 0) + 1
+                continue
+            out.fixes_applied += len(fixes)
             if out.companies_created >= limit:
                 out.limit_reached = True
                 # Still attach evidence to companies we already track.
-                existing = find_duplicate(session, cand.name, cand.domain, cand.state)
+                existing = find_duplicate(session, cand.name, cand.domain, cand.state, cand.source_record_id)
                 if existing and add_signal(session, existing, cand.signal_type, cand.signal_text, cand.source,
                                            cand.source_url, cand.observed_at):
                     out.signals_added += 1

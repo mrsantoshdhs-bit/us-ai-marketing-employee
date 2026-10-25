@@ -4,9 +4,13 @@
 tick_minutes = 15
 timezone = "local"
 
+[jobs.db_maintenance]
+daily_at = "06:15"
+description = "Online database backup (14 kept), integrity check, WAL checkpoint"
+
 [jobs.crm_maintenance]
 daily_at = "06:30"
-description = "CRM Management Agent: dedupe, hygiene, stale leads, lifecycle"
+description = "CRM Management Agent: website verification, dedupe, hygiene, stale leads, lifecycle"
 
 [jobs.plan]
 daily_at = "06:45"
@@ -36,6 +40,11 @@ description = "Authorized Publishing Agent: publish approved, due posts via offi
 daily_at = "20:00"
 description = "Analytics and Reporting Agent: daily summary report"
 
+[jobs.weekly_report]
+weekly_on = "Mon"
+daily_at = "08:00"
+description = "Analytics and Reporting Agent: weekly summary with trends and segment breakdowns"
+
 [jobs.monitor]
 every_minutes = 30
-description = "Health monitor: failed or stale jobs, agent error rates"
+description = "Health monitor: failed or stale jobs, agent error rates, self-checks (doctor)"

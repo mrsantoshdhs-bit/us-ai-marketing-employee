@@ -84,9 +84,31 @@ def is_job_board(domain: str | None) -> bool:
     return bool(domain) and (domain in JOB_BOARD_DOMAINS)
 
 
-def find_duplicate(session: Session, name: str, domain: str | None, state: str | None) -> Company | None:
-    """Find an existing (non-merged) company by domain, exact normalized name, or close name in the same state."""
+DESCRIPTOR_WORDS = {
+    "labs", "lab", "technologies", "technology", "tech", "software", "systems", "solutions", "group",
+    "holdings", "hq", "app", "ai", "io", "studio", "studios", "platform", "global", "usa", "us",
+}
+
+
+def core_name(normalized: str) -> str:
+    """Name without generic descriptors, used only together with a same-state check."""
+    words = [w for w in normalized.split() if w not in DESCRIPTOR_WORDS]
+    return " ".join(words) or normalized
+
+
+def find_duplicate(session: Session, name: str, domain: str | None, state: str | None,
+                   source_record_id: str | None = None) -> Company | None:
+    """Find an existing (non-merged) company by source record, domain, normalized name, core name,
+    or a close name in the same state."""
     active = Company.merged_into_id.is_(None)
+    if source_record_id:
+        hit = session.execute(select(Company).where(Company.source_record_id == source_record_id)).scalars().first()
+        if hit:
+            seen: set[int] = set()
+            while hit.merged_into_id and hit.id not in seen:  # follow merges to the surviving record
+                seen.add(hit.id)
+                hit = session.get(Company, hit.merged_into_id)
+            return hit
     if domain:
         hit = session.execute(select(Company).where(active, Company.domain == domain)).scalars().first()
         if hit:
@@ -100,7 +122,8 @@ def find_duplicate(session: Session, name: str, domain: str | None, state: str |
             if domain and c.domain and c.domain != domain:
                 continue  # same name, different website: different companies
             return c
-    if len(norm) >= 6:
+    core = core_name(norm)
+    if len(norm) >= 4:
         prefix = norm[:3]
         stmt = select(Company).where(active, func.substr(Company.normalized_name, 1, 3) == prefix)
         if state:
@@ -108,6 +131,8 @@ def find_duplicate(session: Session, name: str, domain: str | None, state: str |
         for c in session.execute(stmt).scalars():
             if domain and c.domain and c.domain != domain:
                 continue
-            if SequenceMatcher(None, norm, c.normalized_name).ratio() >= 0.93:
+            if state and len(core) >= 4 and core_name(c.normalized_name) == core:
+                return c
+            if len(norm) >= 6 and SequenceMatcher(None, norm, c.normalized_name).ratio() >= 0.93:
                 return c
     return None

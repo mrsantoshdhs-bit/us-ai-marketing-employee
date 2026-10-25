@@ -9,11 +9,11 @@
   <button>Filter</button> <a href="/companies">Reset</a>
 </form>
 <div class="card table-wrap"><table>
-  <tr><th>Company</th><th>Website</th><th>State</th><th>Industry</th><th>Source</th><th>Lifecycle</th><th>Lead</th><th>Added</th></tr>
+  <tr><th>Company</th><th>Website</th><th>Site check</th><th>State</th><th>Industry</th><th>Source</th><th>Lifecycle</th><th>Lead</th><th>Added</th></tr>
   {% for c in rows %}{% set l = lead_by_co.get(c.id) %}
   <tr><td>{% if l %}<a href="/leads/{{ l.id }}">{{ c.name }}</a>{% else %}{{ c.name }}{% endif %}{% if c.is_competitor %} <span class="pill bad">competitor?</span>{% endif %}{% if c.is_sample %} <span class="pill">sample</span>{% endif %}</td>
-      <td>{{ ext(c.website, c.domain) if c.website else '—' }}</td><td>{{ c.state or '—' }}</td><td>{{ c.industry|industry }}</td>
+      <td>{{ ext(c.website, c.domain) if c.website else '—' }}</td><td class="small">{{ c.website_status or 'unchecked' }}</td><td>{{ c.state or '—' }}</td><td>{{ c.industry|industry }}</td>
       <td>{{ c.source }} · {{ ext(c.source_url) }}</td><td>{{ c.lifecycle_stage }}</td><td>{% if l %}{{ grade(l.grade) }} {{ l.score }}{% else %}—{% endif %}</td><td class="small">{{ c.created_at|local }}</td></tr>
-  {% else %}<tr><td colspan="8" class="muted">No companies yet.</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="9" class="muted">No companies yet.</td></tr>{% endfor %}
 </table></div>
 {% endblock %}

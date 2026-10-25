@@ -1,9 +1,10 @@
-"""Analytics and Reporting Agent: KPIs, pipeline, content queue, blockers, agent health -> daily report."""
+"""Analytics and Reporting Agent: KPIs, pipeline, content queue, blockers, agent health -> daily/weekly reports."""
 
 from __future__ import annotations
 
 from collections import Counter
 from datetime import date, datetime, timedelta
+from typing import Literal
 
 from jinja2 import Environment, select_autoescape
 from pydantic import BaseModel, Field
@@ -23,13 +24,22 @@ from aime.timeutil import fmt_et, fmt_local, local_tz, utcnow
 PROBLEM_STATES = {"NOT CONFIGURED", "NOT CONNECTED", "BLOCKED", "DISABLED", "UNAVAILABLE", "NOT RUNNING", "STALE"}
 
 
+def md_safe(value):
+    """Neutralise HTML and table syntax in values that come from public sources (company names, titles)."""
+    if isinstance(value, str):
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("|", "/")
+    return value
+
+
 class ReportInput(BaseModel):
     report_date: date | None = None
+    kind: Literal["daily", "weekly"] = "daily"
     import_metrics: bool = True
 
 
 class ReportOutput(BaseModel):
     report_id: int
+    kind: str = "daily"
     report_date: date
     path_md: str
     path_html: str
@@ -38,13 +48,13 @@ class ReportOutput(BaseModel):
     metrics_imported: int = 0
 
 
-MD_TEMPLATE = """# Daily Marketing Report — {{ d }}
+MD_TEMPLATE = """# {{ title }} — {{ d }}
 
-Generated {{ generated }} (local time). Window: last 24 hours. All figures are counts of records in the local CRM.
+Generated {{ generated }} (local time). Window: {{ window_label|lower }}. All figures are counts of records in the local CRM.
 
 ## Summary
 
-| Metric | Last 24h | Total |
+| Metric | {{ window_label }} | Total |
 |---|---:|---:|
 {% for label, day, total in summary %}| {{ label }} | {{ day }} | {{ total }} |
 {% endfor %}
@@ -82,12 +92,22 @@ Generated {{ generated }} (local time). Window: last 24 hours. All figures are c
 |---|---:|---:|---:|---:|---:|---|
 {% for a in agents %}| {{ a.agent }} | {{ a.runs }} | {{ a.success_rate }}% | {{ a.avg_ms }} | {{ a.p95_ms }} | {{ a.retries }} | {{ (a.last_error or "")[:80] }} |
 {% endfor %}
-## Alerts (24h)
+## Alerts ({{ window_label|lower }})
 
 {% if alerts %}{% for a in alerts %}- [{{ a.level }}] {{ a.source }}: {{ a.message }}
 {% endfor %}{% else %}None.
 {% endif %}
-{% if engagement %}## Content performance (imported analytics)
+{% if breakdowns %}## Segments (open leads)
+
+{% for name, rows in breakdowns.items() %}**{{ name }}:** {% for k, v in rows %}{{ k }} {{ v }}{{ ", " if not loop.last }}{% endfor %}
+
+{% endfor %}{% endif %}{% if previous %}## Compared with the previous period
+
+| Metric | This period | Previous period |
+|---|---:|---:|
+{% for label, now_v, prev_v in previous %}| {{ label }} | {{ now_v }} | {{ prev_v }} |
+{% endfor %}
+{% endif %}{% if engagement %}## Content performance (imported analytics)
 
 | Post | Impressions | Reactions | Comments |
 |---|---:|---:|---:|
@@ -95,16 +115,16 @@ Generated {{ generated }} (local time). Window: last 24 hours. All figures are c
 {% endfor %}{% endif %}"""
 
 HTML_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Daily report {{ d }}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>{{ title }} {{ d }}</title>
 <style>
 body{font-family:Segoe UI,system-ui,sans-serif;margin:24px;color:#1d2433;background:#fff;max-width:1100px}
 h1{font-size:24px}h2{font-size:18px;margin-top:28px;border-bottom:1px solid #e3e7ef;padding-bottom:4px}
 table{border-collapse:collapse;width:100%;font-size:14px}th,td{border-bottom:1px solid #eef1f6;padding:6px 8px;text-align:left}
 td.n,th.n{text-align:right}.muted{color:#667085}.pill{display:inline-block;padding:1px 8px;border-radius:10px;background:#eef2ff}
 </style></head><body>
-<h1>Daily Marketing Report — {{ d }}</h1>
-<p class="muted">Generated {{ generated }} (local time). Window: last 24 hours. Counts of records in the local CRM.</p>
-<h2>Summary</h2><table><tr><th>Metric</th><th class="n">Last 24h</th><th class="n">Total</th></tr>
+<h1>{{ title }} — {{ d }}</h1>
+<p class="muted">Generated {{ generated }} (local time). Window: {{ window_label|lower }}. Counts of records in the local CRM.</p>
+<h2>Summary</h2><table><tr><th>Metric</th><th class="n">{{ window_label }}</th><th class="n">Total</th></tr>
 {% for label, day, total in summary %}<tr><td>{{ label }}</td><td class="n">{{ day }}</td><td class="n">{{ total }}</td></tr>{% endfor %}</table>
 <h2>Lead grades (open leads)</h2><p>{% for g in "ABCD" %}<span class="pill">{{ g }}: {{ grades.get(g, 0) }}</span> {% endfor %}</p>
 <h2>Pipeline</h2>{% if stages %}<p>{% for stage, n in stages %}<span class="pill">{{ stage }}: {{ n }}</span> {% endfor %}</p>{% else %}<p class="muted">No opportunities yet.</p>{% endif %}
@@ -115,7 +135,9 @@ td.n,th.n{text-align:right}.muted{color:#667085}.pill{display:inline-block;paddi
 <h2>Blockers and required actions</h2>{% if blockers %}<ul>{% for b in blockers %}<li>{{ b }}</li>{% endfor %}</ul>{% else %}<p>None.</p>{% endif %}
 <h2>Agent health (7 days)</h2><table><tr><th>Agent</th><th class="n">Runs</th><th class="n">Success</th><th class="n">Avg ms</th><th class="n">p95 ms</th><th class="n">Retries</th><th>Last error</th></tr>
 {% for a in agents %}<tr><td>{{ a.agent }}</td><td class="n">{{ a.runs }}</td><td class="n">{{ a.success_rate }}%</td><td class="n">{{ a.avg_ms }}</td><td class="n">{{ a.p95_ms }}</td><td class="n">{{ a.retries }}</td><td>{{ (a.last_error or "")[:80] }}</td></tr>{% endfor %}</table>
-<h2>Alerts (24h)</h2>{% if alerts %}<ul>{% for a in alerts %}<li>[{{ a.level }}] {{ a.source }}: {{ a.message }}</li>{% endfor %}</ul>{% else %}<p>None.</p>{% endif %}
+{% if breakdowns %}<h2>Segments (open leads)</h2>{% for name, rows in breakdowns.items() %}<p><strong>{{ name }}:</strong> {% for k, v in rows %}<span class="pill">{{ k }}: {{ v }}</span> {% endfor %}</p>{% endfor %}{% endif %}
+{% if previous %}<h2>Compared with the previous period</h2><table><tr><th>Metric</th><th class="n">This period</th><th class="n">Previous</th></tr>{% for label, a, b in previous %}<tr><td>{{ label }}</td><td class="n">{{ a }}</td><td class="n">{{ b }}</td></tr>{% endfor %}</table>{% endif %}
+<h2>Alerts ({{ window_label|lower }})</h2>{% if alerts %}<ul>{% for a in alerts %}<li>[{{ a.level }}] {{ a.source }}: {{ a.message }}</li>{% endfor %}</ul>{% else %}<p>None.</p>{% endif %}
 </body></html>"""
 
 
@@ -136,7 +158,9 @@ class AnalyticsReportingAgent(BaseAgent[ReportInput, ReportOutput]):
         tz = local_tz(s.schedule.get("timezone"))
         d = inp.report_date or datetime.now(tz).date()
         now = utcnow()
-        since = now - timedelta(hours=24)
+        period = timedelta(hours=24) if inp.kind == "daily" else timedelta(days=7)
+        since = now - period
+        prev_since = since - period
         imported = import_metrics_dir(session, s.imports_dir / "linkedin_metrics") if inp.import_metrics else 0
 
         def count(model, *conds):
@@ -146,40 +170,40 @@ class AnalyticsReportingAgent(BaseAgent[ReportInput, ReportOutput]):
         open_lead = Lead.status.in_(("new", "qualified", "nurture"))
         kpis = {
             "companies_total": count(Company, active_co),
-            "companies_new_24h": count(Company, active_co, Company.created_at >= since),
-            "signals_new_24h": count(Signal, Signal.created_at >= since),
+            "companies_new_period": count(Company, active_co, Company.created_at >= since),
+            "signals_new_period": count(Signal, Signal.created_at >= since),
             "leads_open": count(Lead, open_lead),
-            "leads_new_24h": count(Lead, Lead.created_at >= since),
+            "leads_new_period": count(Lead, Lead.created_at >= since),
             "leads_qualified": count(Lead, Lead.status == "qualified"),
-            "qualified_24h": count(Activity, Activity.type == "status_change", Activity.created_at >= since,
+            "qualified_period": count(Activity, Activity.type == "status_change", Activity.created_at >= since,
                                    Activity.subject.like("%→ qualified%")),
-            "inbound_24h": count(InboundInquiry, InboundInquiry.received_at >= since),
+            "inbound_period": count(InboundInquiry, InboundInquiry.received_at >= since),
             "inbound_total": count(InboundInquiry),
             "opportunities_open": count(Opportunity, Opportunity.stage.not_in(("won", "lost"))),
-            "opportunities_new_24h": count(Opportunity, Opportunity.created_at >= since),
+            "opportunities_new_period": count(Opportunity, Opportunity.created_at >= since),
             "followups_awaiting_approval": count(FollowUp, FollowUp.status == "awaiting_approval"),
             "tasks_pending": count(FollowUp, FollowUp.channel == "task", FollowUp.status == "pending"),
-            "emails_sent_24h": count(FollowUp, FollowUp.status == "sent", FollowUp.sent_at >= since),
+            "emails_sent_period": count(FollowUp, FollowUp.status == "sent", FollowUp.sent_at >= since),
             "emails_sent_total": count(FollowUp, FollowUp.status == "sent"),
-            "content_created_24h": count(ContentItem, ContentItem.created_at >= since),
+            "content_created_period": count(ContentItem, ContentItem.created_at >= since),
             "content_awaiting_approval": count(ContentItem, ContentItem.status == "awaiting_approval"),
             "content_approved_queued": count(ContentItem, ContentItem.status == "approved"),
-            "content_published_24h": count(ContentItem, ContentItem.status == "published", ContentItem.published_at >= since),
+            "content_published_period": count(ContentItem, ContentItem.status == "published", ContentItem.published_at >= since),
             "content_published_total": count(ContentItem, ContentItem.status == "published"),
-            "agent_runs_24h": count(AgentRun, AgentRun.started_at >= since),
-            "agent_failures_24h": count(AgentRun, AgentRun.started_at >= since, AgentRun.status == "failed"),
+            "agent_runs_period": count(AgentRun, AgentRun.started_at >= since),
+            "agent_failures_period": count(AgentRun, AgentRun.started_at >= since, AgentRun.status == "failed"),
         }
         summary = [
-            ("Companies discovered", kpis["companies_new_24h"], kpis["companies_total"]),
-            ("Evidence signals", kpis["signals_new_24h"], count(Signal)),
-            ("Leads", kpis["leads_new_24h"], kpis["leads_open"]),
-            ("Qualified leads", kpis["qualified_24h"], kpis["leads_qualified"]),
-            ("Inbound inquiries", kpis["inbound_24h"], kpis["inbound_total"]),
-            ("Opportunities", kpis["opportunities_new_24h"], kpis["opportunities_open"]),
-            ("Emails sent (approved replies)", kpis["emails_sent_24h"], kpis["emails_sent_total"]),
-            ("Posts created", kpis["content_created_24h"], count(ContentItem)),
-            ("Posts published (confirmed by LinkedIn)", kpis["content_published_24h"], kpis["content_published_total"]),
-            ("Agent runs / failures", f"{kpis['agent_runs_24h']} / {kpis['agent_failures_24h']}", "—"),
+            ("Companies discovered", kpis["companies_new_period"], kpis["companies_total"]),
+            ("Evidence signals", kpis["signals_new_period"], count(Signal)),
+            ("Leads", kpis["leads_new_period"], kpis["leads_open"]),
+            ("Qualified leads", kpis["qualified_period"], kpis["leads_qualified"]),
+            ("Inbound inquiries", kpis["inbound_period"], kpis["inbound_total"]),
+            ("Opportunities", kpis["opportunities_new_period"], kpis["opportunities_open"]),
+            ("Emails sent (approved replies)", kpis["emails_sent_period"], kpis["emails_sent_total"]),
+            ("Posts created", kpis["content_created_period"], count(ContentItem)),
+            ("Posts published (confirmed by LinkedIn)", kpis["content_published_period"], kpis["content_published_total"]),
+            ("Agent runs / failures", f"{kpis['agent_runs_period']} / {kpis['agent_failures_period']}", "—"),
         ]
         grades = Counter(g for g in session.execute(select(Lead.grade).where(open_lead)).scalars() if g)
         stages = session.execute(select(Opportunity.stage, func.count(Opportunity.id))
@@ -214,23 +238,49 @@ class AnalyticsReportingAgent(BaseAgent[ReportInput, ReportOutput]):
                 .group_by(ContentItem.id).order_by(func.sum(ContentMetric.reactions).desc()).limit(5)).all():
             engagement.append({"title": item.title, "impressions": imp or 0, "reactions": rea or 0, "comments": com or 0})
 
+        previous, breakdowns = [], {}
+        if inp.kind == "weekly":
+            def between(model, col, *conds):
+                return count(model, col >= prev_since, col < since, *conds)
+            previous = [
+                ("Companies discovered", kpis["companies_new_period"], between(Company, Company.created_at, active_co)),
+                ("Leads", kpis["leads_new_period"], between(Lead, Lead.created_at)),
+                ("Qualified leads", kpis["qualified_period"], between(Activity, Activity.created_at,
+                                                                      Activity.type == "status_change",
+                                                                      Activity.subject.like("%→ qualified%"))),
+                ("Inbound inquiries", kpis["inbound_period"], between(InboundInquiry, InboundInquiry.received_at)),
+                ("Posts created", kpis["content_created_period"], between(ContentItem, ContentItem.created_at)),
+            ]
+            open_rows = session.execute(select(Lead, Company).join(Company, Company.id == Lead.company_id)
+                                        .where(open_lead)).all()
+            breakdowns = {
+                "Category": Counter(lead.category or "unscored" for lead, _ in open_rows).most_common(),
+                "Industry": Counter(industry_label(co.industry) for _, co in open_rows).most_common(8),
+                "State": Counter(co.state or "unknown" for _, co in open_rows).most_common(10),
+                "Website check": Counter(co.website_status or "unchecked" for _, co in open_rows).most_common(),
+            }
+        title = "Daily Marketing Report" if inp.kind == "daily" else "Weekly Marketing Report"
+        window_label = "Last 24h" if inp.kind == "daily" else "Last 7 days"
         data = dict(d=d.isoformat(), generated=fmt_local(now, s.schedule.get("timezone")), summary=summary,
                     grades=grades, stages=stages, top_leads=top_leads, queue=queue, blockers=blockers,
-                    agents=agent_stats(session, 7), alerts=alerts, engagement=engagement)
-        md = Environment(autoescape=False).from_string(MD_TEMPLATE).render(**data)
+                    agents=agent_stats(session, 7), alerts=alerts, engagement=engagement, title=title,
+                    window_label=window_label, previous=previous, breakdowns=breakdowns)
+        # Markdown output: values are escaped by md_safe (HTML characters and table pipes) instead of HTML autoescape.
+        md = Environment(autoescape=False, finalize=md_safe).from_string(MD_TEMPLATE).render(**data)  # noqa: S701
         html = Environment(autoescape=select_autoescape(default=True)).from_string(HTML_TEMPLATE).render(**data)
         s.reports_dir.mkdir(parents=True, exist_ok=True)
-        md_path = s.reports_dir / f"daily_{d.isoformat()}.md"
-        html_path = s.reports_dir / f"daily_{d.isoformat()}.html"
+        stem = f"daily_{d.isoformat()}" if inp.kind == "daily" else f"weekly_{d.isocalendar().year}-W{d.isocalendar().week:02d}"
+        md_path = s.reports_dir / f"{stem}.md"
+        html_path = s.reports_dir / f"{stem}.html"
         md_path.write_text(md, encoding="utf-8")
         html_path.write_text(html, encoding="utf-8")
 
-        report = session.execute(select(Report).where(Report.report_date == d, Report.kind == "daily")).scalars().first()
+        report = session.execute(select(Report).where(Report.report_date == d, Report.kind == inp.kind)).scalars().first()
         if report is None:
-            report = Report(report_date=d, kind="daily", path_md=str(md_path), path_html=str(html_path))
+            report = Report(report_date=d, kind=inp.kind, path_md=str(md_path), path_html=str(html_path))
             session.add(report)
         report.summary = {"kpis": kpis, "blockers": blockers}
         report.created_at = now
         session.flush()
-        return ReportOutput(report_id=report.id, report_date=d, path_md=str(md_path), path_html=str(html_path),
+        return ReportOutput(report_id=report.id, kind=inp.kind, report_date=d, path_md=str(md_path), path_html=str(html_path),
                             kpis=kpis, blockers=blockers, metrics_imported=imported)

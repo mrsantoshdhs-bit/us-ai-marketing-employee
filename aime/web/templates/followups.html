@@ -27,6 +27,8 @@
   <div class="post small">{{ f.body }}</div>
   <div class="row-actions" style="margin-top:8px">
     {% if f.channel == 'task' and f.status == 'pending' %}<form class="inline" method="post" action="/followups/{{ f.id }}/done"><button>Mark done</button></form>{% endif %}
+    {% if f.status == 'uncertain' %}<form class="inline" method="post" action="/followups/{{ f.id }}/mark_sent"><button>It was delivered: mark sent</button></form>
+      <form class="inline" method="post" action="/followups/{{ f.id }}/requeue"><button class="secondary">Not delivered: requeue</button></form>{% endif %}
     {% if f.status in ['pending', 'approved'] %}<form class="inline" method="post" action="/followups/{{ f.id }}/reject"><button class="danger">Cancel</button></form>{% endif %}
   </div>
   {% endif %}

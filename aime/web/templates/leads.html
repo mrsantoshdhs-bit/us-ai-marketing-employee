@@ -12,16 +12,16 @@
   <button>Filter</button> <a href="/leads">Reset</a>
 </form>
 <div class="card table-wrap"><table>
-  <tr><th>Grade</th><th class="n">Score</th><th>Company</th><th>State</th><th>Industry</th><th>Source</th><th>Status</th><th>Best-fit service</th><th class="n">Intent</th><th>Created</th></tr>
+  <tr><th>Grade</th><th class="n">Score</th><th>Company</th><th>State</th><th>Industry</th><th>Source</th><th>Status</th><th>Category</th><th>Best-fit service</th><th class="n">Intent</th><th>Created</th></tr>
   {% for l in rows %}
   <tr>
     <td>{{ grade(l.grade) }}</td><td class="n">{{ l.score }}</td>
     <td><a href="/leads/{{ l.id }}">{{ l.company.name }}</a>{% if l.is_sample %} <span class="pill">sample</span>{% endif %}{% if l.contact %}<div class="small muted">{{ l.contact.display_name }}</div>{% endif %}</td>
     <td>{{ l.company.state or '—' }}</td><td>{{ l.company.industry|industry }}</td><td>{{ l.source }}</td>
-    <td>{{ status_pill(l.status) }}</td><td>{{ l.primary_service|service }}</td><td class="n">{{ l.intent_score }}</td>
+    <td>{{ status_pill(l.status) }}</td><td class="small">{{ l.category or '—' }}</td><td>{{ l.primary_service|service }}</td><td class="n">{{ l.intent_score }}</td>
     <td class="small">{{ l.created_at|local }}</td>
   </tr>
-  {% else %}<tr><td colspan="10" class="muted">No leads yet. They appear after the research or inbound jobs run.</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="11" class="muted">No leads yet. They appear after the research or inbound jobs run.</td></tr>{% endfor %}
 </table></div>
 {% set qs %}{% for k, v in f.items() if v %}{{ k }}={{ v|urlencode }}&{% endfor %}{% endset %}
 {% if total > 100 %}<p>{% if page > 1 %}<a href="?{{ qs }}page={{ page - 1 }}">← Previous</a>{% endif %}

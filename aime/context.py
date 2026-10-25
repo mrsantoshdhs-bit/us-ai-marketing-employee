@@ -58,12 +58,37 @@ class AppContext:
             self._llm_checked = False
 
 
+class DataRoleMismatch(RuntimeError):
+    pass
+
+
+def _has_data(db: Database) -> bool:
+    from sqlalchemy import inspect, text
+
+    if "companies" not in inspect(db.engine).get_table_names():
+        return False
+    with db.engine.connect() as conn:
+        return bool(conn.execute(text("SELECT 1 FROM companies LIMIT 1")).first())
+
+
 def create_context(settings: Settings | None = None, http_transport: httpx.BaseTransport | None = None) -> AppContext:
+    from aime.db import kv_get, kv_set
+    from aime.migrations import migrate
+
     settings = settings or Settings.load()
     settings.ensure_dirs()
     setup_logging(settings.logs_dir)
     db = Database(settings.database_url)
-    db.create_all()
+    migrate(db.engine, settings.backups_dir, has_data=_has_data(db))
+    with db.session() as s:
+        role = kv_get(s, "db_role")
+        if role is None:
+            kv_set(s, "db_role", settings.data_role)
+        elif role != settings.data_role:
+            db.dispose()
+            raise DataRoleMismatch(
+                f"Database at {settings.database_url} is a '{role}' database but settings say "
+                f"'{settings.data_role}'. Refusing to mix real and sample data.")
     return AppContext(settings=settings, db=db, http_transport=http_transport)
 
 

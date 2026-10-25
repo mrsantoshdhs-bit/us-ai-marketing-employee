@@ -41,6 +41,11 @@ _BANNED = [
     (re.compile(r"\b\d{2,}\s*(?:x|times|hours|companies|businesses|clients)\b", re.I), "contains a quantitative claim"),
     (re.compile(r"\bas an ai\b|\blanguage model\b", re.I), "mentions being an AI"),
     (re.compile(r"\[[^\]]+\]|\{[^}]+\}"), "contains placeholders"),
+    (re.compile(r"\byour company\b|\bcompany name\b", re.I), "contains a placeholder brand"),
+    (re.compile(r"\b(?:we|we've|we have|our team(?: has)?) (?:helped|delivered|built for|worked with|saved|increased)\b",
+                re.I), "claims past results"),
+    (re.compile(r"\b(?:industry[- ]leading|world[- ]class|best[- ]in[- ]class|number one|award[- ]winning|"
+                r"leading provider|#1)\b", re.I), "uses unverifiable superlatives"),
 ]
 _EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF☀-➿️]")
 _PREAMBLE_RE = re.compile(r"^(here(?:'s| is)|sure|certainly|below is)[^\n]*:\s*\n", re.I)
@@ -113,6 +118,17 @@ def quality_check(body: str, min_words: int = 70, max_words: int = 260) -> dict:
     letters = sum(1 for c in body if c.isalpha()) or 1
     if ascii_letters / letters < 0.97:
         problems.append("not plain English")
+    lines = [ln.strip() for ln in body.splitlines()]
+    bullets = sum(1 for ln in lines if ln.startswith("•"))
+    if bullets > 4:
+        problems.append(f"too many bullets ({bullets})")
+    if len([b for b in body.split("\n\n") if b.strip()]) < 3:
+        problems.append("needs short paragraphs")
+    if body.count("!") > 1:
+        problems.append("too many exclamation marks")
+    sentences = [x for x in re.split(r"[.!?]+\s", re.sub(r"•[^\n]*", "", body)) if x.strip()]
+    if sentences and words / len(sentences) > 30:
+        problems.append("sentences too long")
     return {"passed": not problems, "problems": problems, "words": words}
 
 

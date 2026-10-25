@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import hmac
+import json
+import threading
+import time
+from collections import defaultdict, deque
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -11,6 +16,7 @@ from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
 from sqlalchemy import func, or_, select
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -21,13 +27,15 @@ from aime.crm_ops import log_activity, suppress
 from aime.db import kv_get, kv_set
 from aime.inbound import InboundPayload, record_inquiry
 from aime.integrations.email_smtp import EmailSender
-from aime.integrations.linkedin import LinkedInAPIError, LinkedInClient, get_auth_status, get_token, new_state
+from aime.integrations.linkedin import (POST_REF_RE, LinkedInAPIError, LinkedInClient, get_auth_status, get_token,
+                                        new_state, post_url)
 from aime.integrations.status import integration_statuses
 from aime.knowledge.geo import US_REGIONS
 from aime.knowledge.industries import INDUSTRIES, industry_label
 from aime.knowledge.services import SERVICES, service_name
 from aime.models import (Activity, AgentRun, Alert, Campaign, Company, ContentItem, FollowUp, InboundInquiry,
-                         JobRun, JobState, Lead, MarketingPlan, Opportunity, Report, ResearchTopic, Signal)
+                         JobRun, JobState, Lead, MarketingPlan, Opportunity, PublishAttempt, Report, ResearchTopic,
+                         Signal)
 from aime.monitoring import agent_stats, read_heartbeat
 from aime.scheduler.runner import due_jobs, run_job
 from aime.timeutil import fmt_et, fmt_local, utcnow
@@ -59,9 +67,55 @@ class OriginCheckMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+SECURITY_HEADERS = {
+    "Content-Security-Policy": ("default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+                                "script-src 'none'; "
+                                "frame-ancestors 'none'; form-action 'self' https://www.linkedin.com; base-uri 'none'"),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        for k, v in SECURITY_HEADERS.items():
+            if k == "Content-Security-Policy" and request.url.path.startswith("/api/docs"):
+                continue  # Swagger UI needs its own scripts
+            response.headers.setdefault(k, v)
+        return response
+
+
+class InboundLimiter:
+    """Small in-memory rate limit for the public-facing inbound endpoint."""
+
+    def __init__(self, per_minute: int = 20):
+        self.per_minute = per_minute
+        self.hits: dict[str, deque] = defaultdict(deque)
+        self.lock = threading.Lock()
+
+    def allow(self, key: str) -> bool:
+        now = time.monotonic()
+        with self.lock:
+            q = self.hits[key]
+            while q and now - q[0] > 60:
+                q.popleft()
+            if len(q) >= self.per_minute:
+                return False
+            q.append(now)
+            return True
+
+
+MAX_INBOUND_BYTES = 20_000
+
+
 def create_app(ctx: AppContext | None = None) -> FastAPI:
     app = FastAPI(title="AI Marketing Employee", docs_url="/api/docs", redoc_url=None)
     app.state.ctx = ctx
+    limiter = InboundLimiter()
+    app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(OriginCheckMiddleware)
     hosts = [h.strip() for h in (ctx or get_context()).settings.allowed_hosts.split(",") if h.strip()]
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts + ["testserver"])
@@ -78,6 +132,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def render(request: Request, name: str, **data):
         data.setdefault("msg", request.query_params.get("msg"))
         data.setdefault("company_name", C().settings.company_name)
+        data.setdefault("data_role", C().settings.data_role)
         return templates.TemplateResponse(request, name, data)
 
     def back(url: str, msg: str) -> RedirectResponse:
@@ -235,7 +290,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         with C().db.session() as s:
             stmt = select(FollowUp)
             if show == "open":
-                stmt = stmt.where(FollowUp.status.in_(("pending", "awaiting_approval", "approved")))
+                stmt = stmt.where(FollowUp.status.in_(("pending", "awaiting_approval", "approved", "sending", "uncertain")))
             rows = s.execute(stmt.order_by(FollowUp.due_at).limit(300)).scalars().all()
             for r in rows:
                 _ = r.lead.company, r.contact
@@ -259,6 +314,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             elif action == "done" and f.channel == "task":
                 f.status = "done"
                 msg = "Task completed"
+            elif action == "mark_sent" and f.status == "uncertain":
+                f.status, f.sent_at, f.blocked_reason = "sent", f.send_started_at or utcnow(), None
+                msg = "Marked as sent (confirmed in your Sent folder)"
+            elif action == "requeue" and f.status == "uncertain":
+                f.status, f.send_started_at = "approved", None
+                f.blocked_reason = "Requeued after a person confirmed it was not delivered"
+                msg = "Requeued"
             else:
                 raise HTTPException(400, "Action not allowed in the current state")
             log_activity(s, f"Follow-up #{f.id} {action}", "human", type_="followup", company_id=f.company_id, lead_id=f.lead_id)
@@ -285,11 +347,35 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/content/{cid}/{action}")
     def content_action(cid: int, action: str, title: str = Form(""), body: str = Form(""), hashtags: str = Form(""),
-                       scheduled_et: str = Form("")):
+                       scheduled_et: str = Form(""), post_ref: str = Form(""), checked: str = Form("")):
         with C().db.session() as s:
             item = s.get(ContentItem, cid) or _404()
             if item.status == "published":
                 raise HTTPException(400, "Published posts cannot be changed here")
+            if item.status == "publishing":
+                raise HTTPException(409, "This post is being published right now; try again in a few minutes")
+            if item.status == "uncertain":
+                ref = post_ref.strip()
+                if action == "confirm_published" and POST_REF_RE.match(ref):
+                    urn = ref if ref.startswith("urn:li:") else None
+                    item.status, item.reconciled_via = "published", "manual"
+                    item.external_id = urn or ref
+                    item.external_url = post_url(urn) if urn else ref
+                    item.published_at = item.published_at or utcnow()
+                    item.publish_blocked_reason = None
+                    s.query(PublishAttempt).filter(PublishAttempt.attempt_id == item.publish_attempt_id).update(
+                        {"outcome": "reconciled", "external_id": item.external_id, "finished_at": utcnow()})
+                    msg = "Marked as published"
+                elif action == "requeue" and checked == "yes":
+                    s.query(PublishAttempt).filter(PublishAttempt.attempt_id == item.publish_attempt_id).update(
+                        {"outcome": "not_sent", "finished_at": utcnow()})
+                    item.status, item.publish_attempt_id, item.publish_started_at = "approved", None, None
+                    item.publish_blocked_reason = "Requeued after a person confirmed it is not on LinkedIn"
+                    msg = "Requeued for publishing"
+                else:
+                    raise HTTPException(400, "Uncertain posts need: confirm with the LinkedIn post URL/URN, or "
+                                             "requeue after ticking that you checked LinkedIn")
+                return back(f"/content/{cid}", msg)
             if action == "save":
                 item.title = title.strip() or item.title
                 item.body = body.strip() or item.body
@@ -372,11 +458,22 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/api/inbound")
     async def api_inbound(request: Request):
+        client_ip = request.client.host if request.client else "unknown"
+        if not limiter.allow(client_ip):
+            raise HTTPException(429, "Too many requests; try again in a minute")
         token = C().settings.inbound_api_token
-        if token and request.headers.get("x-inbound-token") != token:
+        if token and not hmac.compare_digest(request.headers.get("x-inbound-token", ""), token):
             raise HTTPException(401, "Invalid inbound token")
-        payload = await request.json()
-        InboundPayload.model_validate(payload)
+        raw = await request.body()
+        if len(raw) > MAX_INBOUND_BYTES:
+            raise HTTPException(413, "Inquiry too large")
+        try:
+            payload = json.loads(raw)
+            InboundPayload.model_validate(payload)
+        except (ValueError, ValidationError) as exc:
+            raise HTTPException(422, f"Invalid inquiry: {str(exc)[:200]}") from exc
+        if C().settings.is_production and payload.get("is_sample"):
+            raise HTTPException(422, "Sample records are not accepted by the production database")
         with C().db.session() as s:
             row, created = record_inquiry(s, payload, "api")
             rid = row.id if row else None

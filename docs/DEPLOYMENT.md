@@ -72,7 +72,9 @@ crm.example.com {
 
 ## Pre-flight checklist
 
-- [ ] `python -m pytest` passes
+- [ ] `python -m pytest` passes and `python -m ruff check aime tests scripts` is clean
+- [ ] `python -m aime doctor` reports no FAIL lines
+- [ ] `git config core.hooksPath .githooks` is set (secret scanning on every commit)
 - [ ] `.env` contains only what you intend to enable; it is not committed (see `.gitignore`)
 - [ ] `config/business.toml` has your real company name and website
 - [ ] `COMPANY_POSTAL_ADDRESS` is set before enabling outbound email (CAN-SPAM)

@@ -23,17 +23,19 @@ Set your brand in `config/business.toml` (`[company] name = ...`). Integrations 
 ## Architecture
 
 ```
-Windows Task Scheduler (every 15 min, per-user)
-  └─ scripts/run_tick.py → aime tick → runs due jobs (config/schedule.toml)
-       ├─ crm_maintenance  06:30  CRM agent (dedupe, hygiene, stale, lifecycle) + re-score
+Windows Task Scheduler (every 15 min, per-user, restarts on failure)
+  └─ scripts/run_tick.py → maintenance-window check → aime tick → runs due jobs (config/schedule.toml)
+       ├─ db_maintenance   06:15  Online backup (14 kept), integrity check, WAL checkpoint
+       ├─ crm_maintenance  06:30  CRM agent (website checks, dedupe, hygiene, stale, lifecycle) + re-score
        ├─ plan             06:45  Marketing Manager (50-state rotation, industry focus, campaign, briefs)
-       ├─ research         07:00  Research agent → Qualification → Sales Workflow
+       ├─ research         07:00  Research agent → website verification → Qualification → Sales Workflow
        ├─ content          07:30  LinkedIn Content agent (topics, LLM drafts, images, calendar)
        ├─ inbound          30 min CRM intake → Qualification → Sales Workflow
        ├─ followups        60 min Sales Workflow (drafts, tasks, approved sends)
        ├─ publish          30 min Authorized Publishing (official LinkedIn API only)
        ├─ daily_report     20:00  Analytics & Reporting (Markdown + HTML)
-       └─ monitor          30 min Failure / staleness / error-rate alerts
+       ├─ weekly_report    Mon 08:00 Weekly report: trends vs previous week, segments
+       └─ monitor          30 min Failure / staleness / error-rate alerts + doctor self-checks
 FastAPI dashboard (127.0.0.1) ── SQLite (data/aime.db, WAL) ── Ollama llama3.2 (local, optional)
 ```
 
@@ -53,13 +55,13 @@ FastAPI dashboard (127.0.0.1) ── SQLite (data/aime.db, WAL) ── Ollama ll
 | Agent | Responsibilities | Retry policy |
 |---|---|---|
 | Marketing Manager | 50-state rotation, industry focus (explore + exploit), monthly campaign, content briefs | 3 attempts, exponential backoff |
-| US Business Research | Authorized sources only, US-location evidence required, requirement extraction, dedupe, no personal data | 3 attempts on network/DB errors |
+| US Business Research | Authorized sources only, US-location evidence required, record validation, requirement extraction, dedupe (source id, domain, name, core name), no personal data, cached fallback | 3 attempts on network/DB errors |
 | LinkedIn Content | Topic research, local-LLM drafts behind a quality gate, template fallback, hashtags, 1200×627 images, calendar | 3 attempts |
-| Authorized Publishing | Approved + due posts only, official API, published only on 201 + post id, no bursts | 1 attempt per run (non-idempotent), per-post 3 tries |
+| Authorized Publishing | Approved + due posts only, official API, durable claim → journal → DB (at-most-once), uncertain outcomes reconciled, never re-posted | 1 attempt per run; per-post: definite failures retried 3×, uncertain never |
 | Lead Qualification | 0–100 score: fit 35, need 35, intent 20 (evidence only), data 10, with reasons | 3 attempts |
-| Sales Workflow | Opportunities for inbound, approval-gated reply sequences, tasks for research leads, send window | 1 attempt (non-idempotent) |
-| CRM Management | Inbound intake + spam checks, suppression, merges without deletes, hygiene, lifecycle | 3 attempts |
-| Analytics & Reporting | KPIs from records only, blockers, agent health, imported LinkedIn analytics | 3 attempts |
+| Sales Workflow | Opportunities for inbound, approval-gated reply sequences, tasks for research leads, send window, at-most-once sending | 1 attempt (non-idempotent) |
+| CRM Management | Inbound intake + spam checks, website verification, suppression, merges without deletes, hygiene, lifecycle | 3 attempts |
+| Analytics & Reporting | Daily and weekly reports: KPIs from records only, segments, period comparison, blockers, agent health | 3 attempts |
 
 Every run is logged to `agent_runs` (dashboard → Agents) and `data/logs/agent_runs.jsonl`;
 job runs to `job_runs`; health metrics (success rate, avg/p95 latency, retries) are on the Overview.
@@ -81,7 +83,10 @@ job runs to `job_runs`; health metrics (success rate, avg/p95 latency, retries) 
   unsubscribe line, `List-Unsubscribe` header, postal address (CAN-SPAM); suppression list honored.
 - No fabricated data: intent is scored only from evidence, opportunity values only from people,
   sample data uses reserved `.example` domains and is flagged.
-- Dashboard binds to 127.0.0.1 and rejects cross-site form posts.
+- Dashboard binds to 127.0.0.1, rejects cross-site posts and unknown Host headers, and sends a strict CSP.
+- OAuth tokens are encrypted at rest with Windows DPAPI; secrets and emails are redacted from logs.
+- Production and demo/test databases are stamped and cannot be mixed; sample records are refused in production.
+- A pre-commit hook blocks credentials, personal data, databases, and logs from reaching GitHub.
 
 ## Enabling integrations
 
@@ -98,12 +103,18 @@ job runs to `job_runs`; health metrics (success rate, avg/p95 latency, retries) 
 
 ```
 python -m aime status | init | tick | serve
-python -m aime run <plan|research|content|inbound|followups|publish|crm_maintenance|daily_report|monitor>
-python -m aime scheduler install|uninstall|status|run
+python -m aime run <db_maintenance|crm_maintenance|plan|research|content|inbound|followups|publish|daily_report|weekly_report|monitor>
+python -m aime scheduler install|uninstall|status|run|verify
+python -m aime doctor                                # integrity, isolation, compliance self-checks
+python -m aime backup --label before-change
+python -m aime maintenance on --hours 2 | off | status
+python -m aime refresh-graphics                      # re-render unpublished post images
 python -m aime llm-check --service ai_agents --industry real_estate
 python -m aime inbound inquiries.json
 python -m aime suppress someone@domain.com
 python -m aime seed-demo --data-dir demo_data      # separate demo DB from fictional data
 ```
 
-See `docs/DEPLOYMENT.md` for always-on hosting.
+See `docs/OPERATIONS.md` for the runbook (uncertain posts, backups, upgrades) and `docs/DEPLOYMENT.md`
+for always-on hosting. Enable the secret-scanning pre-commit hook once per clone:
+`git config core.hooksPath .githooks`.

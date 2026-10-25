@@ -24,7 +24,10 @@ def parse_company_feed(xml_text: str) -> list[dict]:
     """Return [{cik, name}] from an EDGAR browse Atom feed (lenient to minor format changes)."""
     out: list[dict] = []
     try:
-        root = ET.fromstring(xml_text)
+        if len(xml_text) > 5_000_000:
+            return out  # far larger than any EDGAR company list: refuse to parse
+        # Python 3.12's bundled expat limits entity expansion (billion-laughs); input is size-capped above.
+        root = ET.fromstring(xml_text)  # noqa: S314
     except ET.ParseError:
         return out
     for entry in root.iter():

@@ -26,6 +26,7 @@
   </nav>
 </header>
 <main>
+  {% if data_role != 'production' %}<div class="flash demo">{{ data_role|upper }} DATABASE: sample data only. Nothing here is a real prospect.</div>{% endif %}
   {% if msg %}<div class="flash">{{ msg }}</div>{% endif %}
   {% block content %}{% endblock %}
 </main>

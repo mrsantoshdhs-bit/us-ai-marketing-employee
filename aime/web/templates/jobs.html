@@ -7,12 +7,13 @@
   status {{ task.get('Status', '?') }} · last run {{ task.get('Last Run Time', '?') }} · last result {{ task.get('Last Result', '?') }} · next run {{ task.get('Next Run Time', '?') }}
   {% else %}{{ state_pill('NOT RUNNING') }} not installed. Run <code>python -m aime scheduler install</code>.{% endif %}
   <br>Last tick heartbeat: {% if heartbeat %}{{ heartbeat.at }} UTC ({{ heartbeat.trigger }}, {{ heartbeat.state }}){% else %}none yet{% endif %}
+  {% if heartbeat and heartbeat.state == 'maintenance' %}<br><span class="pill warn">Maintenance window until {{ heartbeat.maintenance.until }}: scheduled jobs are paused and resume automatically</span>{% endif %}
 </div>
 <div class="card table-wrap"><table>
   <tr><th>Job</th><th>Schedule</th><th>Now</th><th>Last attempt</th><th>Last success</th><th>Last status</th><th class="n">Fails in a row</th><th></th></tr>
   {% for spec, due, reason in due %}{% set st = states.get(spec.name) %}
   <tr><td><strong>{{ spec.name }}</strong><div class="small muted">{{ spec.description }}</div></td>
-      <td class="small">{% if spec.every_minutes %}every {{ spec.every_minutes }} min{% else %}daily {{ spec.daily_at.strftime('%H:%M') }}{% endif %}</td>
+      <td class="small">{{ spec.schedule_label }}</td>
       <td class="small">{{ 'due' if due else 'waiting' }}: {{ reason }}</td>
       <td class="small">{{ (st.last_attempt_at if st else None)|local }}</td><td class="small">{{ (st.last_success_at if st else None)|local }}</td>
       <td>{{ status_pill(st.last_status) if st and st.last_status else '—' }}</td><td class="n">{{ st.consecutive_failures if st else 0 }}</td>
