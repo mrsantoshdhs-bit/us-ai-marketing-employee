@@ -115,6 +115,14 @@ python -m aime suppress someone@domain.com
 python -m aime seed-demo --data-dir demo_data      # separate demo DB from fictional data
 ```
 
+## Continuous integration
+
+Every pull request into `main` runs `.github/workflows/ci.yml` on a free GitHub-hosted Linux runner:
+secret/personal-data scan, Ruff (including bandit security rules), compile check, the full pytest suite with
+offline mocks in an isolated data folder, and a `pip-audit` dependency scan. The workflow uses no
+repository secrets, has a read-only token, blocks LinkedIn hosts and SMTP ports at the network level,
+and never touches real lead data (which is never committed). It does not merge anything.
+
 See `docs/OPERATIONS.md` for the runbook (uncertain posts, backups, upgrades) and `docs/DEPLOYMENT.md`
 for always-on hosting. Enable the secret-scanning pre-commit hook once per clone:
 `git config core.hooksPath .githooks`.

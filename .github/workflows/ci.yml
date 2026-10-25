@@ -1,0 +1,90 @@
+# Free CI for pull requests: tests, lint, and security checks.
+#
+# Safety guarantees (enforced below, not just by convention):
+# - No repository secrets or production credentials are referenced; the token is read-only.
+# - Real lead data never exists here: data/ is git-ignored and the scan fails if any is tracked.
+# - LinkedIn hosts and SMTP ports are blocked at the network level, and every outbound
+#   channel is disabled through environment settings, so nothing can be published or emailed.
+# - Runs on a standard Linux runner (lowest minute cost) and cancels superseded runs.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  AIME_DATA_ROLE: test
+  PUBLISHING_ENABLED: "false"
+  REQUIRE_HUMAN_APPROVAL: "true"
+  OUTBOUND_EMAIL_ENABLED: "false"
+  LLM_PROVIDER: template
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  checks:
+    name: Tests, lint and security
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Guard - workflow uses no secrets
+        run: |
+          if grep -rnE '\$\{\{\s*secrets\.' .github/workflows/; then
+            echo "::error::Workflows must not use repository secrets"; exit 1
+          fi
+
+      - name: Guard - block LinkedIn and outbound email at the network level
+        run: |
+          echo "0.0.0.0 linkedin.com www.linkedin.com api.linkedin.com" | sudo tee -a /etc/hosts
+          sudo iptables -A OUTPUT -p tcp -m multiport --dports 25,465,587,2525 -j REJECT
+          if curl -s --max-time 5 https://api.linkedin.com >/dev/null; then
+            echo "::error::LinkedIn is reachable; refusing to run"; exit 1
+          fi
+
+      - name: Secret, personal-data and lead-data scan
+        run: python3 scripts/secret_scan.py --all
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Ruff (pyflakes, bugbear, bandit security rules)
+        run: ruff check aime tests scripts --output-format github
+
+      - name: Compile check
+        run: python -m compileall -q aime scripts tests
+
+      - name: Tests (offline mocks only, isolated data folder)
+        env:
+          AIME_DATA_DIR: ${{ runner.temp }}/aime-ci-data
+        run: python -m pytest -o addopts="" -q -p no:cacheprovider
+
+      - name: Guard - tests created no data inside the repository
+        run: |
+          if [ -e data ] || [ -e demo_data ]; then
+            echo "::error::Tests wrote a data folder into the checkout"; exit 1
+          fi
+
+      - name: Dependency vulnerability audit
+        run: pip-audit -r requirements.txt --progress-spinner off
