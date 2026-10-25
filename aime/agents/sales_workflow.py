@@ -105,9 +105,10 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
     def _new_draft(self, session: Session, lead: Lead, step: int, due: datetime, out: SalesOutput) -> None:
         subject, body = draft_reply(self.settings, step, lead.contact.first_name, lead.primary_service,
                                     self._inquiry_excerpt(session, lead) if step == 1 else None)
-        status = "awaiting_approval" if self.settings.require_human_approval else "approved"
+        # Every email waits for a person to approve it; there is no setting that skips this.
         session.add(FollowUp(lead_id=lead.id, contact_id=lead.contact_id, company_id=lead.company_id,
-                             channel="email", step=step, due_at=due, status=status, subject=subject, body=body))
+                             channel="email", step=step, due_at=due, status="awaiting_approval",
+                             subject=subject, body=body))
         out.drafts_created += 1
         log_activity(session, f"Drafted follow-up email #{step} (awaiting approval)", self.name, type_="email_draft",
                      company_id=lead.company_id, lead_id=lead.id)
@@ -169,8 +170,15 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         return start <= local.time() <= end
 
     def _send_approved(self, session: Session, now: datetime, cfg: dict, out: SalesOutput) -> None:
+        # "approved" without an approval record (e.g. set directly in the database) is not an approval.
+        for f in session.execute(select(FollowUp).where(
+                FollowUp.channel == "email", FollowUp.status == "approved", FollowUp.approved_at.is_(None))).scalars():
+            f.status = "awaiting_approval"
+            f.blocked_reason = "Needs a person's approval before it can be sent"
+            out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
         approved = session.execute(select(FollowUp).where(
-            FollowUp.channel == "email", FollowUp.status == "approved", FollowUp.due_at <= now)).scalars().all()
+            FollowUp.channel == "email", FollowUp.status == "approved", FollowUp.approved_at.is_not(None),
+            FollowUp.due_at <= now)).scalars().all()
         if not approved:
             return
         ready, reason = self.sender.status()

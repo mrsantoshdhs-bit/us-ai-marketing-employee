@@ -42,6 +42,13 @@ def run_checks(ctx: AppContext) -> list[dict]:
         unapproved = n(ContentItem, ContentItem.status.in_(("published", "publishing", "uncertain")),
                        ContentItem.approved_at.is_(None))
         add("Nothing published without approval", unapproved == 0, f"{unapproved} post(s) without an approval record")
+        unapproved_mail = n(FollowUp, FollowUp.channel == "email",
+                            FollowUp.status.in_(("sending", "sent", "uncertain")), FollowUp.approved_at.is_(None))
+        add("No email sent without approval", unapproved_mail == 0,
+            f"{unapproved_mail} email(s) without an approval record")
+        add("Human approval setting", ctx.settings.require_human_approval,
+            "Every email and post needs an approval record" if ctx.settings.require_human_approval
+            else "REQUIRE_HUMAN_APPROVAL=false is set but ignored; approval is still required", "warning")
         multi = s.execute(select(PublishAttempt.content_id).where(PublishAttempt.outcome.in_(("success", "reconciled")))
                           .group_by(PublishAttempt.content_id).having(func.count() > 1)).all()
         add("No post published twice", not multi, f"{len(multi)} post(s) with more than one successful attempt")

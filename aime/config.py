@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import tomllib
 from dataclasses import dataclass, field, fields
@@ -12,6 +13,7 @@ from typing import Any
 from dotenv import dotenv_values
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+log = logging.getLogger("aime.config")
 
 DEFAULT_BUSINESS: dict[str, Any] = {
     "company": {"name": "Your Company", "website": "", "tagline": ""},
@@ -136,6 +138,7 @@ class Settings:
     linkedin_api_version: str = "202609"
     linkedin_author_urn: str = ""
     publishing_enabled: bool = False
+    # Read for compatibility only: emails and posts always need an approval record before they go out.
     require_human_approval: bool = True
 
     hn_source_enabled: bool = True
@@ -169,6 +172,8 @@ class Settings:
         self.data_dir = Path(self.data_dir)
         if not self.database_url:
             self.database_url = f"sqlite:///{(self.data_dir / 'aime.db').as_posix()}"
+        if not self.require_human_approval:
+            log.warning("REQUIRE_HUMAN_APPROVAL=false is ignored: emails and posts always need an approval record")
 
     # ---- derived paths -------------------------------------------------
     @property
