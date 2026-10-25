@@ -1,0 +1,37 @@
+{% extends "_base.html.j2" %}
+{% block style %}
+body { background: var(--paper); color: var(--paper-ink); display: flex; flex-direction: column; }
+.top { flex: 1; display: grid; grid-template-columns: 1.08fr .92fr; min-height: 0; }
+.left { background: radial-gradient(700px 500px at 0% 100%, rgba(20,184,166,.28), transparent 60%), linear-gradient(160deg, var(--navy), var(--navy-2));
+  color: var(--ink); padding: 84px 52px 60px 84px; display: flex; flex-direction: column; justify-content: center; gap: 28px; }
+.eyebrow { font-size: 26px; letter-spacing: .12em; text-transform: uppercase; color: var(--teal-light); font-weight: 600; }
+h1 { font-size: 60px; line-height: 1.08; font-weight: 700; letter-spacing: -.015em; }
+h1 em { font-style: normal; color: var(--teal-light); }
+.sub { font-size: 29px; line-height: 1.38; color: var(--muted); }
+.tag { font-size: 26px; color: var(--muted); }
+.right { padding: 72px 64px 48px 44px; display: flex; flex-direction: column; justify-content: center; gap: 22px; }
+.card { background: #ffffff; border: 1px solid #e3e1da; border-radius: 18px; padding: 22px 24px; box-shadow: 0 10px 24px rgba(15,23,42,.06); }
+.card b { display: block; font-size: 26px; color: var(--accent-dark); font-weight: 700; font-variant-numeric: lining-nums; }
+.card span { display: block; margin-top: 6px; font-size: 28px; line-height: 1.32; }
+.bottom { padding: 0 84px 52px; }
+{% endblock %}
+{% block body %}
+<div class="top">
+  <div class="left">
+    <div class="eyebrow" data-qc="eyebrow" data-fg="{{ c.teal_light }}" data-bg="{{ c.navy }}">{{ b.eyebrow }}</div>
+    <h1 data-qc="headline" data-fg="{{ c.ink }}" data-bg="{{ c.navy }}">{{ b.lead }} <em>{{ b.highlight }}</em></h1>
+    {% if b.subheadline %}<p class="sub" data-qc="subheadline" data-fg="{{ c.muted }}" data-bg="{{ c.navy }}">{{ b.subheadline }}</p>{% endif %}
+    {% if b.tag %}<div class="tag" data-qc="tag" data-fg="{{ c.muted }}" data-bg="{{ c.navy }}">For {{ b.tag }}</div>{% endif %}
+  </div>
+  <div class="right">
+    {% for p in b.points %}
+    <div class="card" data-box="card{{ loop.index }}"><b data-qc="card{{ loop.index }}-n" data-fg="{{ c.accent_dark }}" data-bg="#ffffff">{{ '%02d' % loop.index }}</b>
+      <span data-qc="card{{ loop.index }}" data-fg="{{ c.paper_ink }}" data-bg="#ffffff">{{ p }}</span></div>
+    {% endfor %}
+  </div>
+</div>
+<div class="bottom">
+  {% set frule, fbg, ffg, fmuted, fmono_bg, fmono_fg = '#d6d3cb', c.paper, c.paper_ink, c.paper_muted, c.navy, c.ink %}
+  {% include "_footer.html.j2" %}
+</div>
+{% endblock %}

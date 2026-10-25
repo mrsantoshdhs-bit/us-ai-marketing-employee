@@ -1,0 +1,34 @@
+{% extends "_base.html.j2" %}
+{% block style %}
+body { background: #ffffff; color: var(--paper-ink); display: flex; flex-direction: column; }
+.head { background: radial-gradient(800px 420px at 92% 0%, rgba(59,130,246,.35), transparent 60%), linear-gradient(150deg, var(--navy), var(--navy-2));
+  color: var(--ink); padding: 84px 84px 56px; }
+.eyebrow { display: flex; gap: 14px; align-items: center; font-size: 26px; letter-spacing: .12em; text-transform: uppercase; color: var(--teal-light); font-weight: 600; }
+.eyebrow i { width: 44px; height: 3px; background: var(--teal-light); border-radius: 2px; flex: 0 0 44px; }
+h1 { font-size: 62px; line-height: 1.08; margin-top: 22px; font-weight: 700; letter-spacing: -.015em; }
+h1 em { font-style: normal; color: var(--teal-light); }
+.sub { margin-top: 20px; font-size: 30px; line-height: 1.38; color: var(--muted); }
+.list { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 26px; padding: 44px 84px; }
+.row { display: flex; gap: 30px; align-items: center; padding: 30px 32px; background: #f2f5fb; border-radius: 20px; border-left: 6px solid var(--accent-dark); }
+.num { flex: 0 0 84px; height: 84px; border-radius: 50%; background: var(--accent-dark); color: #fff; display: grid; place-items: center;
+  font-size: 32px; font-weight: 700; font-variant-numeric: lining-nums; }
+.row span { font-size: 36px; line-height: 1.28; }
+.bottom { padding: 0 84px 56px; }
+{% endblock %}
+{% block body %}
+<div class="head">
+  <div class="eyebrow" data-qc="eyebrow" data-fg="{{ c.teal_light }}" data-bg="{{ c.navy }}"><i></i>{{ b.eyebrow }}</div>
+  <h1 data-qc="headline" data-fg="{{ c.ink }}" data-bg="{{ c.navy }}">{{ b.lead }} <em>{{ b.highlight }}</em></h1>
+  {% if b.subheadline %}<p class="sub" data-qc="subheadline" data-fg="{{ c.muted }}" data-bg="{{ c.navy }}">{{ b.subheadline }}</p>{% endif %}
+</div>
+<div class="list">
+  {% for p in b.points %}
+  <div class="row" data-box="row{{ loop.index }}"><div class="num" data-qc="row{{ loop.index }}-n" data-fg="#ffffff" data-bg="{{ c.accent_dark }}">{{ '%02d' % loop.index }}</div>
+    <span data-qc="row{{ loop.index }}" data-fg="{{ c.paper_ink }}" data-bg="#f2f5fb">{{ p }}</span></div>
+  {% endfor %}
+</div>
+<div class="bottom">
+  {% set frule, fbg, ffg, fmuted, fmono_bg, fmono_fg = '#e6e8ee', '#ffffff', c.paper_ink, c.paper_muted, c.navy, c.ink %}
+  {% include "_footer.html.j2" %}
+</div>
+{% endblock %}

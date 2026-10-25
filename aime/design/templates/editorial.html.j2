@@ -1,0 +1,36 @@
+{% extends "_base.html.j2" %}
+{% block style %}
+body { background: var(--paper); color: var(--paper-ink); }
+.wrap { height: 100%; padding: 92px 96px 56px; display: flex; flex-direction: column; }
+.kicker { font-size: 26px; letter-spacing: .14em; text-transform: uppercase; color: var(--accent-dark); font-weight: 600; }
+.rule { width: 120px; height: 5px; background: var(--accent-dark); margin-top: 22px; flex: 0 0 5px; }
+.main { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 48px; padding: 36px 0; }
+h1 { font-family: var(--serif); font-weight: 400; font-size: 92px; line-height: 1.08; letter-spacing: -.015em; }
+h1 em { color: var(--accent-dark); }
+.sub { font-size: 34px; line-height: 1.42; color: var(--paper-muted); max-width: 880px; }
+.points { display: grid; gap: 30px 34px; }
+.pt { border-top: 3px solid var(--paper-ink); padding-top: 18px; }
+.pt b { display: block; font-family: var(--sans); font-size: 30px; color: var(--accent-dark); font-weight: 700; font-variant-numeric: lining-nums; }
+.pt span { display: block; margin-top: 8px; font-size: 28px; line-height: 1.34; color: var(--paper-muted); }
+{% endblock %}
+{% block body %}
+{% set cols = 3 if b.points|length == 3 else 2 %}
+<div class="wrap">
+  <div class="kicker" data-qc="eyebrow" data-fg="{{ c.accent_dark }}" data-bg="{{ c.paper }}">{{ b.eyebrow }}</div>
+  <div class="rule"></div>
+  <div class="main">
+    <h1 data-qc="headline" data-fg="{{ c.paper_ink }}" data-bg="{{ c.paper }}">{{ b.lead }} <em>{{ b.highlight }}</em></h1>
+    {% if b.subheadline %}<p class="sub" data-qc="subheadline" data-fg="{{ c.paper_muted }}" data-bg="{{ c.paper }}">{{ b.subheadline }}</p>{% endif %}
+    {% if b.points %}
+    <div class="points" style="grid-template-columns: repeat({{ cols }}, 1fr)">
+      {% for p in b.points %}
+      <div class="pt" data-box="pt{{ loop.index }}"><b data-qc="pt{{ loop.index }}-n" data-fg="{{ c.accent_dark }}" data-bg="{{ c.paper }}">{{ '%02d' % loop.index }}</b>
+        <span data-qc="pt{{ loop.index }}" data-fg="{{ c.paper_muted }}" data-bg="{{ c.paper }}">{{ p }}</span></div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+  {% set frule, fbg, ffg, fmuted, fmono_bg, fmono_fg = '#d6d3cb', c.paper, c.paper_ink, c.paper_muted, c.paper_ink, c.paper %}
+  {% include "_footer.html.j2" %}
+</div>
+{% endblock %}

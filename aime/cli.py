@@ -320,22 +320,23 @@ def cmd_maintenance(args, ctx) -> int:
 
 
 def cmd_refresh_graphics(args, ctx) -> int:
-    """Re-render images for posts that are not published yet (e.g. after a brand change)."""
-    import uuid
-
+    """Re-render images for posts that are not published yet (e.g. after a brand change). Old files are kept."""
     from aime.models import ContentItem
-    from aime.visuals import render_card
+    from aime.visuals import render_post_image
 
-    count = 0
+    if args.renderer:
+        ctx.settings.image_renderer = args.renderer
+    counts: dict[str, int] = {}
     with ctx.db.session() as s:
         for item in s.execute(select(ContentItem).where(
                 ContentItem.status.in_(("draft", "awaiting_approval", "approved", "failed")))).scalars():
-            path = render_card(ctx.settings.assets_dir / f"post_{uuid.uuid4().hex[:10]}.png", item.title,
-                               item.service, item.industry, ctx.settings.company_name,
-                               ctx.settings.business["company"].get("tagline") or None)
-            item.image_path, item.image_urn = path.name, None
-            count += 1
-    print(f"Re-rendered {count} image(s) with brand '{ctx.settings.company_name}'")
+            image = render_post_image(ctx.settings, item.title, item.body, item.service, item.industry, seed=item.id)
+            item.image_path, item.image_urn = image["path"].name, None
+            item.quality = {**(item.quality or {}),
+                            "image": {k: image[k] for k in ("renderer", "style", "metrics", "problems")}}
+            counts[f"{image['renderer']}:{image['style']}"] = counts.get(f"{image['renderer']}:{image['style']}", 0) + 1
+            s.commit()  # each image is saved as soon as it is rendered
+    print(f"Re-rendered {sum(counts.values())} image(s) with brand '{ctx.settings.company_name}': {counts}")
     return 0
 
 
@@ -419,7 +420,9 @@ def build_parser() -> argparse.ArgumentParser:
     mt.add_argument("action", choices=["on", "off", "status"])
     mt.add_argument("--hours", type=float, default=2.0)
     mt.add_argument("--reason", default="Manual maintenance")
-    sub.add_parser("refresh-graphics", help="Re-render images of unpublished posts (e.g. after a brand change)")
+    rg = sub.add_parser("refresh-graphics", help="Re-render images of unpublished posts (e.g. after a brand change)")
+    rg.add_argument("--renderer", choices=["auto", "html", "pillow"], help="Override IMAGE_RENDERER for this run")
+    rg.add_argument("--data-dir", help="Use another data folder (e.g. the demo database)")
     lc = sub.add_parser("llm-check", help="Generate one sample post with the configured LLM")
     lc.add_argument("--service", default="ai_agents")
     lc.add_argument("--industry", default="real_estate")

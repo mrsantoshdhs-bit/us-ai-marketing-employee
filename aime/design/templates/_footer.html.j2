@@ -1,0 +1,7 @@
+<div class="foot" style="border-top: 1px solid {{ frule }}">
+  <div class="mono" style="background: {{ fmono_bg }}; color: {{ fmono_fg }}">{{ monogram }}</div>
+  <div class="brand">
+    <b data-qc="brand" data-fg="{{ ffg }}" data-bg="{{ fbg }}" style="color: {{ ffg }}">{{ b.company }}</b>
+    {% if b.tagline %}<span data-qc="tagline" data-fg="{{ fmuted }}" data-bg="{{ fbg }}" style="color: {{ fmuted }}">{{ b.tagline }}</span>{% endif %}
+  </div>
+</div>

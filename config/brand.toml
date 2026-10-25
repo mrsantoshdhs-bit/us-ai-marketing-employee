@@ -1,0 +1,25 @@
+# Visual brand for LinkedIn images. The company name and tagline come from business.toml.
+# Colours are used by every image template; keep text/background pairs at 4.5:1 contrast or better.
+
+[colors]
+navy = "#0b1630"      # dark background
+navy_2 = "#12244a"    # dark background, gradient end
+blue = "#3b82f6"      # primary accent
+blue_light = "#8fbaff"
+teal = "#14b8a6"      # secondary accent
+teal_light = "#5eead4"
+ink = "#eef3ff"       # text on dark
+muted = "#b4c3e0"     # secondary text on dark
+paper = "#f6f4ef"     # light background
+paper_ink = "#0f172a" # text on light
+paper_muted = "#3f4a5e"
+accent_dark = "#1d4ed8" # accent on light backgrounds
+
+[fonts]
+sans = "\"Segoe UI Variable Display\", \"Segoe UI\", \"Inter\", \"DejaVu Sans\", Arial, sans-serif"
+serif = "Georgia, \"DejaVu Serif\", \"Times New Roman\", serif"
+
+[image]
+# 4:5 portrait takes the most space in the LinkedIn feed.
+width = 1080
+height = 1350
