@@ -100,6 +100,11 @@ def run_checks(ctx: AppContext) -> list[dict]:
         hours = (utcnow() - datetime.fromisoformat(off["at"])).total_seconds() / 3600
         add("Off-machine encrypted backup", hours <= BACKUP_MAX_AGE_HOURS, f"{off['file']}, {hours:.0f} h ago")
 
+    mode = str(ctx.settings.section("publish_policy").get("mode", "shadow")).lower()
+    add("Auto-publish policy is shadow-only", mode == "shadow",
+        "records decisions only; never publishes" if mode == "shadow"
+        else f"publish_policy.mode={mode!r} is not supported and is treated as shadow", "warning")
+
     hb = read_heartbeat(ctx.settings)
     if hb is None:
         add("Scheduler heartbeat", False, "No tick recorded yet", "warning")

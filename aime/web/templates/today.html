@@ -18,7 +18,7 @@
       {% endfor %}
       {% for p in posts %}
       <div class="row-item">{{ qc_pill(p.qc_status) }} <a href="/content/{{ p.id }}">{{ p.title }}</a>
-        <span class="muted small">post · {{ p.scheduled_for|et }}</span></div>
+        <span class="muted small">post · {{ p.scheduled_for|et }}{% if post_decisions.get(p.id) %} · policy: {{ post_decisions[p.id]|replace('_', ' ') }}{% endif %}</span></div>
       {% endfor %}
       {% for f in emails %}
       <div class="row-item"><span class="pill warn">reply draft</span> <a href="/followups">{{ f.subject }}</a>
@@ -44,6 +44,14 @@
       {% if href %}<a class="kpi" href="{{ href }}"><div class="v">{{ value }}</div><div class="l">{{ label }}</div></a>
       {% else %}<div class="kpi muted"><div class="v">–</div><div class="l">{{ label }}<br><span class="small">{{ note }}</span></div></div>{% endif %}
       {% endfor %}
+    </div>
+
+    <h2>Auto-publish policy <span class="pill warn">shadow</span></h2>
+    <div class="card small">
+      Of the posts waiting: <b>{{ policy.would_publish }}</b> would publish, <b>{{ policy.would_hold }}</b> would hold.
+      {% if policy.agreement_rate is not none %}Agreed with you on {{ policy.agreement_rate }}% of your decisions
+      ({{ policy.too_permissive }} too permissive, {{ policy.too_strict }} too strict).{% else %}No decisions of yours to compare yet.{% endif %}
+      <a href="/policy">Details →</a><br><span class="muted">Records only: it never approves or publishes.</span>
     </div>
 
     <h2>Companies to review <span class="muted small">{{ task_total }} open</span></h2>

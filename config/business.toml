@@ -68,6 +68,23 @@ max_posts_per_run = 1
 # Approved posts whose slot passed by more than this are rescheduled instead of burst-published.
 max_overdue_hours = 24
 
+[publish_policy]
+# SHADOW MODE ONLY. The policy records what it WOULD do with each post ("would publish" or
+# "would hold" with reasons) so its judgement can be compared with yours. It never approves,
+# schedules or publishes anything; a person still approves every post. "shadow" is the only mode.
+mode = "shadow"
+# Services the policy may publish without a person (empty = all services).
+allowed_services = []
+# Designed (browser-rendered) images only; simple fallback cards always go to a person.
+require_designed_image = true
+max_posts_per_week = 3
+min_hours_between_posts = 20
+# Drafts older than this go back to a person even if they passed every check.
+max_draft_age_days = 14
+# Posts mentioning any of these always go to a person.
+hold_terms = ["guarantee", "pricing", "price", "discount", "free trial", "case study", "our client",
+              "customer story", "testimonial", "award", "certified"]
+
 [followup]
 max_touches = 3
 intervals_days = [0, 3, 7]

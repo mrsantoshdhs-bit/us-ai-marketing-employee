@@ -33,6 +33,11 @@
     <p class="small muted">Checked {{ item.qc.checked_at }} UTC · {{ item.quality.get('words') }} words
       {% if item.quality.get('image') %} · image: {{ item.quality.image.renderer }} {{ item.quality.image.style }}{% endif %}</p>
     {% else %}<p class="small muted">Not checked yet (posts created before automated checks). Saving the post runs them.</p>{% endif %}
+    <h3>Auto-publish policy <span class="pill warn">shadow</span></h3>
+    {% if decision %}<p class="small"><span class="pill {{ 'ok' if decision.decision == 'would_publish' else 'warn' }}">{{ decision.decision|replace('_', ' ') }}</span>
+      <span class="muted">checked {{ decision.decided_at|local }} · records only, never publishes</span></p>
+      {% if decision.reasons %}<ul class="reasons small">{% for r in decision.reasons %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}
+    {% else %}<p class="small muted">Not evaluated yet. <a href="/policy">Policy</a></p>{% endif %}
     {% if item.quality.get('llm_rejected') %}<p class="small muted">LLM drafts rejected by the content rules: {{ item.quality.get('llm_rejected')|join(' | ') }}</p>{% endif %}
   </div>
   <div class="card">

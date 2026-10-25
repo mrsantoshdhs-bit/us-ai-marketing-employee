@@ -18,6 +18,7 @@ from aime.db import kv_set
 from aime.doctor import run_checks
 from aime.models import MarketingPlan
 from aime.monitoring import alert_once, check_health
+from aime.policy import evaluate_shadow
 from aime.redact import redact
 from aime.sources.census import CensusMarketSource
 from aime.timeutil import utcnow
@@ -80,9 +81,21 @@ def job_research(ctx: AppContext, job: str = "research") -> JobOutcome:
     return out
 
 
+def _policy_shadow_step(ctx: AppContext, out: JobOutcome) -> None:
+    """Record what the auto-publishing policy would do (shadow mode only: it never changes a post)."""
+    try:
+        with ctx.db.session() as s:
+            summary = evaluate_shadow(s, ctx.settings)
+        out.steps.append({"agent": "publish_policy", "status": "success", "output": summary})
+    except Exception as exc:  # the shadow policy must never affect content or publishing
+        out.steps.append({"agent": "publish_policy", "status": "failed", "error": redact(str(exc))[:300]})
+        out.failed = True
+
+
 def job_content(ctx: AppContext, job: str = "content") -> JobOutcome:
     out = JobOutcome()
     out.add(LinkedInContentAgent(ctx).run({}, job=job))
+    _policy_shadow_step(ctx, out)
     return out
 
 
@@ -104,6 +117,7 @@ def job_followups(ctx: AppContext, job: str = "followups") -> JobOutcome:
 def job_publish(ctx: AppContext, job: str = "publish") -> JobOutcome:
     out = JobOutcome()
     out.add(AuthorizedPublishingAgent(ctx).run({}, job=job))
+    _policy_shadow_step(ctx, out)
     return out
 
 

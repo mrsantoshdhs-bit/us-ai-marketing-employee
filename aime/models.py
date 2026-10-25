@@ -310,6 +310,29 @@ class PublishAttempt(Base):
     error: Mapped[str | None] = mapped_column(Text)
 
 
+class PolicyDecision(Base):
+    """What the auto-publishing policy would have done with a post (shadow mode: it never acts).
+
+    A row is written when a post is first evaluated and again whenever the decision or the post's
+    content changes, so the history shows how the policy compared with the person's decision."""
+
+    __tablename__ = "policy_decisions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    content_id: Mapped[int] = mapped_column(ForeignKey("content_items.id"), index=True)
+    decided_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    mode: Mapped[str] = mapped_column(String(20), default="shadow")
+    policy_version: Mapped[int] = mapped_column(Integer)
+    decision: Mapped[str] = mapped_column(String(20))  # would_publish | would_hold
+    reasons: Mapped[list[Any]] = mapped_column(JSON, default=list)  # rules that held the post
+    rules: Mapped[list[Any]] = mapped_column(JSON, default=list)  # every rule with its result
+    blockers: Mapped[list[Any]] = mapped_column(JSON, default=list)  # environment: switch off, not connected
+    content_sha256: Mapped[str] = mapped_column(String(64))
+    post_status: Mapped[str] = mapped_column(String(20))  # the post's status when evaluated
+
+    content: Mapped[ContentItem] = relationship()
+
+
 class ContentMetric(Base):
     __tablename__ = "content_metrics"
 

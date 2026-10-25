@@ -113,6 +113,7 @@ python -m aime doctor                                # integrity, isolation, com
 python -m aime backup --label before-change
 python -m aime maintenance on --hours 2 | off | status
 python -m aime refresh-graphics                      # re-render unpublished post images
+python -m aime policy [evaluate]                     # shadow auto-publish decisions (never publishes)
 python -m aime llm-check --service ai_agents --industry real_estate
 python -m aime inbound inquiries.json
 python -m aime suppress someone@domain.com
