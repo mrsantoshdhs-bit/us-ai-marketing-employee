@@ -11,12 +11,16 @@ from aime.agents import (AnalyticsReportingAgent, AuthorizedPublishingAgent, CRM
                          LeadQualificationAgent, LinkedInContentAgent, MarketingManagerAgent, SalesWorkflowAgent,
                          USBusinessResearchAgent)
 from aime.agents.base import AgentResult
-from aime.backup import backup_sqlite_file, checkpoint, integrity_check, prune_backups
+from aime.backup import (backup_sqlite_file, checkpoint, integrity_check, prune_backups, verify_backup,
+                         write_offsite)
 from aime.context import AppContext
+from aime.db import kv_set
 from aime.doctor import run_checks
 from aime.models import MarketingPlan
 from aime.monitoring import alert_once, check_health
+from aime.redact import redact
 from aime.sources.census import CensusMarketSource
+from aime.timeutil import utcnow
 
 
 class JobOutcome:
@@ -123,20 +127,48 @@ def job_weekly_report(ctx: AppContext, job: str = "weekly_report") -> JobOutcome
 
 
 def job_db_maintenance(ctx: AppContext, job: str = "db_maintenance") -> JobOutcome:
-    """Daily online backup (14 kept), integrity check, and WAL checkpoint."""
+    """Daily online backup (14 kept) verified after writing, encrypted off-machine copy when configured,
+    integrity check, and WAL checkpoint."""
     out = JobOutcome()
     s = ctx.settings
     db_path = ctx.db.engine.url.database
     backup = backup_sqlite_file(Path(db_path), s.backups_dir, label="auto") if db_path else None
+    verified = verify_backup(backup) if backup else None
     pruned = prune_backups(s.backups_dir, label="auto", keep=14)
     check = integrity_check(ctx.db)
     checkpoint(ctx.db)
-    step = {"agent": "db_maintenance", "status": "success" if check["ok"] else "failed",
-            "output": {"backup": backup.name if backup else None, "pruned": pruned, **check}}
+    problems = []
     if not check["ok"]:
-        step["error"] = f"Integrity check failed: {check}"
+        problems.append(f"Integrity check failed: {check}")
+    if verified is not None and not verified["ok"]:
+        problems.append(f"Backup {backup.name} failed verification: {verified['integrity']}")
+    elif verified is not None:
+        with ctx.db.session() as session:
+            kv_set(session, "backup.last_verified", {"file": backup.name, "at": utcnow().isoformat(),
+                                                     "tables": verified["tables"], "rows": verified["rows"]})
+    step = {"agent": "db_maintenance", "status": "failed" if problems else "success",
+            "output": {"backup": backup.name if backup else None, "pruned": pruned, **check,
+                       "backup_verified": bool(verified and verified["ok"]),
+                       "backup_rows": verified["rows"] if verified else None}}
+    if problems:
+        step["error"] = "; ".join(problems)
         out.failed = True
     out.steps.append(step)
+
+    if db_path:  # encrypted off-machine copy (optional; a failure is reported but the local backup stands)
+        try:
+            offsite = write_offsite(s, Path(db_path))
+        except Exception as exc:  # keep the job alive; the monitor raises an alert on repeated failures
+            offsite = {"status": "error", "reason": redact(str(exc))}
+        if offsite["status"] == "ok":
+            with ctx.db.session() as session:
+                kv_set(session, "backup.last_offsite", {"file": offsite["file"], "at": utcnow().isoformat()})
+        off_step = {"agent": "offsite_backup", "status": "failed" if offsite["status"] == "error" else "success",
+                    "output": offsite}
+        if offsite["status"] == "error":
+            off_step["error"] = offsite["reason"]
+            out.failed = True
+        out.steps.append(off_step)
     return out
 
 

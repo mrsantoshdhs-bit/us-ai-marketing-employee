@@ -7,7 +7,7 @@ import re
 
 _PATTERNS = [
     (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"), r"\1[REDACTED]"),
-    (re.compile(r"(?i)((?:access_token|refresh_token|client_secret|password|api_key|apikey|token)\"?\s*[:=]\s*\"?)"
+    (re.compile(r"(?i)((?:access_token|refresh_token|client_secret|password|passphrase|api_key|apikey|token)\"?\s*[:=]\s*\"?)"
                 r"[^\"&\s,}]{4,}"), r"\1[REDACTED]"),
     (re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16})\b"),
      "[REDACTED]"),
