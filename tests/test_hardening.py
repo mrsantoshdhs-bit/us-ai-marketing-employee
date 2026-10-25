@@ -269,6 +269,25 @@ def test_requalified_lead_gets_a_new_review_task(ctx):
     assert SalesWorkflowAgent(ctx).run({}).output.tasks_created == 0  # no duplicates
 
 
+def test_website_check_triggers_rescore(ctx):
+    with ctx.db.session() as s:
+        co = Company(name="Fresh Co", normalized_name="fresh co", source="hn_hiring", state="CA",
+                     domain="fresh.example", website="https://fresh.example")
+        s.add(co)
+        s.flush()
+        s.add(Lead(company_id=co.id, source="research", status="nurture", last_scored_at=utcnow()))
+        co_id = co.id
+    assert LeadQualificationAgent(ctx).run({}).output.scored == 0  # nothing changed yet
+    with ctx.db.session() as s:
+        co = s.get(Company, co_id)
+        co.website_status, co.website_checked_at = "verified", utcnow() + timedelta(seconds=1)
+    out = LeadQualificationAgent(ctx).run({}).output
+    assert out.scored == 1
+    with ctx.db.session() as s:
+        lead = s.execute(select(Lead).where(Lead.company_id == co_id)).scalars().one()
+        assert any("website verified" in r for r in lead.score_breakdown)
+
+
 def test_downgraded_research_lead_returns_to_nurture(ctx):
     with ctx.db.session() as s:
         co = Company(name="Weak Co", normalized_name="weak co", source="hn_hiring", state=None, country="US")

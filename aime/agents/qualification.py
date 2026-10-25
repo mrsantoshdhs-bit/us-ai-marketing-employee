@@ -60,12 +60,15 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
         for lead in leads:
             stale_cutoff = now - timedelta(hours=inp.stale_hours)
             newest = latest_signal.get(lead.company_id)
+            company: Company = lead.company
+            checked = company.website_checked_at
             needs = (inp.rescore_all or bool(inp.lead_ids) or lead.last_scored_at is None
                      or lead.last_scored_at < stale_cutoff
-                     or (newest is not None and newest > lead.last_scored_at))
+                     or (newest is not None and newest > lead.last_scored_at)
+                     # website verified after the last score: apply that evidence now, not a day later
+                     or (checked is not None and checked > lead.last_scored_at))
             if not needs:
                 continue
-            company: Company = lead.company
             contact: Contact | None = lead.contact
             signals = session.execute(select(Signal).where(Signal.company_id == company.id)).scalars().all()
             inquiry = session.execute(select(InboundInquiry).where(InboundInquiry.lead_id == lead.id)
