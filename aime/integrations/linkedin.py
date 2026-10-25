@@ -37,6 +37,24 @@ IMAGES_URL = "https://api.linkedin.com/rest/images"
 _RESERVED = set("\\|{}@[]()<>#*_~")
 _POST_URN_RE = re.compile(r"urn:li:(?:share|ugcPost|activity):\d+")
 POST_REF_RE = re.compile(r"^(?:urn:li:(?:share|ugcPost|activity):\d+|https://www\.linkedin\.com/\S+)$")
+AUTHOR_URN_RE = re.compile(r"^urn:li:(?:person|organization):[A-Za-z0-9_-]{1,64}$")
+INVALID_AUTHOR_REASON = (
+    "LINKEDIN_AUTHOR_URN in .env is not a valid LinkedIn author URN, so it is ignored and publishing is "
+    "blocked. Leave it empty to post as your profile, or set urn:li:organization:<numeric id> for a page.")
+
+
+def configured_author_urn(settings: Settings) -> tuple[str | None, bool]:
+    """Return (author_urn, is_valid) for the LINKEDIN_AUTHOR_URN override.
+
+    An invalid value is never returned, so it can never be displayed, logged, or sent to LinkedIn
+    (a client secret pasted on the wrong line must not leak through the dashboard).
+    """
+    raw = (settings.linkedin_author_urn or "").strip()
+    if not raw:
+        return None, True
+    if AUTHOR_URN_RE.match(raw):
+        return raw, True
+    return None, False
 
 
 class LinkedInAPIError(Exception):
@@ -99,13 +117,18 @@ def get_auth_status(settings: Settings, session: Session) -> LinkedInAuthStatus:
         return LinkedInAuthStatus(False, False, False,
                                   "NOT CONFIGURED: LINKEDIN_CLIENT_ID / LINKEDIN_CLIENT_SECRET are not set")
     tok = get_token(session)
+    override, override_valid = configured_author_urn(settings)
+    if not override_valid:
+        return LinkedInAuthStatus(True, tok is not None, False, INVALID_AUTHOR_REASON,
+                                  expires_at=tok.expires_at if tok else None, scopes=tok.scope if tok else "",
+                                  member_name=tok.subject_name if tok else None)
     if tok is None:
         return LinkedInAuthStatus(True, False, False,
                                   "Not connected: open Integrations and click 'Connect LinkedIn' to authorize")
     if tok.expires_at and tok.expires_at <= utcnow():
         return LinkedInAuthStatus(True, False, False, "Access token expired: reconnect LinkedIn",
                                   expires_at=tok.expires_at, scopes=tok.scope)
-    author = settings.linkedin_author_urn.strip() or (f"urn:li:person:{tok.subject}" if tok.subject else None)
+    author = override or (f"urn:li:person:{tok.subject}" if tok.subject else None)
     is_org = bool(author and author.startswith("urn:li:organization:"))
     needed = "w_organization_social" if is_org else "w_member_social"
     scopes = set(tok.scope.replace(",", " ").split())

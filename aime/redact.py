@@ -12,6 +12,7 @@ _PATTERNS = [
     (re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16})\b"),
      "[REDACTED]"),
     (re.compile(r"\bAQ[A-Za-z0-9_-]{40,}\b"), "[REDACTED]"),  # LinkedIn access-token shape
+    (re.compile(r"\bWPL_AP\d\.[A-Za-z0-9._+/=-]{8,}"), "[REDACTED]"),  # LinkedIn client-secret shape
     (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), "[email]"),
 ]
 
