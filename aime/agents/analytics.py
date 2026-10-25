@@ -161,7 +161,11 @@ class AnalyticsReportingAgent(BaseAgent[ReportInput, ReportOutput]):
         period = timedelta(hours=24) if inp.kind == "daily" else timedelta(days=7)
         since = now - period
         prev_since = since - period
-        imported = import_metrics_dir(session, s.imports_dir / "linkedin_metrics") if inp.import_metrics else 0
+        imported = 0
+        if inp.import_metrics:
+            imported, batch = import_metrics_dir(session, s.imports_dir / "linkedin_metrics")
+            session.commit()  # metrics are saved before their files leave the import folder
+            batch.archive()
 
         def count(model, *conds):
             return session.execute(select(func.count(model.id)).where(*conds)).scalar_one()

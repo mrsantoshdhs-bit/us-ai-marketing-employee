@@ -7,15 +7,21 @@ name (required), website, state, city, industry, notes, source_url
 from __future__ import annotations
 
 import csv
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sqlalchemy.orm import Session
+
 from aime.dedupe import domain_from_url
+from aime.intake import IntakeBatch, file_sha256, mark, seen
 from aime.knowledge.geo import normalize_state
 from aime.knowledge.industries import INDUSTRIES
 from aime.matching import classify_industry
 from aime.sources.base import CompanyCandidate, ResearchFocus, Source
+
+# User-provided lists are imported in full (they are not limited by the research per-run cap),
+# but a single file is capped so one mistaken export can't flood the CRM.
+MAX_ROWS_PER_FILE = 5000
 
 
 def read_company_csv(path: Path) -> list[CompanyCandidate]:
@@ -62,11 +68,38 @@ class CSVImportSource(Source):
         return True, f"{len(files)} file(s) waiting in data/imports"
 
     def fetch(self, focus: ResearchFocus) -> list[CompanyCandidate]:
+        """Read waiting CSV files. Files are archived by `finish_intake` only after the research run commits."""
         out: list[CompanyCandidate] = []
-        processed = self.settings.imports_dir / "processed"
-        processed.mkdir(parents=True, exist_ok=True)
+        self.batch = IntakeBatch(folder=self.settings.imports_dir)
+        self.loaded: list[tuple[Path, str, int]] = []
         for path in sorted(self.settings.imports_dir.glob("*.csv")):
-            out.extend(read_company_csv(path))
-            stamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            shutil.move(str(path), processed / f"{stamp}_{path.name}")
+            sha = file_sha256(path)
+            with self.ctx.db.session() as s:
+                done = seen(s, "csv", sha)
+            if done:  # imported in an earlier run whose archive step failed: only archive it
+                self.batch.files.append(path)
+                continue
+            try:
+                rows = read_company_csv(path)
+            except (UnicodeDecodeError, csv.Error) as exc:
+                self.batch.reject(path, f"unreadable file ({type(exc).__name__})")
+                continue
+            if len(rows) > MAX_ROWS_PER_FILE:
+                self.batch.rejected.append(f"{path.name}: {len(rows)} rows; split it into files of at most "
+                                           f"{MAX_ROWS_PER_FILE} rows (file left in place)")
+                continue
+            self.batch.files.append(path)
+            self.loaded.append((path, sha, len(rows)))
+            out.extend(rows)
         return out
+
+    def finish_intake(self, session: Session) -> None:
+        """Record imported files in the same transaction as their companies (call before commit)."""
+        for path, sha, rows in getattr(self, "loaded", []):
+            if not seen(session, "csv", sha):
+                mark(session, "csv", sha, path.name, rows)
+
+    def archive_intake(self) -> int:
+        """Move imported files to processed/ (call after commit)."""
+        batch = getattr(self, "batch", None)
+        return batch.archive() if batch else 0

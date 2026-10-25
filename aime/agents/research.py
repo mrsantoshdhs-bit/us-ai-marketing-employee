@@ -10,6 +10,7 @@ from aime.agents.base import BaseAgent, TransientAgentError
 from aime.agents.contracts import SourceReport
 from aime.crm_ops import add_signal, ensure_lead, log_activity, upsert_company
 from aime.dedupe import find_duplicate
+from aime.models import Alert
 from aime.sources.base import ResearchFocus
 from aime.sources.registry import get_sources
 from aime.validation import validate_candidate
@@ -37,6 +38,8 @@ class ResearchOutput(BaseModel):
     limit_reached: bool = False
     new_company_ids: list[int] = Field(default_factory=list)
     sources: list[SourceReport] = Field(default_factory=list)
+    import_files_archived: int = 0
+    import_files_rejected: list[str] = Field(default_factory=list)
 
 
 class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
@@ -58,6 +61,7 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         out = ResearchOutput()
         candidates = []
         transport_failures, configured_count = 0, 0
+        file_sources = []  # sources whose files are archived only after this run commits
 
         for src in get_sources(self.ctx, inp.sources):
             ok, msg = src.configured()
@@ -77,6 +81,8 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                 continue
             out.sources.append(SourceReport(name=src.name, configured=True, ok=True, records=len(found), message=msg))
             candidates.extend(found)
+            if hasattr(src, "finish_intake"):
+                file_sources.append(src)
 
         if configured_count and transport_failures == configured_count:
             raise TransientAgentError("All configured sources failed with network errors")
@@ -85,6 +91,7 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         focus_states, focus_inds = set(inp.states), set(inp.industries)
         candidates.sort(key=lambda c: (c.state not in focus_states, c.industry not in focus_inds))
 
+        public_created = 0  # the per-run cap applies to public-source discovery, not to your own CSV lists
         for cand in candidates:
             out.candidates_seen += 1
             if cand.is_us is False:
@@ -100,7 +107,8 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                     out.invalid_reasons[p] = out.invalid_reasons.get(p, 0) + 1
                 continue
             out.fixes_applied += len(fixes)
-            if out.companies_created >= limit:
+            user_list = cand.source == "csv_import"
+            if public_created >= limit and not user_list:
                 out.limit_reached = True
                 # Still attach evidence to companies we already track.
                 existing = find_duplicate(session, cand.name, cand.domain, cand.state, cand.source_record_id)
@@ -111,6 +119,7 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             company, created = upsert_company(session, cand)
             if created:
                 out.companies_created += 1
+                public_created += int(not user_list)
                 out.new_company_ids.append(company.id)
                 log_activity(session, f"Discovered via {cand.source}", self.name, type_="research",
                              body=cand.source_url, company_id=company.id)
@@ -126,4 +135,14 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                 _, lead_created = ensure_lead(session, company, "research")
                 if lead_created:
                     out.leads_created += 1
+
+        # Imported files leave data/imports only after their companies are committed.
+        for src in file_sources:
+            src.finish_intake(session)
+            out.import_files_rejected.extend(src.batch.rejected)
+            for problem in src.batch.rejected:
+                session.add(Alert(level="warning", source=self.name, message=f"Import file not imported: {problem}"))
+        session.commit()
+        for src in file_sources:
+            out.import_files_archived += src.archive_intake()
         return out

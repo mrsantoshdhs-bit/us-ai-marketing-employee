@@ -19,7 +19,7 @@ from aime.inbound import InboundPayload, load_inbox_files, validate_inquiry
 from aime.knowledge.geo import normalize_state
 from aime.knowledge.industries import INDUSTRIES
 from aime.matching import classify_industry
-from aime.models import Company, FollowUp, InboundInquiry, Lead, Opportunity
+from aime.models import Alert, Company, FollowUp, InboundInquiry, Lead, Opportunity
 from aime.sources.base import CompanyCandidate
 from aime.timeutil import utcnow
 from aime.website_check import check_website
@@ -37,6 +37,7 @@ class CRMInput(BaseModel):
 
 class CRMOutput(BaseModel):
     inbound_files_loaded: int = 0
+    inbound_files_rejected: list[str] = Field(default_factory=list)
     inbound_processed: int = 0
     inbound_rejected: int = 0
     inbound_lead_ids: list[int] = Field(default_factory=list)
@@ -64,8 +65,13 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         out = CRMOutput()
         ops = inp.operations
         if "ingest_inbound" in ops:
-            out.inbound_files_loaded = load_inbox_files(session, self.settings.inbox_dir)
+            out.inbound_files_loaded, batch = load_inbox_files(session, self.settings.inbox_dir)
+            out.inbound_files_rejected = batch.rejected
+            for problem in batch.rejected:
+                session.add(Alert(level="warning", source=self.name, message=f"Inbox file moved to rejected/: {problem}"))
             self._process_inbound(session, out)
+            session.commit()  # inquiries are saved before their files leave the inbox
+            batch.archive()
         if "verify_websites" in ops and self.settings.network_enabled:
             self._verify_websites(session, out, inp.company_ids)
         if "dedupe" in ops:
