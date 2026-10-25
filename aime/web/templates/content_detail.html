@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% from "_macros.html" import status_pill, ext %}
+{% extends "base.html" %}{% from "_macros.html" import status_pill, ext, qc_pill %}
 {% block title %}{{ item.title }} · Content{% endblock %}
 {% block content %}
 <h1>{{ item.title }} {{ status_pill(item.status) }}</h1>
@@ -25,8 +25,15 @@
     <h2 style="margin-top:0">Preview</h2>
     {% if item.image_path %}<img class="preview" src="/assets/{{ item.image_path }}" alt="{{ item.image_alt }}">{% endif %}
     <div class="post" style="margin-top:10px">{{ item.full_text }}</div>
-    <p class="small muted">Quality checks: {{ 'passed' if item.quality.get('passed') else 'see notes' }} · {{ item.quality.get('words') }} words
-      {% if item.quality.get('llm_rejected') %}<br>LLM drafts rejected by the quality gate: {{ item.quality.get('llm_rejected')|join(' | ') }}{% endif %}</p>
+    <h3>Quality checks {{ qc_pill(item.qc_status) }}</h3>
+    {% if item.qc.checks %}<table class="small">
+      {% for ch in item.qc.checks %}<tr><td>{{ qc_pill({'pass': 'passed', 'fail': 'failed', 'uncertain': 'held'}[ch.status]) }}</td>
+        <td><b>{{ ch.name }}</b></td><td class="muted">{{ ch.detail }}</td></tr>{% endfor %}
+    </table>
+    <p class="small muted">Checked {{ item.qc.checked_at }} UTC · {{ item.quality.get('words') }} words
+      {% if item.quality.get('image') %} · image: {{ item.quality.image.renderer }} {{ item.quality.image.style }}{% endif %}</p>
+    {% else %}<p class="small muted">Not checked yet (posts created before automated checks). Saving the post runs them.</p>{% endif %}
+    {% if item.quality.get('llm_rejected') %}<p class="small muted">LLM drafts rejected by the content rules: {{ item.quality.get('llm_rejected')|join(' | ') }}</p>{% endif %}
   </div>
   <div class="card">
     <h2 style="margin-top:0">Edit and approve</h2>
@@ -41,7 +48,10 @@
       <div class="row-actions" style="margin-top:10px"><button class="secondary">Save changes</button></div>
     </form>
     <div class="row-actions" style="margin-top:10px">
-      {% if item.status in ['awaiting_approval', 'draft', 'failed'] %}<form class="inline" method="post" action="/content/{{ item.id }}/approve"><button>Approve for publishing</button></form>{% endif %}
+      {% if item.status in ['awaiting_approval', 'draft', 'failed'] %}<form class="inline" method="post" action="/content/{{ item.id }}/approve">
+        {% if item.qc_status in ['held', 'failed'] %}<label class="small"><input type="checkbox" name="qc_override" value="yes" required>
+          I reviewed the quality findings above</label>{% endif %}
+        <button>Approve for publishing</button></form>{% endif %}
       {% if item.status != 'rejected' %}<form class="inline" method="post" action="/content/{{ item.id }}/reject"><button class="danger">Reject</button></form>{% endif %}
     </div>
     <p class="small muted">Editing an approved post sends it back for approval.</p>

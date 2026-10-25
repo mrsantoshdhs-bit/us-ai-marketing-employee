@@ -11,6 +11,10 @@
 <span class="pill {{ cls.get(s, '') }}">{{ s }}</span>
 {%- endmacro %}
 
+{% macro qc_pill(s) -%}
+<span class="pill {{ {'passed': 'ok', 'held': 'warn', 'failed': 'bad'}.get(s, '') }}">{{ {'passed': 'checks passed', 'held': 'held for review', 'failed': 'checks failed'}.get(s, s) }}</span>
+{%- endmacro %}
+
 {% macro grade(g) -%}<span class="grade {{ g or '' }}">{{ g or '–' }}</span>{%- endmacro %}
 
 {% macro ext(url, label='source') -%}

@@ -281,6 +281,15 @@ class ContentItem(Timestamped, Base):
         tags = " ".join(self.hashtags or [])
         return f"{self.body}\n\n{tags}".strip()
 
+    @property
+    def qc(self) -> dict:
+        """Latest automated quality-check report (see aime.qc), stored in `quality`."""
+        return (self.quality or {}).get("qc") or {}
+
+    @property
+    def qc_status(self) -> str:
+        return self.qc.get("status", "not checked")
+
 
 class PublishAttempt(Base):
     """Audit trail of every call to the publishing API (one row per attempt)."""

@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% from "_macros.html" import status_pill, state_pill, ext %}
+{% extends "base.html" %}{% from "_macros.html" import status_pill, state_pill, ext, qc_pill %}
 {% block title %}Content · AI Marketing Employee{% endblock %}
 {% block content %}
 <h1>LinkedIn content calendar</h1>
@@ -11,15 +11,16 @@
   <button>Filter</button>
 </form>
 <div class="card table-wrap"><table>
-  <tr><th>Scheduled (ET)</th><th>Post</th><th>Service / industry</th><th>Status</th><th>Writer</th></tr>
+  <tr><th>Scheduled (ET)</th><th>Post</th><th>Service / industry</th><th>Quality checks</th><th>Status</th><th>Writer</th></tr>
   {% for c in rows %}
   <tr><td class="small">{{ c.scheduled_for|et }}</td>
       <td><a href="/content/{{ c.id }}">{{ c.title }}</a><div class="small muted">{{ c.body[:140] }}…</div>
         {% if c.publish_blocked_reason %}<div class="small"><span class="pill warn">{{ c.publish_blocked_reason }}</span></div>{% endif %}</td>
       <td class="small">{{ c.service|service }}<br>{{ c.industry|industry }}</td>
+      <td>{{ qc_pill(c.qc_status) }}</td>
       <td>{{ status_pill(c.status) }}{% if c.external_url %}<div>{{ ext(c.external_url, 'view on LinkedIn') }}</div>{% endif %}</td>
       <td class="small">{{ c.generator }}</td></tr>
-  {% else %}<tr><td colspan="5" class="muted">No posts yet. The content job fills the next two weeks of posting slots.</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="6" class="muted">No posts yet. The content job fills the next two weeks of posting slots.</td></tr>{% endfor %}
 </table></div>
 
 <h2>Researched topics (public discussion, last runs)</h2>

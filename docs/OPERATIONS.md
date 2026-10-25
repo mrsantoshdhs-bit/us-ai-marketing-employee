@@ -112,6 +112,26 @@ Alerts are always stored and shown on the dashboard; notifications are an extra 
   design fails, the next style is tried; if none passes or no browser is found, the simple card is used.
 - Re-render unpublished posts: `refresh-graphics` (`--renderer pillow` to go back to the simple card).
 
+## Automated quality checks
+
+Every new post (and every edit you save) is checked before it can be scheduled:
+
+| Check | Fails (draft replaced) | Held for you (kept, flagged) |
+|---|---|---|
+| Content rules | statistics, $ amounts, guarantees, client claims, superlatives, missing question, length | — |
+| Factual claims | — | any number, or a named company (needs a source you verify) |
+| Spelling / grammar | likely misspellings (offline dictionary + business vocabulary), repeated words, "a" before a vowel, unbalanced brackets | spell checker unavailable |
+| Clichés | filler such as "in today's fast-paced", "leverage", "game-changer" | — |
+| Brand | brand name written differently, hashtags not on the approved list, too many hashtags | — |
+| LinkedIn rules | over 3,000 characters, engagement bait, @-mentions, shortened links | any other link |
+| Duplicates | same title, ≥ 45% text overlap or a near-identical image in the last 120 days | — |
+| Image | wrong size, over 5 MB | missing image |
+| Image matches caption | image headline/points not taken from the post | — |
+
+The content agent tries up to three drafts per slot; if none passes, the slot stays empty and you get
+an alert. Held posts show "held for review" and can only be approved after ticking "I reviewed the
+quality findings" (logged). Every post still needs your approval before it is published.
+
 ## Keeping secrets out of GitHub
 
 `git config core.hooksPath .githooks` enables a pre-commit hook that runs `scripts/secret_scan.py`.
