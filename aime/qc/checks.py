@@ -77,7 +77,7 @@ def _speller():
     """Loading the English dictionary takes about a second, so it is loaded once per process."""
     if not _SPELLER:
         from spellchecker import SpellChecker
-        _SPELLER.append(SpellChecker(language="en"))
+        _SPELLER.append(SpellChecker(language="en", distance=1))  # one edit catches common typos, and is fast
     return _SPELLER[0]
 
 
