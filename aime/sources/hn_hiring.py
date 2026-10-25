@@ -11,6 +11,8 @@ import html
 import re
 from datetime import datetime
 
+import httpx
+
 from aime.dedupe import domain_from_url, is_job_board, normalize_name
 from aime.knowledge.geo import parse_location
 from aime.matching import classify_industry
@@ -118,24 +120,39 @@ class HNHiringSource(Source):
             return False, "Network disabled"
         return True, "Public API, no key required"
 
+    def latest_threads(self, count: int = 1) -> list[dict]:
+        try:
+            with self.ctx.http() as client:
+                resp = client.get(f"{API}/search_by_date", params={"tags": "story,author_whoishiring", "hitsPerPage": 12})
+                resp.raise_for_status()
+                hits = [h for h in resp.json().get("hits", [])
+                        if (h.get("title") or "").lower().startswith("ask hn: who is hiring")]
+            self.cache_put("threads", hits)
+        except httpx.HTTPError:
+            hits = self.cache_get("threads", max_age_hours=24 * 40)  # API down: use the last known list
+            if hits is None:
+                raise
+        return hits[:count]
+
     def latest_thread(self) -> dict | None:
-        with self.ctx.http() as client:
-            resp = client.get(f"{API}/search_by_date", params={"tags": "story,author_whoishiring", "hitsPerPage": 10})
-            resp.raise_for_status()
-            for hit in resp.json().get("hits", []):
-                if (hit.get("title") or "").lower().startswith("ask hn: who is hiring"):
-                    return hit
-        return None
+        threads = self.latest_threads(1)
+        return threads[0] if threads else None
 
     def thread_items(self, story_id: str) -> list[dict]:
         cache_hours = float(self.settings.section("research").get("cache_hours", 12))
         cached = self.cache_get(f"items_{story_id}", cache_hours)
         if cached is not None:
             return cached
-        with self.ctx.http(timeout=60) as client:
-            resp = client.get(f"{API}/items/{story_id}")
-            resp.raise_for_status()
-            children = resp.json().get("children", [])
+        try:
+            with self.ctx.http(timeout=60) as client:
+                resp = client.get(f"{API}/items/{story_id}")
+                resp.raise_for_status()
+                children = resp.json().get("children", [])
+        except httpx.HTTPError:
+            stale = self.cache_get(f"items_{story_id}", max_age_hours=24 * 40)
+            if stale is not None:
+                return stale
+            raise
         slim = [
             {"id": c.get("id"), "author": c.get("author"), "created_at": c.get("created_at"), "text": c.get("text")}
             for c in children
@@ -145,13 +162,11 @@ class HNHiringSource(Source):
         return slim
 
     def fetch(self, focus: ResearchFocus) -> list[CompanyCandidate]:
-        thread = self.latest_thread()
-        if not thread:
-            return []
         out = []
-        for item in self.thread_items(str(thread["objectID"])):
-            cand = parse_post(item)
-            if cand:
-                cand.extra["thread_title"] = thread.get("title")
-                out.append(cand)
+        for thread in self.latest_threads(int(self.settings.section("research").get("hn_threads", 2))):
+            for item in self.thread_items(str(thread["objectID"])):
+                cand = parse_post(item)
+                if cand:
+                    cand.extra["thread_title"] = thread.get("title")
+                    out.append(cand)
         return out

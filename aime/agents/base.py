@@ -17,6 +17,8 @@ from sqlalchemy.orm import Session
 from aime.context import AppContext
 from aime.logging_setup import append_jsonl
 from aime.models import AgentRun
+from aime.redact import redact
+from aime.runtime import current_job_run_id
 from aime.timeutil import utcnow
 
 
@@ -148,8 +150,8 @@ class BaseAgent(ABC, Generic[InT, OutT]):
         try:
             with self.ctx.db.session() as s:
                 row = AgentRun(
-                    run_id=run_id, agent=self.name, job=job, status="running", started_at=started,
-                    input_summary=summarize(inp),
+                    run_id=run_id, agent=self.name, job=job, job_run_id=current_job_run_id.get(),
+                    status="running", started_at=started, input_summary=summarize(inp),
                 )
                 s.add(row)
                 s.flush()
@@ -161,13 +163,15 @@ class BaseAgent(ABC, Generic[InT, OutT]):
     def _finish(self, run_id, job, started, t0, attempts, output, error, inp, record_id=None, record_new=False) -> AgentResult:
         duration_ms = int((time.perf_counter() - t0) * 1000)
         status = "success" if output is not None and error is None else "failed"
+        error = redact(error)
         finished = utcnow()
         out_summary = summarize(output) if output is not None else {}
         try:
             with self.ctx.db.session() as s:
                 row = s.get(AgentRun, record_id) if record_id else None
                 if row is None:
-                    row = AgentRun(run_id=run_id, agent=self.name, job=job, started_at=started, input_summary=summarize(inp))
+                    row = AgentRun(run_id=run_id, agent=self.name, job=job, job_run_id=current_job_run_id.get(),
+                                   started_at=started, input_summary=summarize(inp))
                     s.add(row)
                 row.status = status
                 row.attempts = attempts
@@ -182,6 +186,7 @@ class BaseAgent(ABC, Generic[InT, OutT]):
             {
                 "ts": finished.isoformat() + "Z", "agent": self.name, "run_id": run_id, "job": job,
                 "status": status, "attempts": attempts, "duration_ms": duration_ms, "error": error,
+                "job_run_id": current_job_run_id.get(),
             },
         )
         level = logging.INFO if status == "success" else logging.ERROR

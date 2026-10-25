@@ -42,6 +42,8 @@ class LeadFacts:
     explicit_services: list[str] = field(default_factory=list)
     stated_timeline: bool = False
     stated_budget: bool = False
+    website_status: str | None = None  # see aime.website_check; None = not checked yet
+    seeks_external_help: bool = False  # their own post asks for contractors / partners
     now: datetime | None = None
 
 
@@ -56,6 +58,26 @@ class ScoreResult:
     matched_services: list[str]
     reasons: list[str]
     disqualify_reason: str | None = None
+
+
+SERVICE_GROUPS = {
+    "custom_crm": "CRM & Sales", "sales_automation": "CRM & Sales", "leadgen_automation": "CRM & Sales",
+    "ai_agents": "AI & Agents", "agent_orchestration": "AI & Agents", "ai_consulting": "AI & Agents",
+    "bpa": "Automation", "saas_dev": "Product Engineering", "custom_software": "Product Engineering",
+}
+
+
+def categorize(source: str, grade: str, primary_service: str | None, disqualified: bool) -> str:
+    """Opportunity category: temperature tier plus service group, e.g. 'hot · CRM & Sales'."""
+    if disqualified:
+        tier = "disqualified"
+    elif grade in ("A", "B"):
+        tier = "hot" if source == "inbound" else "warm"
+    elif grade == "C":
+        tier = "nurture"
+    else:
+        tier = "cold"
+    return f"{tier} · {SERVICE_GROUPS.get(primary_service or '', 'General')}"
 
 
 def grade_for(total: int, thresholds: dict) -> str:
@@ -89,8 +111,17 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
         fit += 4
         reasons.append("+4 fit: US presence stated, state unknown")
     if f.has_website:
-        fit += 5
-        reasons.append("+5 fit: company website known")
+        if f.website_status in ("verified", "redirected"):
+            fit += 5
+            reasons.append("+5 fit: company website verified")
+        elif f.website_status in (None, "blocked", "robots_disallowed"):
+            fit += 3
+            reasons.append("+3 fit: company website listed (not verified)")
+        elif f.website_status == "mismatch":
+            fit += 1
+            reasons.append("+1 fit: website found but does not name the company")
+        else:
+            reasons.append(f"+0 fit: website {f.website_status}")
     if f.employee_range:
         fit += 5
         reasons.append(f"+5 fit: company size known ({f.employee_range})")
@@ -134,17 +165,23 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
     elif any(s.signal_type == "hiring" and s.matched_services for s in f.signals):
         intent = 6
         reasons.append("+6 intent: public hiring post mentions a related need (signal, not buying intent)")
+        if f.seeks_external_help:
+            intent += 3
+            reasons.append("+3 intent: their post asks for contractors, freelancers, or partners")
     else:
         reasons.append("+0 intent: no recorded buying signal")
 
     # ---- Data quality (0-10)
     data = 0
     if any(s.has_source_url for s in f.signals):
-        data += 4
-        reasons.append("+4 data: evidence links to its source")
-    if f.verified:
         data += 3
-        reasons.append("+3 data: company record verified from an authorized source")
+        reasons.append("+3 data: evidence links to its source")
+    if f.website_status in ("verified", "redirected"):
+        data += 2
+        reasons.append("+2 data: website confirmed live and naming the company")
+    if f.verified:
+        data += 2
+        reasons.append("+2 data: company record verified from an official registry")
     if f.contact_consent in {"inquiry", "opt_in"}:
         data += 3
         reasons.append("+3 data: contact provided by the person with consent")

@@ -23,7 +23,7 @@ def fingerprint(*parts: str | None) -> str:
 
 
 def upsert_company(session: Session, cand: CompanyCandidate) -> tuple[Company, bool]:
-    existing = find_duplicate(session, cand.name, cand.domain, cand.state)
+    existing = find_duplicate(session, cand.name, cand.domain, cand.state, cand.source_record_id)
     if existing:
         # Fill gaps only; never overwrite verified data with weaker data.
         for attr in ("website", "domain", "state", "city", "industry", "employee_range", "location_text"):

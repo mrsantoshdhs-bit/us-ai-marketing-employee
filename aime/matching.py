@@ -76,6 +76,18 @@ def detect_competitor(text: str | None) -> bool:
     return bool(text and _COMPETITOR_RE.search(text))
 
 
+_EXTERNAL_HELP_RE = re.compile(
+    r"\bcontract(?:or|ors)\b|\bcontract (?:role|position|engineer|developer)s?\b|\bcontract-to-hire\b"
+    r"|\bfreelanc\w*|\b(?:agency|consulting|development|implementation) partners?\b|\bfractional\b",
+    re.IGNORECASE,
+)
+
+
+def seeks_external_help(text: str | None) -> bool:
+    """The company itself says it hires contractors, freelancers, or partners (evidence, not a guess)."""
+    return bool(text and _EXTERNAL_HELP_RE.search(text))
+
+
 def describe_requirements(matches: list[ServiceMatch], limit: int = 3) -> list[str]:
     out = []
     for m in matches[:limit]:

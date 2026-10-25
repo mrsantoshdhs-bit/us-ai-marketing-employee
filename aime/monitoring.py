@@ -43,9 +43,10 @@ def agent_stats(session: Session, days: int = 7) -> list[dict]:
     return out
 
 
-def _alert(session: Session, level: str, source: str, message: str) -> bool:
+def alert_once(session: Session, level: str, source: str, message: str) -> bool:
+    """Create an alert unless the same one was raised in the last 24 hours."""
     since = utcnow() - timedelta(hours=24)
-    if session.execute(select(Alert.id).where(Alert.source == source, Alert.message == message,
+    if session.execute(select(Alert.id).where(Alert.source == source, Alert.message == message[:500],
                                               Alert.created_at >= since)).first():
         return False
     session.add(Alert(level=level, source=source, message=message[:500]))
@@ -67,17 +68,20 @@ def check_health(session: Session, settings: Settings) -> dict:
         if st.consecutive_failures >= 2:
             msg = f"Job '{spec.name}' failed {st.consecutive_failures} times in a row"
             issues.append(msg)
-            created += _alert(session, "error", "monitor", msg)
-        expected = timedelta(minutes=spec.every_minutes * 3) if spec.every_minutes else timedelta(hours=26)
+            created += alert_once(session, "error", "monitor", msg)
+        if spec.every_minutes:
+            expected = timedelta(minutes=spec.every_minutes * 3)
+        else:
+            expected = timedelta(days=8) if spec.weekdays else timedelta(hours=26)
         if st.last_success_at and now - st.last_success_at > expected:
             msg = f"Job '{spec.name}' has not succeeded since {st.last_success_at:%Y-%m-%d %H:%M} UTC"
             issues.append(msg)
-            created += _alert(session, "warning", "monitor", msg)
+            created += alert_once(session, "warning", "monitor", msg)
     for row in agent_stats(session, days=1):
         if row["runs"] >= 3 and row["success_rate"] < 80:
             msg = f"Agent '{row['agent']}' success rate {row['success_rate']}% over the last 24h"
             issues.append(msg)
-            created += _alert(session, "warning", "monitor", msg)
+            created += alert_once(session, "warning", "monitor", msg)
     return {"issues": issues, "alerts_created": created}
 
 

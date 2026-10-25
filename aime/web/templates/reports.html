@@ -1,13 +1,13 @@
 {% extends "base.html" %}
 {% block title %}Reports · AI Marketing Employee{% endblock %}
 {% block content %}
-<h1>Daily reports</h1>
+<h1>Reports</h1>
 <div class="card table-wrap"><table>
-  <tr><th>Date</th><th>Generated</th><th>Highlights</th><th>Blockers</th></tr>
+  <tr><th>Date</th><th>Type</th><th>Generated</th><th>Highlights</th><th>Blockers</th></tr>
   {% for r in rows %}{% set k = r.summary.get('kpis', {}) %}
-  <tr><td><a href="/reports/{{ r.id }}">{{ r.report_date }}</a></td><td class="small">{{ r.created_at|local }}</td>
-      <td class="small">{{ k.get('companies_new_24h', 0) }} companies · {{ k.get('leads_new_24h', 0) }} leads · {{ k.get('qualified_24h', 0) }} qualified · {{ k.get('content_created_24h', 0) }} posts drafted · {{ k.get('content_published_24h', 0) }} published</td>
+  <tr><td><a href="/reports/{{ r.id }}">{{ r.report_date }}</a></td><td>{{ r.kind }}</td><td class="small">{{ r.created_at|local }}</td>
+      <td class="small">{{ k.get('companies_new_period', 0) }} companies · {{ k.get('leads_new_period', 0) }} leads · {{ k.get('qualified_period', 0) }} qualified · {{ k.get('content_created_period', 0) }} posts drafted · {{ k.get('content_published_period', 0) }} published</td>
       <td class="n">{{ r.summary.get('blockers', [])|length }}</td></tr>
-  {% else %}<tr><td colspan="4" class="muted">No reports yet. The daily_report job writes one every evening.</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="5" class="muted">No reports yet. Daily reports are written every evening and weekly reports on Mondays.</td></tr>{% endfor %}
 </table></div>
 {% endblock %}

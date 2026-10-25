@@ -44,6 +44,8 @@ td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
 .grade.A { background: var(--ok-bg); color: var(--ok); } .grade.B { background: var(--info-bg); color: var(--accent); }
 .grade.C { background: var(--warn-bg); color: var(--warn); } .grade.D { background: var(--bad-bg); color: var(--bad); }
 .flash { background: var(--info-bg); border: 1px solid var(--border); padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; }
+.flash.demo { background: var(--warn-bg); color: var(--warn); font-weight: 600; }
+.flash.bad { background: var(--bad-bg); color: var(--bad); }
 form.inline { display: inline; }
 input, select, textarea { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
 textarea { width: 100%; min-height: 180px; }

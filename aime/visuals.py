@@ -49,7 +49,8 @@ def _wrap(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> list[st
     return lines
 
 
-def render_card(path: Path, title: str, service_id: str, industry_id: str, company: str) -> Path:
+def render_card(path: Path, title: str, service_id: str, industry_id: str, company: str,
+                tagline: str | None = None) -> Path:
     dark, accent = PALETTES.get(service_id, ((25, 25, 35), (90, 120, 200)))
     img = Image.new("RGB", (WIDTH, HEIGHT), dark)
     draw = ImageDraw.Draw(img)
@@ -58,24 +59,49 @@ def render_card(path: Path, title: str, service_id: str, industry_id: str, compa
         color = tuple(int(dark[i] * (1 - t * 0.35) + accent[i] * t * 0.35) for i in range(3))
         draw.line([(0, y), (WIDTH, y)], fill=color)
     draw.rectangle([0, 0, 18, HEIGHT], fill=accent)
+    dot = tuple(int(c * 0.55 + 255 * 0.12) for c in accent)
+    for gx in range(WIDTH - 360, WIDTH - 60, 28):  # subtle dot grid
+        for gy in range(330, HEIGHT - 150, 28):
+            draw.ellipse([gx, gy, gx + 3, gy + 3], fill=dot)
     draw.ellipse([WIDTH - 330, -140, WIDTH + 130, 320], outline=accent, width=6)
     draw.ellipse([WIDTH - 250, -60, WIDTH + 50, 240], outline=accent, width=2)
 
-    tag_font = _font(_FONT_CANDIDATES_BOLD, 26)
-    title_font = _font(_FONT_CANDIDATES_BOLD, 58)
-    foot_font = _font(_FONT_CANDIDATES, 26)
+    tag_font = _font(_FONT_CANDIDATES_BOLD, 24)
+    foot_font = _font(_FONT_CANDIDATES_BOLD, 24)
+    small_font = _font(_FONT_CANDIDATES, 20)
+    badge_font = _font(_FONT_CANDIDATES_BOLD, 26)
 
     tag = f"{SERVICES[service_id].name.upper()}  ·  {INDUSTRIES[industry_id].label.upper()}"
-    draw.text((80, 70), tag, font=tag_font, fill=accent)
+    draw.text((80, 64), tag, font=tag_font, fill=accent)
+    draw.line([(80, 104), (150, 104)], fill=accent, width=4)
 
-    lines = _wrap(draw, title, title_font, WIDTH - 420)[:4]
-    y = 140
-    for line in lines:
+    for size in (58, 52, 46):  # shrink long titles so they always fit
+        title_font = _font(_FONT_CANDIDATES_BOLD, size)
+        lines = _wrap(draw, title, title_font, WIDTH - 420)
+        if len(lines) <= 4:
+            break
+    y = 136
+    for line in lines[:4]:
         draw.text((80, y), line, font=title_font, fill=(255, 255, 255))
-        y += 74
+        y += int(size * 1.27)
 
-    draw.line([(80, HEIGHT - 110), (WIDTH - 80, HEIGHT - 110)], fill=accent, width=2)
-    draw.text((80, HEIGHT - 85), company, font=foot_font, fill=(230, 230, 240))
+    draw.line([(80, HEIGHT - 118), (WIDTH - 80, HEIGHT - 118)], fill=accent, width=2)
+    initials = monogram(company)
+    draw.rounded_rectangle([80, HEIGHT - 96, 80 + 64, HEIGHT - 32], radius=12, fill=accent)
+    tw = draw.textlength(initials, font=badge_font)
+    draw.text((80 + (64 - tw) / 2, HEIGHT - 82), initials, font=badge_font, fill=dark)
+    draw.text((162, HEIGHT - 90), company, font=foot_font, fill=(240, 240, 248))
+    if tagline:
+        draw.text((162, HEIGHT - 58), tagline[:90], font=small_font, fill=(190, 196, 214))
     path.parent.mkdir(parents=True, exist_ok=True)
     img.save(path, "PNG", optimize=True)
     return path
+
+
+_NON_INITIAL_WORDS = {"private", "limited", "pvt", "ltd", "llc", "inc", "co", "company", "corp", "the", "of", "and"}
+
+
+def monogram(company: str) -> str:
+    words = [w for w in company.replace(".", " ").split() if w.lower() not in _NON_INITIAL_WORDS]
+    letters = "".join(w[0] for w in words if w[0].isalnum()).upper()
+    return (letters or company[:2].upper())[:3]

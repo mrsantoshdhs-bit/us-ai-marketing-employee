@@ -5,15 +5,18 @@ cookies, connection requests, or messaging.
 
 Member posting needs the "Share on LinkedIn" product (scope w_member_social).
 Company-page posting needs Community Management API approval (w_organization_social).
+Reading posts back for reconciliation needs r_member_social / r_organization_social; without it,
+uncertain publish outcomes are resolved by a person in the dashboard.
 """
 
 from __future__ import annotations
 
+import re
 import secrets
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 from sqlalchemy import select
@@ -21,22 +24,34 @@ from sqlalchemy.orm import Session
 
 from aime.config import Settings
 from aime.models import OAuthToken
+from aime.redact import redact
+from aime.secure_store import protect, unprotect
 from aime.timeutil import utcnow
 
 AUTH_URL = "https://www.linkedin.com/oauth/v2/authorization"
-TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
+TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"  # noqa: S105 (endpoint URL, not a secret)
 USERINFO_URL = "https://api.linkedin.com/v2/userinfo"
 POSTS_URL = "https://api.linkedin.com/rest/posts"
 IMAGES_URL = "https://api.linkedin.com/rest/images"
 
 _RESERVED = set("\\|{}@[]()<>#*_~")
+_POST_URN_RE = re.compile(r"urn:li:(?:share|ugcPost|activity):\d+")
+POST_REF_RE = re.compile(r"^(?:urn:li:(?:share|ugcPost|activity):\d+|https://www\.linkedin\.com/\S+)$")
 
 
 class LinkedInAPIError(Exception):
     def __init__(self, status: int, body: str):
-        super().__init__(f"LinkedIn API {status}: {body[:300]}")
+        super().__init__(f"LinkedIn API {status}: {redact(body[:300])}")
         self.status = status
         self.body = body
+
+    @property
+    def duplicate_of(self) -> str | None:
+        """LinkedIn rejects identical re-posts (422) and names the existing post: proof it was published."""
+        if self.status == 422 and "duplicate" in self.body.lower():
+            m = _POST_URN_RE.search(self.body)
+            return m.group(0) if m else None
+        return None
 
 
 def escape_little_text(text: str) -> str:
@@ -54,6 +69,10 @@ def format_commentary(body: str, hashtags: list[str]) -> str:
     return f"{text}\n\n{' '.join(tags)}" if tags else text
 
 
+def normalize_commentary(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()[:400]
+
+
 @dataclass
 class LinkedInAuthStatus:
     configured: bool
@@ -64,10 +83,15 @@ class LinkedInAuthStatus:
     expires_at: object | None = None
     scopes: str = ""
     member_name: str | None = None
+    can_read_posts: bool = False
 
 
 def get_token(session: Session) -> OAuthToken | None:
     return session.execute(select(OAuthToken).where(OAuthToken.provider == "linkedin")).scalars().first()
+
+
+def access_token(tok: OAuthToken) -> str:
+    return unprotect(tok.access_token)
 
 
 def get_auth_status(settings: Settings, session: Session) -> LinkedInAuthStatus:
@@ -82,21 +106,20 @@ def get_auth_status(settings: Settings, session: Session) -> LinkedInAuthStatus:
         return LinkedInAuthStatus(True, False, False, "Access token expired: reconnect LinkedIn",
                                   expires_at=tok.expires_at, scopes=tok.scope)
     author = settings.linkedin_author_urn.strip() or (f"urn:li:person:{tok.subject}" if tok.subject else None)
-    needed = "w_organization_social" if author and author.startswith("urn:li:organization:") else "w_member_social"
+    is_org = bool(author and author.startswith("urn:li:organization:"))
+    needed = "w_organization_social" if is_org else "w_member_social"
     scopes = set(tok.scope.replace(",", " ").split())
+    can_read = ("r_organization_social" if is_org else "r_member_social") in scopes
+    common = dict(author_urn=author, expires_at=tok.expires_at, scopes=tok.scope, member_name=tok.subject_name,
+                  can_read_posts=can_read)
     if needed not in scopes:
-        return LinkedInAuthStatus(True, True, False, f"Token lacks the {needed} permission",
-                                  author_urn=author, expires_at=tok.expires_at, scopes=tok.scope,
-                                  member_name=tok.subject_name)
+        return LinkedInAuthStatus(True, True, False, f"Token lacks the {needed} permission", **common)
     if not author:
-        return LinkedInAuthStatus(True, True, False, "Author URN unknown (userinfo missing 'sub')",
-                                  expires_at=tok.expires_at, scopes=tok.scope)
+        return LinkedInAuthStatus(True, True, False, "Author URN unknown (userinfo missing 'sub')", **common)
     if not settings.publishing_enabled:
-        return LinkedInAuthStatus(True, True, False, "Authorized, but PUBLISHING_ENABLED=false (master switch off)",
-                                  author_urn=author, expires_at=tok.expires_at, scopes=tok.scope,
-                                  member_name=tok.subject_name)
-    return LinkedInAuthStatus(True, True, True, "Authorized", author_urn=author, expires_at=tok.expires_at,
-                              scopes=tok.scope, member_name=tok.subject_name)
+        return LinkedInAuthStatus(True, True, False,
+                                  "Authorized, but PUBLISHING_ENABLED=false (master switch off)", **common)
+    return LinkedInAuthStatus(True, True, True, "Authorized", **common)
 
 
 def new_state() -> str:
@@ -104,12 +127,13 @@ def new_state() -> str:
 
 
 class LinkedInClient:
-    def __init__(self, settings: Settings, transport: httpx.BaseTransport | None = None):
+    def __init__(self, settings: Settings, transport: httpx.BaseTransport | None = None, timeout: float = 30):
         self.settings = settings
         self.transport = transport
+        self.timeout = timeout
 
     def _http(self) -> httpx.Client:
-        return httpx.Client(timeout=30, transport=self.transport)
+        return httpx.Client(timeout=self.timeout, transport=self.transport)
 
     def _rest_headers(self, token: str) -> dict[str, str]:
         return {
@@ -152,7 +176,7 @@ class LinkedInClient:
 
     def store_token(self, session: Session, token_resp: dict, info: dict | None) -> OAuthToken:
         tok = get_token(session) or OAuthToken(provider="linkedin", access_token="")
-        tok.access_token = token_resp["access_token"]
+        tok.access_token = protect(token_resp["access_token"])  # encrypted at rest
         expires_in = int(token_resp.get("expires_in") or 0)
         tok.expires_at = utcnow() + timedelta(seconds=expires_in) if expires_in else None
         tok.scope = token_resp.get("scope") or self.settings.linkedin_scopes
@@ -201,6 +225,15 @@ class LinkedInClient:
         if not post_urn:
             raise LinkedInAPIError(resp.status_code, "201 without a post id header; not marking as published")
         return post_urn
+
+    def recent_posts(self, token: str, author_urn: str, count: int = 20) -> list[dict]:
+        """Posts by the author, newest first (needs r_member_social / r_organization_social)."""
+        url = f"{POSTS_URL}?q=author&author={quote(author_urn, safe='')}&count={count}&sortBy=CREATED"
+        with self._http() as client:
+            resp = client.get(url, headers=self._rest_headers(token))
+        if resp.status_code != 200:
+            raise LinkedInAPIError(resp.status_code, resp.text)
+        return resp.json().get("elements", [])
 
 
 def post_url(post_urn: str) -> str:

@@ -53,10 +53,13 @@ def cmd_status(args, ctx) -> int:
     for r in rows:
         print(f"  [{r['state']}] {r['name']}: {r['detail']}")
     print("Counts:", json.dumps(counts))
+    from aime import maintenance
+
+    window = maintenance.active(ctx.settings.data_dir)
+    print("Maintenance:", f"ACTIVE until {window['until']} ({window['reason']})" if window else "off")
     print("Jobs:")
     for spec, due, reason in due_jobs(ctx):
-        when = f"every {spec.every_minutes} min" if spec.every_minutes else f"daily at {spec.daily_at:%H:%M}"
-        print(f"  {spec.name:<16} {when:<18} {'DUE' if due else 'waiting'}: {reason}")
+        print(f"  {spec.name:<16} {spec.schedule_label:<22} {'DUE' if due else 'waiting'}: {reason}")
     task = windows.query()
     print("Windows task:", "installed" if task.get("installed") else "not installed",
           {k: task.get(k) for k in ("Status", "Last Run Time", "Last Result", "Next Run Time") if k in task})
@@ -76,8 +79,8 @@ def cmd_tick(args, ctx) -> int:
 
     result = tick(ctx, trigger=args.trigger)
     _print(result, args.quiet)
-    failed = [r for r in result.get("ran", []) if r["status"] == "failed"]
-    return 1 if failed else 0
+    # Job failures are retried with backoff and raised as alerts; exit non-zero only if the tick crashed.
+    return 0
 
 
 def cmd_serve(args, ctx) -> int:
@@ -97,6 +100,8 @@ def cmd_serve(args, ctx) -> int:
 def cmd_scheduler(args, ctx) -> int:
     from aime.scheduler import windows
 
+    if args.action == "verify":
+        return cmd_scheduler_verify(ctx)
     if args.action == "install":
         res = windows.install(ctx.settings, args.interval)
     elif args.action == "uninstall":
@@ -159,8 +164,12 @@ def cmd_seed_demo(args, ctx) -> int:
             return httpx.Response(200, json={"hits": []})
         return httpx.Response(404)
 
-    demo_dir = Path(args.data_dir)
-    settings = Settings.load(data_dir=demo_dir, database_url="", llm_provider=args.llm, retry_base_delay=0)
+    demo_dir = Path(args.data_dir).resolve()
+    if demo_dir == PRODUCTION_DATA_DIR.resolve():
+        print("Refusing to write sample data into the production data folder.")
+        return 2
+    settings = Settings.load(data_dir=demo_dir, database_url="", llm_provider=args.llm, retry_base_delay=0,
+                             polite_delay=0, data_role="demo")
     demo = create_context(settings, http_transport=httpx.MockTransport(handler))
     with demo.db.session() as s:
         for rec in SAMPLE_INBOUND:
@@ -170,6 +179,95 @@ def cmd_seed_demo(args, ctx) -> int:
         print(f"{job:<16} {r['status']}")
     print(f"Demo data written to {demo_dir}. View it with: python -m aime serve --data-dir \"{demo_dir}\" --port 8766")
     return 0
+
+
+def cmd_doctor(args, ctx) -> int:
+    from aime.doctor import run_checks
+
+    checks = run_checks(ctx)
+    for c in checks:
+        mark = "PASS" if c["ok"] else ("FAIL" if c["severity"] == "error" else "WARN")
+        print(f"[{mark}] {c['name']}: {c['detail']}")
+    return 1 if any(not c["ok"] and c["severity"] == "error" for c in checks) else 0
+
+
+def cmd_backup(args, ctx) -> int:
+    from aime.backup import backup_sqlite_file
+
+    path = backup_sqlite_file(Path(ctx.db.engine.url.database), ctx.settings.backups_dir, label=args.label)
+    print(f"Backup written: {path}")
+    return 0
+
+
+def cmd_maintenance(args, ctx) -> int:
+    from aime import maintenance
+
+    if args.action == "on":
+        print(maintenance.start(ctx.settings.data_dir, args.hours, args.reason))
+    elif args.action == "off":
+        print("Maintenance window ended" if maintenance.stop(ctx.settings.data_dir) else "No maintenance window was active")
+    else:
+        print(maintenance.active(ctx.settings.data_dir) or "Not in maintenance")
+    return 0
+
+
+def cmd_refresh_graphics(args, ctx) -> int:
+    """Re-render images for posts that are not published yet (e.g. after a brand change)."""
+    import uuid
+
+    from aime.models import ContentItem
+    from aime.visuals import render_card
+
+    count = 0
+    with ctx.db.session() as s:
+        for item in s.execute(select(ContentItem).where(
+                ContentItem.status.in_(("draft", "awaiting_approval", "approved", "failed")))).scalars():
+            path = render_card(ctx.settings.assets_dir / f"post_{uuid.uuid4().hex[:10]}.png", item.title,
+                               item.service, item.industry, ctx.settings.company_name,
+                               ctx.settings.business["company"].get("tagline") or None)
+            item.image_path, item.image_urn = path.name, None
+            count += 1
+    print(f"Re-rendered {count} image(s) with brand '{ctx.settings.company_name}'")
+    return 0
+
+
+def cmd_scheduler_verify(ctx) -> int:
+    """Verify the OS task exists, its last result is 0, and recent ticks reached the database."""
+    from datetime import datetime, timedelta
+
+    from aime.models import JobRun
+    from aime.monitoring import read_heartbeat
+    from aime.scheduler import windows
+    from aime.timeutil import utcnow
+
+    problems = []
+    task = windows.query()
+    if not task.get("installed"):
+        problems.append("Windows task is not installed")
+    else:
+        if task.get("Last Result") not in ("0", "267009"):  # 267009 = currently running
+            problems.append(f"Last Result is {task.get('Last Result')}")
+        if task.get("Scheduled Task State", "Enabled") != "Enabled":
+            problems.append("Task is disabled")
+    hb = read_heartbeat(ctx.settings)
+    tick = int(ctx.settings.schedule.get("tick_minutes", 15))
+    if not hb:
+        problems.append("No heartbeat")
+    else:
+        age = utcnow() - datetime.fromisoformat(hb["at"].rstrip("Z"))
+        if age > timedelta(minutes=tick * 2 + 5):
+            problems.append(f"Heartbeat is {int(age.total_seconds() // 60)} min old")
+    with ctx.db.session() as s:
+        recent = s.execute(select(JobRun).where(JobRun.trigger == "scheduler", JobRun.started_at >= utcnow() - timedelta(days=1))
+                           .order_by(JobRun.id.desc())).scalars().all()
+    failed = [r for r in recent if r.status not in ("success", "skipped")]
+    print(f"Task: {'installed' if task.get('installed') else 'missing'} | status={task.get('Status')} | "
+          f"last run={task.get('Last Run Time')} | last result={task.get('Last Result')} | next={task.get('Next Run Time')}")
+    print(f"Heartbeat: {hb}")
+    print(f"Scheduler-triggered job runs in 24h: {len(recent)} ({len(failed)} not successful)")
+    for p in problems:
+        print("PROBLEM:", p)
+    return 1 if problems else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -188,8 +286,16 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--port", type=int)
     sv.add_argument("--data-dir", help="Serve another data folder (e.g. the demo database)")
     sc = sub.add_parser("scheduler", help="Manage the Windows Task Scheduler task")
-    sc.add_argument("action", choices=["install", "uninstall", "status", "run"])
+    sc.add_argument("action", choices=["install", "uninstall", "status", "run", "verify"])
     sc.add_argument("--interval", type=int)
+    sub.add_parser("doctor", help="Integrity, isolation, compliance and scheduler self-checks")
+    bk = sub.add_parser("backup", help="Write an online backup of the database")
+    bk.add_argument("--label", default="manual")
+    mt = sub.add_parser("maintenance", help="Pause scheduled ticks for upgrades (always expires)")
+    mt.add_argument("action", choices=["on", "off", "status"])
+    mt.add_argument("--hours", type=float, default=2.0)
+    mt.add_argument("--reason", default="Manual maintenance")
+    sub.add_parser("refresh-graphics", help="Re-render images of unpublished posts (e.g. after a brand change)")
     lc = sub.add_parser("llm-check", help="Generate one sample post with the configured LLM")
     lc.add_argument("--service", default="ai_agents")
     lc.add_argument("--industry", default="real_estate")
@@ -207,8 +313,10 @@ def build_parser() -> argparse.ArgumentParser:
 COMMANDS = {
     "init": cmd_init, "status": cmd_status, "run": cmd_run, "tick": cmd_tick, "serve": cmd_serve,
     "scheduler": cmd_scheduler, "llm-check": cmd_llm_check, "inbound": cmd_inbound, "suppress": cmd_suppress,
-    "seed-demo": cmd_seed_demo,
+    "seed-demo": cmd_seed_demo, "doctor": cmd_doctor, "backup": cmd_backup, "maintenance": cmd_maintenance,
+    "refresh-graphics": cmd_refresh_graphics,
 }
+PRODUCTION_DATA_DIR = BASE_DIR / "data"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -216,7 +324,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "seed-demo":
         return cmd_seed_demo(args, None)
     data_dir = getattr(args, "data_dir", None)
-    ctx = create_context(Settings.load(data_dir=Path(data_dir).resolve(), database_url="") if data_dir else None)
+    settings = None
+    if data_dir:
+        resolved = Path(data_dir).resolve()
+        role = "production" if resolved == PRODUCTION_DATA_DIR.resolve() else "demo"
+        settings = Settings.load(data_dir=resolved, database_url="", data_role=role)
+    ctx = create_context(settings)
     set_context(ctx)
     return COMMANDS[args.cmd](args, ctx)
 

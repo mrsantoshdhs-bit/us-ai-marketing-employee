@@ -4,7 +4,20 @@
 <h1>{{ item.title }} {{ status_pill(item.status) }}</h1>
 <p class="small muted">{{ item.service|service }} · {{ item.industry|industry }} · scheduled {{ item.scheduled_for|et }} · written by {{ item.generator }}
   {% if item.approved_by %} · approved by {{ item.approved_by }} {{ item.approved_at|local }}{% endif %}</p>
-{% if item.publish_blocked_reason %}<div class="flash">Publishing blocked: {{ item.publish_blocked_reason }}</div>{% endif %}
+{% if item.status == 'uncertain' %}
+<div class="card">
+  <div class="flash bad">{{ item.publish_blocked_reason }}</div>
+  <p class="small">It will not be retried automatically. Open your LinkedIn activity and check whether this post is there.</p>
+  <form method="post" action="/content/{{ item.id }}/confirm_published" class="filters">
+    <input name="post_ref" placeholder="LinkedIn post URL or urn:li:share:…" size="50" required>
+    <button>It is on LinkedIn: confirm published</button>
+  </form>
+  <form method="post" action="/content/{{ item.id }}/requeue" class="filters">
+    <label class="small"><input type="checkbox" name="checked" value="yes" required> I checked LinkedIn and this post is not there</label>
+    <button class="secondary">Requeue</button>
+  </form>
+</div>
+{% elif item.publish_blocked_reason %}<div class="flash">Publishing blocked: {{ item.publish_blocked_reason }}</div>{% endif %}
 {% if item.last_publish_error %}<div class="flash">Last publish error: {{ item.last_publish_error }}</div>{% endif %}
 {% if item.external_url %}<div class="flash">Published: {{ ext(item.external_url, item.external_id) }} at {{ item.published_at|local }}</div>{% endif %}
 <div class="two">
@@ -17,7 +30,8 @@
   </div>
   <div class="card">
     <h2 style="margin-top:0">Edit and approve</h2>
-    {% if item.status != 'published' %}
+    {% if item.status in ['publishing', 'uncertain'] %}<p class="muted">Editing is locked while the publishing outcome is being resolved.</p>
+    {% elif item.status != 'published' %}
     <form method="post" action="/content/{{ item.id }}/save">
       <label class="small">Title</label><input name="title" value="{{ item.title }}" style="width:100%">
       <label class="small">Body</label><textarea name="body" style="min-height:300px">{{ item.body }}</textarea>

@@ -9,11 +9,13 @@ Rules:
 
 from __future__ import annotations
 
+import smtplib
+import socket
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent, RetryPolicy
@@ -22,11 +24,12 @@ from aime.crm_ops import is_suppressed, log_activity
 from aime.email_templates import draft_reply
 from aime.integrations.email_smtp import EmailNotReady, EmailSender
 from aime.knowledge.services import service_name
-from aime.models import FollowUp, InboundInquiry, Lead, Opportunity, Signal
+from aime.models import Alert, FollowUp, InboundInquiry, Lead, Opportunity, Signal
+from aime.redact import redact
 from aime.timeutil import as_aware_utc, utcnow
 
 CONSENTED = ("inquiry", "opt_in")
-OPEN_FOLLOWUP = ("pending", "awaiting_approval", "approved")
+OPEN_FOLLOWUP = ("pending", "awaiting_approval", "approved", "sending", "uncertain")
 
 
 class SalesInput(BaseModel):
@@ -64,6 +67,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         now = inp.now or utcnow()
         cfg = self.settings.section("followup")
         out = SalesOutput()
+        self._recover_stale_sends(session, now)
         stmt = select(Lead).where(Lead.status == "qualified")
         if inp.lead_ids:
             stmt = stmt.where(Lead.id.in_(inp.lead_ids))
@@ -136,7 +140,9 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 self._new_draft(session, lead, last.step + 1, now, out)
 
     def _ensure_task(self, session: Session, lead: Lead, out: SalesOutput) -> None:
-        exists = session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task")).first()
+        # A cancelled task (lead dropped below the threshold) does not block a fresh one if it re-qualifies.
+        exists = session.execute(select(FollowUp.id).where(
+            FollowUp.lead_id == lead.id, FollowUp.channel == "task", FollowUp.status.in_(("pending", "done")))).first()
         if exists:
             return
         evidence = session.execute(select(Signal).where(Signal.company_id == lead.company_id)
@@ -191,11 +197,32 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 f.blocked_reason = "Waiting for the business-hours send window"
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
                 continue
+            # Durable claim before talking to the mail server: at most one send per follow-up.
+            claimed = session.execute(update(FollowUp).where(FollowUp.id == f.id, FollowUp.status == "approved")
+                                      .values(status="sending", send_started_at=utcnow())).rowcount
+            session.commit()
+            if claimed != 1:
+                continue
+            session.refresh(f)
             try:
                 msg_id = self.sender.send(contact.email, f.subject, f.body or "")
-            except (EmailNotReady, OSError) as exc:
-                f.blocked_reason = f"Send failed: {exc}"[:300]
+            except (EmailNotReady, smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused,
+                    smtplib.SMTPConnectError, smtplib.SMTPAuthenticationError, ConnectionRefusedError,
+                    socket.gaierror) as exc:
+                # Rejected or never connected: nothing was delivered, safe to try again later.
+                f.status, f.send_started_at = "approved", None
+                f.blocked_reason = redact(f"Send failed (not delivered): {exc}")[:300]
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+                session.commit()
+                continue
+            except (OSError, smtplib.SMTPException) as exc:
+                # Timeout or disconnect mid-conversation: the message may have been delivered.
+                f.status = "uncertain"
+                f.blocked_reason = redact(f"Delivery unknown ({type(exc).__name__}); check your Sent folder, "
+                                          "then mark sent or requeue")[:300]
+                out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+                session.add(Alert(level="error", source=self.name, message=f"Follow-up #{f.id}: {f.blocked_reason}"))
+                session.commit()
                 continue
             f.status = "sent"
             f.sent_at = utcnow()
@@ -206,3 +233,13 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             log_activity(session, f"Email sent: {f.subject}", self.name, type_="email_sent", body=f.body,
                          company_id=f.company_id, lead_id=f.lead_id)
             session.commit()
+
+    def _recover_stale_sends(self, session: Session, now: datetime) -> None:
+        """A follow-up stuck in 'sending' means the process died mid-send: never resend automatically."""
+        cutoff = now - timedelta(minutes=10)
+        for f in session.execute(select(FollowUp).where(FollowUp.status == "sending")).scalars():
+            if f.send_started_at and f.send_started_at < cutoff:
+                f.status = "uncertain"
+                f.blocked_reason = "Sending was interrupted; check your Sent folder, then mark sent or requeue"
+                session.add(Alert(level="error", source=self.name, message=f"Follow-up #{f.id}: {f.blocked_reason}"))
+        session.commit()

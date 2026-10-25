@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from collections import defaultdict
 from datetime import timedelta
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent
@@ -21,13 +22,17 @@ from aime.matching import classify_industry
 from aime.models import Company, FollowUp, InboundInquiry, Lead, Opportunity
 from aime.sources.base import CompanyCandidate
 from aime.timeutil import utcnow
+from aime.website_check import check_website
 
-Operation = Literal["ingest_inbound", "dedupe", "hygiene", "stale", "lifecycle"]
+Operation = Literal["ingest_inbound", "verify_websites", "dedupe", "hygiene", "stale", "lifecycle"]
+RECHECK_AFTER = timedelta(days=30)
 US_NAMES = {"us", "usa", "u.s.", "u.s.a.", "united states", "united states of america", "america"}
 
 
 class CRMInput(BaseModel):
-    operations: list[Operation] = Field(default_factory=lambda: ["dedupe", "hygiene", "stale", "lifecycle"])
+    operations: list[Operation] = Field(
+        default_factory=lambda: ["verify_websites", "dedupe", "hygiene", "stale", "lifecycle"])
+    company_ids: list[int] | None = None  # limit website checks to these companies (e.g. new research results)
 
 
 class CRMOutput(BaseModel):
@@ -35,6 +40,8 @@ class CRMOutput(BaseModel):
     inbound_processed: int = 0
     inbound_rejected: int = 0
     inbound_lead_ids: list[int] = Field(default_factory=list)
+    websites_checked: int = 0
+    website_results: dict[str, int] = Field(default_factory=dict)
     merged: int = 0
     hygiene: dict[str, int] = Field(default_factory=dict)
     stale_to_nurture: int = 0
@@ -59,6 +66,8 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         if "ingest_inbound" in ops:
             out.inbound_files_loaded = load_inbox_files(session, self.settings.inbox_dir)
             self._process_inbound(session, out)
+        if "verify_websites" in ops and self.settings.network_enabled:
+            self._verify_websites(session, out, inp.company_ids)
         if "dedupe" in ops:
             out.merged = self._dedupe(session)
         if "hygiene" in ops:
@@ -76,6 +85,8 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         for inq in pending:
             p = InboundPayload.model_validate(inq.payload)
             reason = validate_inquiry(p)
+            if not reason and p.is_sample and self.settings.is_production:
+                reason = "Sample data is not accepted by the production database"
             if reason:
                 inq.status, inq.error, inq.processed_at = "rejected", reason, utcnow()
                 out.inbound_rejected += 1
@@ -113,6 +124,40 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             inq.status, inq.lead_id, inq.processed_at = "processed", lead.id, utcnow()
             out.inbound_processed += 1
             out.inbound_lead_ids.append(lead.id)
+
+    # ------------------------------------------------------------------ website verification
+    def _verify_websites(self, session: Session, out: CRMOutput, company_ids: list[int] | None) -> None:
+        limit = int(self.settings.section("research").get("website_checks_per_run", 25))
+        stale = utcnow() - RECHECK_AFTER
+        stmt = select(Company).where(Company.merged_into_id.is_(None), Company.domain.is_not(None),
+                                     or_(Company.website_checked_at.is_(None), Company.website_checked_at < stale))
+        if company_ids:
+            stmt = stmt.where(Company.id.in_(company_ids))
+        todo = session.execute(stmt.order_by(Company.website_checked_at.is_not(None), Company.id).limit(limit)).scalars().all()
+        session.commit()  # no write lock is held during network calls
+        for company in todo:
+            result = check_website(self.ctx, company.domain, company.name)
+            out.websites_checked += 1
+            out.website_results[result.status] = out.website_results.get(result.status, 0) + 1
+            company.website_status = result.status
+            company.website_checked_at = utcnow()
+            company.website_title = result.title
+            company.validation = {**(company.validation or {}), "website": result.note}
+            if result.status == "redirected" and result.final_domain and result.final_domain != company.domain:
+                owner = session.execute(select(Company).where(
+                    Company.merged_into_id.is_(None), Company.domain == result.final_domain,
+                    Company.id != company.id)).scalars().first()
+                if owner:
+                    merge_companies(session, owner, company, self.name)
+                    out.merged += 1
+                else:
+                    log_activity(session, f"Website {company.domain} redirects to {result.final_domain}; domain updated",
+                                 self.name, type_="data_quality", company_id=company.id)
+                    company.domain = result.final_domain
+                    company.website = f"https://{result.final_domain}"
+            session.commit()
+            if self.settings.polite_delay:
+                time.sleep(self.settings.polite_delay)
 
     # ------------------------------------------------------------------ maintenance
     def _dedupe(self, session: Session) -> int:
@@ -164,7 +209,8 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             last = lead.last_activity_at or lead.created_at
             if last and last < cutoff:
                 open_items = session.execute(select(FollowUp.id).where(
-                    FollowUp.lead_id == lead.id, FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).first()
+                    FollowUp.lead_id == lead.id,
+                    FollowUp.status.in_(("pending", "awaiting_approval", "approved", "sending", "uncertain")))).first()
                 if open_items:
                     continue
                 lead.status = "nurture"

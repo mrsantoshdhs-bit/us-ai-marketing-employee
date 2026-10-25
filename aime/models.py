@@ -47,6 +47,11 @@ class Company(Timestamped, Base):
     is_sample: Mapped[bool] = mapped_column(Boolean, default=False)
     lifecycle_stage: Mapped[str] = mapped_column(String(30), default="prospect")
     merged_into_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"))
+    # verified | redirected | mismatch | parked | unreachable | blocked | robots_disallowed | None (unchecked)
+    website_status: Mapped[str | None] = mapped_column(String(30))
+    website_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    website_title: Mapped[str | None] = mapped_column(String(300))
+    validation: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict)
 
     signals: Mapped[list["Signal"]] = relationship(back_populates="company", cascade="all")
     leads: Mapped[list["Lead"]] = relationship(back_populates="company")
@@ -121,6 +126,7 @@ class Lead(Timestamped, Base):
     score_breakdown: Mapped[list[Any]] = mapped_column(JSON, default=list)
     matched_services: Mapped[list[Any]] = mapped_column(JSON, default=list)
     primary_service: Mapped[str | None] = mapped_column(String(40))
+    category: Mapped[str | None] = mapped_column(String(60), index=True)  # e.g. "warm · AI & Agents"
     disqualify_reason: Mapped[str | None] = mapped_column(String(200))
     last_scored_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_activity_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -176,8 +182,9 @@ class FollowUp(Timestamped, Base):
     channel: Mapped[str] = mapped_column(String(20))  # email | task
     step: Mapped[int] = mapped_column(Integer, default=1)
     due_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
-    # pending | awaiting_approval | approved | sent | done | cancelled | rejected
+    # pending | awaiting_approval | approved | sending | sent | uncertain | done | cancelled | rejected
     status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    send_started_at: Mapped[datetime | None] = mapped_column(DateTime)
     subject: Mapped[str] = mapped_column(String(300))
     body: Mapped[str | None] = mapped_column(Text)
     blocked_reason: Mapped[str | None] = mapped_column(String(300))
@@ -249,8 +256,14 @@ class ContentItem(Timestamped, Base):
     image_path: Mapped[str | None] = mapped_column(String(400))
     image_alt: Mapped[str | None] = mapped_column(String(300))
     scheduled_for: Mapped[datetime | None] = mapped_column(DateTime, index=True)
-    # draft | awaiting_approval | approved | published | failed | rejected
+    # draft | awaiting_approval | approved | publishing | uncertain | published | failed | rejected
+    # "publishing" is a durable claim written before the API call; "uncertain" means the outcome
+    # is unknown (timeout/crash) and the post is never retried automatically.
     status: Mapped[str] = mapped_column(String(20), default="awaiting_approval", index=True)
+    publish_attempt_id: Mapped[str | None] = mapped_column(String(40))
+    publish_started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    image_urn: Mapped[str | None] = mapped_column(String(200))
+    reconciled_via: Mapped[str | None] = mapped_column(String(40))
     generator: Mapped[str] = mapped_column(String(60))
     quality: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     fingerprint: Mapped[str] = mapped_column(String(120), index=True)
@@ -267,6 +280,25 @@ class ContentItem(Timestamped, Base):
     def full_text(self) -> str:
         tags = " ".join(self.hashtags or [])
         return f"{self.body}\n\n{tags}".strip()
+
+
+class PublishAttempt(Base):
+    """Audit trail of every call to the publishing API (one row per attempt)."""
+
+    __tablename__ = "publish_attempts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    attempt_id: Mapped[str] = mapped_column(String(40), unique=True)
+    content_id: Mapped[int] = mapped_column(ForeignKey("content_items.id"), index=True)
+    author_urn: Mapped[str | None] = mapped_column(String(120))
+    commentary_sha256: Mapped[str | None] = mapped_column(String(64))
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # pending | success | failed | uncertain | not_sent | reconciled
+    outcome: Mapped[str] = mapped_column(String(20), default="pending")
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    external_id: Mapped[str | None] = mapped_column(String(200))
+    error: Mapped[str | None] = mapped_column(Text)
 
 
 class ContentMetric(Base):
@@ -336,7 +368,8 @@ class AgentRun(Base):
     run_id: Mapped[str] = mapped_column(String(32), index=True)
     agent: Mapped[str] = mapped_column(String(60), index=True)
     job: Mapped[str | None] = mapped_column(String(60))
-    status: Mapped[str] = mapped_column(String(20))  # running | success | failed
+    job_run_id: Mapped[int | None] = mapped_column(Integer, index=True)  # correlates with job_runs.id
+    status: Mapped[str] = mapped_column(String(20))  # running | success | failed | abandoned
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -352,7 +385,7 @@ class JobRun(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     job: Mapped[str] = mapped_column(String(60), index=True)
     trigger: Mapped[str] = mapped_column(String(20))  # scheduler | manual | dashboard | cli
-    status: Mapped[str] = mapped_column(String(20))  # running | success | partial | failed | skipped
+    status: Mapped[str] = mapped_column(String(20))  # running | success | partial | failed | skipped | abandoned
     started_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
@@ -387,7 +420,7 @@ class Report(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     report_date: Mapped[date] = mapped_column(Date, index=True)
-    kind: Mapped[str] = mapped_column(String(20), default="daily")
+    kind: Mapped[str] = mapped_column(String(20), default="daily")  # daily | weekly
     path_md: Mapped[str] = mapped_column(String(400))
     path_html: Mapped[str] = mapped_column(String(400))
     summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

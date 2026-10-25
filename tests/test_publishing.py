@@ -104,14 +104,28 @@ def test_publishes_only_on_confirmed_201(make_ctx):
     assert "\\(world\\)" in body["commentary"] and "{hashtag|\\#|AIAgents}" in body["commentary"]
 
 
-def test_failed_api_call_is_not_marked_published(make_ctx):
-    ctx = make_ctx(handler=linkedin_api([], post_status=500), **AUTH)
+def test_server_error_is_uncertain_and_never_reposted(make_ctx):
+    calls = []
+    ctx = make_ctx(handler=linkedin_api(calls, post_status=500), **AUTH)
     add_token(ctx)
     cid = add_post(ctx)
     for _ in range(3):
         AuthorizedPublishingAgent(ctx).run({})
     item = get(ctx, cid)
-    assert item.status == "failed" and item.external_id is None and item.publish_attempts == 3
+    assert item.status == "uncertain" and item.external_id is None
+    assert sum(1 for r in calls if r.url.path == "/rest/posts") == 1  # a 5xx might have created it: no retry
+
+
+def test_rejected_request_is_retried_then_failed(make_ctx):
+    calls = []
+    ctx = make_ctx(handler=linkedin_api(calls, post_status=400), **AUTH)
+    add_token(ctx)
+    cid = add_post(ctx)
+    for _ in range(4):
+        AuthorizedPublishingAgent(ctx).run({})
+    item = get(ctx, cid)
+    assert item.status == "failed" and item.publish_attempts == 3
+    assert sum(1 for r in calls if r.url.path == "/rest/posts") == 3
 
 
 def test_201_without_post_id_is_not_trusted(make_ctx):
@@ -119,7 +133,8 @@ def test_201_without_post_id_is_not_trusted(make_ctx):
     add_token(ctx)
     cid = add_post(ctx)
     AuthorizedPublishingAgent(ctx).run({})
-    assert get(ctx, cid).status == "approved"
+    item = get(ctx, cid)
+    assert item.status == "uncertain" and item.external_id is None  # probably created: needs confirmation
 
 
 def test_unauthorized_response_requests_reconnect(make_ctx):

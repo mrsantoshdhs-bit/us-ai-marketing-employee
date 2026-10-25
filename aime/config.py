@@ -33,6 +33,8 @@ DEFAULT_BUSINESS: dict[str, Any] = {
         "states_per_run": 5,
         "industries_per_run": 2,
         "cache_hours": 12,
+        "hn_threads": 2,
+        "website_checks_per_run": 25,
     },
     "qualification": {"grade_a": 75, "grade_b": 55, "grade_c": 35},
     "publishing": {"max_posts_per_run": 1, "max_overdue_hours": 24},
@@ -107,6 +109,7 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "allowed_hosts": ("ALLOWED_HOSTS", str),
     "database_url": ("DATABASE_URL", str),
     "data_dir": ("AIME_DATA_DIR", Path),
+    "data_role": ("AIME_DATA_ROLE", str),
 }
 
 
@@ -115,6 +118,9 @@ class Settings:
     base_dir: Path = BASE_DIR
     data_dir: Path = BASE_DIR / "data"
     database_url: str = ""
+    # production | demo | test. Stamped into each database; a mismatch refuses to start, so demo or
+    # test data can never be written into the production CRM (and vice versa).
+    data_role: str = "production"
     business: dict = field(default_factory=lambda: copy.deepcopy(DEFAULT_BUSINESS))
     schedule: dict = field(default_factory=lambda: copy.deepcopy(DEFAULT_SCHEDULE))
 
@@ -155,6 +161,7 @@ class Settings:
 
     # Operational knobs (tests shrink these)
     retry_base_delay: float = 2.0
+    polite_delay: float = 1.0  # pause between requests to third-party websites
     http_timeout: float = 20.0
     network_enabled: bool = True
 
@@ -192,6 +199,14 @@ class Settings:
     def locks_dir(self) -> Path:
         return self.data_dir / "locks"
 
+    @property
+    def backups_dir(self) -> Path:
+        return self.data_dir / "backups"
+
+    @property
+    def is_production(self) -> bool:
+        return self.data_role == "production"
+
     def ensure_dirs(self) -> None:
         for path in (
             self.data_dir,
@@ -205,6 +220,7 @@ class Settings:
             self.imports_dir / "linkedin_metrics",
             self.cache_dir,
             self.locks_dir,
+            self.backups_dir,
         ):
             path.mkdir(parents=True, exist_ok=True)
 

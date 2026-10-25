@@ -9,6 +9,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
+from aime.redact import RedactingFilter
+
 _CONFIGURED: set[str] = set()
 
 
@@ -22,12 +24,14 @@ def setup_logging(logs_dir: Path, level: int = logging.INFO) -> None:
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     file_handler = RotatingFileHandler(logs_dir / "aime.log", maxBytes=2_000_000, backupCount=5, encoding="utf-8")
     file_handler.setFormatter(fmt)
+    file_handler.addFilter(RedactingFilter())
     logger.addHandler(file_handler)
     # pythonw (Task Scheduler) has no console streams
     if sys.stderr is not None:
         stream = logging.StreamHandler(sys.stderr)
         stream.setFormatter(fmt)
         stream.setLevel(logging.WARNING)
+        stream.addFilter(RedactingFilter())
         logger.addHandler(stream)
     _CONFIGURED.add(key)
 

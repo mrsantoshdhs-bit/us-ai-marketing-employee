@@ -97,7 +97,8 @@ class LinkedInContentAgent(BaseAgent[ContentInput, ContentOutput]):
             if draft.quality.get("llm_rejected"):
                 out.llm_rejections += 1
             image = render_card(self.settings.assets_dir / f"post_{uuid.uuid4().hex[:10]}.png", draft.title,
-                                brief.service, brief.industry, company)
+                                brief.service, brief.industry, company,
+                                self.settings.business["company"].get("tagline") or None)
             item = ContentItem(
                 campaign_id=brief.campaign_id, platform="linkedin", service=brief.service, industry=brief.industry,
                 title=draft.title, body=draft.body,

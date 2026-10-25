@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 from sqlalchemy import select
 
@@ -10,9 +11,11 @@ from aime.agents import (AnalyticsReportingAgent, AuthorizedPublishingAgent, CRM
                          LeadQualificationAgent, LinkedInContentAgent, MarketingManagerAgent, SalesWorkflowAgent,
                          USBusinessResearchAgent)
 from aime.agents.base import AgentResult
+from aime.backup import backup_sqlite_file, checkpoint, integrity_check, prune_backups
 from aime.context import AppContext
+from aime.doctor import run_checks
 from aime.models import MarketingPlan
-from aime.monitoring import check_health
+from aime.monitoring import alert_once, check_health
 from aime.sources.census import CensusMarketSource
 
 
@@ -65,6 +68,9 @@ def job_research(ctx: AppContext, job: str = "research") -> JobOutcome:
         plan = _latest_plan(ctx) or {"industries": [], "states": []}
     research = out.add(USBusinessResearchAgent(ctx).run(plan, job=job))
     if research.ok:
+        if research.output.new_company_ids:
+            out.add(CRMManagementAgent(ctx).run(
+                {"operations": ["verify_websites", "dedupe"], "company_ids": research.output.new_company_ids}, job=job))
         out.add(LeadQualificationAgent(ctx).run({}, job=job))
         out.add(SalesWorkflowAgent(ctx).run({}, job=job))
     return out
@@ -106,7 +112,31 @@ def job_crm_maintenance(ctx: AppContext, job: str = "crm_maintenance") -> JobOut
 
 def job_daily_report(ctx: AppContext, job: str = "daily_report") -> JobOutcome:
     out = JobOutcome()
-    out.add(AnalyticsReportingAgent(ctx).run({}, job=job))
+    out.add(AnalyticsReportingAgent(ctx).run({"kind": "daily"}, job=job))
+    return out
+
+
+def job_weekly_report(ctx: AppContext, job: str = "weekly_report") -> JobOutcome:
+    out = JobOutcome()
+    out.add(AnalyticsReportingAgent(ctx).run({"kind": "weekly"}, job=job))
+    return out
+
+
+def job_db_maintenance(ctx: AppContext, job: str = "db_maintenance") -> JobOutcome:
+    """Daily online backup (14 kept), integrity check, and WAL checkpoint."""
+    out = JobOutcome()
+    s = ctx.settings
+    db_path = ctx.db.engine.url.database
+    backup = backup_sqlite_file(Path(db_path), s.backups_dir, label="auto") if db_path else None
+    pruned = prune_backups(s.backups_dir, label="auto", keep=14)
+    check = integrity_check(ctx.db)
+    checkpoint(ctx.db)
+    step = {"agent": "db_maintenance", "status": "success" if check["ok"] else "failed",
+            "output": {"backup": backup.name if backup else None, "pruned": pruned, **check}}
+    if not check["ok"]:
+        step["error"] = f"Integrity check failed: {check}"
+        out.failed = True
+    out.steps.append(step)
     return out
 
 
@@ -114,11 +144,19 @@ def job_monitor(ctx: AppContext, job: str = "monitor") -> JobOutcome:
     out = JobOutcome()
     with ctx.db.session() as s:
         summary = check_health(s, ctx.settings)
+    failing = [c for c in run_checks(ctx) if not c["ok"]]
+    with ctx.db.session() as s:
+        for c in failing:
+            created = alert_once(s, "error" if c["severity"] == "error" else "warning", "doctor",
+                                 f"{c['name']}: {c['detail']}")
+            summary["alerts_created"] += int(created)
+    summary["doctor_failures"] = [f"{c['name']}: {c['detail']}" for c in failing]
     out.steps.append({"agent": "monitor", "status": "success", "output": summary})
     return out
 
 
 JOBS: dict[str, Callable[..., JobOutcome]] = {
+    "db_maintenance": job_db_maintenance,
     "crm_maintenance": job_crm_maintenance,
     "plan": job_plan,
     "research": job_research,
@@ -127,5 +165,6 @@ JOBS: dict[str, Callable[..., JobOutcome]] = {
     "followups": job_followups,
     "publish": job_publish,
     "daily_report": job_daily_report,
+    "weekly_report": job_weekly_report,
     "monitor": job_monitor,
 }

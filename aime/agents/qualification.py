@@ -11,8 +11,9 @@ from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent
 from aime.crm_ops import is_suppressed, log_activity
-from aime.models import Company, Contact, InboundInquiry, Lead, Signal
-from aime.scoring import LeadFacts, SignalFact, score_lead
+from aime.matching import seeks_external_help
+from aime.models import Activity, Company, Contact, FollowUp, InboundInquiry, Lead, Signal
+from aime.scoring import LeadFacts, SignalFact, categorize, score_lead
 from aime.timeutil import utcnow
 
 
@@ -26,6 +27,7 @@ class QualifyOutput(BaseModel):
     scored: int = 0
     grade_counts: dict[str, int] = Field(default_factory=dict)
     newly_qualified: list[int] = Field(default_factory=list)
+    downgraded: list[int] = Field(default_factory=list)
     disqualified: list[int] = Field(default_factory=list)
 
 
@@ -86,6 +88,8 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                 explicit_services=list(payload.get("services_interested") or []),
                 stated_timeline=bool(payload.get("timeline")),
                 stated_budget=bool(payload.get("budget")),
+                website_status=company.website_status,
+                seeks_external_help=any(seeks_external_help(s.text) for s in signals if s.signal_type == "hiring"),
                 now=now,
             )
             result = score_lead(facts, thresholds)
@@ -109,8 +113,22 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                 out.newly_qualified.append(lead.id)
             elif result.grade in ("C", "D") and prev_status == "new":
                 lead.status = "nurture"
+            elif (result.grade in ("C", "D") and prev_status == "qualified" and lead.source == "research"
+                  and not self._human_touched(session, lead)):
+                # The system qualified it on weaker evidence than it now has; a person never acted on it.
+                lead.status = "nurture"
+                out.downgraded.append(lead.id)
+                for task in session.execute(select(FollowUp).where(
+                        FollowUp.lead_id == lead.id, FollowUp.channel == "task", FollowUp.status == "pending")).scalars():
+                    task.status, task.blocked_reason = "cancelled", "Score fell below the qualification threshold"
+            lead.category = categorize(lead.source, result.grade, lead.primary_service, lead.status == "disqualified")
             if lead.status != prev_status:
                 log_activity(session, f"Lead {prev_status} → {lead.status} (score {result.total}, grade {result.grade})",
                              self.name, type_="status_change", company_id=company.id, lead_id=lead.id)
         out.grade_counts = dict(grades)
         return out
+
+    @staticmethod
+    def _human_touched(session: Session, lead: Lead) -> bool:
+        return session.execute(select(Activity.id).where(
+            Activity.lead_id == lead.id, Activity.actor == "human")).first() is not None

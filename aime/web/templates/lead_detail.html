@@ -8,13 +8,14 @@
   <div class="card">
     <h2 style="margin-top:0">Company</h2>
     <table>
-      <tr><th>Website</th><td>{{ ext(c.website, c.website) if c.website else '—' }}</td></tr>
+      <tr><th>Website</th><td>{{ ext(c.website, c.website) if c.website else '—' }}{% if c.website_status %} <span class="pill {{ 'ok' if c.website_status in ['verified', 'redirected'] else 'warn' }}">{{ c.website_status }}</span><div class="small muted">{{ (c.validation or {}).get('website', '') }}{% if c.website_title %} · title: {{ c.website_title }}{% endif %}</div>{% endif %}</td></tr>
       <tr><th>Location</th><td>{{ c.city or '' }}{{ ', ' if c.city and c.state }}{{ c.state or '' }} {{ c.country }}{% if c.location_text %}<div class="small muted">{{ c.location_text }}</div>{% endif %}</td></tr>
       <tr><th>Industry</th><td>{{ c.industry|industry }}</td></tr>
       <tr><th>Source</th><td>{{ c.source }} · {{ ext(c.source_url) }} {% if c.verified %}<span class="pill ok">verified registry</span>{% else %}<span class="pill">self-reported</span>{% endif %}</td></tr>
       {% if c.phone %}<tr><th>Phone (filed)</th><td>{{ c.phone }}</td></tr>{% endif %}
       {% if c.is_competitor %}<tr><th>Flag</th><td><span class="pill bad">possible competitor</span></td></tr>{% endif %}
       <tr><th>Lifecycle</th><td>{{ c.lifecycle_stage }}</td></tr>
+      <tr><th>Category</th><td>{{ lead.category or '—' }}</td></tr>
     </table>
     {% if lead.contact %}
     <h2>Contact</h2>
