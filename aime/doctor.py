@@ -9,6 +9,7 @@ from sqlalchemy import func, or_, select
 from aime.backup import integrity_check
 from aime.context import AppContext
 from aime.db import kv_get
+from aime.integrations.linkedin import configured_author_urn
 from aime.models import (Company, Contact, ContentItem, FollowUp, InboundInquiry, Lead, OAuthToken,
                          PublishAttempt)
 from aime.monitoring import read_heartbeat
@@ -60,6 +61,10 @@ def run_checks(ctx: AppContext) -> list[dict]:
         add("No duplicate company domains", not dup_domains, f"{len(dup_domains)} duplicated domain(s)", "warning")
         plain_tokens = [t.provider for t in s.execute(select(OAuthToken)).scalars() if not is_protected(t.access_token)]
         add("OAuth tokens encrypted at rest", not plain_tokens, f"unencrypted: {', '.join(plain_tokens) or 'none'}")
+    _, author_ok = configured_author_urn(ctx.settings)
+    add("LinkedIn author setting valid", author_ok,
+        "LINKEDIN_AUTHOR_URN is empty or a valid URN" if author_ok
+        else "LINKEDIN_AUTHOR_URN is not a valid LinkedIn URN (value hidden); fix or clear it in .env")
 
     hb = read_heartbeat(ctx.settings)
     if hb is None:

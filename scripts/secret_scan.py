@@ -29,6 +29,7 @@ SECRET_PATTERNS = [
     (re.compile(r"BEGIN [A-Z ]*PRIVATE KEY"), "private key block"),
     (re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}"), "JWT"),
     (re.compile(r"\bAQ[A-Za-z0-9_-]{60,}"), "LinkedIn access token"),
+    (re.compile(r"\bWPL_AP\d\.[A-Za-z0-9._+/=-]{8,}"), "LinkedIn client secret"),
     (re.compile(r"^(?:LINKEDIN_CLIENT_SECRET|SMTP_PASSWORD|CENSUS_API_KEY|INBOUND_API_TOKEN)=\S+", re.M),
      "credential value in env-style file"),
     (re.compile(r"(?i)(?:password|client_secret|api_key)\s*=\s*[\"'][^\"'{}<>\s]{8,}[\"']"), "hard-coded credential"),
