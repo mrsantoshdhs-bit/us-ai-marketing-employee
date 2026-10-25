@@ -40,6 +40,8 @@ from aime.models import (Activity, AgentRun, Alert, Campaign, Company, ContentIt
 from aime.monitoring import agent_stats, read_heartbeat
 from aime.scheduler.runner import due_jobs, run_job
 from aime.timeutil import fmt_et, fmt_local, utcnow
+from aime.web.auth import (COOKIE, SESSION_SECONDS, AuthMiddleware, authenticate, current_username, make_cookie,
+                           safe_next, session_secret, user_count)
 
 WEB_DIR = Path(__file__).resolve().parent
 STAGES = ["new", "discovery", "proposal", "negotiation", "won", "lost"]
@@ -116,6 +118,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     app = FastAPI(title="AI Marketing Employee", docs_url="/api/docs", redoc_url=None)
     app.state.ctx = ctx
     limiter = InboundLimiter()
+    app.add_middleware(AuthMiddleware, get_ctx=lambda: app.state.ctx or get_context())
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(OriginCheckMiddleware)
     hosts = [h.strip() for h in (ctx or get_context()).settings.allowed_hosts.split(",") if h.strip()]
@@ -135,7 +138,36 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         data.setdefault("company_name", C().settings.company_name)
         data.setdefault("data_role", C().settings.data_role)
         data.setdefault("maintenance", maintenance.active(C().settings.data_dir))
+        data.setdefault("current_user", getattr(request.state, "user", None))
         return templates.TemplateResponse(request, name, data)
+
+    who = current_username  # the signed-in Sales Manager, recorded on approvals and activities
+
+    # ------------------------------------------------------------------ sign in
+    @app.get("/login", response_class=HTMLResponse)
+    def login_page(request: Request, next: str = "/", error: str = ""):
+        with C().db.session() as s:
+            has_users = user_count(s) > 0
+        return render(request, "login.html", next=safe_next(next), error=error, has_users=has_users,
+                      auth_on=C().settings.dashboard_auth)
+
+    @app.post("/login")
+    def login_submit(request: Request, username: str = Form(""), password: str = Form(""), next: str = Form("/")):
+        with C().db.session() as s:
+            user, message = authenticate(s, username, password)
+            cookie = make_cookie(session_secret(C().settings.data_dir), user) if user else None
+        if not cookie:
+            return RedirectResponse(f"/login?error={quote(message)}&next={quote(safe_next(next))}", status_code=303)
+        response = RedirectResponse(safe_next(next), status_code=303)
+        response.set_cookie(COOKIE, cookie, max_age=SESSION_SECONDS, httponly=True, samesite="lax",
+                            secure=request.url.scheme == "https", path="/")
+        return response
+
+    @app.post("/logout")
+    def logout():
+        response = RedirectResponse("/login?error=" + quote("Signed out"), status_code=303)
+        response.delete_cookie(COOKIE, path="/")
+        return response
 
     def back(url: str, msg: str) -> RedirectResponse:
         sep = "&" if "?" in url else "?"
@@ -204,7 +236,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return render(request, "lead_detail.html", lead=lead, signals=signals, acts=acts, fups=fups, opps=opps)
 
     @app.post("/leads/{lead_id}/status")
-    def lead_status(lead_id: int, status: str = Form(...), note: str = Form("")):
+    def lead_status(request: Request, lead_id: int, status: str = Form(...), note: str = Form("")):
         if status not in LEAD_STATUSES:
             raise HTTPException(400)
         with C().db.session() as s:
@@ -212,20 +244,20 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             old = lead.status
             lead.status = status
             lead.last_activity_at = utcnow()
-            log_activity(s, f"Status {old} → {status} (manual)", "human", type_="status_change", body=note or None,
+            log_activity(s, f"Status {old} → {status} (manual)", who(request), type_="status_change", body=note or None,
                          company_id=lead.company_id, lead_id=lead.id)
         return back(f"/leads/{lead_id}", "Status updated")
 
     @app.post("/leads/{lead_id}/note")
-    def lead_note(lead_id: int, note: str = Form(...)):
+    def lead_note(request: Request, lead_id: int, note: str = Form(...)):
         with C().db.session() as s:
             lead = s.get(Lead, lead_id) or _404()
-            log_activity(s, "Note", "human", type_="note", body=note, company_id=lead.company_id, lead_id=lead.id)
+            log_activity(s, "Note", who(request), type_="note", body=note, company_id=lead.company_id, lead_id=lead.id)
             lead.last_activity_at = utcnow()
         return back(f"/leads/{lead_id}", "Note added")
 
     @app.post("/leads/{lead_id}/replied")
-    def lead_replied(lead_id: int):
+    def lead_replied(request: Request, lead_id: int):
         with C().db.session() as s:
             lead = s.get(Lead, lead_id) or _404()
             for f in s.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
@@ -234,7 +266,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             for o in s.execute(select(Opportunity).where(Opportunity.lead_id == lead.id, Opportunity.stage == "new")).scalars():
                 o.stage, o.probability = "discovery", 20
             lead.last_activity_at = utcnow()
-            log_activity(s, "Contact replied (logged manually); automated follow-ups stopped", "human",
+            log_activity(s, "Contact replied (logged manually); automated follow-ups stopped", who(request),
                          type_="reply", company_id=lead.company_id, lead_id=lead.id)
         return back(f"/leads/{lead_id}", "Reply logged and sequence stopped")
 
@@ -264,7 +296,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return render(request, "pipeline.html", board=board)
 
     @app.post("/opportunities/{opp_id}")
-    def update_opp(opp_id: int, stage: str = Form(...), next_step: str = Form(""), est_value: str = Form("")):
+    def update_opp(request: Request, opp_id: int, stage: str = Form(...), next_step: str = Form(""),
+                   est_value: str = Form("")):
         if stage not in STAGES:
             raise HTTPException(400)
         with C().db.session() as s:
@@ -282,7 +315,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 if stage == "won" and o.lead_id:
                     lead = s.get(Lead, o.lead_id)
                     lead.status = "converted"
-            log_activity(s, f"Opportunity stage {old} → {stage}", "human", type_="opportunity",
+            log_activity(s, f"Opportunity stage {old} → {stage}", who(request), type_="opportunity",
                          company_id=o.company_id, lead_id=o.lead_id, opportunity_id=o.id)
         return back("/pipeline", "Opportunity updated")
 
@@ -300,7 +333,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return render(request, "followups.html", rows=rows, show=show, email_ready=ready, email_reason=reason)
 
     @app.post("/followups/{fid}/{action}")
-    def followup_action(fid: int, action: str, subject: str = Form(""), body: str = Form("")):
+    def followup_action(request: Request, fid: int, action: str, subject: str = Form(""), body: str = Form("")):
         with C().db.session() as s:
             f = s.get(FollowUp, fid) or _404()
             if action == "approve" and f.channel == "email" and f.status == "awaiting_approval":
@@ -308,7 +341,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     f.subject = subject.strip()
                 if body.strip():
                     f.body = body
-                f.status, f.approved_by, f.approved_at = "approved", "dashboard user", utcnow()
+                f.status, f.approved_by, f.approved_at = "approved", who(request), utcnow()
                 msg = "Approved. It will be sent by the follow-ups job if outbound email is enabled."
             elif action == "reject" and f.status in ("awaiting_approval", "approved", "pending"):
                 f.status = "rejected"
@@ -325,7 +358,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 msg = "Requeued"
             else:
                 raise HTTPException(400, "Action not allowed in the current state")
-            log_activity(s, f"Follow-up #{f.id} {action}", "human", type_="followup", company_id=f.company_id, lead_id=f.lead_id)
+            log_activity(s, f"Follow-up #{f.id} {action}", who(request), type_="followup", company_id=f.company_id,
+                         lead_id=f.lead_id)
         return back("/followups", msg)
 
     # ------------------------------------------------------------------ content
@@ -348,8 +382,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return render(request, "content_detail.html", item=item, auth=auth)
 
     @app.post("/content/{cid}/{action}")
-    def content_action(cid: int, action: str, title: str = Form(""), body: str = Form(""), hashtags: str = Form(""),
-                       scheduled_et: str = Form(""), post_ref: str = Form(""), checked: str = Form("")):
+    def content_action(request: Request, cid: int, action: str, title: str = Form(""), body: str = Form(""),
+                       hashtags: str = Form(""), scheduled_et: str = Form(""), post_ref: str = Form(""),
+                       checked: str = Form("")):
         with C().db.session() as s:
             item = s.get(ContentItem, cid) or _404()
             if item.status == "published":
@@ -388,9 +423,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     item.scheduled_for = local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
                 if item.status == "approved":
                     item.status = "awaiting_approval"  # edits need a fresh approval
+                    item.approved_by, item.approved_at = None, None
                 msg = "Saved"
             elif action == "approve" and item.status in ("awaiting_approval", "draft", "failed"):
-                item.status, item.approved_by, item.approved_at = "approved", "dashboard user", utcnow()
+                item.status, item.approved_by, item.approved_at = "approved", who(request), utcnow()
                 item.publish_attempts = 0
                 msg = "Approved for publishing at its scheduled time (requires LinkedIn authorization)"
             elif action == "reject":
@@ -398,6 +434,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 msg = "Rejected"
             else:
                 raise HTTPException(400, "Action not allowed in the current state")
+            log_activity(s, f"Post #{item.id} {action}", who(request), type_="content")
         return back(f"/content/{cid}", msg)
 
     @app.get("/assets/{name}")

@@ -45,8 +45,10 @@ The compose file publishes the dashboard on `127.0.0.1:8765` only.
 
 ## Exposing the dashboard or inbound API (only if you need to)
 
-The dashboard has no login. Never publish it directly. If you need remote access or a public
-`POST /api/inbound` endpoint for your website form:
+The dashboard requires a Sales Manager sign-in (`python -m aime user create --username <name>`; you type
+the password at the prompt). It has no TLS, multi-factor sign-in or account recovery by email, so still
+never publish it directly. If you need remote access or a public `POST /api/inbound` endpoint for your
+website form:
 
 1. Put an authenticating reverse proxy in front (for example Caddy with `basic_auth`, or Cloudflare Access).
 2. Expose only `/api/inbound` publicly if possible, and set `INBOUND_API_TOKEN` so callers must send

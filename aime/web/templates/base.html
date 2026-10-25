@@ -24,6 +24,9 @@
     <a href="/reports" class="{{ 'active' if p.startswith('/reports') }}">Reports</a>
     <a href="/integrations" class="{{ 'active' if p.startswith('/integrations') }}">Integrations</a>
   </nav>
+  {% if current_user %}<form class="inline user" method="post" action="/logout">
+    <span class="small muted">Signed in as {{ current_user.username }}</span> <button class="secondary">Sign out</button>
+  </form>{% endif %}
 </header>
 <main>
   {% if data_role != 'production' %}<div class="flash demo">{{ data_role|upper }} DATABASE: sample data only. Nothing here is a real prospect.</div>{% endif %}

@@ -110,6 +110,7 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "unsubscribe_email": ("UNSUBSCRIBE_EMAIL", str),
     "dashboard_host": ("DASHBOARD_HOST", str),
     "dashboard_port": ("DASHBOARD_PORT", int),
+    "dashboard_auth": ("DASHBOARD_AUTH", bool),
     "inbound_api_token": ("INBOUND_API_TOKEN", str),
     "allowed_hosts": ("ALLOWED_HOSTS", str),
     "backup_offsite_dir": ("BACKUP_OFFSITE_DIR", str),
@@ -169,6 +170,8 @@ class Settings:
 
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
+    # Sign-in required for every dashboard page and API (accounts: `aime user create`).
+    dashboard_auth: bool = True
     inbound_api_token: str = field(default="", repr=False)
     # Host headers the dashboard answers to (blocks DNS-rebinding). Add your domain when behind a proxy.
     allowed_hosts: str = "127.0.0.1,localhost,::1,[::1]"

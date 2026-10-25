@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Sign in · AI Marketing Employee{% endblock %}
+{% block content %}
+<div class="card" style="max-width:420px;margin:40px auto">
+  <h1 style="margin-top:0">Sign in</h1>
+  {% if error %}<div class="flash">{{ error }}</div>{% endif %}
+  {% if not auth_on %}
+    <p class="muted">Dashboard login is switched off (DASHBOARD_AUTH=false). <a href="/">Open the dashboard</a>.</p>
+  {% elif not has_users %}
+    <p>No Sales Manager account exists yet. For security, the first account is created on this computer,
+       not in the browser. In a terminal in the project folder run:</p>
+    <pre>python -m aime user create --username &lt;your-name&gt;</pre>
+    <p class="small muted">You will be asked to type a password (at least 12 characters). Then reload this page.</p>
+  {% else %}
+  <form method="post" action="/login">
+    <input type="hidden" name="next" value="{{ next }}">
+    <label class="small">Username</label><input name="username" autocomplete="username" required style="width:100%">
+    <label class="small">Password</label><input name="password" type="password" autocomplete="current-password" required style="width:100%">
+    <div class="row-actions" style="margin-top:12px"><button>Sign in</button></div>
+  </form>
+  <p class="small muted">Forgot your password? Reset it in a terminal: <code>python -m aime user set-password --username &lt;name&gt;</code></p>
+  {% endif %}
+</div>
+{% endblock %}
