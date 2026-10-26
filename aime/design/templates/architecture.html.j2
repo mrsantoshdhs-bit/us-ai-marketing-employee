@@ -1,0 +1,54 @@
+{% extends "_base.html.j2" %}
+{% block style %}
+body { color: var(--ink); background:
+  radial-gradient(1100px 650px at 88% -8%, rgba(59,130,246,.38), transparent 60%),
+  radial-gradient(900px 620px at -12% 112%, rgba(20,184,166,.26), transparent 60%),
+  linear-gradient(160deg, var(--navy), var(--navy-2)); }
+.grid { position: absolute; inset: 0; background-image:
+  linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px);
+  background-size: 54px 54px; -webkit-mask-image: linear-gradient(180deg, transparent, #000 22%, #000 78%, transparent); }
+.wrap { position: relative; height: 100%; padding: 84px 84px 56px; display: flex; flex-direction: column; }
+.eyebrow { display: flex; gap: 14px; align-items: center; font-size: 26px; letter-spacing: .12em; text-transform: uppercase; color: var(--teal-light); font-weight: 600; }
+.eyebrow i { width: 44px; height: 3px; background: var(--teal-light); border-radius: 2px; flex: 0 0 44px; }
+h1 { margin-top: 26px; font-size: 68px; line-height: 1.06; font-weight: 700; letter-spacing: -.02em; }
+h1 em { font-style: normal; background: linear-gradient(90deg, var(--blue-light), var(--teal-light)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.sub { margin-top: 20px; font-size: 30px; line-height: 1.38; color: var(--muted); max-width: 880px; }
+.diagram { position: relative; flex: 1; margin: 40px 0 34px; min-height: 470px; }
+svg.links { position: absolute; inset: 0; width: 100%; height: 100%; }
+.node { position: absolute; width: 41%; padding: 20px 24px; border-radius: 20px; background: #182a52;
+  border: 1px solid rgba(255,255,255,.17); box-shadow: 0 18px 40px rgba(0,0,0,.28); }
+.node b { display: block; font-size: 26px; color: var(--teal-light); letter-spacing: .06em; font-variant-numeric: lining-nums; }
+.node span { display: block; margin-top: 6px; font-size: 28px; line-height: 1.3; color: var(--ink); }
+.p1 { left: 0; top: 0; } .p2 { right: 0; top: 0; } .p3 { left: 0; bottom: 0; } .p4 { right: 0; bottom: 0; }
+.pc { left: 50%; bottom: 0; transform: translateX(-50%); }
+.hub { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 36%; text-align: center; padding: 22px 24px;
+  border-radius: 22px; background: linear-gradient(160deg, #23478f, #155a68); border: 1px solid rgba(143,186,255,.6); }
+.hub b { display: block; font-size: 30px; font-weight: 600; }
+.hub span { display: block; margin-top: 6px; font-size: 26px; color: var(--muted); }
+{% endblock %}
+{% block body %}
+{% set n = b.points|length %}
+{% set slots = ['p1', 'p2', 'pc'] if n == 3 else (['p1', 'p4'] if n == 2 else ['p1', 'p2', 'p3', 'p4']) %}
+{% set ends = {'p1': (20, 15), 'p2': (80, 15), 'p3': (20, 85), 'p4': (80, 85), 'pc': (50, 88)} %}
+<div class="grid"></div>
+<div class="wrap">
+  <div class="eyebrow" data-qc="eyebrow" data-fg="{{ c.teal_light }}" data-bg="{{ c.navy }}"><i></i>{{ b.eyebrow }}</div>
+  <h1 data-qc="headline" data-fg="{{ c.ink }}" data-bg="{{ c.navy }}">{{ b.lead }} <em>{{ b.highlight }}</em></h1>
+  {% if b.subheadline %}<p class="sub" data-qc="subheadline" data-fg="{{ c.muted }}" data-bg="{{ c.navy }}">{{ b.subheadline }}</p>{% endif %}
+  <div class="diagram">
+    <svg class="links" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+      {% for s in slots[:n] %}<line x1="50" y1="50" x2="{{ ends[s][0] }}" y2="{{ ends[s][1] }}" stroke="{{ c.teal_light }}" stroke-opacity=".75" stroke-width="2.5" stroke-dasharray="6 8" vector-effect="non-scaling-stroke"/>{% endfor %}
+    </svg>
+    {% for p in b.points %}
+    <div class="node {{ slots[loop.index0] }}" data-box="node{{ loop.index }}">
+      <b data-qc="node{{ loop.index }}-n" data-fg="{{ c.teal_light }}" data-bg="{{ c.navy_2 }}">{{ '%02d' % loop.index }}</b>
+      <span data-qc="node{{ loop.index }}" data-fg="{{ c.ink }}" data-bg="{{ c.navy_2 }}">{{ p }}</span>
+    </div>
+    {% endfor %}
+    <div class="hub" data-box="hub"><b data-qc="hub" data-fg="{{ c.ink }}" data-bg="{{ c.navy_2 }}">{{ b.eyebrow }}</b>
+      {% if b.tag %}<span data-qc="hub-tag" data-fg="{{ c.muted }}" data-bg="{{ c.navy_2 }}">{{ b.tag }}</span>{% endif %}</div>
+  </div>
+  {% set frule, fbg, ffg, fmuted, fmono_bg, fmono_fg = 'rgba(255,255,255,.18)', c.navy_2, c.ink, c.muted, c.teal_light, c.navy %}
+  {% include "_footer.html.j2" %}
+</div>
+{% endblock %}

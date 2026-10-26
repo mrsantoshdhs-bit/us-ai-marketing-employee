@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
 from collections import Counter
 from datetime import datetime, timedelta
 
@@ -21,7 +20,7 @@ from aime.knowledge.services import SERVICES
 from aime.models import ContentItem, MarketingPlan, ResearchTopic
 from aime.sources.trends import fetch_trending_topics
 from aime.timeutil import utcnow
-from aime.visuals import render_card
+from aime.visuals import render_post_image
 
 PENDING_STATUSES = ("draft", "awaiting_approval", "approved")
 
@@ -41,6 +40,7 @@ class ContentOutput(BaseModel):
     topic_research_error: str | None = None
     pending_total: int = 0
     skipped_reason: str | None = None
+    images_by_renderer: dict[str, int] = Field(default_factory=dict)
 
 
 class LinkedInContentAgent(BaseAgent[ContentInput, ContentOutput]):
@@ -96,16 +96,18 @@ class LinkedInContentAgent(BaseAgent[ContentInput, ContentOutput]):
                                int(cfg.get("min_words", 70)), int(cfg.get("max_words", 260)))
             if draft.quality.get("llm_rejected"):
                 out.llm_rejections += 1
-            image = render_card(self.settings.assets_dir / f"post_{uuid.uuid4().hex[:10]}.png", draft.title,
-                                brief.service, brief.industry, company,
-                                self.settings.business["company"].get("tagline") or None)
+            image = render_post_image(self.settings, draft.title, draft.body, brief.service, brief.industry,
+                                      seed=len(recent_fps) + i)
+            out.images_by_renderer[image["renderer"]] = out.images_by_renderer.get(image["renderer"], 0) + 1
+            quality = {**draft.quality, "image": {k: image[k] for k in ("renderer", "style", "metrics", "problems")}}
             item = ContentItem(
                 campaign_id=brief.campaign_id, platform="linkedin", service=brief.service, industry=brief.industry,
                 title=draft.title, body=draft.body,
                 hashtags=build_hashtags(brief.service, brief.industry, int(cfg.get("max_hashtags", 5))),
-                image_path=image.name,
-                image_alt=f"{draft.title} — {SERVICES[brief.service].name} for {INDUSTRIES[brief.industry].label}",
-                scheduled_for=slots[i], generator=draft.generator, quality=draft.quality, fingerprint=fp,
+                image_path=image["path"].name,
+                image_alt=(f"{company} graphic with the headline \"{draft.title}\". Topic: "
+                           f"{SERVICES[brief.service].name} for {INDUSTRIES[brief.industry].label}.")[:300],
+                scheduled_for=slots[i], generator=draft.generator, quality=quality, fingerprint=fp,
                 status="awaiting_approval",  # a person (or, later, an approved policy) must authorize every post
             )
             session.add(item)

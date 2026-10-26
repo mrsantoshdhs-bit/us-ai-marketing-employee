@@ -87,6 +87,8 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "ollama_autostart": ("OLLAMA_AUTOSTART", bool),
     "ollama_exe": ("OLLAMA_EXE", str),
     "alert_toast": ("ALERT_TOAST", bool),
+    "image_renderer": ("IMAGE_RENDERER", str),
+    "browser_path": ("BROWSER_PATH", str),
     "linkedin_client_id": ("LINKEDIN_CLIENT_ID", str),
     "linkedin_client_secret": ("LINKEDIN_CLIENT_SECRET", str),
     "linkedin_redirect_uri": ("LINKEDIN_REDIRECT_URI", str),
@@ -141,6 +143,10 @@ class Settings:
     ollama_exe: str = ""  # empty = %LOCALAPPDATA%\Programs\Ollama\ollama.exe
     # Windows desktop notification for each new warning/error alert (never in the test data role).
     alert_toast: bool = True
+    # Post images: "auto" = branded HTML/CSS templates via a local Edge/Chrome, falling back to the
+    # simple Pillow card; "html" = the same but noted as required; "pillow" = always the simple card.
+    image_renderer: str = "auto"
+    browser_path: str = ""  # empty = find Edge or Chrome automatically
 
     linkedin_client_id: str = ""
     # Secrets use repr=False so printing or logging a Settings object can never show them.

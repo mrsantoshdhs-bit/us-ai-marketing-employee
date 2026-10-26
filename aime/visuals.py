@@ -105,3 +105,32 @@ def monogram(company: str) -> str:
     words = [w for w in company.replace(".", " ").split() if w.lower() not in _NON_INITIAL_WORDS]
     letters = "".join(w[0] for w in words if w[0].isalnum()).upper()
     return (letters or company[:2].upper())[:3]
+
+
+def render_post_image(settings, title: str, body: str, service_id: str, industry_id: str, seed: int = 0) -> dict:
+    """Premium image from the HTML/CSS templates when a local Edge/Chrome is available (IMAGE_RENDERER=auto|html),
+    otherwise the Pillow card above. Returns {path, renderer, style, metrics, problems}.
+
+    Every word on the image comes from the post itself, and a design is kept only if its layout checks pass.
+    """
+    import uuid
+
+    from aime.design.brief import build_brief, style_order
+    from aime.design.render import render_designed_image
+
+    company = settings.company_name
+    tagline = settings.business["company"].get("tagline") or ""
+    out = settings.assets_dir / f"post_{uuid.uuid4().hex[:10]}.png"
+    problems: list[str] = []
+    if (settings.image_renderer or "auto").lower() in ("auto", "html"):
+        brief = build_brief(title, body, service_id, industry_id, company, tagline)
+        res = render_designed_image(brief, style_order(service_id, seed, brief), out, settings.base_dir,
+                                    monogram(company), settings.browser_path or None)
+        if res.ok:
+            return {"path": res.path, "renderer": "browser", "style": res.style, "problems": [],
+                    "metrics": {k: res.metrics.get(k) for k in ("min_font", "gap", "coverage", "contrast")},
+                    "headline": brief.headline, "points": brief.points}
+        problems = res.problems[:6]
+    path = render_card(out, title, service_id, industry_id, company, tagline or None)
+    return {"path": path, "renderer": "pillow", "style": "card", "metrics": {}, "problems": problems,
+            "headline": title, "points": []}

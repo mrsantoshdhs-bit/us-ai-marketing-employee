@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<style>
+:root {
+  --navy: {{ c.navy }}; --navy-2: {{ c.navy_2 }}; --blue: {{ c.blue }}; --blue-light: {{ c.blue_light }};
+  --teal: {{ c.teal }}; --teal-light: {{ c.teal_light }}; --ink: {{ c.ink }}; --muted: {{ c.muted }};
+  --paper: {{ c.paper }}; --paper-ink: {{ c.paper_ink }}; --paper-muted: {{ c.paper_muted }};
+  --accent-dark: {{ c.accent_dark }};
+  {# font stacks come from config/brand.toml (trusted config) and contain quotes, so they are not HTML-escaped #}
+  --sans: {{ f.sans|safe }}; --serif: {{ f.serif|safe }};
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: {{ w }}px; height: {{ h }}px; overflow: hidden; }
+body { font-family: var(--sans); -webkit-font-smoothing: antialiased; text-rendering: geometricPrecision; position: relative; }
+.foot { display: flex; align-items: center; gap: 22px; padding-top: 26px; }
+.mono { flex: 0 0 76px; height: 76px; border-radius: 18px; display: grid; place-items: center; font-weight: 700; font-size: 30px; }
+.brand b { display: block; font-size: 32px; font-weight: 600; }
+.brand span { display: block; font-size: 26px; margin-top: 2px; }
+#aime-qc { display: none; }
+{% block style %}{% endblock %}
+</style></head>
+<body>
+{% block body %}{% endblock %}
+<pre id="aime-qc"></pre>
+<script>
+(function () {
+  var W = {{ w }}, H = {{ h }};
+  var out = {overflow: [], overlaps: [], min_font: 1000, contrast: [], gap: 0, coverage: 0, brand: false, texts: 0};
+  function rgb(h) { h = h.replace('#', ''); return [0, 2, 4].map(function (i) { return parseInt(h.substr(i, 2), 16) / 255; }); }
+  function lin(v) { return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
+  function lum(h) { var c = rgb(h).map(lin); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; }
+  function ratio(a, b) { var x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); }
+  var spans = [];
+  document.querySelectorAll('[data-qc]').forEach(function (el) {
+    var r = el.getBoundingClientRect(), name = el.getAttribute('data-qc');
+    if (!el.textContent.trim()) { return; }
+    out.texts++;
+    var fs = parseFloat(getComputedStyle(el).fontSize);
+    out.min_font = Math.min(out.min_font, fs);
+    // Display fonts draw ascenders/descenders past tight line boxes; allow that, but not a clipped line.
+    if (el.scrollWidth > el.clientWidth + 2 || el.scrollHeight > el.clientHeight + Math.max(2, fs * 0.45) ||
+        r.right > W + 1 || r.bottom > H + 1 || r.left < -1 || r.top < -1) { out.overflow.push(name); }
+    if (el.dataset.fg && el.dataset.bg) { out.contrast.push([name, Math.round(ratio(el.dataset.fg, el.dataset.bg) * 100) / 100]); }
+    spans.push([Math.max(0, r.top), Math.min(H, r.bottom)]);
+  });
+  var boxes = Array.prototype.slice.call(document.querySelectorAll('[data-box]')).map(function (el) {
+    return [el.getAttribute('data-box'), el.getBoundingClientRect()];
+  });
+  for (var i = 0; i < boxes.length; i++) { for (var j = i + 1; j < boxes.length; j++) {
+    var a = boxes[i][1], b = boxes[j][1];
+    if (a.left < b.right - 2 && b.left < a.right - 2 && a.top < b.bottom - 2 && b.top < a.bottom - 2) {
+      out.overlaps.push(boxes[i][0] + '/' + boxes[j][0]);
+    }
+  } }
+  out.brand = !!document.querySelector('[data-qc=brand]');
+  spans.sort(function (a, b) { return a[0] - b[0]; });
+  var gap = 0, cur = 0, covered = 0;
+  spans.forEach(function (s) {
+    if (s[0] > cur) { gap = Math.max(gap, s[0] - cur); }
+    if (s[1] > cur) { covered += s[1] - Math.max(s[0], cur); cur = s[1]; }
+  });
+  gap = Math.max(gap, H - cur);
+  out.gap = Math.round(gap / H * 1000) / 1000;
+  out.coverage = Math.round(covered / H * 1000) / 1000;
+  document.getElementById('aime-qc').textContent = JSON.stringify(out);
+})();
+</script>
+</body></html>
