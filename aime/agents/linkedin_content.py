@@ -106,7 +106,7 @@ class LinkedInContentAgent(BaseAgent[ContentInput, ContentOutput]):
                 image_path=image.name,
                 image_alt=f"{draft.title} — {SERVICES[brief.service].name} for {INDUSTRIES[brief.industry].label}",
                 scheduled_for=slots[i], generator=draft.generator, quality=draft.quality, fingerprint=fp,
-                status="awaiting_approval" if self.settings.require_human_approval else "approved",
+                status="awaiting_approval",  # a person (or, later, an approved policy) must authorize every post
             )
             session.add(item)
             session.commit()  # each finished post is saved before the next LLM call

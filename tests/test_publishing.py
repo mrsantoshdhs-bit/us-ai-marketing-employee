@@ -17,7 +17,8 @@ def add_post(ctx, status="approved", due_delta=timedelta(minutes=-5), image=Fals
         item = ContentItem(service="ai_agents", industry="saas", title="T", body="Hello (world) #1 *bold*",
                            hashtags=["#AIAgents", "#SaaS"], scheduled_for=utcnow() + due_delta, status=status,
                            generator="template", fingerprint=f"fp{utcnow().timestamp()}",
-                           image_path="img.png" if image else None)
+                           image_path="img.png" if image else None,
+                           approved_at=utcnow() if status == "approved" else None)
         s.add(item)
         s.flush()
         return item.id

@@ -10,6 +10,7 @@ from aime.inbound import record_inquiry
 from aime.integrations.email_smtp import EmailSender
 from aime.models import Company, Contact, FollowUp, InboundInquiry, Lead, Opportunity
 from aime.sample_data import SAMPLE_INBOUND
+from aime.timeutil import utcnow
 
 ET = ZoneInfo("America/New_York")
 TUESDAY_11AM_ET = datetime(2026, 10, 27, 11, 0, tzinfo=ET).astimezone(timezone.utc).replace(tzinfo=None)
@@ -102,7 +103,7 @@ def test_research_leads_get_tasks_never_emails(ctx):
 def approve_all(ctx):
     with ctx.db.session() as s:
         for f in s.execute(select(FollowUp).where(FollowUp.status == "awaiting_approval")).scalars():
-            f.status = "approved"
+            f.status, f.approved_by, f.approved_at = "approved", "test", utcnow()
 
 
 def test_sending_requires_enabled_configured_email(ctx):

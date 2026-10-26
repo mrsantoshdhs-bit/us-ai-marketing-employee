@@ -17,7 +17,7 @@ All commands run from the project folder with the virtual environment's Python:
 | Command | What it checks |
 |---|---|
 | `status` | Integrations, maintenance window, every job's schedule and next run |
-| `doctor` | SQLite integrity, production/sample isolation, nothing published twice or without approval, consent on sent email, tokens encrypted, scheduler heartbeat |
+| `doctor` | SQLite integrity, production/sample isolation, nothing published twice or without approval, no email sent without approval, consent on sent email, tokens encrypted, scheduler heartbeat |
 | `scheduler verify` | Windows task installed and enabled, last result 0, fresh heartbeat, recent scheduler-triggered runs |
 
 The `monitor` job runs `doctor` every 30 minutes and raises alerts for failures.

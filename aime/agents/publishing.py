@@ -84,10 +84,19 @@ class AuthorizedPublishingAgent(BaseAgent[PublishInput, PublishOutput]):
 
         self._reconcile(session, now, auth, out)
 
+        # "approved" without an approval record (e.g. set directly in the database) is not an approval.
+        for item in session.execute(select(ContentItem).where(
+                ContentItem.status == "approved", ContentItem.approved_at.is_(None))).scalars():
+            item.status = "awaiting_approval"
+            item.publish_blocked_reason = "Needs a person's approval before it can be published"
+            out.blocked.append(BlockedItem(id=item.id, reason=item.publish_blocked_reason))
+        session.commit()
+
         out.awaiting_approval = session.execute(select(func.count(ContentItem.id)).where(
             ContentItem.status == "awaiting_approval")).scalar_one()
         due = session.execute(select(ContentItem).where(
-            ContentItem.status == "approved", ContentItem.scheduled_for.is_not(None),
+            ContentItem.status == "approved", ContentItem.approved_at.is_not(None),
+            ContentItem.scheduled_for.is_not(None),
             ContentItem.scheduled_for <= now).order_by(ContentItem.scheduled_for)).scalars().all()
         out.due = len(due)
 
@@ -127,7 +136,7 @@ class AuthorizedPublishingAgent(BaseAgent[PublishInput, PublishOutput]):
         attempt_id = uuid.uuid4().hex
         started = utcnow()
         res = session.execute(update(ContentItem).where(
-            ContentItem.id == item.id, ContentItem.status == "approved").values(
+            ContentItem.id == item.id, ContentItem.status == "approved", ContentItem.approved_at.is_not(None)).values(
             status="publishing", publish_attempt_id=attempt_id, publish_started_at=started,
             publish_attempts=ContentItem.publish_attempts + 1))
         if res.rowcount != 1:
