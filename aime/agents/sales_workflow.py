@@ -28,6 +28,7 @@ from aime.integrations.email_smtp import EmailNotReady, EmailSender
 from aime.knowledge.services import service_name
 from aime.models import Alert, FollowUp, InboundEmail, InboundInquiry, Lead, Opportunity, Signal
 from aime.outreach import draft_outreach, eligible, gather_evidence, set_status
+from aime.pipeline import pipeline_checks
 from aime.outreach import policy as outreach_policy
 from aime.qc.email_checks import run_email_checks
 from aime.reply_intel import QUESTION_PLACEHOLDER
@@ -50,6 +51,7 @@ class SalesOutput(BaseModel):
     outreach_drafts: int = 0
     emails_sent: int = 0
     cancelled: int = 0
+    pipeline: dict[str, int] = Field(default_factory=dict)
     blocked: list[BlockedItem] = Field(default_factory=list)
 
 
@@ -95,6 +97,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             self._ensure_task(session, lead, out)
         self._progress_sequences(session, now, cfg, out)
         self._send_approved(session, now, cfg, out)
+        out.pipeline = pipeline_checks(session, self.settings, now, self.name)
         return out
 
     # ------------------------------------------------------------------

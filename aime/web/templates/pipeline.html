@@ -2,7 +2,9 @@
 {% block title %}Pipeline · AI Marketing Employee{% endblock %}
 {% block content %}
 <h1>Pipeline</h1>
-<p class="muted small">Opportunities open automatically only for qualified leads who contacted you. Values are entered by people, never estimated by agents.</p>
+<p class="muted small">Opportunities open automatically for qualified leads who contacted you, and for prospects who reply
+  with interest or book a meeting. Values are entered by people, never estimated by agents.</p>
+<div class="card small">Outreach: {% for k, n in outreach %}<span class="pill">{{ k|replace('_', ' ') }}: {{ n }}</span> {% endfor %}</div>
 <div class="board">
   {% for stage in STAGES %}
   <div class="col"><strong>{{ stage|capitalize }}</strong> <span class="muted">({{ board[stage]|length }})</span>

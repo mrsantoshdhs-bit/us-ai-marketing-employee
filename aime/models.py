@@ -174,7 +174,7 @@ class Lead(Timestamped, Base):
     last_scored_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_activity_at: Mapped[datetime | None] = mapped_column(DateTime)
     # Outbound pipeline (aime.outreach): drafted | approved | contacted | replied | interested | meeting |
-    # not_interested | unsubscribed | bounced | stopped | None (not in outreach)
+    # not_interested | no_response | unsubscribed | bounced | stopped | None (not in outreach)
     outreach_status: Mapped[str | None] = mapped_column(String(20), index=True)
     outreach_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
     owner: Mapped[str | None] = mapped_column(String(80))  # the Sales Manager who approved its first outreach
@@ -250,6 +250,31 @@ class FollowUp(Timestamped, Base):
 
     lead: Mapped[Lead] = relationship()
     contact: Mapped[Contact | None] = relationship()
+
+
+class Meeting(Timestamped, Base):
+    """A booked meeting: from a Calendly notification in the sales mailbox (aime.meetings) or logged by hand."""
+
+    __tablename__ = "meetings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lead_id: Mapped[int | None] = mapped_column(ForeignKey("leads.id"), index=True)
+    company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"))
+    contact_id: Mapped[int | None] = mapped_column(ForeignKey("contacts.id"))
+    opportunity_id: Mapped[int | None] = mapped_column(ForeignKey("opportunities.id"))
+    invitee_email: Mapped[str] = mapped_column(String(200), index=True)
+    invitee_name: Mapped[str | None] = mapped_column(String(200))
+    title: Mapped[str] = mapped_column(String(200), default="Meeting")
+    starts_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    ends_at: Mapped[datetime] = mapped_column(DateTime)
+    timezone: Mapped[str | None] = mapped_column(String(60))
+    source: Mapped[str] = mapped_column(String(20))  # calendly_email | manual
+    status: Mapped[str] = mapped_column(String(20), default="scheduled", index=True)  # scheduled | cancelled | completed | no_show
+    notes: Mapped[str | None] = mapped_column(Text)
+    inbound_email_id: Mapped[int | None] = mapped_column(Integer)
+    is_simulated: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    lead: Mapped["Lead | None"] = relationship()
 
 
 class InboundEmail(Base):

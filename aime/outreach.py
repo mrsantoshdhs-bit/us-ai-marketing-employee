@@ -29,7 +29,8 @@ TOPICS = {
     "saas_dev": "your product roadmap", "custom_software": "internal tools", "ai_consulting": "AI adoption",
 }
 OPEN = ("pending", "awaiting_approval", "approved", "sending", "uncertain")
-STOP_STATUSES = ("replied", "interested", "meeting", "not_interested", "unsubscribed", "bounced", "stopped")
+STOP_STATUSES = ("replied", "interested", "meeting", "not_interested", "no_response", "unsubscribed", "bounced",
+                 "stopped")
 
 
 @dataclass

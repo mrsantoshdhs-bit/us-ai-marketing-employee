@@ -16,7 +16,8 @@ from aime.integrations.status import integration_statuses
 from aime.knowledge.industries import industry_label
 from aime.knowledge.services import service_name
 from aime.metrics_import import import_metrics_dir
-from aime.models import (Activity, AgentRun, Alert, Company, ContentItem, ContentMetric, FollowUp, InboundInquiry,
+from aime.models import (Activity, AgentRun, Alert, Company, Contact, ContentItem, ContentMetric, FollowUp, InboundEmail,
+                         InboundInquiry, Meeting,
                          Lead, Opportunity, Report, Signal)
 from aime.monitoring import agent_stats
 from aime.timeutil import fmt_et, fmt_local, local_tz, utcnow
@@ -29,6 +30,65 @@ def md_safe(value):
     if isinstance(value, str):
         return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("|", "/")
     return value
+
+
+REAL_REPLY = ("interested", "not_interested", "objection", "referral", "question", "other")
+
+
+def _rate(part: int, whole: int) -> str:
+    return f"{round(100 * part / whole)}% ({part}/{whole})" if whole else "—"
+
+
+def sales_kpis(count, since) -> dict:
+    """Sales pipeline counts from records only. Simulated replies and meetings are kept apart."""
+    researched = (Contact.source.in_(("website", "sec_filing")),)
+    real = (InboundEmail.is_simulated.is_(False),)
+    out = {
+        "companies_researched_period": count(Company, Company.researched_at >= since),
+        "companies_researched_total": count(Company, Company.researched_at.is_not(None)),
+        "decision_makers_period": count(Contact, *researched, Contact.last_name.is_not(None), Contact.created_at >= since),
+        "decision_makers_total": count(Contact, *researched, Contact.last_name.is_not(None)),
+        "usable_emails_total": count(Contact, Contact.email_status.in_(("published", "role_address"))),
+        "outreach_drafted_period": count(FollowUp, FollowUp.kind == "outreach", FollowUp.created_at >= since),
+        "outreach_drafted_total": count(FollowUp, FollowUp.kind == "outreach"),
+        "outreach_sent_period": count(FollowUp, FollowUp.kind == "outreach", FollowUp.status == "sent", FollowUp.sent_at >= since),
+        "outreach_sent_total": count(FollowUp, FollowUp.kind == "outreach", FollowUp.status == "sent"),
+        "bounces_period": count(InboundEmail, *real, InboundEmail.category == "bounce", InboundEmail.received_at >= since),
+        "bounces_total": count(InboundEmail, *real, InboundEmail.category == "bounce"),
+        "unsubscribes_total": count(InboundEmail, *real, InboundEmail.category == "unsubscribe"),
+        "replies_period": count(InboundEmail, *real, InboundEmail.category.in_(REAL_REPLY), InboundEmail.received_at >= since),
+        "replies_total": count(InboundEmail, *real, InboundEmail.category.in_(REAL_REPLY)),
+        "interested_period": count(InboundEmail, *real, InboundEmail.category == "interested", InboundEmail.received_at >= since),
+        "interested_total": count(InboundEmail, *real, InboundEmail.category == "interested"),
+        "meetings_booked_period": count(Meeting, Meeting.is_simulated.is_(False), Meeting.created_at >= since),
+        "meetings_booked_total": count(Meeting, Meeting.is_simulated.is_(False), Meeting.status != "cancelled"),
+        "meetings_held_total": count(Meeting, Meeting.is_simulated.is_(False), Meeting.status == "completed"),
+        "simulated_replies_total": count(InboundEmail, InboundEmail.is_simulated.is_(True)),
+        "simulated_meetings_total": count(Meeting, Meeting.is_simulated.is_(True)),
+        "replies_to_review": count(InboundEmail, InboundEmail.status == "needs_review"),
+    }
+    return out
+
+
+def sales_rows(k: dict) -> list[tuple]:
+    rows = [
+        ("Companies researched (own website / SEC)", k["companies_researched_period"], k["companies_researched_total"]),
+        ("Decision-makers identified (with evidence)", k["decision_makers_period"], k["decision_makers_total"]),
+        ("Usable business emails (published)", "—", k["usable_emails_total"]),
+        ("Outreach drafted (awaiting or past approval)", k["outreach_drafted_period"], k["outreach_drafted_total"]),
+        ("Outreach sent (approved)", k["outreach_sent_period"], k["outreach_sent_total"]),
+        ("Bounces / unsubscribes", k["bounces_period"], f"{k['bounces_total']} / {k['unsubscribes_total']}"),
+        ("Replies from prospects", k["replies_period"], k["replies_total"]),
+        ("Interested replies", k["interested_period"], k["interested_total"]),
+        ("Meetings booked / held", k["meetings_booked_period"], f"{k['meetings_booked_total']} / {k['meetings_held_total']}"),
+        ("Reply rate (replies / outreach sent)", "—", _rate(k["replies_total"], k["outreach_sent_total"])),
+        ("Interest rate (interested / replies)", "—", _rate(k["interested_total"], k["replies_total"])),
+        ("Meeting rate (meetings / interested)", "—", _rate(k["meetings_booked_total"], k["interested_total"])),
+    ]
+    if k["simulated_replies_total"] or k["simulated_meetings_total"]:
+        rows.append(("SIMULATED test activity (not counted above): replies / meetings", "—",
+                     f"{k['simulated_replies_total']} / {k['simulated_meetings_total']}"))
+    return rows
 
 
 class ReportInput(BaseModel):
@@ -197,6 +257,7 @@ class AnalyticsReportingAgent(BaseAgent[ReportInput, ReportOutput]):
             "agent_runs_period": count(AgentRun, AgentRun.started_at >= since),
             "agent_failures_period": count(AgentRun, AgentRun.started_at >= since, AgentRun.status == "failed"),
         }
+        kpis.update(sales_kpis(count, since))
         summary = [
             ("Companies discovered", kpis["companies_new_period"], kpis["companies_total"]),
             ("Evidence signals", kpis["signals_new_period"], count(Signal)),
@@ -209,6 +270,7 @@ class AnalyticsReportingAgent(BaseAgent[ReportInput, ReportOutput]):
             ("Posts published (confirmed by LinkedIn)", kpis["content_published_period"], kpis["content_published_total"]),
             ("Agent runs / failures", f"{kpis['agent_runs_period']} / {kpis['agent_failures_period']}", "—"),
         ]
+        summary += sales_rows(kpis)
         grades = Counter(g for g in session.execute(select(Lead.grade).where(open_lead)).scalars() if g)
         stages = session.execute(select(Opportunity.stage, func.count(Opportunity.id))
                                  .group_by(Opportunity.stage)).all()
