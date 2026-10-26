@@ -70,7 +70,8 @@ def run_checks(ctx: AppContext) -> list[dict]:
         add("Emails only to consenting contacts or approved B2B outreach", no_consent == 0 and bad_outreach == 0,
             f"{no_consent} replies sent without consent; {bad_outreach} outreach emails without a published address, "
             "an approval record, or sent after an opt-out")
-        other_sources = n(Contact, Contact.source.not_in(("inbound", "manual", "import", "website", "sec_filing")))
+        other_sources = n(Contact, Contact.source.not_in(("inbound", "manual", "import", "website", "sec_filing",
+                                                          "website_withdrawn")))
         add("Contacts only from approved sources", other_sources == 0,
             f"{other_sources} contact(s) from a source other than inquiries, manual entry, your imports, "
             "companies' own websites or SEC filings")

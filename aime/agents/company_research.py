@@ -16,9 +16,11 @@ from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent, RetryPolicy
 from aime.agents.contracts import BlockedItem
-from aime.company_research import build_snapshot, cik_of, is_plausible_website, save_contact
+from aime.company_research import (WITHDRAWN, build_snapshot, cik_of, is_plausible_website, save_contact,
+                                   withdraw_missing)
 from aime.contact_validation import STATUS_OK, MailDomainChecker, assign_published_emails
 from aime.crm_ops import log_activity
+from aime.matching import competitor_evidence
 from aime.models import Company, Contact, Lead
 from aime.people import extract_people, merge_findings
 from aime.redact import redact
@@ -44,6 +46,8 @@ class ResearchOutput(BaseModel):
     sec_officers: int = 0
     person_emails: int = 0
     inboxes: int = 0
+    contacts_withdrawn: int = 0
+    competitors: list[int] = Field(default_factory=list)
     no_people: list[int] = Field(default_factory=list)
     failed: list[BlockedItem] = Field(default_factory=list)
     skipped: str | None = None
@@ -132,8 +136,22 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             contacts.append(contact)
             out.contacts_created += int(created)
         out.people_found += len(people)
+        site_read = bool(pages) and pages[0].ok
+        if site_read:
+            for c in withdraw_missing(session, company, people):
+                out.contacts_withdrawn += 1
+                log_activity(session, f"Decision-maker withdrawn: {c.display_name} ({c.title}) is no longer found on "
+                             f"{company.domain}", self.name, type_="research", company_id=company.id,
+                             lead_id=lead.id if lead else None)
         snapshot = build_snapshot(company, pages, people, status)
         session.add(snapshot)
+        phrase = competitor_evidence(f"{snapshot.description or ''} {' '.join(snapshot.services_offered or [])}")
+        if phrase and not company.is_competitor and not company.competitor_cleared_by:
+            company.is_competitor = True
+            out.competitors.append(company.id)
+            log_activity(session, f'Marked as a possible competitor: its website says "{phrase}"', self.name,
+                         type_="research", body=snapshot.description, company_id=company.id,
+                         lead_id=lead.id if lead else None)
         emails = assign_published_emails(session, company, snapshot.emails, self.mail_checker)
         out.person_emails += emails["person_emails"]
         out.inboxes += emails["inboxes"]
@@ -141,8 +159,10 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             company.phone = snapshot.phones[0]["phone"][:40]  # as published on the company's own site
         researched = session.execute(select(Contact).where(Contact.company_id == company.id, Contact.source.in_(
             ("website", "sec_filing")))).scalars().all()
-        if lead and researched and (lead.contact_id is None or (lead.contact and lead.contact.source in ("website", "sec_filing"))):
+        if lead and researched and (lead.contact_id is None or (lead.contact and lead.contact.source in ("website", "sec_filing", WITHDRAWN))):
             lead.contact_id = best_contact(researched).id
+        elif lead and lead.contact and lead.contact.source == WITHDRAWN:
+            lead.contact_id = None
         company.research_status, company.researched_at = status, utcnow()
         out.companies_researched += 1
         read = sum(1 for p in pages if p.ok)

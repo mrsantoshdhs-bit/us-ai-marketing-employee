@@ -13,7 +13,9 @@
       <tr><th>Industry</th><td>{{ c.industry|industry }}</td></tr>
       <tr><th>Source</th><td>{{ c.source }} · {{ ext(c.source_url) }} {% if c.verified %}<span class="pill ok">verified registry</span>{% else %}<span class="pill">self-reported</span>{% endif %}</td></tr>
       {% if c.phone %}<tr><th>Phone (filed)</th><td>{{ c.phone }}</td></tr>{% endif %}
-      {% if c.is_competitor %}<tr><th>Flag</th><td><span class="pill bad">possible competitor</span></td></tr>{% endif %}
+      {% if c.is_competitor %}<tr><th>Flag</th><td><span class="pill bad">possible competitor</span>
+        <form method="post" action="/companies/{{ c.id }}/not_competitor" style="display:inline"><button>Not a competitor</button></form></td></tr>
+      {% elif c.competitor_cleared_by %}<tr><th>Flag</th><td class="small muted">Not a competitor (cleared by {{ c.competitor_cleared_by }})</td></tr>{% endif %}
       <tr><th>Lifecycle</th><td>{{ c.lifecycle_stage }}</td></tr>
       <tr><th>Category</th><td>{{ lead.category or '—' }}</td></tr>
     </table>
@@ -25,6 +27,7 @@
       {% if p.source in ['website', 'sec_filing'] %}<span class="muted">{{ 'SEC filing' if p.source == 'sec_filing' else 'own website' }} · {{ ext(p.evidence_url, 'evidence') }}</span>{% endif %}
       <div class="muted">Email: {{ p.email or 'not found' }}{% if p.email_status %} ({{ p.email_status|replace('_', ' ') }}{% if p.email_confidence %}, {{ p.email_confidence }}{% endif %}){% endif %}{% if p.email_evidence %} · {{ p.email_evidence }}{% endif %} · consent: {{ p.consent_status }}{% if p.consent_source %} ({{ p.consent_source }}){% endif %}</div></div>
     {% else %}<p class="muted small">{% if c.research_status %}No decision-maker named on the pages read ({{ c.research_status|replace('_', ' ') }}).{% else %}Not researched yet; the enrich job reads the company's own pages.{% endif %}</p>{% endfor %}
+    {% if withdrawn %}<p class="muted small">{{ withdrawn }} earlier finding(s) withdrawn: no longer found when the site was re-read (see Activity).</p>{% endif %}
     {% for p in inboxes %}<div class="row-item small">{% if lead.contact_id == p.id %}<span class="pill ok">primary</span> {% endif %}Company inbox: <b>{{ p.email }}</b>
       <span class="muted">({{ p.email_status|replace('_', ' ') }}) · {{ ext(p.email_source_url, 'where') }}</span></div>{% endfor %}
   </div>

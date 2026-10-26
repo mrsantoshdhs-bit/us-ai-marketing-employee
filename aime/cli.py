@@ -294,6 +294,33 @@ def cmd_user(args, ctx, prompt_fn=None) -> int:
     return 0
 
 
+def cmd_research_recheck(args, ctx) -> int:
+    """Re-read companies' own websites now (e.g. after a research rule fix), then re-score them. Contacts no one."""
+    from aime.agents.company_research import CompanyResearchAgent
+    from aime.agents.qualification import LeadQualificationAgent
+    from aime.models import Company
+
+    with ctx.db.session() as s:
+        ids = list(args.company or s.execute(select(Company.id).where(Company.researched_at.is_not(None))
+                                              .order_by(Company.id)).scalars())
+    if not ids:
+        print("No researched companies to re-check")
+        return 0
+    res = CompanyResearchAgent(ctx).run({"company_ids": ids, "limit": len(ids)}, job="research_recheck")
+    if not res.ok:
+        print(f"Research re-check failed: {res.error}")
+        return 1
+    o = res.output
+    if o.skipped:
+        print(f"Skipped: {o.skipped}")
+        return 1
+    print(f"Re-checked {o.companies_researched} company(ies): {o.people_found} decision-maker(s) named, "
+          f"{o.contacts_withdrawn} withdrawn, {len(o.competitors)} marked as possible competitors, "
+          f"{len(o.failed)} failed")
+    LeadQualificationAgent(ctx).run({}, job="research_recheck")
+    return 0
+
+
 def cmd_backup_verify(args, ctx) -> int:
     from aime.backup import verify_backup
 
@@ -524,6 +551,8 @@ def build_parser() -> argparse.ArgumentParser:
     sd = sub.add_parser("seed-demo", help="Build a separate demo database from fictional sample data")
     sd.add_argument("--data-dir", default=str(BASE_DIR / "demo_data"))
     sd.add_argument("--llm", default="template", choices=["template", "auto", "ollama"])
+    rr = sub.add_parser("research-recheck", help="Re-read researched companies' own websites now and re-score them")
+    rr.add_argument("--company", type=int, action="append", help="company id (repeat); default: every researched one")
     us = sub.add_parser("user", help="Dashboard sign-in accounts (you type the password at the prompt)")
     us.add_argument("action", choices=["create", "list", "set-password", "set-role", "disable", "enable"])
     us.add_argument("--username")
@@ -537,7 +566,7 @@ COMMANDS = {
     "scheduler": cmd_scheduler, "llm-check": cmd_llm_check, "inbound": cmd_inbound, "suppress": cmd_suppress,
     "seed-demo": cmd_seed_demo, "doctor": cmd_doctor, "backup": cmd_backup, "maintenance": cmd_maintenance,
     "refresh-graphics": cmd_refresh_graphics, "backup-verify": cmd_backup_verify, "restore-drill": cmd_restore_drill,
-    "user": cmd_user, "policy": cmd_policy, "simulate-reply": cmd_simulate_reply,
+    "user": cmd_user, "policy": cmd_policy, "simulate-reply": cmd_simulate_reply, "research-recheck": cmd_research_recheck,
     "acceptance-report": cmd_acceptance_report,
 }
 PRODUCTION_DATA_DIR = BASE_DIR / "data"

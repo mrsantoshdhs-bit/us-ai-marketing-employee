@@ -27,12 +27,15 @@ from aime.website_check import _read_capped
 
 # A link is classified by the first kind whose keywords appear in its path or text.
 PAGE_KINDS: list[tuple[str, tuple[str, ...]]] = [
-    ("team", ("team", "leadership", "management", "people", "founders", "executives", "staff", "who we are",
-              "who-we-are", "board", "principals", "attorneys")),
+    ("team", ("team", "leadership", "founders", "executives", "who we are", "who-we-are", "board", "principals",
+              "attorneys", "our people", "our-people", "our staff", "our-staff", "management team")),
     ("about", ("about", "our story", "our-story", "company", "mission", "history")),
     ("contact", ("contact", "get in touch", "get-in-touch", "locations", "offices")),
     ("services", ("services", "solutions", "what we do", "what-we-do", "capabilities", "products", "industries")),
 ]
+# These name a team page only on their own ("/people", "/about/management", a "Management" link), never inside a
+# product name ("/customer-management", "People analytics"): product pages quote customers, not staff.
+TEAM_WORDS_ALONE = ("management", "people", "staff")
 KIND_ORDER = {"team": 0, "about": 1, "contact": 2, "services": 3}
 FALLBACK_PATHS = (("/about", "about"), ("/about-us", "about"), ("/team", "team"), ("/our-team", "team"),
                   ("/leadership", "team"), ("/contact", "contact"), ("/contact-us", "contact"))
@@ -200,7 +203,15 @@ def classify_link(url: str, text: str) -> str | None:
                     return kind
             elif re.search(rf"(^|[/_-]){re.escape(w)}([/_.-]|$)", path) or re.search(rf"\b{re.escape(w)}\b", label):
                 return kind
+        if kind == "team" and _team_word_alone(path, label):
+            return kind
     return None
+
+
+def _team_word_alone(path: str, label: str) -> bool:
+    segments = {s for s in path.split("/") if s}
+    text = " ".join(label.split())
+    return any(w in segments or re.fullmatch(rf"(?:(?:meet )?(?:our|the) )?{w}", text) for w in TEAM_WORDS_ALONE)
 
 
 class SiteReader:

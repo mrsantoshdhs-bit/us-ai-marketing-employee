@@ -10,8 +10,10 @@ from sqlalchemy import func, select
 from aime.agents.company_research import CompanyResearchAgent
 from aime.doctor import run_checks
 from aime.models import Company, Contact, Lead, ResearchSnapshot
-from aime.people import extract_people, is_title, looks_like_name
-from aime.site_reader import parse_page
+from aime.agents.qualification import LeadQualificationAgent
+from aime.models import Activity, FollowUp
+from aime.people import extract_people, is_title, looks_like_name, names_other_org
+from aime.site_reader import classify_link, parse_page
 from aime.sources.sec_officers import display_name
 from aime.web.app import create_app
 
@@ -240,3 +242,98 @@ def test_homepage_testimonials_and_people_from_other_companies_are_not_decision_
     found = {f.full_name: f for f in extract_people([home, about], "Acme Software")}
     assert set(found) == {"Lauren DeSouza", "Domonique Brown"}
     assert found["Domonique Brown"].role_category == "operations"  # a department director, not the board
+
+
+def test_product_pages_are_not_team_pages():
+    # "management" or "people" inside a product name is a product page with customer quotes, not the team
+    for url, text in (("https://x.example/customer-management", "Customer management"),
+                      ("https://x.example/product-lifecycle-management", "PLM"),
+                      ("https://x.example/people-analytics", "People analytics")):
+        assert classify_link(url, text) != "team", url
+    for url, text in (("https://x.example/people", "People"), ("https://x.example/about/management", "Management"),
+                      ("https://x.example/our-team", "Our team"), ("https://x.example/company", "Meet our people"),
+                      ("https://x.example/leadership-team", "Leadership")):
+        assert classify_link(url, text) == "team", url
+
+
+def test_titles_naming_another_organisation_and_place_names():
+    for title in ("Founder & CEO, Octopus Energy Services", "Director of Business Solutions, EDF", "CFO at Acme Corp",
+                  "Founder, Biddify"):
+        assert names_other_org(title, "Kraken Tech"), title
+    for title in ("Founder, CEO", "VP and Head of Global Sales", "Chief People Officer & Chief of Staff",
+                  "CEO, Kraken for Water & Telco", "Director of Sales Operations, North America", "Head of Product, AI",
+                  "Partner, Tax", "Director of Customer Experience"):
+        assert not names_other_org(title, "Kraken Tech"), title
+    assert not looks_like_name("San Francisco") and not looks_like_name("New York") and not looks_like_name("Salt Lake City")
+    assert looks_like_name("Francisco Lopez") and looks_like_name("Georgia Smith")
+
+
+def recheck_ctx(make_ctx, state):
+    requests: list[str] = []
+    base = make_handler(requests)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == SITE and request.url.path in state:
+            return httpx.Response(200, text=state[request.url.path], headers={"content-type": "text/html; charset=utf-8"})
+        return base(request)
+    return make_ctx(handler=handler)
+
+
+def test_recheck_withdraws_people_no_longer_found_but_keeps_anyone_already_emailed(make_ctx, capsys):
+    from argparse import Namespace
+
+    from aime.cli import cmd_research_recheck
+    state = {"/team": TEAM}
+    ctx = recheck_ctx(make_ctx, state)
+    cid = add_company(ctx)
+    assert CompanyResearchAgent(ctx).run({"company_ids": [cid]}).ok
+    found = people_of(ctx, cid)
+    assert {"Tom Baker", "Sarah O'Neil"} <= set(found)
+    with ctx.db.session() as s:
+        lead = s.execute(select(Lead)).scalar_one()
+        s.add(FollowUp(lead_id=lead.id, contact_id=found["Sarah O'Neil"].id, company_id=cid, channel="email",
+                       kind="outreach", step=1, status="awaiting_approval", subject="Hi", body="Body"))
+    state["/team"] = (TEAM.replace("<div><p>Tom Baker, Head of Engineering</p></div>", "")
+                      .replace('<div class="card"><span class="name">Sarah O\'Neil</span><span class="role">VP of Sales</span></div>', ""))
+    assert cmd_research_recheck(Namespace(company=[cid]), ctx) == 0
+    assert "1 withdrawn" in capsys.readouterr().out
+    after = people_of(ctx, cid)
+    assert after["Tom Baker"].source == "website_withdrawn" and "Not found when" in after["Tom Baker"].evidence
+    assert after["Sarah O'Neil"].source == "website"  # an email is queued for her: a person decides
+    client = TestClient(create_app(ctx))
+    assert "Tom Baker" not in client.get("/contacts").text
+    lead_page = client.get("/leads/1").text
+    assert "<b>Tom Baker</b>" not in lead_page and "1 earlier finding(s) withdrawn" in lead_page  # only in Activity
+    with ctx.db.session() as s:
+        assert s.execute(select(Activity).where(Activity.subject.like("Decision-maker withdrawn: Tom Baker%"))).scalars().first()
+    checks = {c["name"]: c for c in run_checks(ctx)}
+    assert checks["Contacts only from approved sources"]["ok"]
+    state["/team"] = TEAM  # back on the page: restored, not duplicated
+    assert CompanyResearchAgent(ctx).run({"company_ids": [cid]}).ok
+    again = people_of(ctx, cid)
+    assert again["Tom Baker"].source == "website" and len(again) == len(found)
+
+
+def test_companies_that_sell_ai_agents_are_flagged_and_a_person_can_clear_it(make_ctx):
+    state = {"/": HOME.replace("Brightline Logistics helps regional carriers plan routes, dispatch drivers and invoice "
+                               "customers from one place.", "Brightline builds AI agents that automate dispatch for "
+                               "regional carriers.")}
+    ctx = recheck_ctx(make_ctx, state)
+    cid = add_company(ctx)
+    assert CompanyResearchAgent(ctx).run({"company_ids": [cid]}).output.competitors == [cid]
+    LeadQualificationAgent(ctx).run({})
+    with ctx.db.session() as s:
+        assert s.get(Company, cid).is_competitor
+        assert s.execute(select(Lead)).scalar_one().status == "disqualified"
+        note = s.execute(select(Activity).where(Activity.subject.like("Marked as a possible competitor%"))).scalars().one()
+        assert "ai agents that" in note.subject.lower()
+    client = TestClient(create_app(ctx))
+    assert "Not a competitor" in client.get("/leads/1").text
+    client.post(f"/companies/{cid}/not_competitor", headers={"origin": "http://testserver"})
+    with ctx.db.session() as s:
+        assert not s.get(Company, cid).is_competitor and s.get(Company, cid).competitor_cleared_by
+        assert s.execute(select(Lead)).scalar_one().status == "new"
+    assert CompanyResearchAgent(ctx).run({"company_ids": [cid]}).output.competitors == []  # not flagged again
+    LeadQualificationAgent(ctx).run({})
+    with ctx.db.session() as s:
+        assert s.execute(select(Lead)).scalar_one().status != "disqualified"

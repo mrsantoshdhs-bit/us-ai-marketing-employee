@@ -19,6 +19,20 @@ COMPETITOR_PATTERNS = [
     r"nearshore|offshore development",
 ]
 _COMPETITOR_RE = re.compile("|".join(COMPETITOR_PATTERNS), re.IGNORECASE)
+# What a company says it sells on its own website: AI agents or workers, an agent platform, or developers for
+# hire. A hiring post can describe the job instead, so these apply only to the company's own description.
+OWN_SITE_COMPETITOR_PATTERNS = [
+    r"\bai (?:agents?|workers?|employees?|teammates?) (?:that|which|for|to)\b",
+    r"\b(?:build|create|source|deploy|launch|design) (?:your own |a |an |custom |autonomous )*ai (?:agents?|workers?|"
+    r"employees?)\b",
+    r"\bagentic ai\b",
+    r"\bai agent (?:platform|builder|infrastructure|framework|marketplace)\b",
+    r"\b(?:custom )?(?:crm|software|app) development (?:agency|company|firm|services)\b",
+    r"\b(?:hire|access|connect with|join) (?:thousands of )?(?:elite |top(?:-tier)? |vetted |remote )*"
+    r"(?:developers|engineers|software talent)\b",
+    *COMPETITOR_PATTERNS,
+]
+_OWN_SITE_COMPETITOR_RE = re.compile("|".join(OWN_SITE_COMPETITOR_PATTERNS), re.IGNORECASE)
 
 
 @lru_cache(maxsize=512)
@@ -74,6 +88,12 @@ def classify_industry(text: str | None, default: str | None = None) -> str | Non
 
 def detect_competitor(text: str | None) -> bool:
     return bool(text and _COMPETITOR_RE.search(text))
+
+
+def competitor_evidence(own_words: str | None) -> str | None:
+    """The phrase in a company's own description that shows it sells what we sell, or None."""
+    m = _OWN_SITE_COMPETITOR_RE.search(own_words or "")
+    return m.group(0) if m else None
 
 
 _EXTERNAL_HELP_RE = re.compile(
