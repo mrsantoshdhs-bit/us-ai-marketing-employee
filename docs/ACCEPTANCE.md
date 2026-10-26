@@ -40,13 +40,15 @@ emailing the company and without changing production records**. Nobody but you r
    that window now uses the acceptance folder; close the window to end the session.
 5. `python -m aime user create --username <you> --role admin` (in that window: the account lives in the acceptance
    copy only), then `python -m aime doctor` and `python -m aime status` (outbound: TEST MODE; mailbox configured).
+6. `python -m aime email-check --connect --send-test`: settings, your domain's SPF/DKIM/DMARC, SMTP and IMAP
+   sign-in, and one email to your test address only. Fix every FAIL before going on.
 
 ## 2. Run (each step maps to the acceptance tests)
 
 | Step | Command / action | Tests |
 |---|---|---|
 | Discovery is already in the copy (the companies found from real sources) | `python -m aime acceptance-report` shows test 1 | 1 |
-| Research companies' own sites and SEC filings | `python -m aime run enrich` | 2, 3, 4 |
+| Research companies' own sites and SEC filings | `python -m aime run enrich` (or `research-recheck` to re-read the ones already researched) | 2, 3, 4 |
 | Re-score with contact quality | `python -m aime run crm_maintenance` | 5, 6 |
 | Draft outreach | `python -m aime run followups` | 7, 8 |
 | Open the acceptance dashboard | `python -m aime serve` → http://127.0.0.1:8770 (sign in) | 15 |
@@ -57,6 +59,7 @@ emailing the company and without changing production records**. Nobody but you r
 | Approve the suggested reply (your Calendly link) and send it | dashboard, then `run followups` | 9 |
 | Book a slot through the link from your test mailbox | Calendly | — |
 | Record the booking | `python -m aime run inbox` → Meetings page | 14 |
+| Reschedule it in Calendly (optional), then `run inbox` | Meetings page shows the new time, not two meetings | 14 |
 | Reply "unsubscribe" from the test mailbox to a second test email (optional) | `run inbox` → suppression | 13 |
 | Report | `python -m aime run daily_report` and `python -m aime acceptance-report` | 15, 16, 17, 19 |
 | Regression | `python scripts/pytest_with_timeout.py 900` (development folder) and CI | 18 |

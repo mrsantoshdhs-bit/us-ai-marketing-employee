@@ -39,16 +39,21 @@ approved sends within 08:00–18:00 ET weekdays, pipeline automation) · publish
   `CALENDLY_URL`, `OUTBOUND_TEST_RECIPIENTS` (test mode). Setup: `docs/SALES_SETUP.md`.
 - `config/business.toml`: `[outreach]` (on/off, drafts per run, limits, intervals), `[enrichment]`, `[pipeline]`.
 
-## Deploying this work (needs your approval)
+## Deployment status
 
-PRs, merged in order: #19 research and decision-makers → #20 contacts and scoring → #21 outreach →
-#22 inbox and replies → #23 meetings, pipeline, reports → #24 acceptance, roles, security. Same flow as before:
-verify CI on each head commit, verified backup, maintenance on, merge, fast-forward the production folder,
-`pip install -r requirements.txt` (adds `dnspython`), tests and doctor, restart the dashboard, maintenance off,
-confirm the next tick. Schema changes are additive (new tables and nullable columns) and applied automatically
-with a backup first.
+- **Deployed 26 Oct 2026:** #19–#24 (production `main` at `715f881`), with outbound email and publishing off.
+- **Waiting for your approval** (each with CI; merge in this order):
+  - #25 research accuracy: no product pages as team pages, no places or customers as staff, competitors from
+    their own site, withdrawal of people no longer found, and disqualified leads' drafts cancelled.
+  - #26 `email-check`.
+  - #27 Calendly reschedules, late cancellations and linking unmatched bookings.
+  - #28 Today tiles and these docs.
+- **Same deploy flow as before:** verified backup, maintenance on, merge, fast-forward the production folder,
+  tests and doctor, restart the dashboard, maintenance off, confirm the next tick.
+- **After #25, run `python -m aime research-recheck` once.** On a copy of production it withdrew the three wrong
+  contacts, found Curai's CEO and flagged five competitors.
 
-**After deploying, nothing is sent**: outbound stays off, every email needs approval, and drafts only appear for
+**Nothing is sent after deploying**: outbound stays off, every email needs approval, and drafts only appear for
 researched contacts with a published email.
 
 ## Rollback
@@ -62,15 +67,21 @@ drafts; empty `IMAP_HOST` stops mailbox reading.
 
 1. Gmail app password, `.env` values, SPF/DKIM/DMARC (`docs/SALES_SETUP.md`).
 2. Calendly link, with notifications to the sales mailbox.
-3. `python -m aime user create --username <you> --role admin` (and Sales Manager accounts if others help).
-   An account you already have can be made admin with `python -m aime user set-role --username <you> --role admin`.
-4. The live acceptance run (`docs/ACCEPTANCE.md`) with a test address you control.
-5. Going live: your explicit decision, after the acceptance report.
+3. Your account is admin (set on 26 Oct with `user set-role`). Add Sales Manager accounts with
+   `python -m aime user create --username <name>` if others help.
+4. The off-machine backup passphrase (`docs/SALES_SETUP.md` section 7).
+5. The live acceptance run (`docs/ACCEPTANCE.md`) with a test address you control.
+6. Going live: your explicit decision, after the acceptance report.
 
 ## Known limitations
 
-- Decision-makers and emails come only from what companies publish, so many companies show "not found"; team
-  pages rendered by JavaScript are not read.
+- **Contact coverage:** decision-makers and emails come only from what companies publish, so many companies
+  show "not found", and team pages rendered by JavaScript are not read. In the first production run, 15
+  companies were researched: 10 named decision-makers, 2 published a usable address (both company inboxes),
+  and none published a named person's address.
+- **Discovery sources:** most discovered companies come from public hiring posts, which favour tech startups.
+  Some of these sell AI agents themselves, and #25 flags them. Better-fitting small businesses need other
+  authorized sources (your CSV lists, or a source you approve).
 - Reply classification is rule-based; anything unclear goes to review.
 - Calendly is read from its notification emails (works with the free plan); a changed format goes to review.
 - Wording of outreach is template-based around quoted evidence (no AI rewriting, to avoid unsupported claims).
