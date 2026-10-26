@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from aime.agents.base import BaseAgent, RetryPolicy
 from aime.agents.contracts import BlockedItem
 from aime.company_research import build_snapshot, cik_of, is_plausible_website, save_contact
+from aime.contact_validation import STATUS_OK, MailDomainChecker, assign_published_emails
 from aime.crm_ops import log_activity
 from aime.models import Company, Contact, Lead
 from aime.people import extract_people, merge_findings
@@ -41,6 +42,8 @@ class ResearchOutput(BaseModel):
     people_found: int = 0
     contacts_created: int = 0
     sec_officers: int = 0
+    person_emails: int = 0
+    inboxes: int = 0
     no_people: list[int] = Field(default_factory=list)
     failed: list[BlockedItem] = Field(default_factory=list)
     skipped: str | None = None
@@ -53,11 +56,16 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         "Read each company's own website politely (robots.txt, a few pages, size cap)",
         "Record what the company says it does, the services it lists, and related topics, with quotes",
         "Identify decision-makers only where the company or its SEC filings name them, with evidence",
+        "Attach only emails the company publishes on its own domain; check the domain accepts mail",
         "Never guess names, titles or emails, and never contact anyone",
     ]
     input_model = ResearchInput
     output_model = ResearchOutput
     retry_policy = RetryPolicy(max_attempts=1)  # per-company failures are recorded; the batch continues
+
+    def __init__(self, ctx, mail_checker=None):
+        super().__init__(ctx)
+        self.mail_checker = mail_checker or MailDomainChecker()
 
     def execute(self, inp: ResearchInput, session: Session) -> ResearchOutput:
         out = ResearchOutput()
@@ -124,10 +132,17 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             contacts.append(contact)
             out.contacts_created += int(created)
         out.people_found += len(people)
-        if lead and contacts and (lead.contact_id is None or (lead.contact and lead.contact.source in ("website", "sec_filing"))):
-            lead.contact_id = best_contact(contacts).id  # the lead's primary contact: best evidence, best role fit
         snapshot = build_snapshot(company, pages, people, status)
         session.add(snapshot)
+        emails = assign_published_emails(session, company, snapshot.emails, self.mail_checker)
+        out.person_emails += emails["person_emails"]
+        out.inboxes += emails["inboxes"]
+        if not company.phone and snapshot.phones:
+            company.phone = snapshot.phones[0]["phone"][:40]  # as published on the company's own site
+        researched = session.execute(select(Contact).where(Contact.company_id == company.id, Contact.source.in_(
+            ("website", "sec_filing")))).scalars().all()
+        if lead and researched and (lead.contact_id is None or (lead.contact and lead.contact.source in ("website", "sec_filing"))):
+            lead.contact_id = best_contact(researched).id
         company.research_status, company.researched_at = status, utcnow()
         out.companies_researched += 1
         read = sum(1 for p in pages if p.ok)
@@ -137,5 +152,10 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
 
 
 def best_contact(contacts: list[Contact]) -> Contact | None:
-    return max(contacts, key=lambda c: (CONFIDENCE_RANK.get(c.confidence or "", 0), c.relevance or 0, -c.id),
-               default=None)
+    """The lead's primary contact: a named person with a usable published email, then the company inbox,
+    then the named person with the best evidence and role fit."""
+    def rank(c: Contact) -> tuple:
+        reachable = c.email_status in STATUS_OK
+        tier = 2 if reachable and c.role_category != "inbox" else 1 if reachable else 0
+        return tier, CONFIDENCE_RANK.get(c.confidence or "", 0), c.relevance or 0, -c.id
+    return max(contacts, key=rank, default=None)

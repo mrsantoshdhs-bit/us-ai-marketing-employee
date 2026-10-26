@@ -208,7 +208,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 ("Companies found", cnt(Company, *open_leads), "/companies", ""),
                 ("Websites verified", cnt(Company, Company.website_status == "verified", *open_leads), "/companies", ""),
                 ("Companies with a decision-maker", s.execute(select(func.count(func.distinct(Contact.company_id))).where(
-                    Contact.source.in_(("website", "sec_filing")))).scalar_one(), "/contacts", ""),
+                    Contact.source.in_(("website", "sec_filing")), Contact.last_name.is_not(None))).scalar_one(),
+                 "/contacts", ""),
+                ("Companies with a usable email", s.execute(select(func.count(func.distinct(Contact.company_id))).where(
+                    Contact.email_status.in_(("published", "role_address")))).scalar_one(), "/contacts?reachable=1", ""),
                 ("Qualified companies", cnt(Lead, Lead.status == "qualified"), "/leads?status=qualified", ""),
                 ("Posts scheduled", cnt(ContentItem, ContentItem.status.in_(("awaiting_approval", "approved"))), "/content", ""),
                 ("Posts published", cnt(ContentItem, ContentItem.status == "published"), "/content?status=published", ""),
@@ -294,9 +297,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                       people=people, research=research)
 
     @app.get("/contacts", response_class=HTMLResponse)
-    def contacts_page(request: Request, confidence: str = "", role: str = ""):
+    def contacts_page(request: Request, confidence: str = "", role: str = "", reachable: str = ""):
         with C().db.session() as s:
             stmt = select(Contact).where(Contact.source.in_(("website", "sec_filing")))
+            if reachable:
+                stmt = stmt.where(Contact.email_status.in_(("published", "role_address")))
             if confidence:
                 stmt = stmt.where(Contact.confidence == confidence)
             if role:
@@ -309,10 +314,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             researched = s.execute(select(func.count(Company.id)).where(Company.researched_at.is_not(None),
                                                                          *open_companies)).scalar_one()
             with_people = s.execute(select(func.count(func.distinct(Contact.company_id))).where(
-                Contact.source.in_(("website", "sec_filing")))).scalar_one()
+                Contact.source.in_(("website", "sec_filing")), Contact.last_name.is_not(None))).scalar_one()
             by_status = dict(s.execute(select(Company.research_status, func.count(Company.id)).where(
                 Company.research_status.is_not(None), *open_companies).group_by(Company.research_status)).all())
-        return render(request, "contacts.html", rows=rows, leads=leads, confidence=confidence, role=role,
+        return render(request, "contacts.html", rows=rows, leads=leads, confidence=confidence, role=role, reachable=reachable,
                       researched=researched, with_people=with_people, by_status=by_status)
 
     @app.post("/leads/{lead_id}/status")

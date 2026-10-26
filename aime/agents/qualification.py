@@ -65,8 +65,9 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
             needs = (inp.rescore_all or bool(inp.lead_ids) or lead.last_scored_at is None
                      or lead.last_scored_at < stale_cutoff
                      or (newest is not None and newest > lead.last_scored_at)
-                     # website verified after the last score: apply that evidence now, not a day later
-                     or (checked is not None and checked > lead.last_scored_at))
+                     # website verified or company researched after the last score: apply that evidence now
+                     or (checked is not None and checked > lead.last_scored_at)
+                     or (company.researched_at is not None and company.researched_at > lead.last_scored_at))
             if not needs:
                 continue
             contact: Contact | None = lead.contact
@@ -93,6 +94,9 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                 stated_budget=bool(payload.get("budget")),
                 website_status=company.website_status,
                 seeks_external_help=any(seeks_external_help(s.text) for s in signals if s.signal_type == "hiring"),
+                contact_source=contact.source if contact else None,
+                contact_role=contact.role_category if contact else None,
+                contact_email_status=contact.email_status if contact else None,
                 now=now,
             )
             result = score_lead(facts, thresholds)

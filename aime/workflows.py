@@ -125,9 +125,12 @@ def job_publish(ctx: AppContext, job: str = "publish") -> JobOutcome:
 
 
 def job_enrich(ctx: AppContext, job: str = "enrich") -> JobOutcome:
-    """Read companies' own websites and SEC filings for research and decision-makers (never contacts anyone)."""
+    """Read companies' own websites and SEC filings for research, decision-makers and published emails, then
+    re-score the researched leads (never contacts anyone)."""
     out = JobOutcome()
-    out.add(CompanyResearchAgent(ctx).run({}, job=job))
+    research = out.add(CompanyResearchAgent(ctx).run({}, job=job))
+    if research.ok and research.output.companies_researched:
+        out.add(LeadQualificationAgent(ctx).run({}, job=job))
     return out
 
 

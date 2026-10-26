@@ -10,7 +10,8 @@
 </div>
 <form class="filters" method="get">
   <select name="confidence"><option value="">Any confidence</option>{% for c in ['high', 'medium'] %}<option {{ 'selected' if confidence == c }}>{{ c }}</option>{% endfor %}</select>
-  <select name="role"><option value="">Any role</option>{% for r in ['executive', 'operations', 'technology', 'sales', 'marketing', 'finance', 'people', 'board', 'other'] %}<option {{ 'selected' if role == r }}>{{ r }}</option>{% endfor %}</select>
+  <select name="role"><option value="">Any role</option>{% for r in ['executive', 'operations', 'technology', 'sales', 'marketing', 'finance', 'people', 'board', 'inbox', 'other'] %}<option {{ 'selected' if role == r }}>{{ r }}</option>{% endfor %}</select>
+  <label class="small"><input type="checkbox" name="reachable" value="1" {{ 'checked' if reachable }}> usable email only</label>
   <button>Filter</button>
 </form>
 <div class="card table-wrap"><table>
@@ -21,7 +22,10 @@
     <td class="n">{{ c.relevance or '' }}</td>
     <td><span class="pill {{ 'ok' if c.confidence == 'high' else 'warn' }}">{{ c.confidence }}</span> <span class="small muted">{{ 'SEC filing' if c.source == 'sec_filing' else 'own website' }}</span></td>
     <td class="small" style="max-width:360px">{{ ext(c.evidence_url, 'source') }} <span class="muted">{{ (c.evidence or '')[:140] }}</span></td>
-    <td class="small">{% if c.email %}{{ c.email }} <span class="pill">{{ c.email_status }}</span>{% else %}<span class="muted">not found</span>{% endif %}</td></tr>
+    <td class="small">{% if c.email %}<span title="{{ c.email_evidence or '' }}">{{ c.email }}</span>
+      <span class="pill {{ 'ok' if c.email_status in ['published', 'role_address'] else 'warn' }}">{{ c.email_status|replace('_', ' ') }}</span>
+      {% if c.email_confidence %}<span class="muted">{{ c.email_confidence }}</span>{% endif %} {{ ext(c.email_source_url, 'where') }}
+      {% else %}<span class="muted">not found</span>{% endif %}</td></tr>
   {% else %}<tr><td colspan="8" class="muted">No decision-makers yet. The enrich job researches companies daily.</td></tr>{% endfor %}
 </table></div>
 {% endblock %}

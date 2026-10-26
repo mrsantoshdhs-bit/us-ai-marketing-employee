@@ -121,8 +121,18 @@ officers in their insider filings (Forms 3 and 4). Each company is re-read after
   Jane Doe"), or an SEC filing names them. Testimonials on homepages and titles naming another
   organisation ("Founder, OtherCo") are ignored. Each person shows the page or filing and the exact text.
   Companies whose pages name nobody show "not found"; nothing is guessed.
-- The lead's primary contact is the decision-maker with the best evidence and role fit for the lead's
-  best-fit service. Nobody is contacted by this job.
+- **Business emails**: only addresses the company publishes on its own domain. An address printed next to
+  a named person is theirs (high confidence); one whose local part matches exactly one named person's
+  name is theirs (medium); general inboxes (info@, hello@, sales@, contact@ ...) become a "Company inbox"
+  contact. Support, jobs, privacy, no-reply, placeholder, free-mail and other-domain addresses are never
+  used. Each domain is checked for a mail server (MX, implicit MX, null MX): `published` /
+  `role_address` are usable; `no_mail_server` and `unchecked` (DNS could not tell) are not.
+- **Fit score** (0-100, "Fit" column): seniority first (founder/C-level, VP/head, director, lead), then
+  how well the role usually buys the lead's best-fit service. The lead's primary contact is a named
+  person with a usable email, else the company inbox, else the best-fit named person.
+- **Lead score**: the 10-point data part credits +3 for a decision-maker with a published, verified email,
+  +1 for a named decision-maker without one, +1 for a published company inbox (or +3 for a person who
+  contacted you). The breakdown on the lead page says which. Nobody is contacted by this job.
 
 ## Post images
 

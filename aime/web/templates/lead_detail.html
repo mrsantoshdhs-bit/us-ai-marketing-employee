@@ -18,12 +18,15 @@
       <tr><th>Category</th><td>{{ lead.category or '—' }}</td></tr>
     </table>
     <h2>Decision-makers</h2>
-    {% for p in people %}
+    {% set inboxes = people|selectattr('role_category', 'equalto', 'inbox')|list %}
+    {% for p in people|rejectattr('role_category', 'equalto', 'inbox') %}
     <div class="row-item small">{% if lead.contact_id == p.id %}<span class="pill ok">primary</span> {% endif %}<b>{{ p.display_name }}</b>{% if p.title %} · {{ p.title }}{% endif %}
       {% if p.confidence %}<span class="pill {{ 'ok' if p.confidence == 'high' else 'warn' }}">{{ p.confidence }}</span>{% endif %}
       {% if p.source in ['website', 'sec_filing'] %}<span class="muted">{{ 'SEC filing' if p.source == 'sec_filing' else 'own website' }} · {{ ext(p.evidence_url, 'evidence') }}</span>{% endif %}
-      <div class="muted">Email: {{ p.email or 'not found' }}{% if p.email_status %} ({{ p.email_status }}){% endif %} · consent: {{ p.consent_status }}{% if p.consent_source %} ({{ p.consent_source }}){% endif %}</div></div>
+      <div class="muted">Email: {{ p.email or 'not found' }}{% if p.email_status %} ({{ p.email_status|replace('_', ' ') }}{% if p.email_confidence %}, {{ p.email_confidence }}{% endif %}){% endif %}{% if p.email_evidence %} · {{ p.email_evidence }}{% endif %} · consent: {{ p.consent_status }}{% if p.consent_source %} ({{ p.consent_source }}){% endif %}</div></div>
     {% else %}<p class="muted small">{% if c.research_status %}No decision-maker named on the pages read ({{ c.research_status|replace('_', ' ') }}).{% else %}Not researched yet; the enrich job reads the company's own pages.{% endif %}</p>{% endfor %}
+    {% for p in inboxes %}<div class="row-item small">{% if lead.contact_id == p.id %}<span class="pill ok">primary</span> {% endif %}Company inbox: <b>{{ p.email }}</b>
+      <span class="muted">({{ p.email_status|replace('_', ' ') }}) · {{ ext(p.email_source_url, 'where') }}</span></div>{% endfor %}
   </div>
   <div class="card">
     <h2 style="margin-top:0">Score {{ lead.score }}/100</h2>
