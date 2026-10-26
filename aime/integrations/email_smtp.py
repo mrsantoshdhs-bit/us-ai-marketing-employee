@@ -10,15 +10,30 @@ from email.utils import formataddr, make_msgid
 from aime.config import Settings
 
 
+POSTAL_PLACEHOLDER = "[postal address required before sending]"
+
+
 class EmailNotReady(Exception):
     pass
+
+
+def compliance_problem(settings: Settings, body: str) -> str | None:
+    """What a sales email lacks under CAN-SPAM: the opt-out line, or the configured postal address.
+    No approval or quality override can waive this; an edited draft that lost its footer is not sent."""
+    text = " ".join(body.split()).lower()
+    if "unsubscribe" not in text:
+        return "the opt-out line (reply \"unsubscribe\") is missing"
+    address = " ".join((settings.company_postal_address or "").split()).lower()
+    if address and address not in text:
+        return "the postal address is missing"
+    return None
 
 
 def compliance_footer(settings: Settings, outreach: bool = False) -> str:
     """CAN-SPAM footer: why the person is receiving this, how to opt out, and our postal address.
     Outreach (B2B first touch) says it was sent to a business contact the company published."""
     unsub = settings.unsubscribe_email or settings.smtp_from or "this address"
-    address = settings.company_postal_address or "[postal address required before sending]"
+    address = settings.company_postal_address or POSTAL_PLACEHOLDER
     why = ("We emailed you because your company publishes this address as a business contact."
            if outreach else f"You are receiving this because you contacted {settings.company_name}.")
     return (

@@ -10,6 +10,7 @@ from sqlalchemy import select
 from aime.agents.inbox_agent import InboxAgent
 from aime.agents.sales_workflow import SalesWorkflowAgent
 from aime.inbox import Mailbox, new_text, parse_message
+from aime.reply_intel import reply_footer
 from aime.integrations.email_smtp import EmailSender
 from aime.models import Activity, Alert, Contact, FollowUp, InboundEmail, Lead, Opportunity, Suppression
 from aime.reply_intel import classify
@@ -267,7 +268,8 @@ def test_folded_subjects_and_unbuildable_emails_do_not_break_sending(make_ctx):
         for subject in ("Line one\nBcc: injected@evil.example", "A normal subject"):
             s.add(FollowUp(lead_id=sent.lead_id, contact_id=sent.contact_id, company_id=sent.company_id, channel="email",
                            kind="response", step=1, status="approved", approved_at=sent.approved_at, approved_by="x",
-                           subject=subject, body="Thanks.", to_email=DAVID, in_reply_to="<m1@mail.example>"))
+                           subject=subject, body="Thanks." + reply_footer(ctx.settings), to_email=DAVID,
+                           in_reply_to="<m1@mail.example>"))
         s.add(InboundEmail(message_id="<m1@mail.example>", from_email=DAVID, subject="Re: hi", status="actioned"))
     before = len(FakeSMTP.sent)
     out = SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})

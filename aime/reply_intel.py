@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from aime.crm_ops import log_activity, suppress
 from aime.models import Alert, Contact, FollowUp, InboundEmail, Lead, Opportunity
 from aime.notify import notify_event
+from aime.integrations.email_smtp import POSTAL_PLACEHOLDER
 from aime.outreach import stop_sequence
 from aime.timeutil import utcnow
 
@@ -101,7 +102,7 @@ def _signature(settings) -> str:
 
 def reply_footer(settings) -> str:
     unsub = settings.unsubscribe_email or settings.smtp_from or "this address"
-    address = settings.company_postal_address or "[postal address required before sending]"
+    address = settings.company_postal_address or POSTAL_PLACEHOLDER
     return (f"\n\n---\nTo stop receiving emails from us, reply with \"unsubscribe\" or write to {unsub}.\n"
             f"{settings.company_name} · {address}")
 
