@@ -27,6 +27,7 @@
 </header>
 <main>
   {% if data_role != 'production' %}<div class="flash demo">{{ data_role|upper }} DATABASE: sample data only. Nothing here is a real prospect.</div>{% endif %}
+  {% if maintenance %}<div class="flash">Maintenance in progress until {{ maintenance.until }} (UTC): scheduled and manual jobs are paused.</div>{% endif %}
   {% if msg %}<div class="flash">{{ msg }}</div>{% endif %}
   {% block content %}{% endblock %}
 </main>

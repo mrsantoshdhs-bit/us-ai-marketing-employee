@@ -21,6 +21,7 @@ from sqlalchemy import func, or_, select
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from aime import maintenance
 from aime.agents import AGENTS
 from aime.context import AppContext, get_context
 from aime.crm_ops import log_activity, suppress
@@ -133,6 +134,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         data.setdefault("msg", request.query_params.get("msg"))
         data.setdefault("company_name", C().settings.company_name)
         data.setdefault("data_role", C().settings.data_role)
+        data.setdefault("maintenance", maintenance.active(C().settings.data_dir))
         return templates.TemplateResponse(request, name, data)
 
     def back(url: str, msg: str) -> RedirectResponse:
@@ -453,6 +455,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/inbound/process")
     def inbound_process(background: BackgroundTasks):
+        if window := maintenance.active(C().settings.data_dir):
+            return back("/inbound", f"Maintenance in progress until {window['until']}; try again afterwards")
         background.add_task(run_job, C(), "inbound", "dashboard")
         return back("/inbound", "Inbound job started")
 
@@ -518,6 +522,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         from aime.workflows import JOBS
         if name not in JOBS:
             raise HTTPException(404)
+        if window := maintenance.active(C().settings.data_dir):
+            return back("/jobs", f"Maintenance in progress until {window['until']}; jobs can't be started now")
         background.add_task(run_job, C(), name, "dashboard")
         return back("/jobs", f"Job '{name}' started in the background")
 

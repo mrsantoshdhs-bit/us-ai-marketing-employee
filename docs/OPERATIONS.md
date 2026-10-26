@@ -48,6 +48,13 @@ is repaired automatically on the next run.
 A maintenance window always expires on its own, so automation can never stay paused by accident.
 Schema changes are applied automatically on the next start (additive only, with a backup first).
 
+During a window, scheduled ticks, dashboard "Run now" buttons and `aime run <job>` are all refused.
+To verify a deployment before ending the window, run a job explicitly with
+`aime run <job> --during-maintenance`.
+
+A post that missed its slot by more than `max_overdue_hours` is moved to the next free slot (with an
+alert). If no slot is free it is never published late: it returns to "awaiting approval" for a new time.
+
 ## Backups and restore
 
 - `db_maintenance` (daily 06:15) writes an online backup to `data/backups/` and keeps 14.

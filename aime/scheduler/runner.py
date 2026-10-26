@@ -194,9 +194,15 @@ def recover(ctx: AppContext, now: datetime | None = None) -> dict:
     return {"abandoned_jobs": jobs, "abandoned_agent_runs": agents}
 
 
-def run_job(ctx: AppContext, name: str, trigger: str = "manual") -> dict:
+def run_job(ctx: AppContext, name: str, trigger: str = "manual", *, allow_during_maintenance: bool = False,
+            recover_runs: bool = True) -> dict:
     if name not in JOBS:
         raise KeyError(f"Unknown job '{name}'. Known: {', '.join(JOBS)}")
+    window = maintenance.active(ctx.settings.data_dir)
+    if window and not allow_during_maintenance:
+        return {"job": name, "status": "skipped", "reason": f"maintenance window until {window['until']}"}
+    if recover_runs:  # manual runs close out crashed runs too, not only scheduled ticks
+        recover(ctx)
     lock = FileLock(ctx.settings.locks_dir / f"job_{name}.lock")
     if not lock.acquire():
         return {"job": name, "status": "skipped", "reason": "already running"}
@@ -269,7 +275,7 @@ def tick(ctx: AppContext, trigger: str = "scheduler", now: datetime | None = Non
         recovered = recover(ctx, now)
         for spec, due, reason in due_jobs(ctx, now):
             if due:
-                result = run_job(ctx, spec.name, trigger=trigger)
+                result = run_job(ctx, spec.name, trigger=trigger, recover_runs=False)
                 result["reason"] = reason
                 ran.append(result)
         write_heartbeat(ctx.settings, {"trigger": trigger, "pid": os.getpid(), "state": "idle", "recovered": recovered,

@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from aime.agents.base import BaseAgent, RetryPolicy
 from aime.agents.contracts import BlockedItem
 from aime.calendar_slots import free_slots
+from aime.crm_ops import log_activity
 from aime.integrations.linkedin import (LinkedInAPIError, LinkedInAuthStatus, LinkedInClient, access_token,
                                         format_commentary, get_auth_status, get_token, normalize_commentary,
                                         post_url)
@@ -118,8 +119,20 @@ class AuthorizedPublishingAgent(BaseAgent[PublishInput, PublishOutput]):
                     item.scheduled_for = slots[0]
                     item.publish_blocked_reason = "Slot was missed; rescheduled to the next free slot"
                     out.rescheduled.append(item.id)
-                    session.commit()
-                    continue
+                    self._alert_once(session, f"Post #{item.id} missed its slot and was moved to {slots[0]:%Y-%m-%d %H:%M} UTC",
+                                     level="info")
+                else:
+                    # Never publish late: without a free slot the post goes back to a person.
+                    late_hours = int((now - item.scheduled_for).total_seconds() // 3600)
+                    item.status, item.approved_by, item.approved_at = "awaiting_approval", None, None
+                    item.publish_blocked_reason = ("Missed its slot and no free slot is available; "
+                                                   "choose a new time and approve it again")
+                    out.blocked.append(BlockedItem(id=item.id, reason=item.publish_blocked_reason))
+                    log_activity(session, f"Post #{item.id} held: {late_hours} h past its slot, approval withdrawn",
+                                 self.name, type_="status_change")
+                    self._alert_once(session, f"Post #{item.id} missed its slot and needs a new time and approval")
+                session.commit()
+                continue
             if published_now >= max_items:
                 break
             attempt = self._claim(session, item, auth)

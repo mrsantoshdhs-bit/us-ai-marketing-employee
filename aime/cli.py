@@ -69,7 +69,9 @@ def cmd_status(args, ctx) -> int:
 def cmd_run(args, ctx) -> int:
     from aime.scheduler.runner import run_job
 
-    result = run_job(ctx, args.job, trigger=args.trigger)
+    if args.during_maintenance:
+        print("WARNING: running during the maintenance window (use only to verify a deployment)")
+    result = run_job(ctx, args.job, trigger=args.trigger, allow_during_maintenance=args.during_maintenance)
     _print(result)
     return 0 if result["status"] in ("success", "skipped") else 1
 
@@ -278,6 +280,8 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("run", help="Run one job now")
     r.add_argument("job")
     r.add_argument("--trigger", default="cli")
+    r.add_argument("--during-maintenance", action="store_true",
+                   help="Run even while a maintenance window is active (deployment verification only)")
     t = sub.add_parser("tick", help="Run all due jobs once (what the OS scheduler calls)")
     t.add_argument("--trigger", default="cli")
     t.add_argument("--quiet", action="store_true")
