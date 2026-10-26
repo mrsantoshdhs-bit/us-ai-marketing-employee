@@ -63,6 +63,15 @@ def test_cross_site_posts_blocked(client):
     assert client.post("/content/1/approve", headers={"origin": "https://evil.example"}).status_code == 403
 
 
+def test_referrer_policy_lets_browsers_send_origin(client):
+    # Under "no-referrer" browsers send "Origin: null" on form posts, so sign-in and every button got a 403.
+    for path in ("/", "/login"):
+        assert client.get(path).headers["referrer-policy"] == "same-origin"
+    assert client.post("/login", data={"username": "x", "password": "y"}, headers={"origin": "null"}).status_code == 403
+    signin = client.post("/login", data={"username": "x", "password": "y"}, headers=ORIGIN, follow_redirects=False)
+    assert signin.status_code == 303 and signin.headers["location"].startswith("/login?error=")
+
+
 def test_content_approval_flow(client, seeded):
     r = client.post("/content/1/approve", headers=ORIGIN, follow_redirects=False)
     assert r.status_code == 303
