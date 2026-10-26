@@ -11,7 +11,7 @@ ANGLES: dict[str, list[dict]] = {
         {
             "title": "When an off-the-shelf CRM stops fitting your process",
             "hook": "Most {audience} don't have a CRM problem. They have a process the CRM was never designed around.",
-            "insight": "When the tool doesn't match how deals actually move, people work around it: side spreadsheets, sticky notes, and {pain}. The data gets thinner, and so does trust in the pipeline.",
+            "insight": "When the tool doesn't match how deals actually move, people work around it: side lists, sticky notes, and {pain}. The data gets thinner, and so does trust in the pipeline.",
             "bullets": [
                 "Model the pipeline stages your team really uses, not a vendor's default",
                 "Capture data automatically from forms, email, and calls instead of asking people to re-type it",
@@ -131,7 +131,7 @@ ANGLES: dict[str, list[dict]] = {
         {
             "title": "Lead generation that respects the buyer",
             "hook": "More leads isn't the goal. Better-qualified conversations are.",
-            "insight": "Many {audience} collect leads from several channels and then lose track of them among {pain}. Automating capture, scoring, and routing keeps the best opportunities from going cold.",
+            "insight": "Many {audience} collect leads from their website, phone calls, and events, then lose track of them among {pain}. Automating capture, scoring, and routing keeps the best opportunities from going cold.",
             "bullets": [
                 "Capture every inbound inquiry in one place",
                 "Score leads on fit and stated needs, not guesswork",
