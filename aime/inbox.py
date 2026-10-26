@@ -95,7 +95,7 @@ def parse_message(raw: bytes) -> ParsedEmail:
         received = parsedate_to_datetime(msg.get("Date")).astimezone(timezone.utc).replace(tzinfo=None)
     except (TypeError, ValueError):
         received = utcnow()
-    subject = str(make_header(decode_header(msg.get("Subject", ""))))
+    subject = " ".join(str(make_header(decode_header(msg.get("Subject", "")))).split())  # unfold long headers
     auto = (msg.get("Auto-Submitted", "no").lower() not in ("no", "") or msg.get("X-Autoreply") is not None
             or msg.get("Precedence", "").lower() in ("auto_reply", "bulk", "junk") or bool(AUTO_SUBJECT.search(subject)))
     is_bounce = bool(BOUNCE_SENDERS.search(addr or "")) or msg.get_content_type() == "multipart/report" \

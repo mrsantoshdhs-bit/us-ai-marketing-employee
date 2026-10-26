@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from aime.crm_ops import log_activity
 from aime.dedupe import registrable_domain
-from aime.models import Alert, Company, Contact, InboundEmail, Lead, Meeting, Opportunity
+from aime.models import Alert, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity
 from aime.notify import notify_event
 from aime.outreach import set_status
 from aime.timeutil import utcnow
@@ -105,7 +105,15 @@ def match_lead(session: Session, email: str) -> tuple[Lead | None, Contact | Non
     company = session.execute(select(Company).where(Company.domain == domain, Company.merged_into_id.is_(None))).scalars().first()
     if company:
         return session.execute(select(Lead).where(Lead.company_id == company.id)).scalars().first(), None
-    return None, None
+    # The address we emailed (or that replied to us) for a lead: e.g. a prospect booking from their reply address,
+    # or the owner's test address in a controlled test.
+    f = session.execute(select(FollowUp).where((func.lower(FollowUp.to_email) == email) | (func.lower(FollowUp.delivered_to) == email))
+                        .order_by(FollowUp.id.desc())).scalars().first()
+    if f is not None:
+        return session.get(Lead, f.lead_id), None
+    r = session.execute(select(InboundEmail).where(func.lower(InboundEmail.from_email) == email, InboundEmail.lead_id.is_not(None))
+                        .order_by(InboundEmail.id.desc())).scalars().first()
+    return (session.get(Lead, r.lead_id) if r else None), None
 
 
 def record_meeting(session: Session, settings, info: dict, actor: str, row: InboundEmail | None = None,

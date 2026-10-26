@@ -303,7 +303,10 @@ class Settings:
     def load(cls, base_dir: Path | None = None, env_file: Path | None = None, **overrides: Any) -> "Settings":
         base = Path(base_dir) if base_dir else BASE_DIR
         env: dict[str, str | None] = {}
-        env_path = env_file if env_file is not None else base / ".env"
+        # AIME_ENV_FILE points at a different settings file instead of .env (e.g. an acceptance run with its
+        # own data folder and test-mode mailbox); the production .env is then not read at all.
+        alternate = os.environ.get("AIME_ENV_FILE")
+        env_path = env_file if env_file is not None else (Path(alternate) if alternate else base / ".env")
         if env_path and Path(env_path).exists():
             env.update(dotenv_values(env_path))
         # Real environment variables win over .env

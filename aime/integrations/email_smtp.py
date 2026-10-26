@@ -58,6 +58,9 @@ class EmailSender:
         if not ready:
             raise EmailNotReady(reason)
         s = self.settings
+        if any(ch in to for ch in "\r\n,;") or "@" not in to:
+            raise EmailNotReady(f"invalid recipient address {to!r}")
+        subject = " ".join(subject.split())  # a header is one line: no folding, no injected headers
         actual, redirected = self.recipient_for(to)
         if redirected:  # controlled test: nobody outside the test list is ever emailed
             subject = f"[TEST for {to}] {subject}"

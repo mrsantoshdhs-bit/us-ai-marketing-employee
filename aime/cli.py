@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -321,6 +322,23 @@ def cmd_simulate_reply(args, ctx) -> int:
     return 0
 
 
+def cmd_acceptance_report(args, ctx) -> int:
+    """Read-only: what the records show for each of the 19 acceptance tests; also written as Markdown."""
+    from aime.acceptance import acceptance_evidence, render_markdown
+    from aime.timeutil import utcnow
+
+    with ctx.db.session() as s:
+        rows = acceptance_evidence(s, ctx.settings)
+    for r in rows:
+        print(f"{r['test']:>2}. {r['status']:<18} {r['name']}\n      {r['evidence']}")
+    label = f"{ctx.settings.data_role} data, {utcnow():%Y-%m-%d %H:%M} UTC"
+    out = ctx.settings.reports_dir / f"acceptance_{utcnow():%Y%m%d_%H%M}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(render_markdown(rows, label), encoding="utf-8")
+    print(f"Written to {out}")
+    return 0
+
+
 def cmd_policy(args, ctx) -> int:
     """Shadow-mode auto-publishing policy: record and show what it would do. It never publishes."""
     from aime.policy import agreement, evaluate_shadow
@@ -467,6 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
     rd = sub.add_parser("restore-drill", help="Restore a backup into a temp folder and check it (never touches data/)")
     rd.add_argument("--source", help="Backup .db, bundle .zip or encrypted .aimebak (default: latest local backup)")
     rd.add_argument("--extract-to", help="New folder (outside data/) to receive the checked files for a manual restore")
+    sub.add_parser("acceptance-report", help="Read-only: evidence for each of the 19 acceptance tests")
     sr = sub.add_parser("simulate-reply", help="Process a clearly labelled SIMULATED reply from a lead (testing)")
     sr.add_argument("--lead", type=int, required=True)
     sr.add_argument("--text", required=True)
@@ -505,6 +524,7 @@ COMMANDS = {
     "seed-demo": cmd_seed_demo, "doctor": cmd_doctor, "backup": cmd_backup, "maintenance": cmd_maintenance,
     "refresh-graphics": cmd_refresh_graphics, "backup-verify": cmd_backup_verify, "restore-drill": cmd_restore_drill,
     "user": cmd_user, "policy": cmd_policy, "simulate-reply": cmd_simulate_reply,
+    "acceptance-report": cmd_acceptance_report,
 }
 PRODUCTION_DATA_DIR = BASE_DIR / "data"
 
@@ -519,6 +539,12 @@ def main(argv: list[str] | None = None) -> int:
         resolved = Path(data_dir).resolve()
         role = "production" if resolved == PRODUCTION_DATA_DIR.resolve() else "demo"
         settings = Settings.load(data_dir=resolved, database_url="", data_role=role)
+    if os.environ.get("AIME_ENV_FILE"):
+        settings = settings or Settings.load()
+        if settings.data_dir.resolve() == PRODUCTION_DATA_DIR.resolve():
+            print("AIME_ENV_FILE is set but its AIME_DATA_DIR is the production data folder. An alternate settings file "
+                  "must use its own data folder (set AIME_DATA_DIR in it). Nothing was run.")
+            return 2
     ctx = create_context(settings)
     set_context(ctx)
     return COMMANDS[args.cmd](args, ctx)

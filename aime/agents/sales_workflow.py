@@ -299,6 +299,14 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
                 session.commit()
                 continue
+            except ValueError as exc:
+                # The message could not be built (e.g. a malformed header): nothing left this computer.
+                f.status, f.send_started_at = "awaiting_approval", None
+                f.approved_at, f.approved_by = None, None
+                f.blocked_reason = redact(f"Could not be sent: {exc}; edit it and approve again")[:300]
+                out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+                session.commit()
+                continue
             except (OSError, smtplib.SMTPException) as exc:
                 # Timeout or disconnect mid-conversation: the message may have been delivered.
                 f.status = "uncertain"
