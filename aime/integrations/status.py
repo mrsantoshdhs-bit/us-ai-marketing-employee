@@ -54,8 +54,13 @@ def integration_statuses(ctx: AppContext, session: Session, include_scheduler: b
                  "detail": "PUBLISHING_ENABLED in .env (posts also need per-post approval)", "action": ""})
 
     ready, reason = EmailSender(s).status()
-    rows.append({"name": "Outbound email (replies to inquiries)", "state": "READY" if ready else
+    rows.append({"name": "Outbound email (approved replies and outreach)", "state": "READY" if ready else
                  ("DISABLED" if "DISABLED" in reason else "NOT CONFIGURED"), "detail": reason, "action": ""})
+    rows.append({"name": "Sales mailbox (replies, bounces)", "state": "CONFIGURED" if s.imap_configured else "NOT CONFIGURED",
+                 "detail": f"{s.imap_host} / {s.imap_folder}, read-only" if s.imap_configured else "IMAP_HOST and credentials empty",
+                 "action": "" if s.imap_configured else "Gmail: IMAP_HOST=imap.gmail.com with your app password"})
+    rows.append({"name": "Booking link (Calendly)", "state": "CONFIGURED" if s.calendly_url else "NOT CONFIGURED",
+                 "detail": s.calendly_url or "CALENDLY_URL empty: replies ask for times instead", "action": ""})
 
     llm_ok = llm_reachable(ctx)  # probed now (cached 60 s), not the value cached when this process started
     rows.append({"name": "Local LLM (Ollama)", "state": "AVAILABLE" if llm_ok else "UNAVAILABLE",

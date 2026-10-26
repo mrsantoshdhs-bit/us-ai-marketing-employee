@@ -34,7 +34,8 @@ from aime.integrations.status import integration_statuses
 from aime.knowledge.geo import US_REGIONS
 from aime.knowledge.industries import INDUSTRIES, industry_label
 from aime.knowledge.services import SERVICES, service_name
-from aime.models import (Activity, AgentRun, Alert, Campaign, Company, Contact, ContentItem, FollowUp, InboundInquiry,
+from aime.models import (Activity, AgentRun, Alert, Campaign, Company, Contact, ContentItem, FollowUp, InboundEmail,
+                         InboundInquiry,
                          JobRun, JobState, Lead, MarketingPlan, Opportunity, PolicyDecision, PublishAttempt, Report,
                          ResearchSnapshot, ResearchTopic, Signal)
 from aime.monitoring import agent_stats, read_heartbeat
@@ -44,6 +45,8 @@ from aime.outreach import set_status as set_outreach_status
 from aime.outreach import stop_sequence
 from aime.qc.checks import run_quality_checks
 from aime.qc.email_checks import run_email_checks
+from aime.reply_intel import QUESTION_PLACEHOLDER
+from aime.reply_intel import act as act_on_reply
 from aime.scheduler.runner import due_jobs, run_job
 from aime.timeutil import fmt_et, fmt_local, utcnow
 from aime.web.auth import (COOKIE, SESSION_SECONDS, AuthMiddleware, authenticate, current_username, make_cookie,
@@ -223,6 +226,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             ]
             task_total = cnt(FollowUp, FollowUp.channel == "task", FollowUp.status == "pending")
             health = health_strip(ctx, s)
+            replies = s.execute(select(InboundEmail).where(InboundEmail.status == "needs_review")
+                                .order_by(InboundEmail.received_at.desc()).limit(10)).scalars().all()
             policy = agreement(s)
             pending = [r for r in policy["rows"] if r["post_status"] in ("awaiting_approval", "approved")]
             policy_now = {"would_publish": sum(r["decision"] == "would_publish" for r in pending),
@@ -230,7 +235,49 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             post_decisions = {r["content_id"]: r["decision"] for r in policy["rows"]}
         return render(request, "today.html", posts=posts, emails=emails, tasks=tasks, task_total=task_total,
                       exceptions=exceptions, alerts=alerts, funnel=funnel, stages=stages, health=health,
-                      policy=policy_now, post_decisions=post_decisions)
+                      policy=policy_now, post_decisions=post_decisions, replies=replies)
+
+    # ------------------------------------------------------------------ replies (sales mailbox)
+    @app.get("/inbox", response_class=HTMLResponse)
+    def inbox_page(request: Request, show: str = "review"):
+        settings = C().settings
+        with C().db.session() as s:
+            stmt = select(InboundEmail)
+            if show == "review":
+                stmt = stmt.where(InboundEmail.status == "needs_review")
+            rows = s.execute(stmt.order_by(InboundEmail.received_at.desc()).limit(200)).scalars().all()
+            for r in rows:
+                _ = r.lead.company if r.lead else None
+            counts = dict(s.execute(select(InboundEmail.category, func.count(InboundEmail.id))
+                                    .group_by(InboundEmail.category)).all())
+            state = kv_get(s, "inbox.state")
+        return render(request, "mailbox.html", rows=rows, show=show, counts=counts, state=state,
+                      mailbox=f"{settings.imap_host} / {settings.imap_folder}" if settings.imap_configured else None)
+
+    @app.post("/inbox/{eid}/{action}")
+    def inbox_action(request: Request, eid: int, action: str, category: str = Form("")):
+        with C().db.session() as s:
+            row = s.get(InboundEmail, eid) or _404()
+            if action == "reviewed":
+                row.status = "reviewed"
+                msg = "Marked reviewed"
+            elif action == "reclassify" and category in ("interested", "not_interested", "objection", "referral",
+                                                          "question", "unsubscribe", "out_of_office", "bounce", "other"):
+                if row.suggested_followup_id:
+                    old = s.get(FollowUp, row.suggested_followup_id)
+                    if old and old.status == "awaiting_approval":
+                        old.status, old.blocked_reason = "rejected", "Replaced after the reply was reclassified"
+                previous = row.category
+                row.category, row.confidence = category, "high"
+                row.reasons = list(row.reasons or []) + [f"set to {category} by {who(request)}"]
+                act_on_reply(s, C().settings, row, who(request))
+                row.status = "reviewed" if row.status == "needs_review" else row.status
+                log_activity(s, f"Reply #{row.id} reclassified from {previous} to {category}", who(request),
+                             type_="override", company_id=row.company_id, lead_id=row.lead_id)
+                msg = f"Reclassified as {category.replace('_', ' ')}; {row.action_note or ''}"
+            else:
+                raise HTTPException(400, "Action not allowed")
+        return back("/inbox", msg)
 
     # ------------------------------------------------------------------ system overview
     @app.get("/system", response_class=HTMLResponse)
@@ -442,6 +489,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     qc_status = ((f.quality or {}).get("qc") or {}).get("status")
                 if action == "save":
                     msg = "Saved" + (f"; quality checks: {qc_status}" if qc_status else "")
+                elif QUESTION_PLACEHOLDER in (f.body or ""):
+                    return back(f"/followups#f{f.id}", "Write your answer in place of the placeholder before approving")
                 elif qc_status in ("held", "failed") and qc_override != "yes":
                     return back(f"/followups#f{f.id}", f"Quality checks {qc_status}: review the findings and tick "
                                                        "'I reviewed the quality findings' to approve")

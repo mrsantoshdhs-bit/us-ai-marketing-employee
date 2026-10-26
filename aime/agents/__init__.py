@@ -2,6 +2,7 @@
 
 from aime.agents.analytics import AnalyticsReportingAgent
 from aime.agents.company_research import CompanyResearchAgent
+from aime.agents.inbox_agent import InboxAgent
 from aime.agents.crm import CRMManagementAgent
 from aime.agents.linkedin_content import LinkedInContentAgent
 from aime.agents.marketing_manager import MarketingManagerAgent
@@ -20,6 +21,7 @@ AGENTS = {
         AuthorizedPublishingAgent,
         LeadQualificationAgent,
         SalesWorkflowAgent,
+        InboxAgent,
         CRMManagementAgent,
         AnalyticsReportingAgent,
     )

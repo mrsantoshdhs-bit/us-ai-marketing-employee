@@ -56,3 +56,10 @@ def notify_alert(settings, level: str, message: str, sender=toast) -> bool:
     if level not in ("warning", "error"):
         return False
     return sender(f"{TITLE}: {level}", message)
+
+
+def notify_event(settings, message: str, sender=toast) -> bool:
+    """Toast for a sales event the Sales Manager should see now (e.g. an interested reply). Never in tests."""
+    if settings is None or not getattr(settings, "alert_toast", False) or getattr(settings, "data_role", "") == "test":
+        return False
+    return sender(f"{TITLE}: sales", message)

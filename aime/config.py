@@ -110,6 +110,13 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "sender_name": ("SENDER_NAME", str),
     "company_postal_address": ("COMPANY_POSTAL_ADDRESS", str),
     "unsubscribe_email": ("UNSUBSCRIBE_EMAIL", str),
+    "outbound_test_recipients": ("OUTBOUND_TEST_RECIPIENTS", str),
+    "imap_host": ("IMAP_HOST", str),
+    "imap_port": ("IMAP_PORT", int),
+    "imap_username": ("IMAP_USERNAME", str),
+    "imap_password": ("IMAP_PASSWORD", str),
+    "imap_folder": ("IMAP_FOLDER", str),
+    "calendly_url": ("CALENDLY_URL", str),
     "dashboard_host": ("DASHBOARD_HOST", str),
     "dashboard_port": ("DASHBOARD_PORT", int),
     "dashboard_auth": ("DASHBOARD_AUTH", bool),
@@ -173,6 +180,16 @@ class Settings:
     sender_name: str = ""
     company_postal_address: str = ""
     unsubscribe_email: str = ""
+    # Controlled testing: when set (comma-separated), email is sent ONLY to these addresses, whatever else
+    # is approved. Used for the acceptance test with addresses the owner controls.
+    outbound_test_recipients: str = ""
+    # The sales mailbox, read-only (Gmail: imap.gmail.com, same app password as SMTP). Empty = not monitored.
+    imap_host: str = ""
+    imap_port: int = 993
+    imap_username: str = ""  # defaults to SMTP_USERNAME
+    imap_password: str = field(default="", repr=False)  # defaults to SMTP_PASSWORD
+    imap_folder: str = "INBOX"
+    calendly_url: str = ""  # booking link offered to interested prospects
 
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
@@ -260,6 +277,19 @@ class Settings:
 
     def section(self, name: str) -> dict:
         return self.business.get(name, {})
+
+    @property
+    def test_recipients(self) -> set[str]:
+        return {a.strip().lower() for a in self.outbound_test_recipients.split(",") if a.strip()}
+
+    @property
+    def imap_credentials(self) -> tuple[str, str]:
+        return self.imap_username or self.smtp_username, self.imap_password or self.smtp_password
+
+    @property
+    def imap_configured(self) -> bool:
+        user, password = self.imap_credentials
+        return bool(self.imap_host and user and password)
 
     @property
     def linkedin_configured(self) -> bool:

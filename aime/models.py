@@ -240,13 +240,55 @@ class FollowUp(Timestamped, Base):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime)
     message_id: Mapped[str | None] = mapped_column(String(200))
-    kind: Mapped[str | None] = mapped_column(String(20))  # outreach | None (reply to someone who contacted us)
+    # outreach | response (reply to a prospect's email, aime.inbox) | None (reply to someone who contacted us)
+    kind: Mapped[str | None] = mapped_column(String(20))
+    in_reply_to: Mapped[str | None] = mapped_column(String(300))  # Message-ID of the email this answers
+    delivered_to: Mapped[str | None] = mapped_column(String(200))  # actual recipient (test mode redirects)
     to_email: Mapped[str | None] = mapped_column(String(200))  # the address the approval applies to
     evidence: Mapped[list[Any] | None] = mapped_column(JSON, default=list)  # [{fact, url, kind}] used in the email
     quality: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict)  # email quality-check report
 
     lead: Mapped[Lead] = relationship()
     contact: Mapped[Contact | None] = relationship()
+
+
+class InboundEmail(Base):
+    """An email that arrived in the monitored sales mailbox (or a clearly labelled simulated one), with its
+    classification, the lead it was matched to, and what was done about it."""
+
+    __tablename__ = "inbound_emails"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mailbox_uid: Mapped[str | None] = mapped_column(String(60))  # "<uidvalidity>:<uid>"
+    message_id: Mapped[str | None] = mapped_column(String(300), unique=True)
+    in_reply_to: Mapped[str | None] = mapped_column(String(300))
+    references: Mapped[str | None] = mapped_column(Text)
+    from_email: Mapped[str] = mapped_column(String(200), index=True)
+    from_name: Mapped[str | None] = mapped_column(String(200))
+    to_email: Mapped[str | None] = mapped_column(String(200))
+    subject: Mapped[str] = mapped_column(String(300), default="")
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    body_text: Mapped[str | None] = mapped_column(Text)
+    new_text: Mapped[str | None] = mapped_column(Text)  # the reply without the quoted earlier message
+    auto_submitted: Mapped[bool] = mapped_column(Boolean, default=False)
+    bounced_addresses: Mapped[list[Any] | None] = mapped_column(JSON, default=list)
+    # interested | not_interested | objection | referral | question | unsubscribe | out_of_office | bounce |
+    # calendly | other
+    category: Mapped[str | None] = mapped_column(String(30), index=True)
+    confidence: Mapped[str | None] = mapped_column(String(10))  # high | medium | low
+    reasons: Mapped[list[Any] | None] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(20), default="new", index=True)  # new | actioned | needs_review | reviewed | ignored
+    company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"))
+    lead_id: Mapped[int | None] = mapped_column(ForeignKey("leads.id"), index=True)
+    contact_id: Mapped[int | None] = mapped_column(ForeignKey("contacts.id"))
+    followup_id: Mapped[int | None] = mapped_column(ForeignKey("followups.id"))
+    suggested_followup_id: Mapped[int | None] = mapped_column(Integer)
+    action_note: Mapped[str | None] = mapped_column(Text)
+    is_simulated: Mapped[bool] = mapped_column(Boolean, default=False)  # created by `aime simulate-reply`
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    lead: Mapped["Lead | None"] = relationship()
+    contact: Mapped["Contact | None"] = relationship()
 
 
 class Suppression(Base):

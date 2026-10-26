@@ -292,6 +292,35 @@ def cmd_backup_verify(args, ctx) -> int:
     return 0 if check["ok"] else 1
 
 
+def cmd_simulate_reply(args, ctx) -> int:
+    """A clearly labelled SIMULATED reply from a lead's contact, processed like a real one (for testing)."""
+    import uuid
+
+    from aime.models import FollowUp, InboundEmail, Lead
+    from aime.reply_intel import process_pending
+
+    with ctx.db.session() as s:
+        lead = s.get(Lead, args.lead)
+        if lead is None:
+            print(f"No lead #{args.lead}")
+            return 1
+        last = s.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email")
+                         .order_by(FollowUp.id.desc())).scalars().first()
+        sender = args.from_email or (last.to_email if last and last.to_email else None) or (lead.contact.email if lead.contact else None)
+        if not sender:
+            print("This lead has no email to reply from; pass --from-email")
+            return 1
+        subject = f"Re: {last.subject}" if last else "Re: your email"
+        s.add(InboundEmail(message_id=f"<simulated-{uuid.uuid4().hex}@aime.local>", in_reply_to=last.message_id if last else None,
+                           from_email=sender.lower(), from_name=lead.contact.display_name if lead.contact else None,
+                           subject=subject, body_text=args.text, new_text=args.text, is_simulated=True, status="new"))
+        s.commit()
+        process_pending(s, ctx.settings, "simulate-reply")
+        row = s.execute(select(InboundEmail).order_by(InboundEmail.id.desc())).scalars().first()
+        print(f"SIMULATED reply from {row.from_email}: {row.category} ({row.confidence}) -> {row.status}; {row.action_note}")
+    return 0
+
+
 def cmd_policy(args, ctx) -> int:
     """Shadow-mode auto-publishing policy: record and show what it would do. It never publishes."""
     from aime.policy import agreement, evaluate_shadow
@@ -438,6 +467,10 @@ def build_parser() -> argparse.ArgumentParser:
     rd = sub.add_parser("restore-drill", help="Restore a backup into a temp folder and check it (never touches data/)")
     rd.add_argument("--source", help="Backup .db, bundle .zip or encrypted .aimebak (default: latest local backup)")
     rd.add_argument("--extract-to", help="New folder (outside data/) to receive the checked files for a manual restore")
+    sr = sub.add_parser("simulate-reply", help="Process a clearly labelled SIMULATED reply from a lead (testing)")
+    sr.add_argument("--lead", type=int, required=True)
+    sr.add_argument("--text", required=True)
+    sr.add_argument("--from-email", help="Default: the address of the lead's latest email")
     pl = sub.add_parser("policy", help="Shadow-mode auto-publishing policy (records decisions; never publishes)")
     pl.add_argument("action", choices=["show", "evaluate"], nargs="?", default="show")
     mt = sub.add_parser("maintenance", help="Pause scheduled ticks for upgrades (always expires)")
@@ -471,7 +504,7 @@ COMMANDS = {
     "scheduler": cmd_scheduler, "llm-check": cmd_llm_check, "inbound": cmd_inbound, "suppress": cmd_suppress,
     "seed-demo": cmd_seed_demo, "doctor": cmd_doctor, "backup": cmd_backup, "maintenance": cmd_maintenance,
     "refresh-graphics": cmd_refresh_graphics, "backup-verify": cmd_backup_verify, "restore-drill": cmd_restore_drill,
-    "user": cmd_user, "policy": cmd_policy,
+    "user": cmd_user, "policy": cmd_policy, "simulate-reply": cmd_simulate_reply,
 }
 PRODUCTION_DATA_DIR = BASE_DIR / "data"
 

@@ -34,6 +34,10 @@ description = "LinkedIn Content Agent: keep the content calendar filled"
 every_minutes = 30
 description = "CRM Agent ingests inbound inquiries -> Qualification -> Sales Workflow"
 
+[jobs.inbox]
+every_minutes = 15
+description = "Inbox Agent: read the sales mailbox (read-only), classify replies, update the CRM, suggest responses"
+
 [jobs.followups]
 every_minutes = 60
 description = "Sales Workflow Agent: permitted follow-ups, drafts and tasks"

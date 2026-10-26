@@ -80,6 +80,10 @@ intervals_days = [0, 4, 10]
 max_touches = 3
 # Also draft to a published company inbox (info@, hello@ ...) when no named person has an email.
 include_company_inboxes = true
+# Sending limits for approved outreach (replies to people who wrote to us are not limited).
+daily_send_limit = 20
+per_domain_daily_limit = 1
+sends_per_run = 5
 
 [enrichment]
 # Company research reads each company's own website (robots.txt honoured) and SEC filings.
