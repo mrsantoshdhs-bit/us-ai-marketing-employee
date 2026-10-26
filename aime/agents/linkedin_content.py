@@ -20,7 +20,12 @@ from aime.knowledge.services import SERVICES
 from aime.models import ContentItem, MarketingPlan, ResearchTopic
 from aime.sources.trends import fetch_trending_topics
 from aime.timeutil import utcnow
+from aime.monitoring import alert_once
+from aime.qc import summary as qc_summary
+from aime.qc.checks import run_quality_checks
 from aime.visuals import render_post_image
+
+QC_ATTEMPTS = 3  # drafts tried per slot before it is left empty
 
 PENDING_STATUSES = ("draft", "awaiting_approval", "approved")
 
@@ -41,6 +46,8 @@ class ContentOutput(BaseModel):
     pending_total: int = 0
     skipped_reason: str | None = None
     images_by_renderer: dict[str, int] = Field(default_factory=dict)
+    qc_counts: dict[str, int] = Field(default_factory=dict)  # passed / held
+    qc_rejected: list[str] = Field(default_factory=list)  # drafts replaced because they failed checks
 
 
 class LinkedInContentAgent(BaseAgent[ContentInput, ContentOutput]):
@@ -87,23 +94,42 @@ class LinkedInContentAgent(BaseAgent[ContentInput, ContentOutput]):
 
         for i in range(n):
             brief = briefs[i % len(briefs)]
-            combo = self._unused_combo(brief, recent_fps)
-            if combo is None:
+            hashtags = build_hashtags(brief.service, brief.industry, int(cfg.get("max_hashtags", 5)))
+            accepted = None
+            for attempt in range(QC_ATTEMPTS):  # a draft that fails quality checks is replaced by another one
+                combo = self._unused_combo(brief, recent_fps)
+                if combo is None:
+                    break
+                angle, pain = combo
+                fp = f"{brief.service}:{brief.industry}:{angle}:{pain}"
+                recent_fps.add(fp)  # never retry the same angle in this run
+                draft = write_post(llm, company, brief.service, brief.industry, angle, pain, brief.cta + i + attempt,
+                                   int(cfg.get("min_words", 70)), int(cfg.get("max_words", 260)))
+                if draft.quality.get("llm_rejected"):
+                    out.llm_rejections += 1
+                image = render_post_image(self.settings, draft.title, draft.body, brief.service, brief.industry,
+                                          seed=len(recent_fps) + i)
+                info = {k: image[k] for k in ("renderer", "style", "metrics", "problems", "headline", "points")}
+                qc = run_quality_checks(session, self.settings, title=draft.title, body=draft.body, hashtags=hashtags,
+                                        image_path=image["path"], image_info=info)
+                info["phash"] = qc.pop("image_phash", None)
+                if qc["decision"] != "fail":
+                    accepted = (fp, draft, image, info, qc)
+                    break
+                out.qc_rejected.append(f"{draft.title}: {qc_summary(qc)}"[:300])
+                image["path"].unlink(missing_ok=True)  # discard the rejected draft's own image
+            if accepted is None:
+                if out.qc_rejected:
+                    alert_once(session, "warning", self.name, f"A post slot stayed empty: drafts failed quality checks "
+                               f"({out.qc_rejected[-1][:200]})", self.settings)
                 continue
-            angle, pain = combo
-            fp = f"{brief.service}:{brief.industry}:{angle}:{pain}"
-            draft = write_post(llm, company, brief.service, brief.industry, angle, pain, brief.cta + i,
-                               int(cfg.get("min_words", 70)), int(cfg.get("max_words", 260)))
-            if draft.quality.get("llm_rejected"):
-                out.llm_rejections += 1
-            image = render_post_image(self.settings, draft.title, draft.body, brief.service, brief.industry,
-                                      seed=len(recent_fps) + i)
+            fp, draft, image, info, qc = accepted
             out.images_by_renderer[image["renderer"]] = out.images_by_renderer.get(image["renderer"], 0) + 1
-            quality = {**draft.quality, "image": {k: image[k] for k in ("renderer", "style", "metrics", "problems")}}
+            out.qc_counts[qc["status"]] = out.qc_counts.get(qc["status"], 0) + 1
+            quality = {**draft.quality, "image": info, "qc": qc}
             item = ContentItem(
                 campaign_id=brief.campaign_id, platform="linkedin", service=brief.service, industry=brief.industry,
-                title=draft.title, body=draft.body,
-                hashtags=build_hashtags(brief.service, brief.industry, int(cfg.get("max_hashtags", 5))),
+                title=draft.title, body=draft.body, hashtags=hashtags,
                 image_path=image["path"].name,
                 image_alt=(f"{company} graphic with the headline \"{draft.title}\". Topic: "
                            f"{SERVICES[brief.service].name} for {INDUSTRIES[brief.industry].label}.")[:300],

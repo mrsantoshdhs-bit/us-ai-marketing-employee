@@ -38,6 +38,8 @@ from aime.models import (Activity, AgentRun, Alert, Campaign, Company, ContentIt
                          JobRun, JobState, Lead, MarketingPlan, Opportunity, PublishAttempt, Report, ResearchTopic,
                          Signal)
 from aime.monitoring import agent_stats, read_heartbeat
+from aime.qc import summary as qc_summary
+from aime.qc.checks import run_quality_checks
 from aime.scheduler.runner import due_jobs, run_job
 from aime.timeutil import fmt_et, fmt_local, utcnow
 from aime.web.auth import (COOKIE, SESSION_SECONDS, AuthMiddleware, authenticate, current_username, make_cookie,
@@ -384,7 +386,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.post("/content/{cid}/{action}")
     def content_action(request: Request, cid: int, action: str, title: str = Form(""), body: str = Form(""),
                        hashtags: str = Form(""), scheduled_et: str = Form(""), post_ref: str = Form(""),
-                       checked: str = Form("")):
+                       checked: str = Form(""), qc_override: str = Form("")):
         with C().db.session() as s:
             item = s.get(ContentItem, cid) or _404()
             if item.status == "published":
@@ -424,11 +426,22 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 if item.status == "approved":
                     item.status = "awaiting_approval"  # edits need a fresh approval
                     item.approved_by, item.approved_at = None, None
-                msg = "Saved"
+                image_info = dict((item.quality or {}).get("image") or {"renderer": "pillow"})
+                qc = run_quality_checks(s, C().settings, title=item.title, body=item.body, hashtags=item.hashtags or [],
+                                        image_path=C().settings.assets_dir / item.image_path if item.image_path else None,
+                                        image_info=image_info, exclude_id=item.id)
+                image_info["phash"] = qc.pop("image_phash", None)
+                item.quality = {**(item.quality or {}), "image": image_info, "qc": qc}
+                msg = f"Saved; quality checks: {qc['status']} ({qc_summary(qc)[:160]})"
             elif action == "approve" and item.status in ("awaiting_approval", "draft", "failed"):
+                if item.qc_status in ("held", "failed") and qc_override != "yes":
+                    return back(f"/content/{cid}", "Tick 'I reviewed the quality findings' to approve this post")
                 item.status, item.approved_by, item.approved_at = "approved", who(request), utcnow()
                 item.publish_attempts = 0
                 msg = "Approved for publishing at its scheduled time (requires LinkedIn authorization)"
+                if item.qc_status in ("held", "failed"):
+                    log_activity(s, f"Post #{item.id} approved despite quality findings: {qc_summary(item.qc)[:200]}",
+                                 who(request), type_="content")
             elif action == "reject":
                 item.status = "rejected"
                 msg = "Rejected"

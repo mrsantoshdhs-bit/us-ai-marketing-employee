@@ -15,6 +15,7 @@ dependencies = [
     "pillow>=10.4",
     "tzdata>=2024.1",
     "cryptography>=43",
+    "pyspellchecker>=0.8",
 ]
 
 [project.scripts]
