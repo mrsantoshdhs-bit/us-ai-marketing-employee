@@ -320,11 +320,16 @@ def test_companies_that_sell_ai_agents_are_flagged_and_a_person_can_clear_it(mak
                                "regional carriers.")}
     ctx = recheck_ctx(make_ctx, state)
     cid = add_company(ctx)
+    with ctx.db.session() as s:  # an outreach draft already waiting for approval
+        s.add(FollowUp(lead_id=s.execute(select(Lead)).scalar_one().id, company_id=cid, channel="email", kind="outreach",
+                       step=1, status="awaiting_approval", subject="Hi", body="Body", to_email=f"info@{SITE}"))
     assert CompanyResearchAgent(ctx).run({"company_ids": [cid]}).output.competitors == [cid]
     LeadQualificationAgent(ctx).run({})
     with ctx.db.session() as s:
         assert s.get(Company, cid).is_competitor
         assert s.execute(select(Lead)).scalar_one().status == "disqualified"
+        draft = s.execute(select(FollowUp)).scalar_one()
+        assert draft.status == "cancelled" and "competitor" in draft.blocked_reason
         note = s.execute(select(Activity).where(Activity.subject.like("Marked as a possible competitor%"))).scalars().one()
         assert "ai agents that" in note.subject.lower()
     client = TestClient(create_app(ctx))

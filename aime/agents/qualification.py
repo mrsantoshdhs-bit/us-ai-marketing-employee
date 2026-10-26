@@ -115,6 +115,12 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                 lead.status = "disqualified"
                 lead.disqualify_reason = result.disqualify_reason
                 out.disqualified.append(lead.id)
+                if prev_status != "disqualified":
+                    # Nothing unsent stays in the approval queue for a newly disqualified lead (e.g. a competitor
+                    # found by research); items a person adds later are left alone.
+                    for f in session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.status.in_(
+                            ("pending", "awaiting_approval", "approved")))).scalars():
+                        f.status, f.blocked_reason = "cancelled", f"Lead disqualified: {result.disqualify_reason}"[:300]
             elif result.grade in ("A", "B") and prev_status in ("new", "nurture"):
                 lead.status = "qualified"
                 out.newly_qualified.append(lead.id)
