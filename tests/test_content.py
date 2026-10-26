@@ -90,3 +90,33 @@ def test_content_agent_respects_pending_cap(make_ctx):
     assert len(first.created) == 2
     second = LinkedInContentAgent(ctx).run({"research_topics": False}).output
     assert second.created == [] and "Queue full" in second.skipped_reason
+
+
+def test_templates_do_not_repeat_words_with_any_pain():
+    """A template sentence plus any industry pain must not use the same longer word twice."""
+    import re
+    from collections import Counter
+
+    from aime.knowledge import content_bank
+    from aime.knowledge.industries import INDUSTRIES
+
+    def strings(o):
+        if isinstance(o, dict):
+            for v in o.values():
+                yield from strings(v)
+        elif isinstance(o, (list, tuple)):
+            for v in o:
+                yield from strings(v)
+        elif isinstance(o, str):
+            yield o
+
+    pains = [p for ind in INDUSTRIES.values() for p in strings(ind.pains) if p]
+    assert any("spreadsheets" in p for p in pains)
+    templates = [t for name in ("ANGLES", "BULLET_INTROS", "CTAS") for t in strings(getattr(content_bank, name))
+                 if "{pain}" in t]
+    assert templates
+    for tpl in templates:
+        for pain in pains:
+            for sentence in re.split(r"(?<=[.!?])\s", tpl.replace("{pain}", pain)):
+                words = Counter(w.lower() for w in re.findall(r"[A-Za-z][A-Za-z-]{5,}", sentence))
+                assert not [w for w, n in words.items() if n > 1], sentence
