@@ -300,6 +300,10 @@ def cmd_simulate_reply(args, ctx) -> int:
     from aime.models import FollowUp, InboundEmail, Lead
     from aime.reply_intel import process_pending
 
+    if ctx.settings.is_production and not os.environ.get("AIME_ENV_FILE"):
+        print("simulate-reply refused on live production data: a simulated reply would change real leads. Use a demo "
+              "folder or an acceptance copy (AIME_ENV_FILE, see docs/ACCEPTANCE.md).")
+        return 2
     with ctx.db.session() as s:
         lead = s.get(Lead, args.lead)
         if lead is None:

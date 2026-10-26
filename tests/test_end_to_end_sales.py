@@ -126,6 +126,8 @@ def test_alternate_settings_file_is_isolated_and_guarded(tmp_path, monkeypatch, 
     from aime.cli import PRODUCTION_DATA_DIR, main
     from aime.config import Settings
 
+    for name in ("AIME_DATA_DIR", "AIME_DATA_ROLE", "OUTBOUND_EMAIL_ENABLED", "OUTBOUND_TEST_RECIPIENTS"):
+        monkeypatch.delenv(name, raising=False)  # real environment variables outrank any settings file (CI sets some)
     acceptance = tmp_path / "acceptance.env"
     acceptance.write_text(f"AIME_DATA_DIR={tmp_path / 'acc-data'}\nOUTBOUND_TEST_RECIPIENTS={OWNER}\n", encoding="utf-8")
     monkeypatch.setenv("AIME_ENV_FILE", str(acceptance))
@@ -135,3 +137,13 @@ def test_alternate_settings_file_is_isolated_and_guarded(tmp_path, monkeypatch, 
     bad.write_text(f"AIME_DATA_DIR={PRODUCTION_DATA_DIR}\n", encoding="utf-8")
     monkeypatch.setenv("AIME_ENV_FILE", str(bad))
     assert main(["status"]) == 2 and "Nothing was run" in capsys.readouterr().out
+
+
+def test_simulated_replies_are_refused_on_live_production_data(make_ctx, monkeypatch, capsys):
+    from argparse import Namespace
+
+    from aime.cli import cmd_simulate_reply
+    ctx = make_ctx(data_role="production")
+    monkeypatch.delenv("AIME_ENV_FILE", raising=False)
+    assert cmd_simulate_reply(Namespace(lead=1, text="hi", from_email=None), ctx) == 2
+    assert "refused" in capsys.readouterr().out
