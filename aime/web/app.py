@@ -34,9 +34,9 @@ from aime.integrations.status import integration_statuses
 from aime.knowledge.geo import US_REGIONS
 from aime.knowledge.industries import INDUSTRIES, industry_label
 from aime.knowledge.services import SERVICES, service_name
-from aime.models import (Activity, AgentRun, Alert, Campaign, Company, ContentItem, FollowUp, InboundInquiry,
+from aime.models import (Activity, AgentRun, Alert, Campaign, Company, Contact, ContentItem, FollowUp, InboundInquiry,
                          JobRun, JobState, Lead, MarketingPlan, Opportunity, PolicyDecision, PublishAttempt, Report,
-                         ResearchTopic, Signal)
+                         ResearchSnapshot, ResearchTopic, Signal)
 from aime.monitoring import agent_stats, read_heartbeat
 from aime.policy import agreement, environment_blockers, evaluate_shadow, policy_config
 from aime.qc import summary as qc_summary
@@ -207,7 +207,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             funnel = [
                 ("Companies found", cnt(Company, *open_leads), "/companies", ""),
                 ("Websites verified", cnt(Company, Company.website_status == "verified", *open_leads), "/companies", ""),
-                ("Decision-makers found", None, None, "not built yet"),
+                ("Companies with a decision-maker", s.execute(select(func.count(func.distinct(Contact.company_id))).where(
+                    Contact.source.in_(("website", "sec_filing")))).scalar_one(), "/contacts", ""),
                 ("Qualified companies", cnt(Lead, Lead.status == "qualified"), "/leads?status=qualified", ""),
                 ("Posts scheduled", cnt(ContentItem, ContentItem.status.in_(("awaiting_approval", "approved"))), "/content", ""),
                 ("Posts published", cnt(ContentItem, ContentItem.status == "published"), "/content?status=published", ""),
@@ -285,7 +286,34 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                              .order_by(Activity.id.desc()).limit(50)).scalars().all()
             fups = s.execute(select(FollowUp).where(FollowUp.lead_id == lead.id).order_by(FollowUp.id)).scalars().all()
             opps = s.execute(select(Opportunity).where(Opportunity.lead_id == lead.id)).scalars().all()
-        return render(request, "lead_detail.html", lead=lead, signals=signals, acts=acts, fups=fups, opps=opps)
+            people = s.execute(select(Contact).where(Contact.company_id == lead.company_id)
+                               .order_by(Contact.relevance.desc().nullslast(), Contact.id)).scalars().all()
+            research = s.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == lead.company_id)
+                                 .order_by(ResearchSnapshot.id.desc())).scalars().first()
+        return render(request, "lead_detail.html", lead=lead, signals=signals, acts=acts, fups=fups, opps=opps,
+                      people=people, research=research)
+
+    @app.get("/contacts", response_class=HTMLResponse)
+    def contacts_page(request: Request, confidence: str = "", role: str = ""):
+        with C().db.session() as s:
+            stmt = select(Contact).where(Contact.source.in_(("website", "sec_filing")))
+            if confidence:
+                stmt = stmt.where(Contact.confidence == confidence)
+            if role:
+                stmt = stmt.where(Contact.role_category == role)
+            rows = s.execute(stmt.order_by(Contact.relevance.desc().nullslast(), Contact.id).limit(500)).scalars().all()
+            leads = {lead.company_id: lead for lead in s.execute(select(Lead)).scalars()}
+            for c in rows:
+                _ = c.company
+            open_companies = (Company.merged_into_id.is_(None),)
+            researched = s.execute(select(func.count(Company.id)).where(Company.researched_at.is_not(None),
+                                                                         *open_companies)).scalar_one()
+            with_people = s.execute(select(func.count(func.distinct(Contact.company_id))).where(
+                Contact.source.in_(("website", "sec_filing")))).scalar_one()
+            by_status = dict(s.execute(select(Company.research_status, func.count(Company.id)).where(
+                Company.research_status.is_not(None), *open_companies).group_by(Company.research_status)).all())
+        return render(request, "contacts.html", rows=rows, leads=leads, confidence=confidence, role=role,
+                      researched=researched, with_people=with_people, by_status=by_status)
 
     @app.post("/leads/{lead_id}/status")
     def lead_status(request: Request, lead_id: int, status: str = Form(...), note: str = Form("")):

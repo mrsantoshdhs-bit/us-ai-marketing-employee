@@ -39,7 +39,7 @@ def test_today_shows_sales_manager_view(ctx):
         titles = s.execute(select(ContentItem.title).where(ContentItem.status == "awaiting_approval")).scalars().all()
     html = _client(ctx).get("/").text
     assert "Needs you" in html and "Companies to review" in html
-    assert "Decision-makers found" in html and "not built yet" in html
+    assert "Companies with a decision-maker" in html and "not built yet" not in html
     assert "off: nothing is posted" in html
     assert titles and all(t.replace("&", "&amp;").replace("'", "&#39;") in html for t in titles[:3])
 

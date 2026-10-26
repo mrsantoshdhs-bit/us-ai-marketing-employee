@@ -7,7 +7,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from aime.agents import (AnalyticsReportingAgent, AuthorizedPublishingAgent, CRMManagementAgent,
+from aime.agents import (AnalyticsReportingAgent, AuthorizedPublishingAgent, CompanyResearchAgent, CRMManagementAgent,
                          LeadQualificationAgent, LinkedInContentAgent, MarketingManagerAgent, SalesWorkflowAgent,
                          USBusinessResearchAgent)
 from aime.agents.base import AgentResult
@@ -124,6 +124,13 @@ def job_publish(ctx: AppContext, job: str = "publish") -> JobOutcome:
     return out
 
 
+def job_enrich(ctx: AppContext, job: str = "enrich") -> JobOutcome:
+    """Read companies' own websites and SEC filings for research and decision-makers (never contacts anyone)."""
+    out = JobOutcome()
+    out.add(CompanyResearchAgent(ctx).run({}, job=job))
+    return out
+
+
 def job_crm_maintenance(ctx: AppContext, job: str = "crm_maintenance") -> JobOutcome:
     out = JobOutcome()
     out.add(CRMManagementAgent(ctx).run({}, job=job))
@@ -209,6 +216,7 @@ JOBS: dict[str, Callable[..., JobOutcome]] = {
     "crm_maintenance": job_crm_maintenance,
     "plan": job_plan,
     "research": job_research,
+    "enrich": job_enrich,
     "content": job_content,
     "inbound": job_inbound,
     "followups": job_followups,

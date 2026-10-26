@@ -105,6 +105,25 @@ alert). If no slot is free it is never published late: it returns to "awaiting a
 New warning and error alerts also appear as a Windows notification (`ALERT_TOAST=true`, the default).
 Alerts are always stored and shown on the dashboard; notifications are an extra nudge.
 
+## Company research and decision-makers
+
+The `enrich` job (daily, 07:15) reads up to 15 companies' own websites, qualified leads first: the homepage
+and up to five team, about, contact or services pages it links to. robots.txt is honoured for every page,
+pages are capped at 300 KB, and requests are spaced out. SEC-registered companies are also checked for
+officers in their insider filings (Forms 3 and 4). Each company is re-read after 30 days
+(`[enrichment]` in `config/business.toml`).
+
+- **Research snapshot** (lead page, "Website research"): the company's own description quoted with its
+  URL, the services it lists, topics related to our services with the sentence they come from, the pages
+  read, and the emails and phone numbers it publishes.
+- **Decision-makers** (`/contacts` and the lead page): a person is recorded only when the company's team or
+  about page pairs a name with a title (or its structured data does, or a sentence such as "founded by
+  Jane Doe"), or an SEC filing names them. Testimonials on homepages and titles naming another
+  organisation ("Founder, OtherCo") are ignored. Each person shows the page or filing and the exact text.
+  Companies whose pages name nobody show "not found"; nothing is guessed.
+- The lead's primary contact is the decision-maker with the best evidence and role fit for the lead's
+  best-fit service. Nobody is contacted by this job.
+
 ## Post images
 
 - Images are 1080×1350 (4:5, the largest feed format), designed from HTML/CSS templates in
