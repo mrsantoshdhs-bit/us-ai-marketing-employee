@@ -70,8 +70,8 @@ def test_output_contract_violation(ctx):
     assert not res.ok and "ValidationError" in res.error
 
 
-def test_team_has_eight_documented_agents():
-    assert len(AGENTS) == 8
+def test_team_has_nine_documented_agents():
+    assert len(AGENTS) == 9
     for cls in AGENTS.values():
         d = cls.describe()
         assert d["responsibilities"] and d["input"] is not None and d["output"] and d["retry_policy"]

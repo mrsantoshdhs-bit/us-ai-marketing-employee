@@ -63,8 +63,16 @@ def run_checks(ctx: AppContext) -> list[dict]:
         no_consent = s.execute(select(func.count(FollowUp.id)).join(Contact, Contact.id == FollowUp.contact_id).where(
             FollowUp.status == "sent", Contact.consent_status.not_in(("inquiry", "opt_in", "opted_out")))).scalar_one()
         add("Emails only to consenting contacts", no_consent == 0, f"{no_consent} sent without consent on record")
-        research_contacts = n(Contact, Contact.source.not_in(("inbound", "manual", "import")))
-        add("No harvested contact data", research_contacts == 0, f"{research_contacts} contact(s) from public sources")
+        other_sources = n(Contact, Contact.source.not_in(("inbound", "manual", "import", "website", "sec_filing")))
+        add("Contacts only from approved sources", other_sources == 0,
+            f"{other_sources} contact(s) from a source other than inquiries, manual entry, your imports, "
+            "companies' own websites or SEC filings")
+        researched = (Contact.source.in_(("website", "sec_filing")),)
+        no_evidence = n(Contact, *researched, (Contact.evidence_url.is_(None)) | (Contact.evidence.is_(None)))
+        unsourced_email = n(Contact, *researched, Contact.email.is_not(None), Contact.email_source_url.is_(None))
+        add("Researched contacts have evidence", no_evidence == 0 and unsourced_email == 0,
+            f"{no_evidence} without the page or filing they come from; {unsourced_email} with an email that was "
+            "not published by the company")
         dup_domains = s.execute(select(Company.domain).where(Company.merged_into_id.is_(None), Company.domain.is_not(None))
                                 .group_by(Company.domain).having(func.count() > 1)).all()
         add("No duplicate company domains", not dup_domains, f"{len(dup_domains)} duplicated domain(s)", "warning")

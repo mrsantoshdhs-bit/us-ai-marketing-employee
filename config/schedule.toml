@@ -22,6 +22,10 @@ description = "Marketing Manager Agent: daily focus states, industries, campaign
 daily_at = "07:00"
 description = "Research Agent (authorized public sources) -> Qualification -> Sales Workflow"
 
+[jobs.enrich]
+daily_at = "07:15"
+description = "Company Research Agent: companies' own websites and SEC filings -> research and decision-makers"
+
 [jobs.content]
 daily_at = "07:30"
 description = "LinkedIn Content Agent: keep the content calendar filled"

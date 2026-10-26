@@ -52,6 +52,9 @@ class Company(Timestamped, Base):
     website_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
     website_title: Mapped[str | None] = mapped_column(String(300))
     validation: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict)
+    # Reading the company's own pages (aime.company_research): done | no_people | no_website | blocked | failed
+    research_status: Mapped[str | None] = mapped_column(String(20))
+    researched_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     signals: Mapped[list["Signal"]] = relationship(back_populates="company", cascade="all")
     leads: Mapped[list["Lead"]] = relationship(back_populates="company")
@@ -80,8 +83,34 @@ class Signal(Base):
     company: Mapped[Company] = relationship(back_populates="signals")
 
 
+class ResearchSnapshot(Base):
+    """One reading of a company's own website (and SEC filings): what it says it does, the services it
+    lists, where it may need our services (with quotes), and the people and business contacts it publishes."""
+
+    __tablename__ = "research_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"), index=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    status: Mapped[str] = mapped_column(String(20))  # done | no_people | no_website | blocked | failed
+    pages: Mapped[list[Any]] = mapped_column(JSON, default=list)  # [{url, kind, status, title}]
+    description: Mapped[str | None] = mapped_column(Text)  # the company's own words, quoted
+    description_url: Mapped[str | None] = mapped_column(String(500))
+    services_offered: Mapped[list[Any]] = mapped_column(JSON, default=list)  # headings from its services pages
+    needs: Mapped[list[Any]] = mapped_column(JSON, default=list)  # [{service, keywords, quote, url}]
+    emails: Mapped[list[Any]] = mapped_column(JSON, default=list)  # [{email, url, near}] as published
+    phones: Mapped[list[Any]] = mapped_column(JSON, default=list)  # [{phone, url}] as published
+    people: Mapped[list[Any]] = mapped_column(JSON, default=list)  # [{name, title, confidence, url}]
+    summary: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(String(300))
+
+    company: Mapped[Company] = relationship()
+
+
 class Contact(Timestamped, Base):
-    """People records come only from inbound inquiries, manual entry, or user-provided imports."""
+    """People records come from inbound inquiries, manual entry, user-provided imports, or (source "website" /
+    "sec_filing") the company's own published pages and SEC filings, always with the page or filing as
+    evidence. Names, titles and emails are never guessed."""
 
     __tablename__ = "contacts"
 
@@ -98,6 +127,17 @@ class Contact(Timestamped, Base):
     consent_source: Mapped[str | None] = mapped_column(String(200))
     consent_at: Mapped[datetime | None] = mapped_column(DateTime)
     is_sample: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Decision-maker research (sources "website" and "sec_filing"):
+    role_category: Mapped[str | None] = mapped_column(String(20))  # executive | operations | technology | sales | ...
+    relevance: Mapped[int | None] = mapped_column(Integer)  # 0-100: how well the role fits who buys our services
+    confidence: Mapped[str | None] = mapped_column(String(10))  # high | medium
+    evidence: Mapped[str | None] = mapped_column(Text)  # the published text the name and title come from
+    evidence_url: Mapped[str | None] = mapped_column(String(500))
+    discovered_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # Email provenance and checks: published | role_address | bounced | invalid | None (no email)
+    email_status: Mapped[str | None] = mapped_column(String(20))
+    email_source_url: Mapped[str | None] = mapped_column(String(500))
+    email_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     company: Mapped[Company | None] = relationship(back_populates="contacts")
 

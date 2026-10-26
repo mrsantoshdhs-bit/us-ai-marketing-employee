@@ -68,6 +68,12 @@ max_posts_per_run = 1
 # Approved posts whose slot passed by more than this are rescheduled instead of burst-published.
 max_overdue_hours = 24
 
+[enrichment]
+# Company research reads each company's own website (robots.txt honoured) and SEC filings.
+companies_per_run = 15
+max_pages_per_site = 6
+recheck_days = 30
+
 [publish_policy]
 # SHADOW MODE ONLY. The policy records what it WOULD do with each post ("would publish" or
 # "would hold" with reasons) so its judgement can be compared with yours. It never approves,

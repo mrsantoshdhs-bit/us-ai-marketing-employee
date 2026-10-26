@@ -1,7 +1,7 @@
 # Autonomous US AI Marketing Employee
 
-A local, $0-per-month team of eight AI agents that researches US businesses from authorized public
-sources, scores opportunities on evidence, drafts LinkedIn content with a local LLM, manages a
+A local, $0-per-month team of nine AI agents that researches US businesses from authorized public
+sources, identifies their decision-makers from the companies' own pages and SEC filings, scores opportunities on evidence, drafts LinkedIn content with a local LLM, manages a
 lightweight CRM, drafts compliant replies to inbound inquiries, and reports daily. It runs on a
 Windows Task Scheduler task and has a local dashboard.
 
@@ -41,7 +41,7 @@ FastAPI dashboard (127.0.0.1) ── SQLite (data/aime.db, WAL) ── Ollama ll
 
 | Path | Purpose |
 |---|---|
-| `aime/agents/` | The eight agents (typed input/output contracts, retries, run logs) |
+| `aime/agents/` | The nine agents (typed input/output contracts, retries, run logs) |
 | `aime/sources/` | HN "Who is hiring" API, SEC EDGAR, Census CBP, CSV import, topic trends |
 | `aime/integrations/` | LinkedIn OAuth + Posts/Images API, SMTP, status checks |
 | `aime/scheduler/` | Due-job logic, locks, Windows Task Scheduler installer |
@@ -61,6 +61,7 @@ FastAPI dashboard (127.0.0.1) ── SQLite (data/aime.db, WAL) ── Ollama ll
 | Lead Qualification | 0–100 score: fit 35, need 35, intent 20 (evidence only), data 10, with reasons | 3 attempts |
 | Sales Workflow | Opportunities for inbound, approval-gated reply sequences, tasks for research leads, send window, at-most-once sending | 1 attempt (non-idempotent) |
 | CRM Management | Inbound intake + spam checks, website verification, suppression, merges without deletes, hygiene, lifecycle | 3 attempts |
+| Company Research | Reads companies' own websites (robots.txt honoured) and SEC insider filings; quoted research snapshot; decision-makers with evidence, never guessed | 1 attempt (per-company failures recorded) |
 | Analytics & Reporting | Daily and weekly reports: KPIs from records only, segments, period comparison, blockers, agent health | 3 attempts |
 
 Every run is logged to `agent_runs` (dashboard → Agents) and `data/logs/agent_runs.jsonl`;
@@ -107,7 +108,7 @@ Dropped files are moved to `processed/` only after their rows are saved, are nev
 
 ```
 python -m aime status | init | tick | serve
-python -m aime run <db_maintenance|crm_maintenance|plan|research|content|inbound|followups|publish|daily_report|weekly_report|monitor>
+python -m aime run <db_maintenance|crm_maintenance|plan|research|enrich|content|inbound|followups|publish|daily_report|weekly_report|monitor>
 python -m aime scheduler install|uninstall|status|run|verify
 python -m aime doctor                                # integrity, isolation, compliance self-checks
 python -m aime backup --label before-change

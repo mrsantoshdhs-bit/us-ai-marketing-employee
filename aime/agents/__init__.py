@@ -1,6 +1,7 @@
 """The AI employee team."""
 
 from aime.agents.analytics import AnalyticsReportingAgent
+from aime.agents.company_research import CompanyResearchAgent
 from aime.agents.crm import CRMManagementAgent
 from aime.agents.linkedin_content import LinkedInContentAgent
 from aime.agents.marketing_manager import MarketingManagerAgent
@@ -14,6 +15,7 @@ AGENTS = {
     for cls in (
         MarketingManagerAgent,
         USBusinessResearchAgent,
+        CompanyResearchAgent,
         LinkedInContentAgent,
         AuthorizedPublishingAgent,
         LeadQualificationAgent,

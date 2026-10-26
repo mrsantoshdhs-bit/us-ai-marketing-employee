@@ -17,14 +17,13 @@
       <tr><th>Lifecycle</th><td>{{ c.lifecycle_stage }}</td></tr>
       <tr><th>Category</th><td>{{ lead.category or '—' }}</td></tr>
     </table>
-    {% if lead.contact %}
-    <h2>Contact</h2>
-    <table>
-      <tr><th>Name</th><td>{{ lead.contact.display_name }}{% if lead.contact.title %} · {{ lead.contact.title }}{% endif %}</td></tr>
-      <tr><th>Email</th><td>{{ lead.contact.email or '—' }}</td></tr>
-      <tr><th>Consent</th><td>{{ status_pill(lead.contact.consent_status) }} <span class="small muted">{{ lead.contact.consent_source or '' }}</span></td></tr>
-    </table>
-    {% else %}<p class="muted small">No contact person on file. Research leads are never contacted automatically.</p>{% endif %}
+    <h2>Decision-makers</h2>
+    {% for p in people %}
+    <div class="row-item small">{% if lead.contact_id == p.id %}<span class="pill ok">primary</span> {% endif %}<b>{{ p.display_name }}</b>{% if p.title %} · {{ p.title }}{% endif %}
+      {% if p.confidence %}<span class="pill {{ 'ok' if p.confidence == 'high' else 'warn' }}">{{ p.confidence }}</span>{% endif %}
+      {% if p.source in ['website', 'sec_filing'] %}<span class="muted">{{ 'SEC filing' if p.source == 'sec_filing' else 'own website' }} · {{ ext(p.evidence_url, 'evidence') }}</span>{% endif %}
+      <div class="muted">Email: {{ p.email or 'not found' }}{% if p.email_status %} ({{ p.email_status }}){% endif %} · consent: {{ p.consent_status }}{% if p.consent_source %} ({{ p.consent_source }}){% endif %}</div></div>
+    {% else %}<p class="muted small">{% if c.research_status %}No decision-maker named on the pages read ({{ c.research_status|replace('_', ' ') }}).{% else %}Not researched yet; the enrich job reads the company's own pages.{% endif %}</p>{% endfor %}
   </div>
   <div class="card">
     <h2 style="margin-top:0">Score {{ lead.score }}/100</h2>
@@ -50,6 +49,17 @@
       <td class="small">{% for x in s.matched_services %}<span class="pill">{{ x|service }}</span> {% endfor %}</td><td>{{ ext(s.source_url) }}</td></tr>
   {% else %}<tr><td colspan="5" class="muted">No evidence recorded.</td></tr>{% endfor %}
 </table></div>
+
+<h2>Website research {% if research %}<span class="muted small">{{ research.fetched_at|local }} · {{ research.status|replace('_', ' ') }}</span>{% endif %}</h2>
+<div class="card small">
+  {% if research %}
+    {% if research.description %}<p>In its own words: "{{ research.description }}" {{ ext(research.description_url, 'source') }}</p>{% endif %}
+    {% if research.services_offered %}<p>Services it lists: {{ research.services_offered|join(', ') }}</p>{% endif %}
+    {% for n in research.needs %}<div class="row-item"><span class="pill">{{ n.service|service }}</span> "{{ n.quote }}" {{ ext(n.url, 'source') }}</div>{% endfor %}
+    {% if research.error %}<p class="muted">Error: {{ research.error }}</p>{% endif %}
+    <p class="muted">Pages read: {% for pg in research.pages %}{{ ext(pg.url, pg.kind) }} ({{ pg.status }}){{ ', ' if not loop.last }}{% else %}none{% endfor %}</p>
+  {% else %}<span class="muted">Not researched yet.</span>{% endif %}
+</div>
 
 <div class="two">
   <div>

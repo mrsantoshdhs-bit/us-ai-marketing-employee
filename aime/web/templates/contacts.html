@@ -1,0 +1,27 @@
+{% extends "base.html" %}{% from "_macros.html" import ext %}
+{% block title %}Decision-makers · AI Marketing Employee{% endblock %}
+{% block content %}
+<h1>Decision-makers</h1>
+<div class="card small">
+  People named by the companies themselves (their own website pages) or in their SEC filings, each with the
+  page or filing it comes from. Nothing here is guessed; companies whose pages name nobody show as not found.
+  <div style="margin-top:6px">{{ researched }} companies researched · <b>{{ with_people }}</b> with at least one decision-maker
+    {% for st, n in by_status.items() %} · {{ st|replace('_', ' ') }}: {{ n }}{% endfor %}</div>
+</div>
+<form class="filters" method="get">
+  <select name="confidence"><option value="">Any confidence</option>{% for c in ['high', 'medium'] %}<option {{ 'selected' if confidence == c }}>{{ c }}</option>{% endfor %}</select>
+  <select name="role"><option value="">Any role</option>{% for r in ['executive', 'operations', 'technology', 'sales', 'marketing', 'finance', 'people', 'board', 'other'] %}<option {{ 'selected' if role == r }}>{{ r }}</option>{% endfor %}</select>
+  <button>Filter</button>
+</form>
+<div class="card table-wrap"><table>
+  <tr><th>Company</th><th>Name</th><th>Title</th><th>Role</th><th class="n">Fit</th><th>Confidence</th><th>Evidence</th><th>Email</th></tr>
+  {% for c in rows %}{% set lead = leads.get(c.company_id) %}
+  <tr><td>{% if lead %}<a href="/leads/{{ lead.id }}">{{ c.company.name }}</a>{% else %}{{ c.company.name if c.company else '' }}{% endif %}</td>
+    <td>{{ c.display_name }}</td><td class="small">{{ c.title }}</td><td class="small">{{ c.role_category }}</td>
+    <td class="n">{{ c.relevance or '' }}</td>
+    <td><span class="pill {{ 'ok' if c.confidence == 'high' else 'warn' }}">{{ c.confidence }}</span> <span class="small muted">{{ 'SEC filing' if c.source == 'sec_filing' else 'own website' }}</span></td>
+    <td class="small" style="max-width:360px">{{ ext(c.evidence_url, 'source') }} <span class="muted">{{ (c.evidence or '')[:140] }}</span></td>
+    <td class="small">{% if c.email %}{{ c.email }} <span class="pill">{{ c.email_status }}</span>{% else %}<span class="muted">not found</span>{% endif %}</td></tr>
+  {% else %}<tr><td colspan="8" class="muted">No decision-makers yet. The enrich job researches companies daily.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}
