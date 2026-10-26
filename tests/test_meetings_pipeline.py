@@ -150,3 +150,60 @@ def test_today_shows_meetings_and_sales_funnel(make_ctx):
     assert "Upcoming meetings" in page and "Meetings booked" in page and "Outreach emails sent" in page
     with ctx.db.session() as s:
         assert s.execute(select(Lead)).scalar_one().outreach_status == "meeting"
+
+
+RESCHEDULED_SUBJECT = "Rescheduled: David Chen - 2:00pm Fri, Oct 30, 2026 - 20 Minute Meeting"
+RESCHEDULED_BODY = (f"Invitee: David Chen\nInvitee Email: {DAVID}\nFormer Event Date/Time: 10:00am - 10:20am (Eastern Time "
+                    "- US & Canada) Thursday, October 29, 2026\nEvent Date/Time: 2:00pm - 2:20pm (Eastern Time - US & "
+                    "Canada) Friday, October 30, 2026\nLocation: Google Meet")
+
+
+def test_parse_reschedules_keeps_the_former_time():
+    info = parse_calendly(RESCHEDULED_SUBJECT, RESCHEDULED_BODY, set())
+    assert info["kind"] == "rescheduled" and info["starts_at"] == datetime(2026, 10, 30, 18, 0)
+    assert info["previous_starts_at"] == datetime(2026, 10, 29, 14, 0)
+
+
+def test_reschedule_moves_the_meeting_and_a_late_cancellation_still_applies(make_ctx, monkeypatch):
+    import aime.meetings as meetings
+    monkeypatch.setattr(meetings, "utcnow", lambda: datetime(2026, 10, 27, 12, 0))
+    ctx, _, _ = contacted(make_ctx)
+    FakeIMAP.messages = {1: calendly(), 2: calendly(RESCHEDULED_SUBJECT, RESCHEDULED_BODY),
+                         3: calendly(RESCHEDULED_SUBJECT, RESCHEDULED_BODY)}  # the same notice twice
+    run_inbox(ctx)
+    with ctx.db.session() as s:
+        m = s.execute(select(Meeting)).scalar_one()  # moved, not duplicated
+        assert m.status == "scheduled" and m.starts_at == datetime(2026, 10, 30, 18, 0)
+        assert "rescheduled" in s.get(Opportunity, m.opportunity_id).next_step
+        assert s.execute(select(Alert).where(Alert.message.like("Meeting rescheduled%"))).scalars().first()
+    assert lead_of(ctx).outreach_status == "meeting"
+    # Calendly's cancellation names the time; if it differs from ours, the invitee's only upcoming meeting is meant
+    FakeIMAP.messages[4] = calendly("Canceled: David Chen - 9:00am Fri, Oct 30, 2026 - 20 Minute Meeting",
+                                    RESCHEDULED_BODY.replace("Former Event Date/Time: 10:00am - 10:20am (Eastern Time - "
+                                                             "US & Canada) Thursday, October 29, 2026\n", "")
+                                    .replace("2:00pm - 2:20pm", "9:00am - 9:20am"))
+    run_inbox(ctx)
+    with ctx.db.session() as s:
+        assert s.execute(select(Meeting)).scalar_one().status == "cancelled"
+        assert s.execute(select(Alert).where(Alert.message.like("Meeting cancelled%"))).scalars().first()
+    assert lead_of(ctx).outreach_status == "interested"
+
+
+def test_an_unmatched_booking_can_be_linked_to_its_lead(make_ctx):
+    ctx, _, sent = contacted(make_ctx)
+    FakeIMAP.messages = {1: calendly("New Event: Zoe - 11:00am Fri, Oct 30, 2026 - Intro",
+                                     "Invitee: Zoe Park Invitee Email: zoe@elsewhere.example Event Date/Time: 11:00am - "
+                                     "11:30am (Eastern Time - US & Canada) Friday, October 30, 2026")}
+    run_inbox(ctx)
+    client = TestClient(create_app(ctx))
+    assert "Link to lead" in client.get("/meetings").text
+    with ctx.db.session() as s:
+        mid = s.execute(select(Meeting)).scalar_one().id
+    r = client.post(f"/meetings/{mid}/link", data={"lead_id": sent.lead_id}, headers=ORIGIN, follow_redirects=False)
+    assert r.status_code == 303
+    with ctx.db.session() as s:
+        m = s.get(Meeting, mid)
+        assert m.lead_id == sent.lead_id and m.opportunity_id
+        assert s.execute(select(InboundEmail)).scalar_one().status == "actioned"
+    assert lead_of(ctx).outreach_status == "meeting"
+    assert client.post(f"/meetings/{mid}/link", data={"lead_id": sent.lead_id}, headers=ORIGIN).status_code == 400

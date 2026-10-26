@@ -14,6 +14,9 @@
   · {{ m.invitee_name or '' }} &lt;{{ m.invitee_email }}&gt;
   {% if m.lead %} · <a href="/leads/{{ m.lead_id }}">{{ m.lead.company.name }}</a>{% else %} · <span class="pill warn">not matched to a lead</span>{% endif %}
   <span class="muted small">({{ m.source|replace('_', ' ') }})</span>
+  {% if not m.lead %}<form class="filters" method="post" action="/meetings/{{ m.id }}/link" style="margin-top:6px">
+    <input name="lead_id" type="number" min="1" placeholder="Lead # (from the lead's page address)" required>
+    <button class="secondary">Link to lead</button></form>{% endif %}
   <form class="filters" method="post" action="/meetings/{{ m.id }}/held" style="margin-top:6px">
     <input name="notes" placeholder="Notes (optional)" style="flex:1">
     <button>Held</button><button class="secondary" formaction="/meetings/{{ m.id }}/no_show">No-show</button>

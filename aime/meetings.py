@@ -4,8 +4,12 @@ Calendly sends the host "New Event: <invitee> - <time> <date> - <event type>" an
 with the invitee's name and email and the event date/time with its time zone. A booking is matched to the
 lead by the invitee's email, then by their company's domain; the meeting is recorded, the lead moves to
 "meeting", the opportunity to 30%, and the Sales Manager is notified. Cancellations reopen the lead
-("interested") with a follow-up next step. Overlapping meetings raise an alert (Calendly itself prevents
-double booking on the calendar it manages). Unmatched or unparseable notifications go to review.
+("interested") with a follow-up next step. Reschedules ("Rescheduled:"/"Updated:", with the former time when
+Calendly gives it) move the recorded meeting instead of adding a second one. A cancellation or reschedule whose
+time matches nothing applies to the invitee's only upcoming meeting; otherwise it goes to review. Overlapping
+meetings raise an alert (Calendly itself prevents double booking on the calendar it manages). Unmatched or
+unparseable notifications go to review, and an unmatched booking can be linked to a lead on the Meetings page.
+Nothing here creates, moves or cancels anything in Calendly: it only records what Calendly reports.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ TIME_RANGE = re.compile(r"(\d{1,2}(?::\d{2})?\s*[ap]m)\s*(?:-|–|to)\s*(\d{1,2}
 DATE_RE = re.compile(r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun),?\s+"
                      r"([a-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})", re.I)
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+WHEN_ENDS = r"Former|Previous|Invitee|Location|Description|Questions|View event|$"  # what follows a date/time field
 
 
 def _zone(text: str, default: str) -> ZoneInfo:
@@ -56,8 +61,11 @@ def _clock(value: str) -> tuple[int, int]:
 
 
 def parse_calendly(subject: str, body: str, own: set[str], default_tz: str = "America/New_York") -> dict | None:
-    """{kind, invitee_name, invitee_email, starts_at, ends_at (UTC naive), event, tz} or None."""
-    kind = "cancelled" if re.match(r"\s*cancel+ed\s*:", subject, re.I) else "booked" if re.match(r"\s*new event\s*:", subject, re.I) else None
+    """{kind, invitee_name, invitee_email, starts_at, ends_at (UTC naive), event, tz, previous_starts_at} or None.
+    kind: booked | cancelled | rescheduled."""
+    kind = ("cancelled" if re.match(r"\s*cancel+ed\s*:", subject, re.I)
+            else "booked" if re.match(r"\s*new event\s*:", subject, re.I)
+            else "rescheduled" if re.match(r"\s*(?:rescheduled|updated)\s*:", subject, re.I) else None)
     if kind is None:
         return None
     text = " ".join(body.split())
@@ -66,7 +74,7 @@ def parse_calendly(subject: str, body: str, own: set[str], default_tz: str = "Am
     if m:
         name = m.group(1).strip()
     else:
-        sm = re.match(r"\s*(?:new event|cancel+ed)\s*:\s*(.+?)\s+-\s+", subject, re.I)
+        sm = re.match(r"\s*(?:new event|cancel+ed|rescheduled|updated)\s*:\s*(.+?)\s+-\s+", subject, re.I)
         name = sm.group(1).strip() if sm else None
     email = None
     m = re.search(r"Invitee Email:\s*(" + EMAIL_RE.pattern + ")", text, re.I)
@@ -74,10 +82,21 @@ def parse_calendly(subject: str, body: str, own: set[str], default_tz: str = "Am
         email = m.group(1).lower()
     else:
         email = next((e.lower() for e in EMAIL_RE.findall(text) if e.lower() not in own and "calendly" not in e.lower()), None)
-    when = re.search(r"Event Date/Time:\s*(.+?)(?:Invitee|Location|Description|Questions|View event|$)", text, re.I)
-    when_text = when.group(1) if when else subject
+    when = re.search(rf"(?<!former )(?<!previous )Event Date/Time:\s*(.+?)(?:{WHEN_ENDS})", text, re.I)
+    parsed = _when(when.group(1) if when else subject, default_tz)
+    if not (parsed and email):
+        return None
+    before = re.search(rf"(?:Former|Previous)(?: Event)? Date/Time:\s*(.+?)(?:Event Date/Time|{WHEN_ENDS})", text, re.I)
+    previous = _when(before.group(1), default_tz) if before else None
+    event = re.split(r"\s+-\s+", subject)[-1].strip() if " - " in subject else "Meeting"
+    return {"kind": kind, "invitee_name": name, "invitee_email": email, "starts_at": parsed[0], "ends_at": parsed[1],
+            "event": event[:200], "tz": parsed[2], "previous_starts_at": previous[0] if previous else None}
+
+
+def _when(when_text: str, default_tz: str) -> tuple[datetime, datetime, str] | None:
+    """(start, end) in UTC (naive) and the zone name, from "10:00am - 10:20am (Eastern Time) Thursday, October 29, 2026"."""
     times, date = TIME_RANGE.search(when_text), DATE_RE.search(when_text)
-    if not (times and date and email):
+    if not (times and date):
         return None
     try:
         day = datetime.strptime(f"{date.group(1)[:3]} {date.group(2)} {date.group(3)}", "%b %d %Y")
@@ -89,10 +108,8 @@ def parse_calendly(subject: str, body: str, own: set[str], default_tz: str = "Am
     end = day.replace(hour=h2, minute=m2, tzinfo=tz)
     if end <= start:
         end += timedelta(days=1)
-    event = re.split(r"\s+-\s+", subject)[-1].strip() if " - " in subject else "Meeting"
     to_utc = lambda d: d.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)  # noqa: E731
-    return {"kind": kind, "invitee_name": name, "invitee_email": email, "starts_at": to_utc(start),
-            "ends_at": to_utc(end), "event": event[:200], "tz": str(tz)}
+    return to_utc(start), to_utc(end), str(tz)
 
 
 def match_lead(session: Session, email: str) -> tuple[Lead | None, Contact | None]:
@@ -123,7 +140,25 @@ def record_meeting(session: Session, settings, info: dict, actor: str, row: Inbo
     simulated = bool(row and row.is_simulated)
     existing = session.execute(select(Meeting).where(func.lower(Meeting.invitee_email) == info["invitee_email"],
                                                      Meeting.starts_at == info["starts_at"])).scalars().first()
+    if info["kind"] == "rescheduled":
+        if existing is not None:
+            return existing, "already recorded"
+        moved = _the_meeting(session, info["invitee_email"], info.get("previous_starts_at"))
+        if moved is None:
+            info = {**info, "kind": "booked"}  # nothing to move: record it as a booking
+        else:
+            old = moved.starts_at
+            moved.starts_at, moved.ends_at, moved.timezone = info["starts_at"], info["ends_at"], info.get("tz")
+            for opp in session.execute(select(Opportunity).where(Opportunity.id == moved.opportunity_id,
+                                                                 Opportunity.stage.not_in(("won", "lost")))).scalars():
+                opp.next_step = f"Meeting {moved.starts_at:%Y-%m-%d %H:%M} UTC (rescheduled): prepare, then record the outcome"
+            msg = f"{'SIMULATED: ' if moved.is_simulated else ''}Meeting rescheduled: {info['invitee_name'] or info['invitee_email']} " \
+                  f"from {old:%a %b %d %H:%M} to {moved.starts_at:%a %b %d %H:%M} UTC"
+            _tell(session, settings, msg, actor, moved)
+            return moved, "meeting rescheduled"
     if info["kind"] == "cancelled":
+        if existing is None:
+            existing = _the_meeting(session, info["invitee_email"], None)
         if existing is None:
             return None, f"cancellation for an unknown meeting with {info['invitee_email']}"
         existing.status = "cancelled"
@@ -134,8 +169,9 @@ def record_meeting(session: Session, settings, info: dict, actor: str, row: Inbo
             for opp in session.execute(select(Opportunity).where(Opportunity.lead_id == lead.id,
                                                                  Opportunity.stage.not_in(("won", "lost")))).scalars():
                 opp.next_step = f"Meeting on {info['starts_at']:%Y-%m-%d} was cancelled: follow up to rebook"
-        log_activity(session, f"Meeting cancelled: {info['invitee_email']} ({info['starts_at']:%Y-%m-%d %H:%M} UTC)", actor,
-                     type_="meeting", company_id=existing.company_id, lead_id=existing.lead_id)
+        _tell(session, settings, f"{'SIMULATED: ' if existing.is_simulated else ''}Meeting cancelled: "
+                                 f"{info['invitee_name'] or info['invitee_email']} ({existing.starts_at:%a %b %d %H:%M} UTC)",
+              actor, existing)
         return existing, "meeting cancelled"
     if existing:
         return existing, "already recorded"
@@ -164,6 +200,34 @@ def record_meeting(session: Session, settings, info: dict, actor: str, row: Inbo
     log_activity(session, msg, actor, type_="meeting", company_id=lead.company_id, lead_id=lead.id,
                  opportunity_id=meeting.opportunity_id)
     return meeting, "meeting recorded; lead moved to meeting; opportunity advanced"
+
+
+def _the_meeting(session: Session, email: str, starts_at: datetime | None) -> Meeting | None:
+    """The scheduled meeting a change refers to: the one at `starts_at`, else the invitee's only upcoming one."""
+    q = select(Meeting).where(func.lower(Meeting.invitee_email) == email, Meeting.status == "scheduled")
+    if starts_at is not None:
+        hit = session.execute(q.where(Meeting.starts_at == starts_at)).scalars().first()
+        if hit is not None:
+            return hit
+    upcoming = session.execute(q.where(Meeting.starts_at >= utcnow() - timedelta(hours=2))).scalars().all()
+    return upcoming[0] if len(upcoming) == 1 else None
+
+
+def _tell(session: Session, settings, msg: str, actor: str, meeting: Meeting) -> None:
+    session.add(Alert(level="info", source="meetings", message=msg[:500]))
+    notify_event(settings, msg)
+    log_activity(session, msg, actor, type_="meeting", company_id=meeting.company_id, lead_id=meeting.lead_id,
+                 opportunity_id=meeting.opportunity_id)
+
+
+def link_meeting(session: Session, meeting: Meeting, lead: Lead, actor: str) -> None:
+    """A person links an unmatched booking to the right lead: the pipeline then moves as for a matched one."""
+    meeting.lead_id, meeting.company_id = lead.id, lead.company_id
+    if meeting.status == "scheduled":
+        meeting.opportunity_id = _advance_opportunity(session, lead, meeting, actor).id
+        set_status(session, lead, "meeting", actor, f"{meeting.starts_at:%Y-%m-%d %H:%M} UTC (linked by hand)")
+    log_activity(session, f"Meeting with {meeting.invitee_name or meeting.invitee_email} linked to this lead by {actor}",
+                 actor, type_="meeting", company_id=lead.company_id, lead_id=lead.id, opportunity_id=meeting.opportunity_id)
 
 
 def _advance_opportunity(session: Session, lead: Lead, meeting: Meeting, actor: str) -> Opportunity:

@@ -462,6 +462,22 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return render(request, "meetings.html", upcoming=[m for m in rows if m.status == "scheduled" and m.ends_at >= now][::-1],
                       past=[m for m in rows if not (m.status == "scheduled" and m.ends_at >= now)])
 
+    @app.post("/meetings/{mid}/link")
+    def link_meeting_to_lead(request: Request, mid: int, lead_id: int = Form(...)):
+        from aime.meetings import link_meeting
+        with C().db.session() as s:
+            m = s.get(Meeting, mid) or _404()
+            lead = s.get(Lead, lead_id)
+            if lead is None:
+                return back("/meetings", f"No lead #{lead_id}")
+            if m.lead_id is not None:
+                raise HTTPException(400, "This meeting is already linked to a lead")
+            link_meeting(s, m, lead, who(request))
+            for r in s.execute(select(InboundEmail).where(InboundEmail.id == m.inbound_email_id,
+                                                          InboundEmail.status == "needs_review")).scalars():
+                r.lead_id, r.company_id, r.status = lead.id, lead.company_id, "actioned"
+        return back("/meetings", f"Meeting linked to lead #{lead_id}")
+
     @app.post("/meetings/{mid}/{action}")
     def meeting_action(request: Request, mid: int, action: str, notes: str = Form("")):
         with C().db.session() as s:
