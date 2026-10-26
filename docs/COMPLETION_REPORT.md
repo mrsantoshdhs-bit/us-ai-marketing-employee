@@ -26,6 +26,8 @@ test address.
 | #27 | Calendly reschedules, late cancellations, linking unmatched bookings |
 | #28 | Today tiles (posts awaiting approval vs scheduled, emails awaiting approval) and the updated docs |
 
+All four merge together in order with no conflicts, and the combined result passes 324 tests.
+
 ## Modules
 
 All 16 are built and tested. Built and verified on real data or in production: discovery, research,
