@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from aime.llm.base import LLMProvider
-from aime.llm.ollama import OllamaProvider
+from aime.llm.ollama import OllamaProvider, default_ollama_exe, start_local_server
 
 if TYPE_CHECKING:
     from aime.context import AppContext
@@ -21,6 +22,8 @@ def build_llm(ctx: "AppContext") -> LLMProvider | None:
         return None
     if provider in {"auto", "ollama"}:
         ollama = OllamaProvider(s.ollama_url, s.ollama_model, s.llm_timeout, transport=ctx.http_transport)
+        if s.ollama_autostart and not ollama.available():
+            start_local_server(ollama, Path(s.ollama_exe) if s.ollama_exe else default_ollama_exe())
         if ollama.available():
             log.info("Using local LLM %s", ollama.label)
             return ollama

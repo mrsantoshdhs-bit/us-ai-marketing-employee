@@ -180,7 +180,7 @@ def job_monitor(ctx: AppContext, job: str = "monitor") -> JobOutcome:
     with ctx.db.session() as s:
         for c in failing:
             created = alert_once(s, "error" if c["severity"] == "error" else "warning", "doctor",
-                                 f"{c['name']}: {c['detail']}")
+                                 f"{c['name']}: {c['detail']}", ctx.settings)
             summary["alerts_created"] += int(created)
     summary["doctor_failures"] = [f"{c['name']}: {c['detail']}" for c in failing]
     out.steps.append({"agent": "monitor", "status": "success", "output": summary})

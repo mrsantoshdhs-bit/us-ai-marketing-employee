@@ -2,9 +2,49 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import subprocess
+import time
+from pathlib import Path
+from urllib.parse import urlparse
+
 import httpx
 
 from aime.llm.base import LLMError, LLMProvider
+
+log = logging.getLogger("aime.llm")
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def is_local_url(url: str) -> bool:
+    return (urlparse(url).hostname or "") in LOCAL_HOSTS
+
+
+def default_ollama_exe() -> Path:
+    return Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
+
+
+def start_local_server(provider: "OllamaProvider", exe: Path, wait: float = 30.0, popen=subprocess.Popen,
+                       sleep=time.sleep) -> bool:
+    """Start `ollama serve` in the background if the local server is down. Never stops or restarts one."""
+    if not is_local_url(provider.url):
+        return False
+    if provider.available():
+        return True
+    if not exe.exists():
+        log.warning("Ollama auto-start skipped: %s not found", exe)
+        return False
+    flags = (subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS) if os.name == "nt" else 0
+    popen([str(exe), "serve"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+          creationflags=flags, close_fds=True)
+    log.warning("Ollama was not running; started %s serve", exe)
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        sleep(1.0)
+        if provider.available():
+            return True
+    return False
 
 
 class OllamaProvider(LLMProvider):

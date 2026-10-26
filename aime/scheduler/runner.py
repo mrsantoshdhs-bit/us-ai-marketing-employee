@@ -21,7 +21,7 @@ from aime import maintenance
 from aime.config import Settings
 from aime.context import AppContext
 from aime.models import AgentRun, JobRun, JobState
-from aime.monitoring import write_heartbeat
+from aime.monitoring import alert_once, write_heartbeat
 from aime.redact import redact
 from aime.runtime import current_job_run_id
 from aime.timeutil import as_aware_utc, local_tz, to_naive_utc, utcnow
@@ -248,6 +248,10 @@ def run_job(ctx: AppContext, name: str, trigger: str = "manual", *, allow_during
         else:
             st.consecutive_failures = (st.consecutive_failures or 0) + 1
         s.add(st)
+        budget = float(ctx.settings.schedule.get("job_budget_minutes", 30))
+        if duration > budget * 60_000:  # warn only; a running job is never killed
+            alert_once(s, "warning", "monitor", f"Job '{name}' took {duration // 60_000} min "
+                       f"(budget {budget:g} min); check the run log for a slow source or model", ctx.settings)
     return {"job": name, "status": status, "duration_ms": duration, "error": error, "run_id": run_id}
 
 

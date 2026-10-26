@@ -3,6 +3,8 @@
 
 tick_minutes = 15
 timezone = "local"
+# A job running longer than this raises a warning alert (it is never stopped).
+job_budget_minutes = 30
 
 [jobs.db_maintenance]
 daily_at = "06:15"

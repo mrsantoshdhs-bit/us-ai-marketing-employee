@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
@@ -9,10 +10,28 @@ from sqlalchemy.orm import Session
 from aime.context import AppContext
 from aime.integrations.email_smtp import EmailSender
 from aime.integrations.linkedin import get_auth_status
+from aime.llm.ollama import OllamaProvider
 from aime.monitoring import read_heartbeat
 from aime.sources.census import CensusMarketSource
 from aime.sources.registry import get_sources
 from aime.timeutil import fmt_local, utcnow
+
+
+_LLM_PROBE: dict[str, tuple[float, bool]] = {}
+
+
+def llm_reachable(ctx: AppContext, max_age: float = 60.0) -> bool:
+    """Is the configured local model reachable right now? A long-running dashboard must not show a stale answer."""
+    s = ctx.settings
+    if (s.llm_provider or "auto").lower() not in ("auto", "ollama"):
+        return False
+    key = f"{s.ollama_url}|{s.ollama_model}"
+    cached = _LLM_PROBE.get(key)
+    if cached and time.monotonic() - cached[0] < max_age:
+        return cached[1]
+    ok = OllamaProvider(s.ollama_url, s.ollama_model, transport=ctx.http_transport).available()
+    _LLM_PROBE[key] = (time.monotonic(), ok)
+    return ok
 
 
 def integration_statuses(ctx: AppContext, session: Session, include_scheduler: bool = True) -> list[dict]:
@@ -38,10 +57,10 @@ def integration_statuses(ctx: AppContext, session: Session, include_scheduler: b
     rows.append({"name": "Outbound email (replies to inquiries)", "state": "READY" if ready else
                  ("DISABLED" if "DISABLED" in reason else "NOT CONFIGURED"), "detail": reason, "action": ""})
 
-    llm = ctx.llm
-    rows.append({"name": "Local LLM (Ollama)", "state": "AVAILABLE" if llm else "UNAVAILABLE",
-                 "detail": llm.label if llm else f"Not reachable at {s.ollama_url}; template writer in use",
-                 "action": "" if llm else "Start Ollama or set LLM_PROVIDER=template"})
+    llm_ok = llm_reachable(ctx)  # probed now (cached 60 s), not the value cached when this process started
+    rows.append({"name": "Local LLM (Ollama)", "state": "AVAILABLE" if llm_ok else "UNAVAILABLE",
+                 "detail": f"ollama:{s.ollama_model}" if llm_ok else f"Not reachable at {s.ollama_url}; template writer in use",
+                 "action": "" if llm_ok else "Start Ollama, enable OLLAMA_AUTOSTART, or set LLM_PROVIDER=template"})
 
     for src in get_sources(ctx):
         ok, msg = src.configured()
