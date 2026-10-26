@@ -134,6 +134,29 @@ officers in their insider filings (Forms 3 and 4). Each company is re-read after
   +1 for a named decision-maker without one, +1 for a published company inbox (or +3 for a person who
   contacted you). The breakdown on the lead page says which. Nobody is contacted by this job.
 
+## B2B outreach (drafts and approvals)
+
+Owner decision (26 Oct 2026): researched decision-makers may receive B2B emails, each approved by you.
+Nothing is sent while `OUTBOUND_EMAIL_ENABLED=false`.
+
+- **Who gets a draft** (`[outreach]` in `config/business.toml`): qualified leads of grade B or better whose
+  primary contact has a business email the company publishes on its own domain (status published, or a
+  company inbox), not suppressed, not a competitor, not already in a sequence. Up to 10 drafts per run.
+  Leads without quotable evidence get a review task instead: no generic emails.
+- **What it says**: one sentence quoting what the company published (its job post, its website on a
+  topic we serve, or its own description), one sentence on what we do for that need, and a low-pressure
+  question, signed by `SENDER_NAME`. The footer says why they got it, how to opt out, and the postal
+  address. Steps 2 and 3 (after 4 and 10 days, `intervals_days`) are short follow-ups; each needs approval.
+- **Checks** (shown on the Follow-ups page): length, subject (no "Re:"/"Fwd:" or shouting), spam words,
+  unsupported claims, numbers outside quotes, quotes found verbatim in the evidence, no links, opt-out and
+  postal address, a usable recipient, spelling, grammar, clichés. Held or failed drafts need "I reviewed the
+  quality findings" to approve; editing re-runs the checks ("Save changes").
+- **Approval** records your name; the first approval makes you the lead's owner. Rejecting the first email
+  stops outreach to that lead. At send time each email is re-checked: if the contact, address, grade,
+  suppression or policy changed, it is cancelled with the reason.
+- **Lead outreach stage** (lead page): drafted, approved, contacted, then replied / stopped. "They replied"
+  stops the sequence.
+
 ## Post images
 
 - Images are 1080×1350 (4:5, the largest feed format), designed from HTML/CSS templates in

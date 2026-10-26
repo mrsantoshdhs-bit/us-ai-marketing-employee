@@ -1,26 +1,39 @@
-{% extends "base.html" %}{% from "_macros.html" import status_pill, state_pill %}
+{% extends "base.html" %}{% from "_macros.html" import status_pill, state_pill, qc_pill, ext %}
 {% block title %}Follow-ups · AI Marketing Employee{% endblock %}
 {% block content %}
 <h1>Follow-ups and tasks</h1>
 <div class="card small">
   Outbound email: {{ state_pill('READY' if email_ready else 'DISABLED') }} {{ email_reason }}.
-  Emails are drafted only for people who contacted you or opted in, and every email needs your approval.
-  Research leads get a review task instead of a message.
+  Replies are drafted for people who contacted you; B2B outreach is drafted for researched decision-makers whose
+  company publishes their business email, quoting only what the company published. Every email needs your approval.
+  Leads that cannot be contacted get a review task instead.
   <a href="?show={{ 'all' if show == 'open' else 'open' }}">{{ 'Show all' if show == 'open' else 'Show open only' }}</a>
 </div>
 {% for f in rows %}
 <div class="card" id="f{{ f.id }}">
   <div class="filters" style="justify-content:space-between">
-    <div><strong>{{ f.subject }}</strong> {{ status_pill(f.status) }} <span class="pill">{{ f.channel }} · step {{ f.step }}</span>
-      <div class="small muted">Lead: <a href="/leads/{{ f.lead_id }}">{{ f.lead.company.name }}</a>{% if f.contact %} · to {{ f.contact.display_name }} &lt;{{ f.contact.email }}&gt;{% endif %} · due {{ f.due_at|local }}</div>
+    <div><strong>{{ f.subject }}</strong> {{ status_pill(f.status) }} <span class="pill">{{ 'outreach' if f.kind == 'outreach' else f.channel }} · step {{ f.step }}</span>
+      {% if f.quality and f.quality.qc %}{{ qc_pill(f.quality.qc.status) }}{% endif %}
+      <div class="small muted">Lead: <a href="/leads/{{ f.lead_id }}">{{ f.lead.company.name }}</a>{% if f.contact %} · to {{ f.contact.display_name }} &lt;{{ f.to_email or f.contact.email }}&gt;{% if f.kind == 'outreach' %} ({{ (f.contact.email_status or '')|replace('_', ' ') }}{% if f.contact.email_confidence %}, {{ f.contact.email_confidence }}{% endif %}, {{ ext(f.contact.email_source_url, 'where published') }}){% endif %}{% endif %} · due {{ f.due_at|local }}</div>
       {% if f.blocked_reason %}<div class="small"><span class="pill warn">{{ f.blocked_reason }}</span></div>{% endif %}
     </div>
   </div>
+  {% if f.kind == 'outreach' %}
+  <div class="small" style="margin-top:6px">
+    {% for e in f.evidence or [] %}<div class="row-item">Evidence ({{ e.kind }}): "{{ e.fact }}" {{ ext(e.url, 'source') }}</div>{% endfor %}
+    {% if f.quality and f.quality.qc %}{% for ch in f.quality.qc.checks if ch.status != 'pass' %}
+      <div class="row-item">{{ qc_pill({'fail': 'failed', 'uncertain': 'held'}[ch.status]) }} <b>{{ ch.name }}</b> <span class="muted">{{ ch.detail }}</span></div>
+    {% endfor %}{% endif %}
+  </div>
+  {% endif %}
   {% if f.channel == 'email' and f.status == 'awaiting_approval' %}
   <form method="post" action="/followups/{{ f.id }}/approve">
     <input name="subject" value="{{ f.subject }}" style="width:100%;margin:8px 0">
     <textarea name="body">{{ f.body }}</textarea>
+    {% if f.quality and f.quality.qc and f.quality.qc.status in ['held', 'failed'] %}
+    <label class="small"><input type="checkbox" name="qc_override" value="yes"> I reviewed the quality findings</label>{% endif %}
     <div class="row-actions" style="margin-top:8px"><button>Approve (send when enabled)</button>
+      {% if f.kind == 'outreach' %}<button class="secondary" formaction="/followups/{{ f.id }}/save">Save changes</button>{% endif %}
       <button class="danger" formaction="/followups/{{ f.id }}/reject">Reject</button></div>
   </form>
   {% else %}

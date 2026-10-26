@@ -61,8 +61,15 @@ def run_checks(ctx: AppContext) -> list[dict]:
                   ContentItem.publish_started_at < utcnow() - timedelta(minutes=15))
         add("No stuck publishing claims", stuck == 0, f"{stuck} claim(s) older than 15 minutes")
         no_consent = s.execute(select(func.count(FollowUp.id)).join(Contact, Contact.id == FollowUp.contact_id).where(
-            FollowUp.status == "sent", Contact.consent_status.not_in(("inquiry", "opt_in", "opted_out")))).scalar_one()
-        add("Emails only to consenting contacts", no_consent == 0, f"{no_consent} sent without consent on record")
+            FollowUp.status == "sent", FollowUp.kind.is_distinct_from("outreach"),
+            Contact.consent_status.not_in(("inquiry", "opt_in", "opted_out")))).scalar_one()
+        bad_outreach = s.execute(select(func.count(FollowUp.id)).join(Contact, Contact.id == FollowUp.contact_id).where(
+            FollowUp.status == "sent", FollowUp.kind == "outreach",
+            (Contact.email_source_url.is_(None)) | (Contact.consent_status == "opted_out")
+            | (FollowUp.approved_at.is_(None)))).scalar_one()
+        add("Emails only to consenting contacts or approved B2B outreach", no_consent == 0 and bad_outreach == 0,
+            f"{no_consent} replies sent without consent; {bad_outreach} outreach emails without a published address, "
+            "an approval record, or sent after an opt-out")
         other_sources = n(Contact, Contact.source.not_in(("inbound", "manual", "import", "website", "sec_filing")))
         add("Contacts only from approved sources", other_sources == 0,
             f"{other_sources} contact(s) from a source other than inquiries, manual entry, your imports, "

@@ -33,6 +33,7 @@
     <p class="small">Fit {{ lead.fit_score }}/35 · Need {{ lead.need_score }}/35 · Intent {{ lead.intent_score }}/20 · Data {{ lead.data_score }}/10</p>
     <ul class="reasons small">{% for r in lead.score_breakdown or [] %}<li>{{ r }}</li>{% endfor %}</ul>
     <p class="small">Matched services: {% for s in lead.matched_services or [] %}<span class="pill">{{ s|service }}</span> {% else %}none{% endfor %}</p>
+    {% if lead.outreach_status or lead.owner %}<p class="small">Outreach: {{ status_pill(lead.outreach_status or 'none') }}{% if lead.outreach_updated_at %} <span class="muted">since {{ lead.outreach_updated_at|local }}</span>{% endif %}{% if lead.owner %} · owner {{ lead.owner }}{% endif %}</p>{% endif %}
     {% if lead.disqualify_reason %}<p class="small"><span class="pill bad">{{ lead.disqualify_reason }}</span></p>{% endif %}
     <h2>Actions</h2>
     <form method="post" action="/leads/{{ lead.id }}/status" class="filters">

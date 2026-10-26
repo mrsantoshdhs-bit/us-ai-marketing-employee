@@ -173,6 +173,11 @@ class Lead(Timestamped, Base):
     disqualify_reason: Mapped[str | None] = mapped_column(String(200))
     last_scored_at: Mapped[datetime | None] = mapped_column(DateTime)
     last_activity_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # Outbound pipeline (aime.outreach): drafted | approved | contacted | replied | interested | meeting |
+    # not_interested | unsubscribed | bounced | stopped | None (not in outreach)
+    outreach_status: Mapped[str | None] = mapped_column(String(20), index=True)
+    outreach_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
+    owner: Mapped[str | None] = mapped_column(String(80))  # the Sales Manager who approved its first outreach
     notes: Mapped[str | None] = mapped_column(Text)
     is_sample: Mapped[bool] = mapped_column(Boolean, default=False)
 
@@ -235,6 +240,10 @@ class FollowUp(Timestamped, Base):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime)
     message_id: Mapped[str | None] = mapped_column(String(200))
+    kind: Mapped[str | None] = mapped_column(String(20))  # outreach | None (reply to someone who contacted us)
+    to_email: Mapped[str | None] = mapped_column(String(200))  # the address the approval applies to
+    evidence: Mapped[list[Any] | None] = mapped_column(JSON, default=list)  # [{fact, url, kind}] used in the email
+    quality: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict)  # email quality-check report
 
     lead: Mapped[Lead] = relationship()
     contact: Mapped[Contact | None] = relationship()

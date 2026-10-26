@@ -1,8 +1,10 @@
-"""Sales Workflow Agent: opportunities, permitted follow-ups, human tasks, and approved sends.
+"""Sales Workflow Agent: opportunities, permitted follow-ups, B2B outreach drafts, human tasks, approved sends.
 
 Rules:
-- Email is drafted only for people who contacted us (consent "inquiry") or opted in.
-- Companies found through research never receive automated messages; a human task is created instead.
+- Replies are drafted for people who contacted us (consent "inquiry") or opted in.
+- Researched leads get a B2B outreach draft (aime.outreach) only when the owner's outreach policy is on and
+  the primary contact has a business email the company publishes, with quotable evidence; otherwise a
+  human review task is created instead.
 - Every email needs human approval, outbound email must be enabled and configured, the address must
   not be suppressed, and sends happen only inside the configured business-hours window.
 """
@@ -25,6 +27,9 @@ from aime.email_templates import draft_reply
 from aime.integrations.email_smtp import EmailNotReady, EmailSender
 from aime.knowledge.services import service_name
 from aime.models import Alert, FollowUp, InboundInquiry, Lead, Opportunity, Signal
+from aime.outreach import draft_outreach, eligible, gather_evidence, set_status
+from aime.outreach import policy as outreach_policy
+from aime.qc.email_checks import run_email_checks
 from aime.redact import redact
 from aime.timeutil import as_aware_utc, utcnow
 
@@ -41,6 +46,7 @@ class SalesOutput(BaseModel):
     opportunities_created: list[int] = Field(default_factory=list)
     tasks_created: int = 0
     drafts_created: int = 0
+    outreach_drafts: int = 0
     emails_sent: int = 0
     cancelled: int = 0
     blocked: list[BlockedItem] = Field(default_factory=list)
@@ -52,7 +58,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
     responsibilities = [
         "Open opportunities for qualified leads who contacted us",
         "Draft reply sequences (max touches, spaced intervals) that wait for human approval",
-        "Create human review tasks for research leads instead of contacting them",
+        "Draft evidence-based B2B outreach for researched decision-makers with published business emails",
+        "Create human review tasks for research leads that cannot be contacted",
         "Send only approved emails, within business hours, to non-suppressed consenting contacts",
     ]
     input_model = SalesInput
@@ -68,16 +75,23 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         cfg = self.settings.section("followup")
         out = SalesOutput()
         self._recover_stale_sends(session, now)
-        stmt = select(Lead).where(Lead.status == "qualified")
+        stmt = select(Lead).where(Lead.status == "qualified").order_by(Lead.score.desc(), Lead.id)
         if inp.lead_ids:
             stmt = stmt.where(Lead.id.in_(inp.lead_ids))
+        budget = outreach_policy(self.settings)["drafts_per_run"]
         for lead in session.execute(stmt).scalars().all():
             contact = lead.contact
             if contact and contact.consent_status in CONSENTED and contact.email:
                 self._ensure_opportunity(session, lead, out)
                 self._ensure_sequence(session, lead, now, cfg, out)
-            else:
-                self._ensure_task(session, lead, out)
+                continue
+            ok, _ = eligible(session, self.settings, lead)
+            if ok:
+                result = self._ensure_outreach(session, lead, now, out, budget)
+                budget -= int(result == "created")
+                if result in ("created", "exists", "budget"):
+                    continue
+            self._ensure_task(session, lead, out)
         self._progress_sequences(session, now, cfg, out)
         self._send_approved(session, now, cfg, out)
         return out
@@ -113,14 +127,43 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         log_activity(session, f"Drafted follow-up email #{step} (awaiting approval)", self.name, type_="email_draft",
                      company_id=lead.company_id, lead_id=lead.id)
 
+    def _ensure_outreach(self, session: Session, lead: Lead, now: datetime, out: SalesOutput, budget: int) -> str:
+        """created | exists (already in a sequence) | budget (cap reached this run) | no_evidence"""
+        if session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email")).first():
+            return "exists"
+        if budget <= 0:
+            return "budget"
+        evidence = gather_evidence(session, lead)
+        if not evidence:
+            return "no_evidence"
+        self._new_outreach(session, lead, 1, now, [e.as_dict() for e in evidence], evidence, out)
+        for task in session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task",
+                                                           FollowUp.status == "pending")).scalars():
+            task.status, task.blocked_reason = "done", "Outreach email drafted; it is waiting for your approval"
+        set_status(session, lead, "drafted", self.name)
+        return "created"
+
+    def _new_outreach(self, session: Session, lead: Lead, step: int, due: datetime, evidence_dicts: list[dict],
+                      evidence, out: SalesOutput) -> None:
+        contact = lead.contact
+        subject, body = draft_outreach(self.settings, step, lead, contact, evidence)
+        suppressed = is_suppressed(session, contact.email, lead.company.domain)
+        qc = run_email_checks(subject, body, evidence_dicts, contact, suppressed, step=step)
+        # Every email waits for a person to approve it; there is no setting that skips this.
+        session.add(FollowUp(lead_id=lead.id, contact_id=contact.id, company_id=lead.company_id, channel="email",
+                             kind="outreach", step=step, due_at=due, status="awaiting_approval", subject=subject,
+                             body=body, to_email=contact.email, evidence=evidence_dicts, quality={"qc": qc}))
+        out.outreach_drafts += 1
+        log_activity(session, f"Drafted outreach email #{step} to {contact.email} (awaiting approval; checks "
+                     f"{qc['status']})", self.name, type_="email_draft", company_id=lead.company_id, lead_id=lead.id)
+
     def _ensure_sequence(self, session: Session, lead: Lead, now: datetime, cfg: dict, out: SalesOutput) -> None:
         exists = session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email")).first()
         if not exists:
             self._new_draft(session, lead, 1, now, out)
 
     def _progress_sequences(self, session: Session, now: datetime, cfg: dict, out: SalesOutput) -> None:
-        intervals = list(cfg.get("intervals_days", [0, 3, 7]))
-        max_touches = min(int(cfg.get("max_touches", 3)), len(intervals))
+        pol = outreach_policy(self.settings)
         sent = session.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "sent")).scalars().all()
         latest: dict[int, FollowUp] = {}
         for f in sent:
@@ -128,9 +171,15 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 latest[f.lead_id] = f
         for lead_id, last in latest.items():
             lead = session.get(Lead, lead_id)
+            outreach = last.kind == "outreach"
+            intervals = list(pol["intervals"] if outreach else cfg.get("intervals_days", [0, 3, 7]))
+            max_touches = min(pol["max_touches"] if outreach else int(cfg.get("max_touches", 3)), len(intervals))
             if lead is None or lead.status != "qualified" or last.step >= max_touches:
                 continue
-            if not lead.contact or lead.contact.consent_status not in CONSENTED:
+            if outreach:
+                if lead.outreach_status != "contacted" or not eligible(session, self.settings, lead)[0]:
+                    continue  # replied, unsubscribed, bounced, stopped, or no longer reachable
+            elif not lead.contact or lead.contact.consent_status not in CONSENTED:
                 continue
             has_open = session.execute(select(FollowUp.id).where(
                 FollowUp.lead_id == lead_id, FollowUp.channel == "email", FollowUp.status.in_(OPEN_FOLLOWUP))).first()
@@ -138,7 +187,10 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 continue
             gap = timedelta(days=intervals[last.step] - intervals[last.step - 1])
             if last.sent_at and now >= last.sent_at + gap:
-                self._new_draft(session, lead, last.step + 1, now, out)
+                if outreach:
+                    self._new_outreach(session, lead, last.step + 1, now, list(last.evidence or []), [], out)
+                else:
+                    self._new_draft(session, lead, last.step + 1, now, out)
 
     def _ensure_task(self, session: Session, lead: Lead, out: SalesOutput) -> None:
         # A cancelled task (lead dropped below the threshold) does not block a fresh one if it re-qualifies.
@@ -186,7 +238,15 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         for f in approved:
             contact = f.contact
             lead = f.lead
-            if (not contact or not contact.email or contact.consent_status not in CONSENTED
+            if f.kind == "outreach":
+                ok, why = eligible(session, self.settings, lead, for_send=True)
+                if ok and (lead.contact_id != f.contact_id or (f.to_email or "").lower() != (contact.email or "").lower()):
+                    ok, why = False, "the contact or address changed after approval; draft a new email"
+                if not ok:
+                    f.status, f.blocked_reason = "cancelled", f"Not sent: {why}"[:300]
+                    out.cancelled += 1
+                    continue
+            elif (not contact or not contact.email or contact.consent_status not in CONSENTED
                     or is_suppressed(session, contact.email)):
                 f.status = "cancelled"
                 f.blocked_reason = "No consent or contact suppressed"
@@ -213,7 +273,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 continue
             session.refresh(f)
             try:
-                msg_id = self.sender.send(contact.email, f.subject, f.body or "")
+                msg_id = self.sender.send(f.to_email or contact.email, f.subject, f.body or "")
             except (EmailNotReady, smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused,
                     smtplib.SMTPConnectError, smtplib.SMTPAuthenticationError, ConnectionRefusedError,
                     socket.gaierror) as exc:
@@ -237,6 +297,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             f.message_id = msg_id
             f.blocked_reason = None
             lead.last_activity_at = f.sent_at
+            if f.kind == "outreach" and lead.outreach_status in (None, "drafted", "approved"):
+                set_status(session, lead, "contacted", self.name)
             out.emails_sent += 1
             log_activity(session, f"Email sent: {f.subject}", self.name, type_="email_sent", body=f.body,
                          company_id=f.company_id, lead_id=f.lead_id)
