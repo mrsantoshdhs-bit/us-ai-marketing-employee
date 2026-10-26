@@ -157,6 +157,24 @@ Nothing is sent while `OUTBOUND_EMAIL_ENABLED=false`.
 - **Lead outreach stage** (lead page): drafted, approved, contacted, then replied / stopped. "They replied"
   stops the sequence.
 
+## Replies, unsubscribes and bounces (sales mailbox)
+
+Setup: `docs/SALES_SETUP.md`. The `inbox` job (every 15 minutes) reads the mailbox read-only and matches
+each email to a lead by thread, then by address. **Replies** page: category, confidence, the new text,
+and what was done.
+
+- Any human reply stops the automated sequence. Interested: the lead becomes *interested*, an
+  opportunity opens (discovery), you get a notification, and a reply with your Calendly link waits in
+  Follow-ups. Not interested: the lead moves to nurture. Objections, referrals, questions and anything
+  unclear go to review with a suggested reply (a question's reply needs your answer before approval).
+- Unsubscribe requests and complaints are suppressed at once; bounces mark the address bounced and
+  suppress it. Out-of-office replies leave the sequence running.
+- Reclassify on the Replies page applies the right actions and is logged.
+- Limits on approved outreach: 20 a day, one per company domain a day, five per run (`[outreach]`).
+- Test mode (`OUTBOUND_TEST_RECIPIENTS`): every email goes only to your test addresses, marked
+  `[TEST for <intended recipient>]`. `aime simulate-reply --lead <id> --text "..."` processes a reply
+  that is labelled SIMULATED everywhere.
+
 ## Post images
 
 - Images are 1080×1350 (4:5, the largest feed format), designed from HTML/CSS templates in

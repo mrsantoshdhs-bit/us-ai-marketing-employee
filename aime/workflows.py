@@ -8,6 +8,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from aime.agents import (AnalyticsReportingAgent, AuthorizedPublishingAgent, CompanyResearchAgent, CRMManagementAgent,
+                         InboxAgent,
                          LeadQualificationAgent, LinkedInContentAgent, MarketingManagerAgent, SalesWorkflowAgent,
                          USBusinessResearchAgent)
 from aime.agents.base import AgentResult
@@ -134,6 +135,13 @@ def job_enrich(ctx: AppContext, job: str = "enrich") -> JobOutcome:
     return out
 
 
+def job_inbox(ctx: AppContext, job: str = "inbox") -> JobOutcome:
+    """Read the sales mailbox (read-only), handle replies, then send anything newly approved."""
+    out = JobOutcome()
+    out.add(InboxAgent(ctx).run({}, job=job))
+    return out
+
+
 def job_crm_maintenance(ctx: AppContext, job: str = "crm_maintenance") -> JobOutcome:
     out = JobOutcome()
     out.add(CRMManagementAgent(ctx).run({}, job=job))
@@ -220,6 +228,7 @@ JOBS: dict[str, Callable[..., JobOutcome]] = {
     "plan": job_plan,
     "research": job_research,
     "enrich": job_enrich,
+    "inbox": job_inbox,
     "content": job_content,
     "inbound": job_inbound,
     "followups": job_followups,

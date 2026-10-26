@@ -1,6 +1,6 @@
 # Autonomous US AI Marketing Employee
 
-A local, $0-per-month team of nine AI agents that researches US businesses from authorized public
+A local, $0-per-month team of ten AI agents that researches US businesses from authorized public
 sources, identifies their decision-makers from the companies' own pages and SEC filings, scores opportunities on evidence, drafts LinkedIn content with a local LLM, manages a
 lightweight CRM, drafts compliant replies to inbound inquiries, and reports daily. It runs on a
 Windows Task Scheduler task and has a local dashboard.
@@ -41,7 +41,7 @@ FastAPI dashboard (127.0.0.1) ── SQLite (data/aime.db, WAL) ── Ollama ll
 
 | Path | Purpose |
 |---|---|
-| `aime/agents/` | The nine agents (typed input/output contracts, retries, run logs) |
+| `aime/agents/` | The ten agents (typed input/output contracts, retries, run logs) |
 | `aime/sources/` | HN "Who is hiring" API, SEC EDGAR, Census CBP, CSV import, topic trends |
 | `aime/integrations/` | LinkedIn OAuth + Posts/Images API, SMTP, status checks |
 | `aime/scheduler/` | Due-job logic, locks, Windows Task Scheduler installer |
@@ -62,6 +62,7 @@ FastAPI dashboard (127.0.0.1) ── SQLite (data/aime.db, WAL) ── Ollama ll
 | Sales Workflow | Opportunities for inbound, approval-gated reply sequences, tasks for research leads, send window, at-most-once sending | 1 attempt (non-idempotent) |
 | CRM Management | Inbound intake + spam checks, website verification, suppression, merges without deletes, hygiene, lifecycle | 3 attempts |
 | Company Research | Reads companies' own websites (robots.txt honoured) and SEC insider filings; quoted research snapshot; decision-makers with evidence, never guessed | 1 attempt (per-company failures recorded) |
+| Inbox | Reads the sales mailbox read-only; classifies replies (interest, objections, unsubscribes, bounces); updates the CRM; drafts responses for approval | 2 attempts |
 | Analytics & Reporting | Daily and weekly reports: KPIs from records only, segments, period comparison, blockers, agent health | 3 attempts |
 
 Every run is logged to `agent_runs` (dashboard → Agents) and `data/logs/agent_runs.jsonl`;

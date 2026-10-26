@@ -1,0 +1,31 @@
+{% extends "base.html" %}{% from "_macros.html" import status_pill %}
+{% block title %}Replies · AI Marketing Employee{% endblock %}
+{% block content %}
+<h1>Replies</h1>
+<div class="card small">
+  Sales mailbox: {% if mailbox %}<b>{{ mailbox }}</b> (read-only{% if state %}, last message {{ state.last_uid }}{% endif %}){% else %}<span class="pill warn">not configured</span> set IMAP_HOST (Gmail: imap.gmail.com) and the app password{% endif %}.
+  Every human reply stops the automated sequence. Unsubscribes and bounces are suppressed. Suggested replies wait
+  in <a href="/followups">Follow-ups</a> for your approval. Simulated replies (testing only) are marked SIMULATED.
+  <div style="margin-top:6px">{% for c, n in counts.items() if c %}<span class="pill">{{ c|replace('_', ' ') }}: {{ n }}</span> {% endfor %}
+    <a href="?show={{ 'all' if show == 'review' else 'review' }}">{{ 'Show all' if show == 'review' else 'Show only those needing review' }}</a></div>
+</div>
+{% for r in rows %}
+<div class="card" id="r{{ r.id }}">
+  <div><strong>{{ r.subject or '(no subject)' }}</strong>
+    {% if r.is_simulated %}<span class="pill bad">SIMULATED</span>{% endif %}
+    <span class="pill {{ 'ok' if r.category == 'interested' else 'warn' if r.category in ['objection', 'question', 'referral', 'other'] else '' }}">{{ (r.category or 'new')|replace('_', ' ') }}</span>
+    <span class="small muted">{{ r.confidence }} confidence</span> {{ status_pill(r.status) }}</div>
+  <div class="small muted">From {{ r.from_name or '' }} &lt;{{ r.from_email }}&gt; · {{ r.received_at|local }}
+    {% if r.lead %} · lead <a href="/leads/{{ r.lead_id }}">{{ r.lead.company.name }}</a>{% else %} · not matched to a lead{% endif %}</div>
+  <div class="post small" style="margin-top:6px">{{ (r.new_text or r.body_text or '')[:1500] }}</div>
+  {% if r.reasons %}<div class="small muted">Why: {{ r.reasons|join('; ') }}</div>{% endif %}
+  {% if r.action_note %}<div class="small">Done: {{ r.action_note }}{% if r.suggested_followup_id %} · <a href="/followups#f{{ r.suggested_followup_id }}">suggested reply</a>{% endif %}</div>{% endif %}
+  {% if r.status == 'needs_review' %}
+  <form class="filters" method="post" action="/inbox/{{ r.id }}/reclassify" style="margin-top:8px">
+    <select name="category">{% for c in ['interested', 'not_interested', 'objection', 'referral', 'question', 'unsubscribe', 'out_of_office', 'bounce', 'other'] %}<option {{ 'selected' if r.category == c }}>{{ c }}</option>{% endfor %}</select>
+    <button class="secondary">Reclassify and apply</button>
+    <button formaction="/inbox/{{ r.id }}/reviewed">Mark reviewed</button>
+  </form>{% endif %}
+</div>
+{% else %}<div class="card muted">{{ 'Nothing needs review.' if show == 'review' else 'No replies yet.' }}</div>{% endfor %}
+{% endblock %}

@@ -115,6 +115,12 @@ def run_checks(ctx: AppContext) -> list[dict]:
         hours = (utcnow() - datetime.fromisoformat(off["at"])).total_seconds() / 3600
         add("Off-machine encrypted backup", hours <= BACKUP_MAX_AGE_HOURS, f"{off['file']}, {hours:.0f} h ago")
 
+    st = ctx.settings
+    if st.outbound_email_enabled and st.section("outreach").get("b2b_enabled"):
+        add("Sales mailbox monitored", st.imap_configured,
+            "replies, unsubscribes and bounces are read" if st.imap_configured else
+            "outreach can be sent but replies, unsubscribes and bounces are not read: set IMAP_HOST (Gmail: imap.gmail.com)",
+            "warning")
     mode = str(ctx.settings.section("publish_policy").get("mode", "shadow")).lower()
     add("Auto-publish policy is shadow-only", mode == "shadow",
         "records decisions only; never publishes" if mode == "shadow"

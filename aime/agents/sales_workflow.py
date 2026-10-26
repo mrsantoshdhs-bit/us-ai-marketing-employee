@@ -17,7 +17,7 @@ from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent, RetryPolicy
@@ -26,10 +26,11 @@ from aime.crm_ops import is_suppressed, log_activity
 from aime.email_templates import draft_reply
 from aime.integrations.email_smtp import EmailNotReady, EmailSender
 from aime.knowledge.services import service_name
-from aime.models import Alert, FollowUp, InboundInquiry, Lead, Opportunity, Signal
+from aime.models import Alert, FollowUp, InboundEmail, InboundInquiry, Lead, Opportunity, Signal
 from aime.outreach import draft_outreach, eligible, gather_evidence, set_status
 from aime.outreach import policy as outreach_policy
 from aime.qc.email_checks import run_email_checks
+from aime.reply_intel import QUESTION_PLACEHOLDER
 from aime.redact import redact
 from aime.timeutil import as_aware_utc, utcnow
 
@@ -235,10 +236,17 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             return
         ready, reason = self.sender.status()
         in_window = self._in_send_window(now, cfg)
+        limits = self._outreach_limits(session, now, cfg)
         for f in approved:
             contact = f.contact
             lead = f.lead
-            if f.kind == "outreach":
+            if f.kind == "response":
+                why = self._response_problem(session, f)
+                if why:
+                    f.status, f.blocked_reason = "cancelled", f"Not sent: {why}"[:300]
+                    out.cancelled += 1
+                    continue
+            elif f.kind == "outreach":
                 ok, why = eligible(session, self.settings, lead, for_send=True)
                 if ok and (lead.contact_id != f.contact_id or (f.to_email or "").lower() != (contact.email or "").lower()):
                     ok, why = False, "the contact or address changed after approval; draft a new email"
@@ -246,13 +254,18 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                     f.status, f.blocked_reason = "cancelled", f"Not sent: {why}"[:300]
                     out.cancelled += 1
                     continue
+                wait = self._over_limit(f, limits)
+                if wait:
+                    f.blocked_reason = wait
+                    out.blocked.append(BlockedItem(id=f.id, reason=wait))
+                    continue
             elif (not contact or not contact.email or contact.consent_status not in CONSENTED
                     or is_suppressed(session, contact.email)):
                 f.status = "cancelled"
                 f.blocked_reason = "No consent or contact suppressed"
                 out.cancelled += 1
                 continue
-            if lead.status != "qualified":
+            if lead.status != "qualified" and f.kind != "response":
                 f.status = "cancelled"
                 f.blocked_reason = f"Lead is {lead.status}"
                 out.cancelled += 1
@@ -273,7 +286,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 continue
             session.refresh(f)
             try:
-                msg_id = self.sender.send(f.to_email or contact.email, f.subject, f.body or "")
+                msg_id = self.sender.send(f.to_email or contact.email, f.subject, f.body or "", in_reply_to=f.in_reply_to)
             except (EmailNotReady, smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused,
                     smtplib.SMTPConnectError, smtplib.SMTPAuthenticationError, ConnectionRefusedError,
                     socket.gaierror) as exc:
@@ -295,14 +308,62 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             f.status = "sent"
             f.sent_at = utcnow()
             f.message_id = msg_id
+            f.delivered_to = self.sender.recipient_for(f.to_email or contact.email)[0]
             f.blocked_reason = None
             lead.last_activity_at = f.sent_at
-            if f.kind == "outreach" and lead.outreach_status in (None, "drafted", "approved"):
-                set_status(session, lead, "contacted", self.name)
+            if f.kind == "outreach":
+                limits["sent_today"] += 1
+                limits["run"] += 1
+                domain = (f.to_email or "").split("@")[-1]
+                limits["domains"][domain] = limits["domains"].get(domain, 0) + 1
+                if lead.outreach_status in (None, "drafted", "approved"):
+                    set_status(session, lead, "contacted", self.name)
             out.emails_sent += 1
             log_activity(session, f"Email sent: {f.subject}", self.name, type_="email_sent", body=f.body,
                          company_id=f.company_id, lead_id=f.lead_id)
             session.commit()
+
+    def _outreach_limits(self, session: Session, now: datetime, cfg: dict) -> dict:
+        """Outreach already sent today (in the send-window time zone), overall and per recipient domain."""
+        pol = self.settings.section("outreach")
+        tz = ZoneInfo(cfg.get("send_window_timezone", "America/New_York"))
+        local = as_aware_utc(now).astimezone(tz)
+        start = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+        sent = session.execute(select(FollowUp.to_email).where(FollowUp.kind == "outreach", FollowUp.status == "sent",
+                                                               FollowUp.sent_at >= start)).scalars().all()
+        domains: dict[str, int] = {}
+        for addr in sent:
+            d = (addr or "").split("@")[-1]
+            domains[d] = domains.get(d, 0) + 1
+        return {"sent_today": len(sent), "domains": domains, "run": 0,
+                "daily": int(pol.get("daily_send_limit", 20)), "per_domain": int(pol.get("per_domain_daily_limit", 1)),
+                "per_run": int(pol.get("sends_per_run", 5))}
+
+    @staticmethod
+    def _over_limit(f: FollowUp, limits: dict) -> str | None:
+        if limits["sent_today"] >= limits["daily"]:
+            return f"Daily outreach limit reached ({limits['daily']}); it will go out on the next business day"
+        if limits["run"] >= limits["per_run"]:
+            return f"Sending at most {limits['per_run']} outreach emails per run; it will go out on the next run"
+        domain = (f.to_email or "").split("@")[-1]
+        if limits["domains"].get(domain, 0) >= limits["per_domain"]:
+            return f"Already emailed {domain} today (limit {limits['per_domain']}); it will go out tomorrow"
+        return None
+
+    @staticmethod
+    def _response_problem(session: Session, f: FollowUp) -> str | None:
+        """A response may go only to someone whose email we received, in that thread, and never if suppressed."""
+        if not f.in_reply_to or not f.to_email:
+            return "a response must answer an email we received"
+        received = session.execute(select(InboundEmail.id).where(
+            InboundEmail.message_id == f.in_reply_to, func.lower(InboundEmail.from_email) == f.to_email.lower())).first()
+        if not received:
+            return "no email from this address to answer"
+        if is_suppressed(session, f.to_email):
+            return "on the do-not-contact list"
+        if QUESTION_PLACEHOLDER in (f.body or ""):
+            return "the answer placeholder was not filled in"
+        return None
 
     def _recover_stale_sends(self, session: Session, now: datetime) -> None:
         """A follow-up stuck in 'sending' means the process died mid-send: never resend automatically."""

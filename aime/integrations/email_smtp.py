@@ -42,21 +42,38 @@ class EmailSender:
             return False, "NOT CONFIGURED: SMTP_HOST / SMTP_FROM missing"
         if not s.company_postal_address:
             return False, "NOT CONFIGURED: COMPANY_POSTAL_ADDRESS required (CAN-SPAM)"
+        if s.test_recipients:
+            return True, "Ready in TEST MODE: every email is delivered only to " + ", ".join(sorted(s.test_recipients))
         return True, "Ready"
 
-    def send(self, to: str, subject: str, body: str) -> str:
+    def recipient_for(self, to: str) -> tuple[str, bool]:
+        """Test mode delivers anything addressed outside OUTBOUND_TEST_RECIPIENTS to the first test address."""
+        tests = self.settings.test_recipients
+        if not tests or to.strip().lower() in tests:
+            return to, False
+        return sorted(tests)[0], True
+
+    def send(self, to: str, subject: str, body: str, in_reply_to: str | None = None) -> str:
         ready, reason = self.status()
         if not ready:
             raise EmailNotReady(reason)
         s = self.settings
+        actual, redirected = self.recipient_for(to)
+        if redirected:  # controlled test: nobody outside the test list is ever emailed
+            subject = f"[TEST for {to}] {subject}"
+            body = (f"TEST MODE: this email would have gone to {to}. Only addresses in OUTBOUND_TEST_RECIPIENTS "
+                    f"receive email.\n\n{body}")
         msg = EmailMessage()
         msg["From"] = formataddr((s.sender_name or s.company_name, s.smtp_from))
-        msg["To"] = to
+        msg["To"] = actual
         msg["Subject"] = subject
         msg_id = make_msgid(domain=s.smtp_from.split("@")[-1])
         msg["Message-ID"] = msg_id
         unsub = s.unsubscribe_email or s.smtp_from
         msg["List-Unsubscribe"] = f"<mailto:{unsub}?subject=unsubscribe>"
+        if in_reply_to:  # keep the reply in the prospect's thread
+            msg["In-Reply-To"] = in_reply_to
+            msg["References"] = in_reply_to
         msg.set_content(body)
         with self.smtp_factory(s.smtp_host, s.smtp_port, timeout=30) as smtp:
             if s.smtp_use_tls:
