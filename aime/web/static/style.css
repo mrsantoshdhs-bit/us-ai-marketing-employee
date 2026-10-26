@@ -30,6 +30,13 @@ h2 { font-size: 16px; margin: 24px 0 10px; }
 .kpi { display: block; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; color: var(--text); }
 .kpi .v { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .kpi .l { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.health { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); margin-bottom: 18px; }
+.health .h { border: 1px solid var(--border); border-left: 5px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--surface); }
+.health .h b { display: block; font-size: 13px; }
+.health .h span { font-size: 12px; color: var(--muted); }
+.health .h.ok { border-left-color: #1f9d55; } .health .h.warn { border-left-color: #d69e2e; } .health .h.bad { border-left-color: #c53030; }
+.row-item { padding: 6px 0; border-bottom: 1px solid var(--border); }
+.row-item:last-child { border-bottom: 0; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
 th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }

@@ -5,12 +5,16 @@ All commands run from the project folder with the virtual environment's Python:
 
 ## Daily routine (5 minutes)
 
-1. Open the dashboard (`scripts\start_dashboard.ps1` → http://127.0.0.1:8765).
+1. Open the dashboard (`scripts\start_dashboard.ps1` → http://127.0.0.1:8765) and sign in.
+   **Today** is the home page: a health strip (scheduler, jobs, local AI model, images, LinkedIn,
+   publishing, email, backups), everything waiting for you (posts with their quality-check result,
+   reply drafts, outcomes that need checking), open alerts, the pipeline funnel and companies to review.
 2. **Content** → approve or edit posts waiting for approval. Nothing is published without approval
    *and* an authorized LinkedIn connection with `PUBLISHING_ENABLED=true`.
 3. **Follow-ups** → approve reply drafts to people who contacted you; work the "Review …" tasks for
    qualified research leads (never contacted automatically).
-4. **Overview** → acknowledge alerts; anything red needs attention.
+4. **Today** → acknowledge alerts; anything red needs attention. Job runs and agent performance
+   are on **System**.
 
 ## Health checks
 

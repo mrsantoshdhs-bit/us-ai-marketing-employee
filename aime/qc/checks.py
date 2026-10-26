@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aime.content import quality_check
+from aime.knowledge.content_bank import CLICHES
 from aime.knowledge.industries import INDUSTRIES
 from aime.knowledge.services import SERVICES
 from aime.models import ContentItem
@@ -31,12 +32,6 @@ VOCABULARY = {
     "dataset", "datasets", "toolset", "toolsets", "reskill", "upskill", "timeline", "timelines", "prioritize",
     "digitize", "agentic", "ups", "admin", "rekey", "rekeying", "offboarding",
 }
-# Filler that made this morning's AI drafts weak (CTO content audit, 25 Oct 2026).
-CLICHES = ["in today's fast-paced", "the future of", "is here", "well-oiled machine", "beautiful thing to behold",
-           "ever-changing landscape", "continue to grow and evolve", "what matters most", "leverag", "seamless",
-           "boost productivity", "game-changer", "game changer", "unlock the power", "take it to the next level",
-           "in this day and age", "costly reality", "makeshift solution", "maximizing efficiency", "revolutioniz",
-           "cutting-edge", "synerg"]
 THIRD_PARTIES = ["Google", "Microsoft", "OpenAI", "Anthropic", "Salesforce", "HubSpot", "Amazon", "AWS", "Meta",
                  "Apple", "IBM", "Oracle", "SAP", "Gartner", "McKinsey", "Forrester", "Deloitte", "Accenture",
                  "Zapier", "Slack", "Zoom", "Nvidia", "NVIDIA", "Tesla", "Zillow", "Redfin", "Pipedrive", "Zoho"]
