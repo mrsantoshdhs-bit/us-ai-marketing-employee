@@ -5,15 +5,14 @@ from __future__ import annotations
 import csv
 import json
 import re
-import shutil
-from datetime import datetime
 from pathlib import Path
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aime.crm_ops import fingerprint
+from aime.intake import IntakeBatch, file_sha256, mark, seen
 from aime.knowledge.services import SERVICES
 from aime.models import InboundInquiry
 
@@ -106,22 +105,40 @@ def record_inquiry(session: Session, payload: dict, channel: str) -> tuple[Inbou
     return row, True
 
 
-def load_inbox_files(session: Session, inbox: Path) -> int:
-    """Read *.json / *.csv files from the inbox folder into inbound_inquiries, then archive them."""
+def load_inbox_files(session: Session, inbox: Path) -> tuple[int, IntakeBatch]:
+    """Read *.json / *.csv files from the inbox folder into inbound_inquiries.
+
+    Files are NOT moved here: the caller commits, then calls `batch.archive()` (see aime.intake).
+    Returns (new inquiries recorded, batch).
+    """
     count = 0
-    processed = inbox / "processed"
-    processed.mkdir(parents=True, exist_ok=True)
+    inbox.mkdir(parents=True, exist_ok=True)
+    batch = IntakeBatch(folder=inbox)
     for path in sorted(list(inbox.glob("*.json")) + list(inbox.glob("*.csv"))):
-        records: list[dict] = []
-        if path.suffix == ".json":
-            data = json.loads(path.read_text(encoding="utf-8"))
-            records = data if isinstance(data, list) else [data]
-        else:
-            with path.open(newline="", encoding="utf-8-sig") as fh:
-                records = [{(k or "").strip().lower(): v for k, v in row.items()} for row in csv.DictReader(fh)]
+        sha = file_sha256(path)
+        batch.files.append(path)
+        if seen(session, "inbox", sha):
+            continue  # already imported in an earlier run whose archive step failed
+        try:
+            if path.suffix == ".json":
+                data = json.loads(path.read_text(encoding="utf-8"))
+                records = data if isinstance(data, list) else [data]
+            else:
+                with path.open(newline="", encoding="utf-8-sig") as fh:
+                    records = [{(k or "").strip().lower(): v for k, v in row.items()} for row in csv.DictReader(fh)]
+            if not all(isinstance(r, dict) for r in records):
+                raise ValueError("expected an object or a list of objects")
+        except (ValueError, UnicodeDecodeError, csv.Error) as exc:
+            batch.files.remove(path)
+            batch.reject(path, f"unreadable file ({type(exc).__name__})")
+            continue
+        skipped = 0
         for rec in records:
-            _, created = record_inquiry(session, rec, "inbox_file")
+            try:
+                _, created = record_inquiry(session, rec, "inbox_file")
+            except ValidationError:
+                skipped += 1  # the raw record stays in the archived file
+                continue
             count += int(created)
-        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        shutil.move(str(path), processed / f"{stamp}_{path.name}")
-    return count
+        mark(session, "inbox", sha, path.name, len(records) - skipped)
+    return count, batch
