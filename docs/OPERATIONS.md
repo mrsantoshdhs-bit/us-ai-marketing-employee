@@ -175,6 +175,22 @@ and what was done.
   `[TEST for <intended recipient>]`. `aime simulate-reply --lead <id> --text "..."` processes a reply
   that is labelled SIMULATED everywhere.
 
+## Meetings, pipeline automation and sales reporting
+
+- **Meetings** (`/meetings`): Calendly's "New Event" and "Canceled" emails in the sales mailbox become meeting
+  records (times converted from the event's time zone; shown in US Eastern). A booking matched to a lead moves it
+  to *meeting*, the opportunity to 30% with the meeting as next step, and notifies you; a cancellation moves it
+  back to *interested*. Unreadable or unmatched notifications go to review. You can also log a meeting on a
+  lead's page. After a meeting mark it held (opportunity 40%, "send a proposal") or no-show (a rebooking task).
+- **Pipeline automation** (followups job, `[pipeline]` in `config/business.toml`): open opportunities with
+  nothing logged for 10 days get a "Stalled" task; leads whose three outreach emails went unanswered for 7 days
+  become *no response* and move to nurture; meetings that ended get a "Record the outcome" task. Each task is
+  created once. "Stop outreach" on a lead page cancels its queued emails.
+- **Reports** (daily and weekly): companies researched, decision-makers, usable emails, outreach drafted and
+  sent, bounces and unsubscribes, replies, interested replies, meetings booked and held, and reply / interest /
+  meeting rates, all from records. Simulated test replies and meetings are listed separately and never counted
+  in these figures.
+
 ## Post images
 
 - Images are 1080×1350 (4:5, the largest feed format), designed from HTML/CSS templates in

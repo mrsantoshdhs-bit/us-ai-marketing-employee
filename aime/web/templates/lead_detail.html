@@ -42,6 +42,16 @@
     </form>
     <form method="post" action="/leads/{{ lead.id }}/note" class="filters"><input name="note" placeholder="Add a note" style="flex:1" required><button class="secondary">Add note</button></form>
     {% if lead.contact %}<form method="post" action="/leads/{{ lead.id }}/replied"><button class="secondary">They replied — stop follow-ups</button></form>{% endif %}
+    {% if lead.outreach_status in ['drafted', 'approved', 'contacted'] %}<form method="post" action="/leads/{{ lead.id }}/stop_outreach" style="margin-top:6px"><button class="danger">Stop outreach</button></form>{% endif %}
+    <h2>Meetings</h2>
+    {% for m in meetings %}<div class="row-item small">{% if m.is_simulated %}<span class="pill bad">SIMULATED</span> {% endif %}{{ m.starts_at|et }} · {{ m.title }} · {{ m.status|replace('_', ' ') }} <span class="muted">({{ m.source|replace('_', ' ') }})</span></div>
+    {% else %}<p class="muted small">None yet.</p>{% endfor %}
+    <form method="post" action="/leads/{{ lead.id }}/meeting" class="filters small">
+      <input name="date" placeholder="YYYY-MM-DD" size="10" required><input name="time_et" placeholder="HH:MM ET" size="7" required>
+      <input name="minutes" value="30" size="3"><input name="title" placeholder="Title" value="Intro call">
+      {% if not (lead.contact and lead.contact.email) %}<input name="invitee_email" placeholder="invitee email" required>{% endif %}
+      <button class="secondary">Log a meeting</button>
+    </form>
   </div>
 </div>
 

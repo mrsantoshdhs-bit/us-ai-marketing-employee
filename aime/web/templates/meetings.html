@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Meetings · AI Marketing Employee{% endblock %}
+{% block content %}
+<h1>Meetings</h1>
+<div class="card small">
+  Booked through your Calendly link (detected from Calendly's emails in the sales mailbox) or logged on a lead's page.
+  Times are US Eastern. After a meeting, mark it held or no-show; the opportunity's next step updates and the
+  "record the outcome" task closes. Simulated bookings (testing only) are marked SIMULATED.
+</div>
+<h2>Upcoming</h2>
+{% for m in upcoming %}
+<div class="card">
+  {% if m.is_simulated %}<span class="pill bad">SIMULATED</span> {% endif %}<strong>{{ m.starts_at|et }}</strong> · {{ m.title }}
+  · {{ m.invitee_name or '' }} &lt;{{ m.invitee_email }}&gt;
+  {% if m.lead %} · <a href="/leads/{{ m.lead_id }}">{{ m.lead.company.name }}</a>{% else %} · <span class="pill warn">not matched to a lead</span>{% endif %}
+  <span class="muted small">({{ m.source|replace('_', ' ') }})</span>
+  <form class="filters" method="post" action="/meetings/{{ m.id }}/held" style="margin-top:6px">
+    <input name="notes" placeholder="Notes (optional)" style="flex:1">
+    <button>Held</button><button class="secondary" formaction="/meetings/{{ m.id }}/no_show">No-show</button>
+    <button class="danger" formaction="/meetings/{{ m.id }}/cancel">Cancelled</button>
+  </form>
+</div>
+{% else %}<div class="card muted">No upcoming meetings.</div>{% endfor %}
+<h2>Past and cancelled</h2>
+<div class="card table-wrap"><table>
+  <tr><th>When (ET)</th><th>Who</th><th>Company</th><th>Status</th><th>Source</th><th>Notes</th></tr>
+  {% for m in past %}<tr><td>{{ m.starts_at|et }}</td><td>{{ m.invitee_name or m.invitee_email }}</td>
+    <td>{% if m.lead %}<a href="/leads/{{ m.lead_id }}">{{ m.lead.company.name }}</a>{% endif %}</td>
+    <td>{{ m.status|replace('_', ' ') }}{% if m.is_simulated %} <span class="pill bad">SIMULATED</span>{% endif %}</td>
+    <td class="small">{{ m.source|replace('_', ' ') }}</td><td class="small">{{ m.notes or '' }}</td></tr>
+  {% else %}<tr><td colspan="6" class="muted">None.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

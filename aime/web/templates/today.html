@@ -50,6 +50,13 @@
       {% endfor %}
     </div>
 
+    <h2>Upcoming meetings</h2>
+    <div class="card small">
+      {% for m in upcoming %}<div class="row-item">{% if m.is_simulated %}<span class="pill bad">SIMULATED</span> {% endif %}<b>{{ m.starts_at|et }}</b>
+        {{ m.invitee_name or m.invitee_email }}{% if m.lead %} · <a href="/leads/{{ m.lead_id }}">{{ m.lead.company.name }}</a>{% endif %}</div>
+      {% else %}<span class="muted">No meetings booked.</span>{% endfor %}
+    </div>
+
     <h2>Auto-publish policy <span class="pill warn">shadow</span></h2>
     <div class="card small">
       Of the posts waiting: <b>{{ policy.would_publish }}</b> would publish, <b>{{ policy.would_hold }}</b> would hold.

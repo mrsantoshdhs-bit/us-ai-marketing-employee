@@ -85,6 +85,12 @@ daily_send_limit = 20
 per_domain_daily_limit = 1
 sends_per_run = 5
 
+[pipeline]
+# Open opportunities with nothing logged for this long get a "decide the next step" task.
+stalled_days = 10
+# After the last outreach email, wait this long for a reply before marking "no response" (lead -> nurture).
+no_response_days = 7
+
 [enrichment]
 # Company research reads each company's own website (robots.txt honoured) and SEC filings.
 companies_per_run = 15

@@ -35,7 +35,7 @@ from aime.knowledge.geo import US_REGIONS
 from aime.knowledge.industries import INDUSTRIES, industry_label
 from aime.knowledge.services import SERVICES, service_name
 from aime.models import (Activity, AgentRun, Alert, Campaign, Company, Contact, ContentItem, FollowUp, InboundEmail,
-                         InboundInquiry,
+                         InboundInquiry, Meeting,
                          JobRun, JobState, Lead, MarketingPlan, Opportunity, PolicyDecision, PublishAttempt, Report,
                          ResearchSnapshot, ResearchTopic, Signal)
 from aime.monitoring import agent_stats, read_heartbeat
@@ -47,6 +47,7 @@ from aime.qc.checks import run_quality_checks
 from aime.qc.email_checks import run_email_checks
 from aime.reply_intel import QUESTION_PLACEHOLDER
 from aime.reply_intel import act as act_on_reply
+from aime.meetings import record_meeting
 from aime.scheduler.runner import due_jobs, run_job
 from aime.timeutil import fmt_et, fmt_local, utcnow
 from aime.web.auth import (COOKIE, SESSION_SECONDS, AuthMiddleware, authenticate, current_username, make_cookie,
@@ -222,10 +223,22 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 ("Posts scheduled", cnt(ContentItem, ContentItem.status.in_(("awaiting_approval", "approved"))), "/content", ""),
                 ("Posts published", cnt(ContentItem, ContentItem.status == "published"), "/content?status=published", ""),
                 ("Open opportunities", cnt(Opportunity, Opportunity.stage.not_in(("won", "lost"))), "/pipeline", ""),
+                ("Outreach emails sent", cnt(FollowUp, FollowUp.kind == "outreach", FollowUp.status == "sent"),
+                 "/followups?show=all", ""),
+                ("Replies (real)", cnt(InboundEmail, InboundEmail.is_simulated.is_(False),
+                                       InboundEmail.category.in_(("interested", "not_interested", "objection", "referral",
+                                                                  "question", "other"))), "/inbox?show=all", ""),
+                ("Interested", cnt(Lead, Lead.outreach_status.in_(("interested", "meeting"))), "/pipeline", ""),
+                ("Meetings booked", cnt(Meeting, Meeting.is_simulated.is_(False), Meeting.status != "cancelled"),
+                 "/meetings", ""),
                 ("Deals won", stages.get("won", 0), "/pipeline", ""),
             ]
             task_total = cnt(FollowUp, FollowUp.channel == "task", FollowUp.status == "pending")
             health = health_strip(ctx, s)
+            upcoming = s.execute(select(Meeting).where(Meeting.status == "scheduled", Meeting.ends_at >= utcnow())
+                                 .order_by(Meeting.starts_at).limit(5)).scalars().all()
+            for m in upcoming:
+                _ = m.lead.company if m.lead else None
             replies = s.execute(select(InboundEmail).where(InboundEmail.status == "needs_review")
                                 .order_by(InboundEmail.received_at.desc()).limit(10)).scalars().all()
             policy = agreement(s)
@@ -235,7 +248,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             post_decisions = {r["content_id"]: r["decision"] for r in policy["rows"]}
         return render(request, "today.html", posts=posts, emails=emails, tasks=tasks, task_total=task_total,
                       exceptions=exceptions, alerts=alerts, funnel=funnel, stages=stages, health=health,
-                      policy=policy_now, post_decisions=post_decisions, replies=replies)
+                      policy=policy_now, post_decisions=post_decisions, replies=replies, upcoming=upcoming)
 
     # ------------------------------------------------------------------ replies (sales mailbox)
     @app.get("/inbox", response_class=HTMLResponse)
@@ -343,8 +356,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                                .order_by(Contact.relevance.desc().nullslast(), Contact.id)).scalars().all()
             research = s.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == lead.company_id)
                                  .order_by(ResearchSnapshot.id.desc())).scalars().first()
+            meetings = s.execute(select(Meeting).where(Meeting.lead_id == lead.id).order_by(Meeting.starts_at.desc())).scalars().all()
         return render(request, "lead_detail.html", lead=lead, signals=signals, acts=acts, fups=fups, opps=opps,
-                      people=people, research=research)
+                      people=people, research=research, meetings=meetings)
 
     @app.get("/contacts", response_class=HTMLResponse)
     def contacts_page(request: Request, confidence: str = "", role: str = "", reachable: str = ""):
@@ -429,8 +443,80 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             opps = s.execute(select(Opportunity).order_by(Opportunity.updated_at.desc())).scalars().all()
             for o in opps:
                 _ = o.company
+            outreach = dict(s.execute(select(Lead.outreach_status, func.count(Lead.id)).where(
+                Lead.outreach_status.is_not(None)).group_by(Lead.outreach_status)).all())
         board = {st: [o for o in opps if o.stage == st] for st in STAGES}
-        return render(request, "pipeline.html", board=board)
+        order = ["drafted", "approved", "contacted", "replied", "interested", "meeting", "not_interested", "no_response",
+                 "unsubscribed", "bounced", "stopped"]
+        return render(request, "pipeline.html", board=board, outreach=[(k, outreach.get(k, 0)) for k in order])
+
+    # ------------------------------------------------------------------ meetings
+    @app.get("/meetings", response_class=HTMLResponse)
+    def meetings_page(request: Request):
+        with C().db.session() as s:
+            rows = s.execute(select(Meeting).order_by(Meeting.starts_at.desc()).limit(200)).scalars().all()
+            for m in rows:
+                _ = m.lead.company if m.lead else None
+        now = utcnow()
+        return render(request, "meetings.html", upcoming=[m for m in rows if m.status == "scheduled" and m.ends_at >= now][::-1],
+                      past=[m for m in rows if not (m.status == "scheduled" and m.ends_at >= now)])
+
+    @app.post("/meetings/{mid}/{action}")
+    def meeting_action(request: Request, mid: int, action: str, notes: str = Form("")):
+        with C().db.session() as s:
+            m = s.get(Meeting, mid) or _404()
+            if action not in ("held", "no_show", "cancel") or m.status != "scheduled":
+                raise HTTPException(400, "Action not allowed in the current state")
+            m.status = {"held": "completed", "no_show": "no_show", "cancel": "cancelled"}[action]
+            m.notes = (notes or m.notes or "")[:2000] or None
+            opp = s.get(Opportunity, m.opportunity_id) if m.opportunity_id else None
+            if opp and opp.stage not in ("won", "lost"):
+                if action == "held":
+                    opp.probability = max(opp.probability or 0, 40)
+                    opp.next_step = "Meeting held: send a proposal or decide the next step"
+                elif action == "no_show":
+                    opp.next_step = "No-show: follow up to rebook"
+                else:
+                    opp.next_step = "Meeting cancelled: follow up to rebook"
+            if m.lead_id and action == "no_show":
+                s.add(FollowUp(lead_id=m.lead_id, company_id=m.company_id, channel="task", step=1, status="pending",
+                               subject=f"Rebook the meeting with {m.invitee_name or m.invitee_email}",
+                               body=f"They did not join the meeting on {m.starts_at:%Y-%m-%d %H:%M} UTC."))
+            for t in s.execute(select(FollowUp).where(FollowUp.lead_id == m.lead_id, FollowUp.channel == "task",
+                                                      FollowUp.status == "pending",
+                                                      FollowUp.subject.like("Record the outcome of the meeting%"))).scalars():
+                t.status = "done"
+            log_activity(s, f"Meeting {m.status.replace('_', ' ')}: {m.invitee_name or m.invitee_email}", who(request),
+                         type_="meeting", body=notes or None, company_id=m.company_id, lead_id=m.lead_id,
+                         opportunity_id=m.opportunity_id)
+        return back("/meetings", f"Meeting marked {m.status.replace('_', ' ')}")
+
+    @app.post("/leads/{lead_id}/meeting")
+    def log_meeting(request: Request, lead_id: int, date: str = Form(...), time_et: str = Form(...),
+                    minutes: int = Form(30), title: str = Form("Meeting"), invitee_email: str = Form("")):
+        from zoneinfo import ZoneInfo
+        with C().db.session() as s:
+            lead = s.get(Lead, lead_id) or _404()
+            email = (invitee_email or (lead.contact.email if lead.contact else "") or "").strip().lower()
+            if "@" not in email:
+                return back(f"/leads/{lead_id}", "Enter the invitee's email")
+            try:
+                start = datetime.fromisoformat(f"{date}T{time_et}").replace(tzinfo=ZoneInfo("America/New_York"))
+            except ValueError:
+                return back(f"/leads/{lead_id}", "Enter the date as YYYY-MM-DD and the time as HH:MM (US Eastern)")
+            start_utc = start.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+            info = {"kind": "booked", "invitee_email": email, "invitee_name": lead.contact.display_name if lead.contact else None,
+                    "starts_at": start_utc, "ends_at": start_utc + timedelta(minutes=max(5, min(minutes, 480))),
+                    "event": title[:200] or "Meeting", "tz": "America/New_York"}
+            meeting, note = record_meeting(s, C().settings, info, who(request), source="manual")
+        return back(f"/leads/{lead_id}", f"Meeting logged: {note}")
+
+    @app.post("/leads/{lead_id}/stop_outreach")
+    def stop_outreach(request: Request, lead_id: int):
+        with C().db.session() as s:
+            lead = s.get(Lead, lead_id) or _404()
+            n = stop_sequence(s, lead, "stopped", f"Stopped by {who(request)}", who(request))
+        return back(f"/leads/{lead_id}", f"Outreach stopped; {n} queued email(s) cancelled")
 
     @app.post("/opportunities/{opp_id}")
     def update_opp(request: Request, opp_id: int, stage: str = Form(...), next_step: str = Form(""),

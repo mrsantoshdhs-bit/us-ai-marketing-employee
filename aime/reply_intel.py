@@ -176,8 +176,8 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         notes.append("Automatic reply: the sequence continues")
         row.status = "actioned"
     elif row.category == "calendly":
-        notes.append("Calendly notification: handled by the meetings step")
-        row.status = "needs_review"
+        from aime.meetings import handle_calendly_email
+        notes.append(handle_calendly_email(session, settings, row, actor))
     elif lead is None:
         notes.append("Could not match this email to a lead")
         row.status = "needs_review"
