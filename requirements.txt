@@ -8,3 +8,4 @@ pydantic>=2.7
 python-dotenv>=1.0
 pillow>=10.4
 tzdata>=2024.1
+cryptography>=43

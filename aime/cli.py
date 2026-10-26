@@ -194,11 +194,44 @@ def cmd_doctor(args, ctx) -> int:
 
 
 def cmd_backup(args, ctx) -> int:
-    from aime.backup import backup_sqlite_file
+    from aime.backup import backup_sqlite_file, verify_backup, write_offsite
 
-    path = backup_sqlite_file(Path(ctx.db.engine.url.database), ctx.settings.backups_dir, label=args.label)
+    db_path = Path(ctx.db.engine.url.database)
+    path = backup_sqlite_file(db_path, ctx.settings.backups_dir, label=args.label)
+    check = verify_backup(path)
     print(f"Backup written: {path}")
-    return 0
+    print(f"Verified: {'ok' if check['ok'] else 'FAILED'} ({check['integrity']}, {check['tables']} tables, "
+          f"{check['rows']} rows)")
+    if args.offsite:
+        result = write_offsite(ctx.settings, db_path)
+        print("Off-machine copy:", result.get("file") or result.get("reason"))
+        if result["status"] != "ok":
+            return 1
+    return 0 if check["ok"] else 1
+
+
+def cmd_backup_verify(args, ctx) -> int:
+    from aime.backup import verify_backup
+
+    check = verify_backup(Path(args.file))
+    print(f"{args.file}: {'ok' if check['ok'] else 'FAILED'} ({check['integrity']}, {check['tables']} tables, "
+          f"{check['rows']} rows)")
+    return 0 if check["ok"] else 1
+
+
+def cmd_restore_drill(args, ctx) -> int:
+    """Restore a backup into a temporary folder and check it; the live data folder is never written."""
+    from aime.backup import BackupError, restore_drill
+
+    try:
+        result = restore_drill(ctx.settings, Path(args.source) if args.source else None,
+                               Path(args.extract_to) if args.extract_to else None)
+    except BackupError as exc:
+        print(f"Restore drill FAILED: {exc}")
+        return 1
+    print(f"Restore drill {'PASSED' if result['ok'] else 'FAILED'}: {result.get('source')} — {result['detail']}"
+          + (f" in {result['seconds']} s" if "seconds" in result else ""))
+    return 0 if result["ok"] else 1
 
 
 def cmd_maintenance(args, ctx) -> int:
@@ -293,8 +326,14 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("action", choices=["install", "uninstall", "status", "run", "verify"])
     sc.add_argument("--interval", type=int)
     sub.add_parser("doctor", help="Integrity, isolation, compliance and scheduler self-checks")
-    bk = sub.add_parser("backup", help="Write an online backup of the database")
+    bk = sub.add_parser("backup", help="Write and verify an online backup of the database")
     bk.add_argument("--label", default="manual")
+    bk.add_argument("--offsite", action="store_true", help="Also write an encrypted copy to BACKUP_OFFSITE_DIR")
+    bv = sub.add_parser("backup-verify", help="Check a backup file's integrity and table counts (read-only)")
+    bv.add_argument("file")
+    rd = sub.add_parser("restore-drill", help="Restore a backup into a temp folder and check it (never touches data/)")
+    rd.add_argument("--source", help="Backup .db, bundle .zip or encrypted .aimebak (default: latest local backup)")
+    rd.add_argument("--extract-to", help="New folder (outside data/) to receive the checked files for a manual restore")
     mt = sub.add_parser("maintenance", help="Pause scheduled ticks for upgrades (always expires)")
     mt.add_argument("action", choices=["on", "off", "status"])
     mt.add_argument("--hours", type=float, default=2.0)
@@ -318,7 +357,7 @@ COMMANDS = {
     "init": cmd_init, "status": cmd_status, "run": cmd_run, "tick": cmd_tick, "serve": cmd_serve,
     "scheduler": cmd_scheduler, "llm-check": cmd_llm_check, "inbound": cmd_inbound, "suppress": cmd_suppress,
     "seed-demo": cmd_seed_demo, "doctor": cmd_doctor, "backup": cmd_backup, "maintenance": cmd_maintenance,
-    "refresh-graphics": cmd_refresh_graphics,
+    "refresh-graphics": cmd_refresh_graphics, "backup-verify": cmd_backup_verify, "restore-drill": cmd_restore_drill,
 }
 PRODUCTION_DATA_DIR = BASE_DIR / "data"
 

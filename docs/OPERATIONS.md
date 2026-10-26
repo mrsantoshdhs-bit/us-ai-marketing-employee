@@ -57,10 +57,21 @@ alert). If no slot is free it is never published late: it returns to "awaiting a
 
 ## Backups and restore
 
-- `db_maintenance` (daily 06:15) writes an online backup to `data/backups/` and keeps 14.
-- Manual: `backup --label before-change`.
+- `db_maintenance` (daily 06:15) writes an online backup to `data/backups/`, **verifies it** (integrity
+  and table counts) and keeps 14. Pre-deploy and manual backups are never pruned.
+- **Off-machine copy (optional):** set `BACKUP_OFFSITE_DIR` (e.g. `C:\Users\<you>\OneDrive\AIME-Backups`)
+  and `BACKUP_PASSPHRASE` (12+ characters) in `.env`. Each day an encrypted bundle (database, publish
+  journal, post images, config, SHA-256 manifest; never `.env`) is written there and test-decrypted;
+  the last 30 copies are kept. **Store the passphrase in your password manager: without it the copies
+  cannot be read.**
+- Manual: `backup --label before-change` (add `--offsite` for an encrypted copy too);
+  `backup-verify <file>` checks any backup.
+- **Restore drill:** `restore-drill` (latest local backup) or `restore-drill --source <file.aimebak>`
+  restores into a temporary folder and checks it. It never writes to `data/`.
 - Restore: `maintenance on`, copy the chosen backup over `data/aime.db` (delete `aime.db-wal` and
-  `aime.db-shm` first), run `doctor`, then `maintenance off`.
+  `aime.db-shm` first), run `doctor`, then `maintenance off`. For an encrypted copy, first run
+  `restore-drill --source <file.aimebak> --extract-to C:\restore-check` (a new folder outside `data/`),
+  then restore the checked `aime.db`, `publish_journal.jsonl` and `assets/` from that folder.
 
 ## Scheduler recovery
 

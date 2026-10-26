@@ -109,6 +109,8 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "dashboard_port": ("DASHBOARD_PORT", int),
     "inbound_api_token": ("INBOUND_API_TOKEN", str),
     "allowed_hosts": ("ALLOWED_HOSTS", str),
+    "backup_offsite_dir": ("BACKUP_OFFSITE_DIR", str),
+    "backup_passphrase": ("BACKUP_PASSPHRASE", str),
     "database_url": ("DATABASE_URL", str),
     "data_dir": ("AIME_DATA_DIR", Path),
     "data_role": ("AIME_DATA_ROLE", str),
@@ -132,7 +134,8 @@ class Settings:
     llm_timeout: float = 180.0
 
     linkedin_client_id: str = ""
-    linkedin_client_secret: str = ""
+    # Secrets use repr=False so printing or logging a Settings object can never show them.
+    linkedin_client_secret: str = field(default="", repr=False)
     linkedin_redirect_uri: str = "http://127.0.0.1:8765/integrations/linkedin/callback"
     linkedin_scopes: str = "openid profile w_member_social"
     linkedin_api_version: str = "202609"
@@ -143,13 +146,13 @@ class Settings:
 
     hn_source_enabled: bool = True
     sec_user_agent: str = ""
-    census_api_key: str = ""
+    census_api_key: str = field(default="", repr=False)
 
     outbound_email_enabled: bool = False
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_username: str = ""
-    smtp_password: str = ""
+    smtp_password: str = field(default="", repr=False)
     smtp_from: str = ""
     smtp_use_tls: bool = True
     sender_name: str = ""
@@ -158,9 +161,13 @@ class Settings:
 
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8765
-    inbound_api_token: str = ""
+    inbound_api_token: str = field(default="", repr=False)
     # Host headers the dashboard answers to (blocks DNS-rebinding). Add your domain when behind a proxy.
     allowed_hosts: str = "127.0.0.1,localhost,::1,[::1]"
+
+    # Encrypted off-machine backup copy (e.g. a OneDrive folder). Both empty = off.
+    backup_offsite_dir: str = ""
+    backup_passphrase: str = field(default="", repr=False)
 
     # Operational knobs (tests shrink these)
     retry_base_delay: float = 2.0

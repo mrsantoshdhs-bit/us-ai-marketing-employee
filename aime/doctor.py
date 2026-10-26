@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import func, or_, select
 
-from aime.backup import integrity_check
+from aime.backup import integrity_check, offsite_status
 from aime.context import AppContext
 from aime.db import kv_get
 from aime.integrations.linkedin import configured_author_urn
@@ -15,6 +15,8 @@ from aime.models import (Company, Contact, ContentItem, FollowUp, InboundInquiry
 from aime.monitoring import read_heartbeat
 from aime.secure_store import is_protected
 from aime.timeutil import utcnow
+
+BACKUP_MAX_AGE_HOURS = 30  # the backup job runs daily; allow for a late or retried run
 
 
 def run_checks(ctx: AppContext) -> list[dict]:
@@ -72,6 +74,24 @@ def run_checks(ctx: AppContext) -> list[dict]:
     add("LinkedIn author setting valid", author_ok,
         "LINKEDIN_AUTHOR_URN is empty or a valid URN" if author_ok
         else "LINKEDIN_AUTHOR_URN is not a valid LinkedIn URN (value hidden); fix or clear it in .env")
+
+    with ctx.db.session() as s:
+        last, off = kv_get(s, "backup.last_verified"), kv_get(s, "backup.last_offsite")
+    if last is None:
+        add("Recent verified backup", False, "No verified backup recorded yet (the daily db_maintenance job records one)",
+            "warning")
+    else:
+        hours = (utcnow() - datetime.fromisoformat(last["at"])).total_seconds() / 3600
+        add("Recent verified backup", hours <= BACKUP_MAX_AGE_HOURS,
+            f"{last['file']}: {last['rows']} rows, verified {hours:.0f} h ago")
+    off_ready, off_reason = offsite_status(ctx.settings)
+    if not off_ready:
+        add("Off-machine encrypted backup", False, f"Off-machine backup {off_reason}", "warning")
+    elif off is None:
+        add("Off-machine encrypted backup", False, "Configured; no copy written yet", "warning")
+    else:
+        hours = (utcnow() - datetime.fromisoformat(off["at"])).total_seconds() / 3600
+        add("Off-machine encrypted backup", hours <= BACKUP_MAX_AGE_HOURS, f"{off['file']}, {hours:.0f} h ago")
 
     hb = read_heartbeat(ctx.settings)
     if hb is None:
