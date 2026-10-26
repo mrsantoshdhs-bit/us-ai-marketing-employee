@@ -24,7 +24,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from aime import maintenance
 from aime.agents import AGENTS
 from aime.context import AppContext, get_context
-from aime.crm_ops import log_activity, suppress
+from aime.crm_ops import is_suppressed, log_activity, suppress
 from aime.db import kv_get, kv_set
 from aime.inbound import InboundPayload, record_inquiry
 from aime.integrations.email_smtp import EmailSender
@@ -40,7 +40,10 @@ from aime.models import (Activity, AgentRun, Alert, Campaign, Company, Contact, 
 from aime.monitoring import agent_stats, read_heartbeat
 from aime.policy import agreement, environment_blockers, evaluate_shadow, policy_config
 from aime.qc import summary as qc_summary
+from aime.outreach import set_status as set_outreach_status
+from aime.outreach import stop_sequence
 from aime.qc.checks import run_quality_checks
+from aime.qc.email_checks import run_email_checks
 from aime.scheduler.runner import due_jobs, run_job
 from aime.timeutil import fmt_et, fmt_local, utcnow
 from aime.web.auth import (COOKIE, SESSION_SECONDS, AuthMiddleware, authenticate, current_username, make_cookie,
@@ -345,6 +348,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def lead_replied(request: Request, lead_id: int):
         with C().db.session() as s:
             lead = s.get(Lead, lead_id) or _404()
+            if lead.outreach_status:
+                stop_sequence(s, lead, "replied", "Contact replied (logged manually); sequence stopped", who(request))
             for f in s.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
                                                       FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
                 f.status, f.blocked_reason = "cancelled", "Contact replied; sequence stopped"
@@ -418,18 +423,43 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return render(request, "followups.html", rows=rows, show=show, email_ready=ready, email_reason=reason)
 
     @app.post("/followups/{fid}/{action}")
-    def followup_action(request: Request, fid: int, action: str, subject: str = Form(""), body: str = Form("")):
+    def followup_action(request: Request, fid: int, action: str, subject: str = Form(""), body: str = Form(""),
+                        qc_override: str = Form("")):
         with C().db.session() as s:
             f = s.get(FollowUp, fid) or _404()
-            if action == "approve" and f.channel == "email" and f.status == "awaiting_approval":
-                if subject.strip():
-                    f.subject = subject.strip()
-                if body.strip():
-                    f.body = body
-                f.status, f.approved_by, f.approved_at = "approved", who(request), utcnow()
-                msg = "Approved. It will be sent by the follow-ups job if outbound email is enabled."
+            if action in ("approve", "save") and f.channel == "email" and f.status == "awaiting_approval":
+                edited = False
+                if subject.strip() and subject.strip() != f.subject:
+                    f.subject, edited = subject.strip(), True
+                if body.strip() and body.replace("\r\n", "\n") != f.body:
+                    f.body, edited = body.replace("\r\n", "\n"), True
+                qc_status = None
+                if f.kind == "outreach":
+                    if edited or action == "save":  # an edited email is checked again before anyone approves it
+                        suppressed = is_suppressed(s, f.contact.email if f.contact else None, f.lead.company.domain)
+                        f.quality = {**(f.quality or {}), "qc": run_email_checks(
+                            f.subject, f.body or "", list(f.evidence or []), f.contact, suppressed, step=f.step)}
+                    qc_status = ((f.quality or {}).get("qc") or {}).get("status")
+                if action == "save":
+                    msg = "Saved" + (f"; quality checks: {qc_status}" if qc_status else "")
+                elif qc_status in ("held", "failed") and qc_override != "yes":
+                    return back(f"/followups#f{f.id}", f"Quality checks {qc_status}: review the findings and tick "
+                                                       "'I reviewed the quality findings' to approve")
+                else:
+                    f.status, f.approved_by, f.approved_at = "approved", who(request), utcnow()
+                    if f.kind == "outreach":
+                        lead = f.lead
+                        lead.owner = lead.owner or who(request)
+                        if f.step == 1:
+                            set_outreach_status(s, lead, "approved", who(request))
+                        if qc_status in ("held", "failed"):
+                            log_activity(s, f"Outreach email #{f.id} approved despite {qc_status} quality checks",
+                                         who(request), type_="override", company_id=f.company_id, lead_id=f.lead_id)
+                    msg = "Approved. It will be sent by the follow-ups job if outbound email is enabled."
             elif action == "reject" and f.status in ("awaiting_approval", "approved", "pending"):
                 f.status = "rejected"
+                if f.kind == "outreach" and f.step == 1 and f.lead.outreach_status in ("drafted", "approved"):
+                    set_outreach_status(s, f.lead, "stopped", who(request), "first email rejected")
                 msg = "Rejected"
             elif action == "done" and f.channel == "task":
                 f.status = "done"

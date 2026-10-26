@@ -68,6 +68,19 @@ max_posts_per_run = 1
 # Approved posts whose slot passed by more than this are rescheduled instead of burst-published.
 max_overdue_hours = 24
 
+[outreach]
+# B2B first-touch emails to researched decision-makers (owner decision, 26 Oct 2026). Drafts quote only
+# what the company published; every email needs your approval; nothing is sent while
+# OUTBOUND_EMAIL_ENABLED=false.
+b2b_enabled = true
+drafts_per_run = 10
+min_grade = "B"
+# Day offsets of the 3 steps (first email, follow-up, close-the-loop); each step needs approval.
+intervals_days = [0, 4, 10]
+max_touches = 3
+# Also draft to a published company inbox (info@, hello@ ...) when no named person has an email.
+include_company_inboxes = true
+
 [enrichment]
 # Company research reads each company's own website (robots.txt honoured) and SEC filings.
 companies_per_run = 15

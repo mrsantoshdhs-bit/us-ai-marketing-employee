@@ -21,7 +21,7 @@
         <span class="muted small">post · {{ p.scheduled_for|et }}{% if post_decisions.get(p.id) %} · policy: {{ post_decisions[p.id]|replace('_', ' ') }}{% endif %}</span></div>
       {% endfor %}
       {% for f in emails %}
-      <div class="row-item"><span class="pill warn">reply draft</span> <a href="/followups">{{ f.subject }}</a>
+      <div class="row-item"><span class="pill warn">{{ 'outreach' if f.kind == 'outreach' else 'reply draft' }}</span> <a href="/followups#f{{ f.id }}">{{ f.subject }}</a>
         <span class="muted small">{{ f.lead.company.name if f.lead and f.lead.company else '' }}</span></div>
       {% endfor %}
       {% if not exceptions and not posts and not emails %}<span class="muted">Nothing waiting for you.</span>{% endif %}
