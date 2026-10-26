@@ -118,7 +118,37 @@ def check_layout(metrics: dict) -> list[str]:
         problems.append(f"unbalanced layout: {int(metrics['gap'] * 100)}% of the height has no text")
     if not metrics.get("brand"):
         problems.append("brand name missing")
+    if metrics.get("crossings"):
+        problems.append(f"decorative line crosses text: {', '.join(metrics['crossings'])}")
+    if metrics.get("blank_patches"):
+        problems.append(f"blank or unpainted patch in the image: {'; '.join(metrics['blank_patches'][:3])}")
     return problems
+
+
+def find_blank_patches(png: Path, white_boxes: list | None = None, black_boxes: list | None = None) -> list[str]:
+    """Solid pure-white or pure-black blocks that no element on the page paints: unpainted areas or render glitches.
+
+    Each colour is masked exactly and the areas the page itself paints in it are cleared. The mask is reduced to
+    3x3-pixel cells (a cell stays set only if all 9 pixels match), then eroded by 3x3 cells, so any solid block from
+    about 12 px across survives and is reported with its approximate position and size."""
+    from PIL import Image, ImageChops, ImageDraw, ImageFilter
+
+    with Image.open(png) as img:
+        channels = img.convert("RGB").split()
+    found = []
+    for name, value, allowed in (("white", 255, white_boxes or []), ("black", 0, black_boxes or [])):
+        r, g, b = (c.point(lambda v, value=value: 255 if v == value else 0) for c in channels)
+        mask = ImageChops.multiply(ImageChops.multiply(r, g), b)
+        draw = ImageDraw.Draw(mask)
+        for left, top, right, bottom in allowed:
+            draw.rectangle([left - 2, top - 2, right + 2, bottom + 2], fill=0)
+        cells = mask.reduce(3).point(lambda v: 255 if v == 255 else 0)
+        box = cells.filter(ImageFilter.MinFilter(3)).getbbox()
+        if box:
+            x0, y0 = max(0, (box[0] - 1) * 3), max(0, (box[1] - 1) * 3)
+            x1, y1 = min(mask.width, (box[2] + 1) * 3), min(mask.height, (box[3] + 1) * 3)
+            found.append(f"{name} at {x0},{y0} about {x1 - x0}x{y1 - y0} px")
+    return found
 
 
 def render_one(browser: Path, html: str, out_png: Path, w: int, h: int, timeout: float = 60) -> dict:
@@ -135,7 +165,16 @@ def render_one(browser: Path, html: str, out_png: Path, w: int, h: int, timeout:
         except ValueError:
             metrics = {}
         shot = work / "shot.png"
-        _run(_browser_args(browser, work / "p2", w, h) + [f"--screenshot={shot}", url], timeout)
+        for attempt in (2, 3):  # a blank patch is a rendering glitch, not a layout fault: take the shot once more
+            shot.unlink(missing_ok=True)
+            _run(_browser_args(browser, work / f"p{attempt}", w, h) + [f"--screenshot={shot}", url], timeout)
+            if not (shot.exists() and shot.stat().st_size > 0):
+                break
+            patches = find_blank_patches(shot, metrics.get("white_boxes"), metrics.get("black_boxes")) if metrics else []
+            if metrics:
+                metrics["blank_patches"] = patches
+            if not patches:
+                break
         if shot.exists() and shot.stat().st_size > 0:
             out_png.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(shot, out_png)

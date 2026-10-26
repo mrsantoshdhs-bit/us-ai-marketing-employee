@@ -112,7 +112,9 @@ Alerts are always stored and shown on the dashboard; notifications are an extra 
   and fonts in `config/brand.toml`, and rendered by the Edge or Chrome already on this computer.
 - Every word on an image comes from the post (title, first sentence, bullets), so image and caption
   always agree. Each design is measured before it is kept: no text overflow or overlaps, text at least
-  26 px (readable on phones), contrast at least 4.5:1, no large empty bands, brand name present. If a
+  26 px (readable on phones), contrast at least 4.5:1, no large empty bands, brand name present, no
+  decorative line crossing text, and no blank or unpainted patch in the screenshot (a solid pure white
+  or black block the design does not paint; the screenshot is retaken once before the style fails). If a
   design fails, the next style is tried; if none passes or no browser is found, the simple card is used.
 - Re-render unpublished posts: `refresh-graphics` (`--renderer pillow` to go back to the simple card).
 
