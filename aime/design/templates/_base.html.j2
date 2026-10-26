@@ -52,6 +52,41 @@ body { font-family: var(--sans); -webkit-font-smoothing: antialiased; text-rende
       out.overlaps.push(boxes[i][0] + '/' + boxes[j][0]);
     }
   } }
+  // Decorative rings ([data-ring]) must not cross a line of text; Range rects hug the glyphs, not the block box.
+  out.crossings = [];
+  var lines = [];
+  document.querySelectorAll('[data-qc]').forEach(function (el) {
+    if (!el.textContent.trim()) { return; }
+    var range = document.createRange();
+    range.selectNodeContents(el);
+    Array.prototype.forEach.call(range.getClientRects(), function (r) {
+      if (r.width && r.height) { lines.push([el.getAttribute('data-qc'), r]); }
+    });
+  });
+  document.querySelectorAll('[data-ring]').forEach(function (ring) {
+    var b = ring.getBoundingClientRect(), cx = b.left + b.width / 2, cy = b.top + b.height / 2, rad = b.width / 2;
+    var tol = (parseFloat(getComputedStyle(ring).borderTopWidth) || 1) + 4;
+    lines.forEach(function (ln) {
+      var r = ln[1];
+      var near = Math.hypot(Math.max(r.left, Math.min(cx, r.right)) - cx, Math.max(r.top, Math.min(cy, r.bottom)) - cy);
+      var far = Math.max(Math.hypot(r.left - cx, r.top - cy), Math.hypot(r.right - cx, r.top - cy),
+                         Math.hypot(r.left - cx, r.bottom - cy), Math.hypot(r.right - cx, r.bottom - cy));
+      if (near <= rad + tol && far >= rad - tol && out.crossings.indexOf(ln[0]) < 0) { out.crossings.push(ln[0]); }
+    });
+  });
+  // Where the page itself paints pure white or black: a solid block anywhere else in the screenshot is a glitch.
+  out.white_boxes = []; out.black_boxes = [];
+  document.querySelectorAll('body, body *').forEach(function (el) {
+    var r = el.getBoundingClientRect(), cs = getComputedStyle(el);
+    if (!r.width || !r.height) { return; }
+    var paints = [cs.backgroundColor];
+    if (Array.prototype.some.call(el.childNodes, function (n) { return n.nodeType === 3 && n.textContent.trim(); })) {
+      paints.push(cs.color);
+    }
+    var box = [Math.floor(r.left), Math.floor(r.top), Math.ceil(r.right), Math.ceil(r.bottom)];
+    if (paints.indexOf('rgb(255, 255, 255)') >= 0) { out.white_boxes.push(box); }
+    if (paints.indexOf('rgb(0, 0, 0)') >= 0) { out.black_boxes.push(box); }
+  });
   out.brand = !!document.querySelector('[data-qc=brand]');
   spans.sort(function (a, b) { return a[0] - b[0]; });
   var gap = 0, cur = 0, covered = 0;

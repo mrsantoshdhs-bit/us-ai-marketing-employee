@@ -2,9 +2,10 @@
 {% block style %}
 body { color: var(--ink); background: linear-gradient(165deg, var(--navy) 0%, #0e1d3f 55%, #10284f 100%); }
 .ring { position: absolute; border-radius: 50%; }
-.r1 { width: 820px; height: 820px; right: -300px; top: -260px; border: 2px solid rgba(143,186,255,.32); }
-.r2 { width: 560px; height: 560px; right: -170px; top: -130px; border: 1px solid rgba(94,234,212,.38); }
-.r3 { width: 300px; height: 300px; right: -40px; top: 0; background: radial-gradient(circle, rgba(94,234,212,.30), transparent 70%); }
+/* Rings sit in the top-right corner, clear of the text; the layout check rejects the style if one ever crosses it. */
+.r1 { width: 560px; height: 560px; right: -230px; top: -250px; border: 2px solid rgba(143,186,255,.32); }
+.r2 { width: 380px; height: 380px; right: -140px; top: -160px; border: 1px solid rgba(94,234,212,.38); }
+.r3 { width: 300px; height: 300px; right: -60px; top: -60px; background: radial-gradient(circle, rgba(94,234,212,.30), transparent 70%); }
 .r4 { width: 900px; height: 900px; left: -520px; bottom: -560px; background: radial-gradient(circle, rgba(59,130,246,.30), transparent 65%); }
 .wrap { position: relative; height: 100%; padding: 84px 84px 56px; display: flex; flex-direction: column; }
 .eyebrow { display: flex; gap: 14px; align-items: center; font-size: 26px; letter-spacing: .12em; text-transform: uppercase; color: var(--teal-light); font-weight: 600; }
@@ -18,7 +19,7 @@ h1 em { font-style: normal; background: linear-gradient(90deg, var(--blue-light)
 .chip i { flex: 0 0 14px; height: 14px; border-radius: 50%; background: var(--teal-light); box-shadow: 0 0 0 7px rgba(94,234,212,.16); }
 {% endblock %}
 {% block body %}
-<div class="ring r4"></div><div class="ring r1"></div><div class="ring r2"></div><div class="ring r3"></div>
+<div class="ring r4"></div><div class="ring r1" data-ring></div><div class="ring r2" data-ring></div><div class="ring r3"></div>
 <div class="wrap">
   <div class="eyebrow" data-qc="eyebrow" data-fg="{{ c.teal_light }}" data-bg="{{ c.navy }}"><i></i>{{ b.eyebrow }}</div>
   <div class="main">
