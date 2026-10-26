@@ -216,6 +216,73 @@ def cmd_backup(args, ctx) -> int:
     return 0 if check["ok"] else 1
 
 
+def _ask_password(prompt_fn) -> str | None:
+    first = prompt_fn("New password (at least 12 characters): ")
+    second = prompt_fn("Repeat the password: ")
+    if first != second:
+        print("The two passwords do not match; nothing changed.")
+        return None
+    return first
+
+
+def cmd_user(args, ctx, prompt_fn=None) -> int:
+    """Dashboard accounts. Passwords are typed by you at the prompt and stored only as scrypt hashes."""
+    import getpass
+
+    from aime.models import User
+    from aime.web.auth import hash_password
+
+    prompt_fn = prompt_fn or getpass.getpass
+    with ctx.db.session() as s:
+        if args.action == "list":
+            for u in s.execute(select(User).order_by(User.id)).scalars():
+                print(f"{u.username:<20} {u.role:<15} {'active' if u.active else 'disabled':<9} "
+                      f"last sign-in: {u.last_login_at or '-'}")
+            return 0
+        username = (args.username or "").strip().lower()
+        if not username:
+            print("--username is required")
+            return 1
+        user = s.execute(select(User).where(User.username == username)).scalars().first()
+        if args.action == "create":
+            if user:
+                print(f"User {username} already exists")
+                return 1
+            password = _ask_password(prompt_fn)
+            if password is None:
+                return 1
+            try:
+                s.add(User(username=username, password_hash=hash_password(password), role=args.role))
+            except ValueError as exc:
+                print(exc)
+                return 1
+            print(f"Created {args.role} account {username}. Sign in at http://127.0.0.1:8765/login")
+            return 0
+        if user is None:
+            print(f"No user {username}")
+            return 1
+        if args.action == "set-password":
+            password = _ask_password(prompt_fn)
+            if password is None:
+                return 1
+            try:
+                user.password_hash = hash_password(password)
+            except ValueError as exc:
+                print(exc)
+                return 1
+            user.session_version += 1  # signs out every existing session
+            user.failed_logins, user.locked_until = 0, None
+            print(f"Password changed for {username}; existing sessions were signed out")
+        elif args.action == "disable":
+            user.active = False
+            user.session_version += 1
+            print(f"Disabled {username}")
+        elif args.action == "enable":
+            user.active = True
+            print(f"Enabled {username}")
+    return 0
+
+
 def cmd_backup_verify(args, ctx) -> int:
     from aime.backup import verify_backup
 
@@ -364,6 +431,11 @@ def build_parser() -> argparse.ArgumentParser:
     sd = sub.add_parser("seed-demo", help="Build a separate demo database from fictional sample data")
     sd.add_argument("--data-dir", default=str(BASE_DIR / "demo_data"))
     sd.add_argument("--llm", default="template", choices=["template", "auto", "ollama"])
+    us = sub.add_parser("user", help="Dashboard sign-in accounts (you type the password at the prompt)")
+    us.add_argument("action", choices=["create", "list", "set-password", "disable", "enable"])
+    us.add_argument("--username")
+    us.add_argument("--role", default="sales_manager", choices=["sales_manager", "admin"])
+    us.add_argument("--data-dir", help="Use another data folder (e.g. the demo database)")
     return p
 
 
@@ -372,6 +444,7 @@ COMMANDS = {
     "scheduler": cmd_scheduler, "llm-check": cmd_llm_check, "inbound": cmd_inbound, "suppress": cmd_suppress,
     "seed-demo": cmd_seed_demo, "doctor": cmd_doctor, "backup": cmd_backup, "maintenance": cmd_maintenance,
     "refresh-graphics": cmd_refresh_graphics, "backup-verify": cmd_backup_verify, "restore-drill": cmd_restore_drill,
+    "user": cmd_user,
 }
 PRODUCTION_DATA_DIR = BASE_DIR / "data"
 

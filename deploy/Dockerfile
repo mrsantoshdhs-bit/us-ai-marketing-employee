@@ -14,5 +14,5 @@ RUN useradd --create-home aime && mkdir -p /app/data && chown -R aime /app
 USER aime
 VOLUME ["/app/data"]
 EXPOSE 8765
-# The dashboard has no login of its own: publish this port only on 127.0.0.1 or behind an authenticating proxy.
+# The dashboard has a sign-in but no TLS or MFA: publish this port only on 127.0.0.1 or behind an authenticating HTTPS proxy.
 CMD ["python", "-m", "uvicorn", "aime.web.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8765"]

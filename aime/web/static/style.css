@@ -17,6 +17,7 @@ a:hover { text-decoration: underline; }
 header.top { background: var(--surface); border-bottom: 1px solid var(--border); padding: 10px 20px; display: flex; gap: 18px; align-items: center; flex-wrap: wrap; position: sticky; top: 0; z-index: 2; }
 header.top .brand { font-weight: 700; margin-right: 8px; }
 header.top nav { display: flex; gap: 4px; flex-wrap: wrap; }
+header.top form.user { margin-left: auto; display: flex; gap: 8px; align-items: center; }
 header.top nav a { padding: 6px 10px; border-radius: 6px; color: var(--text); }
 header.top nav a.active, header.top nav a:hover { background: var(--info-bg); text-decoration: none; }
 main { padding: 20px; max-width: 1280px; margin: 0 auto; }
