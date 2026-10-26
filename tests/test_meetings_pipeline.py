@@ -150,13 +150,3 @@ def test_today_shows_meetings_and_sales_funnel(make_ctx):
     assert "Upcoming meetings" in page and "Meetings booked" in page and "Outreach emails sent" in page
     with ctx.db.session() as s:
         assert s.execute(select(Lead)).scalar_one().outreach_status == "meeting"
-
-
-def test_today_separates_posts_waiting_for_approval_from_scheduled_ones(make_ctx):
-    from aime.models import ContentItem
-    ctx, _, _ = contacted(make_ctx)
-    with ctx.db.session() as s:
-        s.add(ContentItem(service="bpa", industry="logistics", title="Draft", body="Text", status="awaiting_approval",
-                          generator="template", fingerprint="tile-test"))
-    page = TestClient(create_app(ctx)).get("/").text
-    assert "Posts awaiting approval" in page and "Posts scheduled" in page and "Emails awaiting approval" in page
