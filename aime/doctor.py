@@ -93,12 +93,17 @@ def run_checks(ctx: AppContext) -> list[dict]:
     with ctx.db.session() as s:
         last, off = kv_get(s, "backup.last_verified"), kv_get(s, "backup.last_offsite")
         users = s.execute(select(func.count(User.id)).where(User.active.is_(True))).scalar_one()
+        admins = s.execute(select(func.count(User.id)).where(User.active.is_(True), User.role == "admin")).scalar_one()
     if not ctx.settings.dashboard_auth:
         add("Dashboard sign-in", False, "DASHBOARD_AUTH=false: anyone using this computer can open the dashboard",
             "warning")
     else:
         add("Dashboard sign-in", users > 0, f"{users} active account(s)" if users
             else "No account yet: run `python -m aime user create --username <name>`", "warning")
+        if users:
+            add("Dashboard admin account", admins > 0, f"{admins} active admin(s)" if admins
+                else "No admin: running jobs and connecting LinkedIn need one. Run "
+                     "`python -m aime user set-role --username <you> --role admin`", "warning")
     if last is None:
         add("Recent verified backup", False, "No verified backup recorded yet (the daily db_maintenance job records one)",
             "warning")

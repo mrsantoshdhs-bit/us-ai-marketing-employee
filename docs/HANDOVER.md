@@ -63,6 +63,7 @@ drafts; empty `IMAP_HOST` stops mailbox reading.
 1. Gmail app password, `.env` values, SPF/DKIM/DMARC (`docs/SALES_SETUP.md`).
 2. Calendly link, with notifications to the sales mailbox.
 3. `python -m aime user create --username <you> --role admin` (and Sales Manager accounts if others help).
+   An account you already have can be made admin with `python -m aime user set-role --username <you> --role admin`.
 4. The live acceptance run (`docs/ACCEPTANCE.md`) with a test address you control.
 5. Going live: your explicit decision, after the acceptance report.
 

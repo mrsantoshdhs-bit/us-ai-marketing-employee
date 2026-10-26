@@ -230,6 +230,7 @@ def cmd_user(args, ctx, prompt_fn=None) -> int:
     """Dashboard accounts. Passwords are typed by you at the prompt and stored only as scrypt hashes."""
     import getpass
 
+    from aime.crm_ops import log_activity
     from aime.models import User
     from aime.web.auth import hash_password
 
@@ -245,6 +246,7 @@ def cmd_user(args, ctx, prompt_fn=None) -> int:
             print("--username is required")
             return 1
         user = s.execute(select(User).where(User.username == username)).scalars().first()
+        role = getattr(args, "role", None) or "sales_manager"
         if args.action == "create":
             if user:
                 print(f"User {username} already exists")
@@ -253,11 +255,11 @@ def cmd_user(args, ctx, prompt_fn=None) -> int:
             if password is None:
                 return 1
             try:
-                s.add(User(username=username, password_hash=hash_password(password), role=args.role))
+                s.add(User(username=username, password_hash=hash_password(password), role=role))
             except ValueError as exc:
                 print(exc)
                 return 1
-            print(f"Created {args.role} account {username}. Sign in at http://127.0.0.1:8765/login")
+            print(f"Created {role} account {username}. Sign in at http://127.0.0.1:8765/login")
             return 0
         if user is None:
             print(f"No user {username}")
@@ -281,6 +283,14 @@ def cmd_user(args, ctx, prompt_fn=None) -> int:
         elif args.action == "enable":
             user.active = True
             print(f"Enabled {username}")
+        elif args.action == "set-role":
+            # Only from the command line on this computer: the dashboard cannot change roles.
+            if not getattr(args, "role", None):
+                print("--role is required (sales_manager or admin)")
+                return 1
+            old, user.role = user.role, args.role
+            log_activity(s, f"Dashboard account {username}: role {old} -> {args.role}", "command line", type_="security")
+            print(f"{username} is now {args.role} (was {old})")
     return 0
 
 
@@ -515,9 +525,9 @@ def build_parser() -> argparse.ArgumentParser:
     sd.add_argument("--data-dir", default=str(BASE_DIR / "demo_data"))
     sd.add_argument("--llm", default="template", choices=["template", "auto", "ollama"])
     us = sub.add_parser("user", help="Dashboard sign-in accounts (you type the password at the prompt)")
-    us.add_argument("action", choices=["create", "list", "set-password", "disable", "enable"])
+    us.add_argument("action", choices=["create", "list", "set-password", "set-role", "disable", "enable"])
     us.add_argument("--username")
-    us.add_argument("--role", default="sales_manager", choices=["sales_manager", "admin"])
+    us.add_argument("--role", choices=["sales_manager", "admin"], help="default for create: sales_manager")
     us.add_argument("--data-dir", help="Use another data folder (e.g. the demo database)")
     return p
 
