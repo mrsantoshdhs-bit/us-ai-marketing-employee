@@ -134,9 +134,12 @@ class Contact(Timestamped, Base):
     evidence: Mapped[str | None] = mapped_column(Text)  # the published text the name and title come from
     evidence_url: Mapped[str | None] = mapped_column(String(500))
     discovered_at: Mapped[datetime | None] = mapped_column(DateTime)
-    # Email provenance and checks: published | role_address | bounced | invalid | None (no email)
+    # Email provenance and checks (aime.contact_validation): published | role_address | no_mail_server |
+    # unchecked | bounced | None (no email)
     email_status: Mapped[str | None] = mapped_column(String(20))
     email_source_url: Mapped[str | None] = mapped_column(String(500))
+    email_confidence: Mapped[str | None] = mapped_column(String(10))  # high: next to the name | medium: name match
+    email_evidence: Mapped[str | None] = mapped_column(Text)
     email_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     company: Mapped[Company | None] = relationship(back_populates="contacts")

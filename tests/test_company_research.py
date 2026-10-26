@@ -98,7 +98,8 @@ def research_ctx(make_ctx):
 
 def people_of(ctx, company_id):
     with ctx.db.session() as s:
-        return {f"{c.first_name} {c.last_name}": c for c in s.execute(select(Contact).where(Contact.company_id == company_id)).scalars()}
+        return {f"{c.first_name} {c.last_name}": c for c in s.execute(select(Contact).where(
+            Contact.company_id == company_id, Contact.last_name.is_not(None))).scalars()}
 
 
 def test_reads_only_allowed_pages_and_names_people_with_evidence(research_ctx):
@@ -115,7 +116,7 @@ def test_reads_only_allowed_pages_and_names_people_with_evidence(research_ctx):
     assert "founded by James Carter" in people["James Carter"].evidence
     for c in people.values():
         assert c.source == "website" and c.evidence_url.startswith(f"https://{SITE}/") and c.consent_status == "none"
-        assert c.email is None  # emails are assigned from published pages in a later step, never guessed
+        assert c.email is None or c.email_source_url  # only emails the company publishes, never guessed
     urls = research_ctx.requests
     assert not any("/private/" in u for u in urls if not u.endswith("robots.txt"))  # robots.txt honoured
     assert not any("careers" in u or "linkedin" in u for u in urls)
@@ -146,7 +147,7 @@ def test_rerun_refreshes_without_duplicates(research_ctx):
     for _ in range(2):
         assert CompanyResearchAgent(research_ctx).run({"company_ids": [cid]}).ok
     with research_ctx.db.session() as s:
-        assert s.execute(select(func.count(Contact.id))).scalar_one() == 5
+        assert s.execute(select(func.count(Contact.id))).scalar_one() == 6  # 5 people + the published info@ inbox
         assert s.execute(select(func.count(ResearchSnapshot.id))).scalar_one() == 2
     assert CompanyResearchAgent(research_ctx).run({}).output.companies_researched == 0  # nothing due yet
 

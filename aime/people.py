@@ -166,22 +166,31 @@ def role_category(title: str) -> str:
     return "other"
 
 
-def relevance(category: str, title: str, service: str | None) -> int:
-    """0-100: how likely this role decides on our service. Explainable: role order per service, seniority."""
-    order = SERVICE_ROLES.get(service or "", ("executive", "operations", "sales", "technology", "marketing"))
-    base = {0: 80, 1: 70, 2: 60, 3: 50, 4: 45}.get(order.index(category), 30) if category in order else 25
+def seniority(title: str) -> int:
+    """3 founder/owner/C-level, 2 VP/head/partner, 1 director, 0 lead/manager/other, -1 junior. Advisors rank 1."""
     t = title.lower()
-    if re.search(r"\b(chief|ceo|coo|cto|cro|cmo|cio|cfo|founder|co-?founder|owner|president)\b", t):
-        base += 15
-    elif re.search(r"\b(vp|vice president|svp|evp|head of|managing)\b", t):
-        base += 10
-    elif re.search(r"\b(director)\b", t):
-        base += 5
-    if re.search(r"\b(intern|assistant|associate|coordinator|specialist)\b", t):
-        base -= 25
-    if category == "executive" and order[0] != "executive":
-        base = max(base, 70)  # small companies: the founder/CEO decides on most purchases
-    return max(0, min(100, base))
+    if re.search(r"\b(advis[oe]ry?|advisor|adviser|emeritus)\b", t):
+        return 1
+    if re.search(r"\b(intern|assistant|associate|coordinator|specialist|trainee|junior)\b", t):
+        return -1
+    if re.search(r"\b(chief|ceo|coo|cto|cro|cmo|cio|cfo|founder|co-?founder|owner|president)\b", t) and "vice president" not in t:
+        return 3
+    if re.search(r"\b(vp|vice president|svp|evp|head of|managing|partner|principal)\b", t):
+        return 2
+    if re.search(r"\bdirector\b", t):
+        return 1
+    return 0
+
+
+def relevance(category: str, title: str, service: str | None) -> int:
+    """0-100: how likely this person decides on our service. Seniority first (40 + 15 per level), then
+    function fit for the service: +20 / +12 / +6 for the first three role categories that usually buy it;
+    executives always get +12 because at small companies they decide most purchases."""
+    order = SERVICE_ROLES.get(service or "", ("executive", "operations", "sales", "technology", "marketing"))
+    fit = {0: 20, 1: 12, 2: 6}.get(order.index(category), 0) if category in order else 0
+    if category == "executive":
+        fit = max(fit, 12)
+    return max(0, min(100, 40 + 15 * seniority(title) + fit))
 
 
 def _jsonld_people(obj, url: str, out: list[PersonFinding], company: str | None = None) -> None:

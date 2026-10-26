@@ -44,6 +44,9 @@ class LeadFacts:
     stated_budget: bool = False
     website_status: str | None = None  # see aime.website_check; None = not checked yet
     seeks_external_help: bool = False  # their own post asks for contractors / partners
+    contact_source: str | None = None  # inbound | manual | import | website | sec_filing
+    contact_role: str | None = None  # role category; "inbox" for a published company inbox
+    contact_email_status: str | None = None  # see aime.contact_validation
     now: datetime | None = None
 
 
@@ -182,9 +185,20 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
     if f.verified:
         data += 2
         reasons.append("+2 data: company record verified from an official registry")
+    researched = f.contact_source in ("website", "sec_filing")
     if f.contact_consent in {"inquiry", "opt_in"}:
         data += 3
         reasons.append("+3 data: contact provided by the person with consent")
+    elif researched and f.contact_role != "inbox" and f.contact_email_status == "published":
+        data += 3
+        reasons.append("+3 data: decision-maker named by the company, with a business email it publishes "
+                       "(mail server verified)")
+    elif researched and f.contact_role == "inbox" and f.contact_email_status == "role_address":
+        data += 1
+        reasons.append("+1 data: company inbox published on its own site (no named decision-maker email)")
+    elif researched and f.contact_role != "inbox":
+        data += 1
+        reasons.append("+1 data: decision-maker named by the company (no published email)")
 
     total = max(0, min(100, fit + need + intent + data))
     disqualify = None
