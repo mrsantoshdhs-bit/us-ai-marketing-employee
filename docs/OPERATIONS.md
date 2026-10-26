@@ -70,6 +70,7 @@ alert). If no slot is free it is never published late: it returns to "awaiting a
   cannot be read.**
 - Manual: `backup --label before-change` (add `--offsite` for an encrypted copy too);
   `backup-verify <file>` checks any backup.
+- `doctor` warns while the off-machine copy is not configured (folder or passphrase missing).
 - **Restore drill:** `restore-drill` (latest local backup) or `restore-drill --source <file.aimebak>`
   restores into a temporary folder and checks it. It never writes to `data/`.
 - Restore: `maintenance on`, copy the chosen backup over `data/aime.db` (delete `aime.db-wal` and

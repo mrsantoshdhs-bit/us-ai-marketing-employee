@@ -221,7 +221,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 ("Companies with a usable email", s.execute(select(func.count(func.distinct(Contact.company_id))).where(
                     Contact.email_status.in_(("published", "role_address")))).scalar_one(), "/contacts?reachable=1", ""),
                 ("Qualified companies", cnt(Lead, Lead.status == "qualified"), "/leads?status=qualified", ""),
-                ("Posts scheduled", cnt(ContentItem, ContentItem.status.in_(("awaiting_approval", "approved"))), "/content", ""),
+                ("Emails awaiting approval", cnt(FollowUp, FollowUp.channel == "email", FollowUp.status == "awaiting_approval"),
+                 "/followups", ""),
+                ("Posts awaiting approval", cnt(ContentItem, ContentItem.status == "awaiting_approval"), "/content", ""),
+                ("Posts scheduled", cnt(ContentItem, ContentItem.status == "approved"), "/content", ""),
                 ("Posts published", cnt(ContentItem, ContentItem.status == "published"), "/content?status=published", ""),
                 ("Open opportunities", cnt(Opportunity, Opportunity.stage.not_in(("won", "lost"))), "/pipeline", ""),
                 ("Outreach emails sent", cnt(FollowUp, FollowUp.kind == "outreach", FollowUp.status == "sent"),
