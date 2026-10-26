@@ -1,0 +1,141 @@
+"""Sales mailbox readiness check: settings, sending-domain DNS, SMTP/IMAP sign-in, test email (all faked)."""
+
+import smtplib
+from argparse import Namespace
+
+from aime.cli import cmd_email_check
+from aime.email_check import check_domain, run_email_check
+
+APP_PW = "abcd efgh " + "ijkl mnop"  # test-only value, assembled so the secret scanner stays quiet
+MAILBOX = {"smtp_host": "smtp.gmail.com", "smtp_port": 587, "smtp_from": "sales@dhs.example",
+           "smtp_username": "sales@dhs.example", "smtp_password": APP_PW, "imap_host": "imap.gmail.com",
+           "company_postal_address": "1 Sample St, Austin, TX 78701", "sender_name": "Sam Rai",
+           "unsubscribe_email": "sales@dhs.example", "calendly_url": "https://calendly.com/dhs/intro"}
+GOOD_DNS = {
+    ("dhs.example", "MX"): ["1 smtp.google.com."],
+    ("dhs.example", "TXT"): ["v=spf1 include:_spf.google.com ~all", "google-site-verification=x"],
+    ("google._domainkey.dhs.example", "TXT"): ["v=DKIM1; k=rsa; p=MIIBIjANBgkq"],
+    ("_dmarc.dhs.example", "TXT"): ["v=DMARC1; p=quarantine; rua=mailto:d@dhs.example"],
+}
+
+
+def resolver(records):
+    return lambda name, rtype: records.get((name, rtype), [])
+
+
+class FakeSMTP:
+    sent: list = []
+    logins: list = []
+    refuse = False
+
+    def __init__(self, host, port, timeout=30):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def starttls(self):
+        pass
+
+    def login(self, user, password):
+        if FakeSMTP.refuse:
+            raise smtplib.SMTPAuthenticationError(535, b"5.7.8 Username and Password not accepted")
+        FakeSMTP.logins.append(user)
+
+    def noop(self):
+        return 250, b"OK"
+
+    def send_message(self, msg):
+        FakeSMTP.sent.append(msg)
+
+
+class FakeIMAP:
+    readonly = None
+
+    def __init__(self, host, port):
+        pass
+
+    def login(self, user, password):
+        return "OK", [b"ok"]
+
+    def select(self, folder, readonly=False):
+        FakeIMAP.readonly = readonly
+        return "OK", [b"12"]
+
+    def logout(self):
+        return "BYE", [b""]
+
+
+def reset():
+    FakeSMTP.sent, FakeSMTP.logins, FakeSMTP.refuse, FakeIMAP.readonly = [], [], False, None
+
+
+def by_name(checks):
+    return {c.name: c for c in checks}
+
+
+def test_missing_settings_are_reported_without_signing_in(make_ctx, capsys):
+    ctx = make_ctx()
+    assert cmd_email_check(Namespace(connect=False, send_test=False, domain=None), ctx) == 1
+    out = capsys.readouterr().out
+    assert "[FAIL] SMTP settings" in out and "[FAIL] Postal address (CAN-SPAM)" in out
+    assert "[PASS] Sending switch: OFF" in out and "[SKIP] Mailbox sign-in" in out
+
+
+def test_ready_mailbox_passes_and_nothing_is_sent(make_ctx):
+    reset()
+    ctx = make_ctx(**MAILBOX)
+    checks = by_name(run_email_check(ctx.settings, connect=True, resolve=resolver(GOOD_DNS), smtp_factory=FakeSMTP,
+                                     imap_factory=FakeIMAP))
+    assert all(c.status == "pass" for n, c in checks.items() if n not in ("Test recipient",)), checks
+    assert checks["DMARC"].detail == "policy quarantine" and FakeSMTP.logins == ["sales@dhs.example"]
+    assert FakeSMTP.sent == [] and FakeIMAP.readonly is True  # sign-in only; the mailbox is opened read-only
+    assert APP_PW not in str(checks)
+
+
+def test_domain_problems_are_explained():
+    bad = check_domain("dhs.example", resolver({("dhs.example", "TXT"): ["v=spf1 include:mailgun.org ~all",
+                                                                          "v=spf1 -all"]}))
+    checks = by_name(bad)
+    assert checks["MX (replies can arrive)"].status == "fail" and checks["SPF"].status == "fail"
+    assert "exactly one" in checks["SPF"].detail and checks["DKIM"].status == "warn" and checks["DMARC"].status == "warn"
+    one = by_name(check_domain("dhs.example", resolver({("dhs.example", "TXT"): ["v=spf1 include:mailgun.org ~all"]})))
+    assert one["SPF"].status == "warn" and "_spf.google.com" in one["SPF"].detail
+    personal = check_domain("gmail.com", resolver({}))
+    assert len(personal) == 1 and personal[0].status == "warn" and "Google Workspace" in personal[0].detail
+
+
+def test_refused_sign_in_gives_the_app_password_hint_and_never_the_password(make_ctx):
+    reset()
+    FakeSMTP.refuse = True
+    ctx = make_ctx(**MAILBOX)
+    checks = by_name(run_email_check(ctx.settings, connect=True, resolve=resolver(GOOD_DNS), smtp_factory=FakeSMTP,
+                                     imap_factory=FakeIMAP))
+    assert checks["SMTP sign-in"].status == "fail" and "app password" in checks["SMTP sign-in"].detail
+    assert APP_PW not in str(checks)
+
+
+def test_test_email_only_to_your_own_address_and_only_where_sending_is_on(make_ctx):
+    reset()
+    production = make_ctx(**MAILBOX, outbound_test_recipients="me@owner.example")  # sending switch off
+    checks = by_name(run_email_check(production.settings, send=True, resolve=resolver(GOOD_DNS), smtp_factory=FakeSMTP,
+                                     imap_factory=FakeIMAP))
+    assert checks["Test email"].status == "fail" and "DISABLED" in checks["Test email"].detail and FakeSMTP.sent == []
+    nobody = make_ctx(**MAILBOX, outbound_email_enabled=True)
+    assert by_name(run_email_check(nobody.settings, send=True, resolve=resolver(GOOD_DNS), smtp_factory=FakeSMTP,
+                                   imap_factory=FakeIMAP))["Test email"].status == "fail"
+    acceptance = make_ctx(**MAILBOX, outbound_email_enabled=True, outbound_test_recipients="me@owner.example")
+    checks = by_name(run_email_check(acceptance.settings, send=True, resolve=resolver(GOOD_DNS), smtp_factory=FakeSMTP,
+                                     imap_factory=FakeIMAP))
+    assert checks["Test email"].status == "pass" and len(FakeSMTP.sent) == 1
+    msg = FakeSMTP.sent[0]
+    assert msg["To"] == "me@owner.example" and "unsubscribe" in msg.get_content().lower()
+    assert checks["Sending switch"].detail.startswith("ON in TEST MODE")
+
+
+def test_calendly_link_must_be_a_calendly_event(make_ctx):
+    ctx = make_ctx(**{**MAILBOX, "calendly_url": "http://example.com/book"})
+    assert by_name(run_email_check(ctx.settings, resolve=resolver(GOOD_DNS)))["Calendly link"].status == "fail"

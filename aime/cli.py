@@ -226,6 +226,18 @@ def _ask_password(prompt_fn) -> str | None:
     return first
 
 
+def cmd_email_check(args, ctx) -> int:
+    """Sales mailbox readiness: settings, SPF/DKIM/DMARC, SMTP and read-only IMAP sign-in, optional test email."""
+    from aime.email_check import run_email_check
+
+    checks = run_email_check(ctx.settings, connect=args.connect, send=args.send_test, domain=args.domain)
+    for c in checks:
+        print(f"[{c.status.upper():<4}] {c.name}: {c.detail}")
+    failed = [c for c in checks if c.status == "fail"]
+    print(f"{len(failed)} problem(s) to fix" if failed else "No blocking problems")
+    return 1 if failed else 0
+
+
 def cmd_user(args, ctx, prompt_fn=None) -> int:
     """Dashboard accounts. Passwords are typed by you at the prompt and stored only as scrypt hashes."""
     import getpass
@@ -537,6 +549,11 @@ def build_parser() -> argparse.ArgumentParser:
     mt.add_argument("action", choices=["on", "off", "status"])
     mt.add_argument("--hours", type=float, default=2.0)
     mt.add_argument("--reason", default="Manual maintenance")
+    ec = sub.add_parser("email-check", help="Check the sales mailbox: settings, SPF/DKIM/DMARC, SMTP/IMAP sign-in")
+    ec.add_argument("--domain", help="sending domain to check (default: the SMTP_FROM domain)")
+    ec.add_argument("--connect", action="store_true", help="sign in to SMTP and IMAP (read-only); sends nothing")
+    ec.add_argument("--send-test", action="store_true",
+                    help="also send one email to your OUTBOUND_TEST_RECIPIENTS address (acceptance settings only)")
     rg = sub.add_parser("refresh-graphics", help="Re-render images of unpublished posts (e.g. after a brand change)")
     rg.add_argument("--renderer", choices=["auto", "html", "pillow"], help="Override IMAGE_RENDERER for this run")
     rg.add_argument("--data-dir", help="Use another data folder (e.g. the demo database)")
@@ -563,6 +580,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 COMMANDS = {
     "init": cmd_init, "status": cmd_status, "run": cmd_run, "tick": cmd_tick, "serve": cmd_serve,
+    "email-check": cmd_email_check,
     "scheduler": cmd_scheduler, "llm-check": cmd_llm_check, "inbound": cmd_inbound, "suppress": cmd_suppress,
     "seed-demo": cmd_seed_demo, "doctor": cmd_doctor, "backup": cmd_backup, "maintenance": cmd_maintenance,
     "refresh-graphics": cmd_refresh_graphics, "backup-verify": cmd_backup_verify, "restore-drill": cmd_restore_drill,
