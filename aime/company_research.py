@@ -118,6 +118,9 @@ def build_snapshot(company: Company, pages, people: list[PersonFinding], status:
         summary=" ".join(parts) or None, error=error)
 
 
+WITHDRAWN = "website_withdrawn"  # recorded from the website earlier, not found (or not valid) on a re-check
+
+
 def _same_person(contact: Contact, finding: PersonFinding) -> bool:
     return normalize_name(f"{contact.first_name or ''} {contact.last_name or ''}") == finding.key
 
@@ -130,6 +133,8 @@ def save_contact(session: Session, company: Company, finding: PersonFinding, ser
                      if _same_person(c, finding)), None)
     score = relevance(finding.role_category, finding.title, service)
     if existing:
+        if existing.source == WITHDRAWN:  # found again after a re-check withdrew it
+            existing.source, existing.confidence = finding.source, None
         if existing.source in ("website", "sec_filing") and rank[finding.confidence] >= rank[existing.confidence]:
             existing.title, existing.role_category, existing.relevance = finding.title, finding.role_category, score
             existing.confidence, existing.evidence, existing.evidence_url = (finding.confidence, finding.evidence[:2000],
@@ -143,6 +148,25 @@ def save_contact(session: Session, company: Company, finding: PersonFinding, ser
     session.add(contact)
     session.flush()
     return contact, True
+
+
+def withdraw_missing(session: Session, company: Company, people: list[PersonFinding]) -> list[Contact]:
+    """After a successful re-read of the company's site: people recorded from it earlier who are no longer found
+    (or no longer pass the rules) are withdrawn, never deleted. Anyone with an email queued or sent is kept for a
+    person to review."""
+    from aime.models import FollowUp
+
+    withdrawn = []
+    for c in session.execute(select(Contact).where(Contact.company_id == company.id, Contact.source == "website",
+                                                   Contact.last_name.is_not(None))).scalars().all():
+        if any(_same_person(c, f) for f in people):
+            continue
+        if session.execute(select(FollowUp.id).where(FollowUp.contact_id == c.id)).first():
+            continue
+        c.source = WITHDRAWN
+        c.evidence = f"Not found when {company.domain} was re-read on {utcnow():%Y-%m-%d}. Earlier: {c.evidence}"[:2000]
+        withdrawn.append(c)
+    return withdrawn
 
 
 def is_plausible_website(company: Company) -> bool:

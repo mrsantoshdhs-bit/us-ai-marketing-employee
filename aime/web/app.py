@@ -355,11 +355,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             opps = s.execute(select(Opportunity).where(Opportunity.lead_id == lead.id)).scalars().all()
             people = s.execute(select(Contact).where(Contact.company_id == lead.company_id)
                                .order_by(Contact.relevance.desc().nullslast(), Contact.id)).scalars().all()
+            withdrawn = sum(1 for p in people if p.source == "website_withdrawn")
+            people = [p for p in people if p.source != "website_withdrawn"]
             research = s.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == lead.company_id)
                                  .order_by(ResearchSnapshot.id.desc())).scalars().first()
             meetings = s.execute(select(Meeting).where(Meeting.lead_id == lead.id).order_by(Meeting.starts_at.desc())).scalars().all()
         return render(request, "lead_detail.html", lead=lead, signals=signals, acts=acts, fups=fups, opps=opps,
-                      people=people, research=research, meetings=meetings)
+                      people=people, research=research, meetings=meetings, withdrawn=withdrawn)
 
     @app.get("/contacts", response_class=HTMLResponse)
     def contacts_page(request: Request, confidence: str = "", role: str = "", reachable: str = ""):
@@ -511,6 +513,23 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     "event": title[:200] or "Meeting", "tz": "America/New_York"}
             meeting, note = record_meeting(s, C().settings, info, who(request), source="manual")
         return back(f"/leads/{lead_id}", f"Meeting logged: {note}")
+
+    @app.post("/companies/{company_id}/not_competitor")
+    def not_competitor(request: Request, company_id: int):
+        """A person overrides the automatic competitor flag; research does not set it again."""
+        with C().db.session() as s:
+            company = s.get(Company, company_id) or _404()
+            company.is_competitor, company.competitor_cleared_by = False, who(request)
+            lead = s.execute(select(Lead).where(Lead.company_id == company.id).order_by(Lead.id)).scalars().first()
+            lead_id = lead.id if lead else None
+            if lead and lead.status == "disqualified" and "competitor" in (lead.disqualify_reason or ""):
+                lead.status, lead.disqualify_reason = "new", None
+            if lead:
+                lead.last_scored_at = None  # re-scored by the next qualification run
+            log_activity(s, f"Competitor flag cleared by {who(request)}", who(request), type_="override",
+                         company_id=company.id, lead_id=lead_id)
+        return back(f"/leads/{lead_id}" if lead_id else "/companies",
+                    "Marked as not a competitor; the lead is re-scored on the next run")
 
     @app.post("/leads/{lead_id}/stop_outreach")
     def stop_outreach(request: Request, lead_id: int):

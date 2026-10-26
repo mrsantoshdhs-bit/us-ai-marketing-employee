@@ -44,6 +44,7 @@ class Company(Timestamped, Base):
     source_record_id: Mapped[str | None] = mapped_column(String(120), index=True)
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
     is_competitor: Mapped[bool] = mapped_column(Boolean, default=False)
+    competitor_cleared_by: Mapped[str | None] = mapped_column(String(80))  # a person said "not a competitor"
     is_sample: Mapped[bool] = mapped_column(Boolean, default=False)
     lifecycle_stage: Mapped[str] = mapped_column(String(30), default="prospect")
     merged_into_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"))

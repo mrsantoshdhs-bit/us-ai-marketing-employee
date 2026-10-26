@@ -47,8 +47,29 @@ DEPARTMENT_RE = re.compile(
     r"procurement|talent|recruiting|culture|community|education|training|programs?|projects?|portfolio|investor|"
     r"corporate|international|regional|north|south|east|west|central|americas|emea|apac|experience|ai|software|"
     r"solutions|automation|transformation|insights|relations|affairs|administration|planning|medical|clinical|"
-    r"staff|board)\b", re.I)
+    r"staff|board|tax|audit|assurance|advisory|risk|treasury|payroll|facilities|creative|editorial|events|policy|"
+    r"alliances|channel|field|ecosystem|devops|cloud|mobile|web|ux|ui|qa|ml|robotics|hardware|manufacturing|"
+    r"production|safety|sustainability|esg|special|initiatives|office|litigation|investments?|lending|underwriting|"
+    r"claims|benefits|america|europe|asia|pacific|latam|canada|us|usa|uk|eu|anz|nordics|dach|india|japan|africa|"
+    r"middle|worldwide)\b", re.I)
 OTHER_ORG_SPLIT = re.compile(r",\s+|\s+(?:at|@)\s+|\s+of\s+(?=[A-Z])")
+TITLE_CONNECTORS = {"and", "&", "of", "the", "for", "to", "in", "+", "/", "-"}
+# Places that pages print next to names on team cards ("San Francisco" under a title is a location, not a person).
+PLACE_NAMES = frozenset({
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut", "delaware", "florida",
+    "georgia", "hawaii", "idaho", "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine",
+    "maryland", "massachusetts", "michigan", "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada",
+    "new hampshire", "new jersey", "new mexico", "new york", "north carolina", "north dakota", "ohio", "oklahoma",
+    "oregon", "pennsylvania", "rhode island", "south carolina", "south dakota", "tennessee", "texas", "utah",
+    "vermont", "virginia", "washington", "west virginia", "wisconsin", "wyoming", "district of columbia",
+    "washington dc", "new york city", "los angeles", "san francisco", "san diego", "san jose", "san antonio",
+    "santa monica", "santa clara", "santa barbara", "palo alto", "mountain view", "menlo park", "redwood city",
+    "salt lake city", "las vegas", "kansas city", "oklahoma city", "fort worth", "fort lauderdale", "el paso",
+    "long beach", "st louis", "saint louis", "st paul", "new orleans", "silicon valley", "bay area", "north america",
+    "south america", "latin america", "united states", "united kingdom", "hong kong", "tel aviv", "new delhi",
+    "abu dhabi", "cape town", "sao paulo", "buenos aires", "mexico city", "rio de janeiro", "costa rica",
+    "puerto rico", "new zealand", "south africa", "saudi arabia", "united arab emirates",
+})
 # Who usually buys each of our services: role categories in order of fit.
 SERVICE_ROLES = {
     "custom_crm": ("sales", "operations", "executive", "technology", "marketing"),
@@ -107,9 +128,14 @@ def clean_title(text: str) -> str:
 
 
 def names_other_org(title: str, company: str | None = None) -> bool:
-    """True when the title says the person works somewhere else ("Founder, Biddify", "CFO at Acme Corp")."""
-    parts = OTHER_ORG_SPLIT.split(title, maxsplit=1)
-    rest = parts[1].strip(" .") if len(parts) == 2 else ""
+    """True when the title says the person works somewhere else ("Founder, Biddify", "CFO at Acme Corp",
+    "Director of Business Solutions, EDF"). Every part after a separator is checked: departments, regions and
+    other titles ("Founder, CEO") are fine."""
+    return any(_names_org(part, company) for part in OTHER_ORG_SPLIT.split(title)[1:])
+
+
+def _names_org(part: str, company: str | None) -> bool:
+    rest = part.strip(" .")
     if not rest:
         return False
     if company:
@@ -118,9 +144,11 @@ def names_other_org(title: str, company: str | None = None) -> bool:
             return False  # the title names this company itself
     if ORG_SUFFIX_RE.search(rest):
         return True
-    if DEPARTMENT_RE.search(rest):
-        return False
-    return rest[:1].isupper()  # a proper name that is not a department: another organisation
+    if TITLE_RE.search(rest):
+        return False  # a second title
+    words = [w.strip("().,") for w in rest.split()]
+    proper = [w for w in words if w and w.lower() not in TITLE_CONNECTORS and not DEPARTMENT_RE.fullmatch(w)]
+    return bool(proper) and proper[0][:1].isupper()  # a proper name that is not a department: another organisation
 
 
 def is_title(text: str) -> bool:
@@ -138,6 +166,8 @@ def looks_like_name(text: str, company: str | None = None) -> bool:
         return False
     tokens = t.split()
     if not 2 <= len(tokens) <= 4:
+        return False
+    if " ".join(t.lower().replace(".", "").split()) in PLACE_NAMES:
         return False
     for i, tok in enumerate(tokens):
         core = tok.strip(".,")
