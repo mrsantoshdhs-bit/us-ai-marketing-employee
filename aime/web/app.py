@@ -35,9 +35,10 @@ from aime.knowledge.geo import US_REGIONS
 from aime.knowledge.industries import INDUSTRIES, industry_label
 from aime.knowledge.services import SERVICES, service_name
 from aime.models import (Activity, AgentRun, Alert, Campaign, Company, ContentItem, FollowUp, InboundInquiry,
-                         JobRun, JobState, Lead, MarketingPlan, Opportunity, PublishAttempt, Report, ResearchTopic,
-                         Signal)
+                         JobRun, JobState, Lead, MarketingPlan, Opportunity, PolicyDecision, PublishAttempt, Report,
+                         ResearchTopic, Signal)
 from aime.monitoring import agent_stats, read_heartbeat
+from aime.policy import agreement, environment_blockers, evaluate_shadow, policy_config
 from aime.qc import summary as qc_summary
 from aime.qc.checks import run_quality_checks
 from aime.scheduler.runner import due_jobs, run_job
@@ -214,8 +215,14 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             ]
             task_total = cnt(FollowUp, FollowUp.channel == "task", FollowUp.status == "pending")
             health = health_strip(ctx, s)
+            policy = agreement(s)
+            pending = [r for r in policy["rows"] if r["post_status"] in ("awaiting_approval", "approved")]
+            policy_now = {"would_publish": sum(r["decision"] == "would_publish" for r in pending),
+                          "would_hold": sum(r["decision"] == "would_hold" for r in pending), **policy["counts"]}
+            post_decisions = {r["content_id"]: r["decision"] for r in policy["rows"]}
         return render(request, "today.html", posts=posts, emails=emails, tasks=tasks, task_total=task_total,
-                      exceptions=exceptions, alerts=alerts, funnel=funnel, stages=stages, health=health)
+                      exceptions=exceptions, alerts=alerts, funnel=funnel, stages=stages, health=health,
+                      policy=policy_now, post_decisions=post_decisions)
 
     # ------------------------------------------------------------------ system overview
     @app.get("/system", response_class=HTMLResponse)
@@ -423,7 +430,28 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         with C().db.session() as s:
             item = s.get(ContentItem, cid) or _404()
             auth = get_auth_status(C().settings, s)
-        return render(request, "content_detail.html", item=item, auth=auth)
+            decision = s.execute(select(PolicyDecision).where(PolicyDecision.content_id == cid)
+                                 .order_by(PolicyDecision.id.desc())).scalars().first()
+        return render(request, "content_detail.html", item=item, auth=auth, decision=decision)
+
+    # ------------------------------------------------------------------ auto-publishing policy (shadow mode)
+    @app.get("/policy", response_class=HTMLResponse)
+    def policy_page(request: Request):
+        settings = C().settings
+        with C().db.session() as s:
+            report = agreement(s)
+            cfg = policy_config(settings)
+            blockers = environment_blockers(s, settings, cfg)
+        return render(request, "policy.html", report=report, cfg=cfg, blockers=blockers)
+
+    @app.post("/policy/evaluate")
+    def policy_evaluate(request: Request):
+        if window := maintenance.active(C().settings.data_dir):
+            return back("/policy", f"Maintenance in progress until {window['until']}; try again afterwards")
+        with C().db.session() as s:
+            out = evaluate_shadow(s, C().settings)
+        return back("/policy", f"Shadow policy checked {out['evaluated']} post(s): {len(out['would_publish'])} would "
+                               f"publish, {len(out['would_hold'])} would hold. Nothing was approved or published.")
 
     @app.post("/content/{cid}/{action}")
     def content_action(request: Request, cid: int, action: str, title: str = Form(""), body: str = Form(""),

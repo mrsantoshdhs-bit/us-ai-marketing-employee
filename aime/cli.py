@@ -292,6 +292,28 @@ def cmd_backup_verify(args, ctx) -> int:
     return 0 if check["ok"] else 1
 
 
+def cmd_policy(args, ctx) -> int:
+    """Shadow-mode auto-publishing policy: record and show what it would do. It never publishes."""
+    from aime.policy import agreement, evaluate_shadow
+
+    with ctx.db.session() as s:
+        if args.action == "evaluate":
+            out = evaluate_shadow(s, ctx.settings)
+            print(f"Checked {out['evaluated']} post(s): {len(out['would_publish'])} would publish, "
+                  f"{len(out['would_hold'])} would hold, {out['recorded']} new decision(s) recorded.")
+            print("Nothing was approved or published. " + "; ".join(out["blockers"]))
+        report = agreement(s)
+    for r in report["rows"]:
+        print(f"#{r['content_id']:<4} {r['decision']:<14} you: {r['human']:<9} {r['title'][:60]}")
+        for reason in r["reasons"]:
+            print(f"        - {reason}")
+    c = report["counts"]
+    rate = f"{c['agreement_rate']}%" if c["agreement_rate"] is not None else "n/a"
+    print(f"Agreement {rate}: {c['agree']} agree, {c['too_permissive']} too permissive, "
+          f"{c['too_strict']} too strict, {c['pending']} waiting for you")
+    return 0
+
+
 def cmd_restore_drill(args, ctx) -> int:
     """Restore a backup into a temporary folder and check it; the live data folder is never written."""
     from aime.backup import BackupError, restore_drill
@@ -416,6 +438,8 @@ def build_parser() -> argparse.ArgumentParser:
     rd = sub.add_parser("restore-drill", help="Restore a backup into a temp folder and check it (never touches data/)")
     rd.add_argument("--source", help="Backup .db, bundle .zip or encrypted .aimebak (default: latest local backup)")
     rd.add_argument("--extract-to", help="New folder (outside data/) to receive the checked files for a manual restore")
+    pl = sub.add_parser("policy", help="Shadow-mode auto-publishing policy (records decisions; never publishes)")
+    pl.add_argument("action", choices=["show", "evaluate"], nargs="?", default="show")
     mt = sub.add_parser("maintenance", help="Pause scheduled ticks for upgrades (always expires)")
     mt.add_argument("action", choices=["on", "off", "status"])
     mt.add_argument("--hours", type=float, default=2.0)
@@ -447,7 +471,7 @@ COMMANDS = {
     "scheduler": cmd_scheduler, "llm-check": cmd_llm_check, "inbound": cmd_inbound, "suppress": cmd_suppress,
     "seed-demo": cmd_seed_demo, "doctor": cmd_doctor, "backup": cmd_backup, "maintenance": cmd_maintenance,
     "refresh-graphics": cmd_refresh_graphics, "backup-verify": cmd_backup_verify, "restore-drill": cmd_restore_drill,
-    "user": cmd_user,
+    "user": cmd_user, "policy": cmd_policy,
 }
 PRODUCTION_DATA_DIR = BASE_DIR / "data"
 

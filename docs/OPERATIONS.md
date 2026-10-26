@@ -136,6 +136,20 @@ The content agent tries up to three drafts per slot; if none passes, the slot st
 an alert. Held posts show "held for review" and can only be approved after ticking "I reviewed the
 quality findings" (logged). Every post still needs your approval before it is published.
 
+## Auto-publish policy (shadow mode only)
+
+After every content and publish job the policy records what it **would** do with each post waiting for
+you or approved by you: *would publish* when every rule passes, otherwise *would hold* with the reasons.
+It never approves, schedules or publishes, and never calls LinkedIn. Rules (`[publish_policy]` in
+`config/business.toml`): all quality checks passed on the current text, designed image, allowed
+service, no sensitive terms (pricing, guarantees, client stories…), draft not older than 14 days, slot
+not passed, at most 3 posts in any 7 days and 20 h apart.
+
+**Content → Auto-publish policy** (`/policy`) compares its decisions with yours: *agreed*, *too
+permissive* (it would have published a post you rejected) and *too strict*. CLI: `policy` to show,
+`policy evaluate` to check now. `doctor` warns if the mode is set to anything other than `shadow`
+(other modes are not supported and are treated as shadow).
+
 ## Keeping secrets out of GitHub
 
 `git config core.hooksPath .githooks` enables a pre-commit hook that runs `scripts/secret_scan.py`.

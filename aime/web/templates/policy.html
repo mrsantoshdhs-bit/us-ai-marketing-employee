@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Auto-publish policy · AI Marketing Employee{% endblock %}
+{% block content %}
+<h1>Auto-publish policy <span class="pill warn">shadow mode</span></h1>
+<div class="flash">The policy only records what it <b>would</b> do with each post. It never approves, schedules or
+  publishes anything. Every post still needs your approval.</div>
+
+<div class="grid">
+  <div class="kpi"><div class="v">{{ report.counts.agree }}</div><div class="l">Agreed with you</div></div>
+  <div class="kpi"><div class="v">{{ report.counts.too_permissive }}</div><div class="l">Would have published what you rejected</div></div>
+  <div class="kpi"><div class="v">{{ report.counts.too_strict }}</div><div class="l">Would have held what you approved</div></div>
+  <div class="kpi"><div class="v">{{ report.counts.pending }}</div><div class="l">Waiting for your decision</div></div>
+  <div class="kpi"><div class="v">{{ report.counts.agreement_rate if report.counts.agreement_rate is not none else '–' }}{% if report.counts.agreement_rate is not none %}%{% endif %}</div><div class="l">Agreement</div></div>
+</div>
+
+<div class="two">
+  <div>
+    <h2>Decisions <form class="inline" method="post" action="/policy/evaluate"><button class="secondary">Check posts now</button></form></h2>
+    <div class="card table-wrap"><table>
+      <tr><th>Post</th><th>Slot (ET)</th><th>Policy</th><th>You</th><th>Why it would hold</th></tr>
+      {% for r in report.rows %}
+      <tr><td><a href="/content/{{ r.content_id }}">{{ r.title }}</a></td><td class="small">{{ r.scheduled_for|et }}</td>
+        <td><span class="pill {{ 'ok' if r.decision == 'would_publish' else 'warn' }}">{{ r.decision|replace('_', ' ') }}</span></td>
+        <td><span class="pill {{ {'agree': 'ok', 'too_permissive': 'bad', 'too_strict': 'warn'}.get(r.verdict, '') }}">{{ r.human }}</span></td>
+        <td class="small">{{ r.reasons|join('; ') or '–' }}</td></tr>
+      {% else %}<tr><td colspan="5" class="muted">No decisions yet. They are recorded after each content and publish job.</td></tr>{% endfor %}
+    </table></div>
+  </div>
+  <div>
+    <h2>Rules</h2>
+    <div class="card small">
+      <ul class="reasons">
+        <li>All quality checks passed, on the text as it is now</li>
+        <li>{{ 'Designed image only' if cfg.require_designed_image else 'Any image' }}</li>
+        <li>Services: {{ cfg.allowed_services|join(', ') if cfg.allowed_services else 'all' }}</li>
+        <li>At most {{ cfg.max_posts_per_week }} posts in any 7 days, {{ cfg.min_hours_between_posts }} h apart</li>
+        <li>Draft no older than {{ cfg.max_draft_age_days }} days; slot not passed</li>
+        <li>Always held when the post mentions: {{ cfg.hold_terms|join(', ') }}</li>
+      </ul>
+      <p class="muted">Change these in <code>config/business.toml</code> under <code>[publish_policy]</code>.</p>
+    </div>
+    <h2>Why nothing would actually publish</h2>
+    <div class="card small"><ul class="reasons">{% for b in blockers %}<li>{{ b }}</li>{% endfor %}</ul></div>
+  </div>
+</div>
+{% endblock %}

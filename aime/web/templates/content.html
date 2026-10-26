@@ -5,6 +5,7 @@
 <div class="card small">
   Publishing: {{ state_pill('CONNECTED' if auth.can_publish else ('NOT CONFIGURED' if not auth.configured else 'BLOCKED')) }} {{ auth.reason }}.
   Posts publish only when approved here, due, and LinkedIn authorization is in place. A post is shown as published only after LinkedIn confirms it.
+  <a href="/policy">Auto-publish policy (shadow mode) →</a>
 </div>
 <form class="filters" method="get">
   <select name="status"><option value="">All statuses</option>{% for st in ['awaiting_approval', 'approved', 'published', 'failed', 'rejected'] %}<option {{ 'selected' if status == st }}>{{ st }}</option>{% endfor %}</select>
