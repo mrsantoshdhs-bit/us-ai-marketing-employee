@@ -166,3 +166,15 @@ def test_policy_pages(ctx):
     assert "shadow mode" in page and "would publish" in page
     assert "Auto-publish policy" in client.get(f"/content/{cid}").text
     assert "Auto-publish policy" in client.get("/").text
+
+
+def test_failed_content_job_stays_failed(ctx, monkeypatch):
+    from aime.agents.linkedin_content import LinkedInContentAgent
+
+    def boom(self, inp, session):
+        raise RuntimeError("simulated outage")
+    monkeypatch.setattr(LinkedInContentAgent, "execute", boom)
+    res = run_job(ctx, "content")
+    assert res["status"] == "failed" and "publish_policy" not in (res["error"] or "")
+    with ctx.db.session() as s:
+        assert s.execute(select(func.count(PolicyDecision.id))).scalar_one() == 0

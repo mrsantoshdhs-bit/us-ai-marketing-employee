@@ -82,7 +82,10 @@ def job_research(ctx: AppContext, job: str = "research") -> JobOutcome:
 
 
 def _policy_shadow_step(ctx: AppContext, out: JobOutcome) -> None:
-    """Record what the auto-publishing policy would do (shadow mode only: it never changes a post)."""
+    """Record what the auto-publishing policy would do (shadow mode only: it never changes a post).
+    Skipped when the job's own work failed, so the job still reports "failed" rather than "partial"."""
+    if out.failed:
+        return
     try:
         with ctx.db.session() as s:
             summary = evaluate_shadow(s, ctx.settings)
