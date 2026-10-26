@@ -79,7 +79,8 @@ SECURITY_HEADERS = {
                                 "frame-ancestors 'none'; form-action 'self' https://www.linkedin.com; base-uri 'none'"),
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer",
+    # Not "no-referrer": browsers then send "Origin: null" on the dashboard's own form posts, which the origin check blocks.
+    "Referrer-Policy": "same-origin",
     "Cache-Control": "no-store",
 }
 
