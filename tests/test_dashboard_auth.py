@@ -123,3 +123,39 @@ def test_inbound_api_stays_reachable_with_its_token(make_ctx):
     r = client.post("/api/inbound", json={"email": "a@b.example", "message": "hello there", "company": "B"},
                     headers={"X-Inbound-Token": "tok"})
     assert r.status_code != 401
+
+
+def test_operational_changes_need_an_admin(auth_ctx):
+    assert cmd_user(Args("create", "owner", role="admin"), auth_ctx, prompt_fn=lambda _p: GOOD) == 0
+    manager = TestClient(create_app(auth_ctx))
+    _login(manager)
+    assert manager.post("/jobs/monitor/run", headers=ORIGIN, follow_redirects=False).status_code == 403
+    assert manager.get("/integrations/linkedin/connect", follow_redirects=False).status_code == 403
+    assert manager.get("/jobs").status_code == 200  # viewing is fine; running is not
+    admin = TestClient(create_app(auth_ctx))
+    _login(admin, username="owner")
+    assert admin.post("/jobs/monitor/run", headers=ORIGIN, follow_redirects=False).status_code == 303
+
+
+def test_an_existing_account_can_be_made_admin_from_the_command_line(auth_ctx, capsys):
+    check = next(c for c in run_checks(auth_ctx) if c["name"] == "Dashboard admin account")
+    assert not check["ok"] and "set-role" in check["detail"]
+    assert cmd_user(Args("set-role", "manager", role=None), auth_ctx) == 1  # the role must be named
+    assert cmd_user(Args("set-role", "manager", role="admin"), auth_ctx) == 0
+    assert "now admin" in capsys.readouterr().out
+    assert next(c for c in run_checks(auth_ctx) if c["name"] == "Dashboard admin account")["ok"]
+    with auth_ctx.db.session() as s:
+        assert s.execute(select(Activity).where(Activity.type == "security")).scalars().first()
+    admin = TestClient(create_app(auth_ctx))
+    _login(admin)
+    assert admin.post("/jobs/monitor/run", headers=ORIGIN, follow_redirects=False).status_code == 303
+
+
+def test_sales_pages_need_sign_in(auth_ctx):
+    client = TestClient(create_app(auth_ctx))
+    for path in ("/contacts", "/inbox", "/meetings", "/policy", "/pipeline", "/system", "/companies"):
+        r = client.get(path, follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"].startswith("/login"), path
+    for path, method in (("/inbox/1/reviewed", "post"), ("/meetings/1/held", "post"), ("/leads/1/stop_outreach", "post")):
+        r = getattr(client, method)(path, headers=ORIGIN, follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"].startswith("/login"), path

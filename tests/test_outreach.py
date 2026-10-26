@@ -169,6 +169,39 @@ def test_controlled_send_then_follow_up_then_stop_on_reply(make_ctx):
     assert checks["Emails only to consenting contacts or approved B2B outreach"]["ok"]
 
 
+def test_no_override_sends_an_email_without_its_compliance_footer(make_ctx):
+    ctx = researched(make_ctx, **SENDING)
+    FakeSMTP.sent = []
+    sender = EmailSender(ctx.settings, smtp_factory=FakeSMTP)
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})
+    f = drafts(ctx)[0]
+    client = TestClient(create_app(ctx))
+    no_footer = f.body.split("\n\n---\n")[0]
+    r = client.post(f"/followups/{f.id}/approve", data={"subject": f.subject, "body": no_footer, "qc_override": "yes"},
+                    headers=ORIGIN, follow_redirects=False)
+    location = r.headers["location"]
+    assert r.status_code == 303 and location.startswith("/followups?msg=Cannot%20approve") and location.endswith(f"#f{f.id}")
+    assert drafts(ctx)[0].status == "awaiting_approval"
+    with ctx.db.session() as s:  # approved behind the dashboard's back: the send-time check still refuses it
+        row = s.get(FollowUp, f.id)
+        row.status, row.approved_by, row.approved_at = "approved", "someone", row.created_at
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})
+    f = drafts(ctx)[0]
+    assert FakeSMTP.sent == [] and f.status == "awaiting_approval" and f.approved_at is None
+    assert "opt-out line" in f.blocked_reason
+
+
+def test_draft_written_before_the_postal_address_gets_it_on_approval(make_ctx):
+    ctx = researched(make_ctx)  # drafted with no postal address configured
+    SalesWorkflowAgent(ctx).run({})
+    assert "[postal address required" in drafts(ctx)[0].body
+    ctx.settings.company_postal_address = POSTAL["company_postal_address"]
+    f = drafts(ctx)[0]
+    TestClient(create_app(ctx)).post(f"/followups/{f.id}/approve", headers=ORIGIN)
+    f = drafts(ctx)[0]
+    assert f.status == "approved" and POSTAL["company_postal_address"] in f.body and "[postal" not in f.body
+
+
 @pytest.mark.parametrize("change", ["address_changed", "suppressed_after_approval"])
 def test_send_time_recheck_cancels(make_ctx, change):
     ctx = researched(make_ctx, **SENDING)

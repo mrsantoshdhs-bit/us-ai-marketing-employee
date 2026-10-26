@@ -27,7 +27,7 @@ from aime.context import AppContext, get_context
 from aime.crm_ops import is_suppressed, log_activity, suppress
 from aime.db import kv_get, kv_set
 from aime.inbound import InboundPayload, record_inquiry
-from aime.integrations.email_smtp import EmailSender
+from aime.integrations.email_smtp import POSTAL_PLACEHOLDER, EmailSender, compliance_problem
 from aime.integrations.linkedin import (POST_REF_RE, LinkedInAPIError, LinkedInClient, get_auth_status, get_token,
                                         new_state, post_url)
 from aime.integrations.status import integration_statuses
@@ -181,8 +181,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return response
 
     def back(url: str, msg: str) -> RedirectResponse:
-        sep = "&" if "?" in url else "?"
-        return RedirectResponse(f"{url}{sep}msg={quote(msg)}", status_code=303)
+        path, mark, anchor = url.partition("#")  # the message goes in the query, before any #anchor
+        sep = "&" if "?" in path else "?"
+        return RedirectResponse(f"{path}{sep}msg={quote(msg)}{mark}{anchor}", status_code=303)
 
     # ------------------------------------------------------------------ today (Sales Manager home)
     @app.get("/", response_class=HTMLResponse)
@@ -566,6 +567,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     f.subject, edited = subject.strip(), True
                 if body.strip() and body.replace("\r\n", "\n") != f.body:
                     f.body, edited = body.replace("\r\n", "\n"), True
+                address = C().settings.company_postal_address
+                if f.kind in ("outreach", "response") and address and POSTAL_PLACEHOLDER in (f.body or ""):
+                    f.body, edited = f.body.replace(POSTAL_PLACEHOLDER, address), True  # drafted before it was set
                 qc_status = None
                 if f.kind == "outreach":
                     if edited or action == "save":  # an edited email is checked again before anyone approves it
@@ -577,6 +581,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     msg = "Saved" + (f"; quality checks: {qc_status}" if qc_status else "")
                 elif QUESTION_PLACEHOLDER in (f.body or ""):
                     return back(f"/followups#f{f.id}", "Write your answer in place of the placeholder before approving")
+                elif f.kind in ("outreach", "response") and (problem := compliance_problem(C().settings, f.body or "")):
+                    return back(f"/followups#f{f.id}", f"Cannot approve: {problem}. Put the footer back first")
                 elif qc_status in ("held", "failed") and qc_override != "yes":
                     return back(f"/followups#f{f.id}", f"Quality checks {qc_status}: review the findings and tick "
                                                        "'I reviewed the quality findings' to approve")

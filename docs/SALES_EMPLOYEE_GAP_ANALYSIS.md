@@ -82,3 +82,27 @@ Status: **Complete** (works and tested), **Partial** (foundation exists, scope i
 No real prospect reply, meeting, revenue or verified contact is reported unless it actually happened.
 Simulated replies used in tests are labelled simulated. Any blocked dependency or failed test is reported
 as NOT COMPLETE.
+
+## Status after development (26 Oct 2026, PRs #19–#24, not yet merged)
+
+"Built and tested" means the code is in the PRs and covered by automated tests (including one end-to-end test
+through every stage in test mode). Live acceptance with your Gmail and Calendly is the remaining step.
+
+| # | Module | Status | Where |
+|---|---|---|---|
+| 1 | Discovery | Built and tested (existing) | — |
+| 2 | Company research | Built and tested; checked on 8 real companies (copy of production data) | #19 |
+| 3 | Decision-makers | Built and tested; real-world check found and fixed testimonial and other-organisation errors | #19 |
+| 4 | Contact enrichment and validation | Built and tested; real-world: published emails are rare, no guessing | #20 |
+| 5 | Qualification | Built and tested (contact quality in the score) | #20 |
+| 6 | CRM | Built and tested (outreach stages, owner, audit trail) | #21 |
+| 7 | Personalized outreach | Built and tested (evidence quotes, email checks) | #21 |
+| 8 | Email sending | Built and tested with a fake mail server; **live Gmail pending your credentials** | #22 |
+| 9 | Follow-ups | Built and tested (steps, stop rules, no duplicates) | #21, #22 |
+| 10 | Reply intelligence | Built and tested with a fake mailbox; **live mailbox pending** | #22 |
+| 11 | Meetings | Built and tested from Calendly emails; **live Calendly pending** | #23 |
+| 12 | Pipeline automation | Built and tested | #23 |
+| 13 | Dashboard | Built and tested (Decision-makers, Replies, Meetings, Today, Pipeline) | #19–#23 |
+| 14 | Reporting | Built and tested (sales metrics from records; simulations apart) | #23 |
+| 15 | Background automation | Built and tested (enrich, inbox, followups jobs; retries; recovery) | #19–#23 |
+| 16 | Security and operations | Built and tested (admin-only operations, header-injection guard, isolated acceptance settings) | #24 |

@@ -24,7 +24,7 @@ from aime.agents.base import BaseAgent, RetryPolicy
 from aime.agents.contracts import BlockedItem
 from aime.crm_ops import is_suppressed, log_activity
 from aime.email_templates import draft_reply
-from aime.integrations.email_smtp import EmailNotReady, EmailSender
+from aime.integrations.email_smtp import EmailNotReady, EmailSender, compliance_problem
 from aime.knowledge.services import service_name
 from aime.models import Alert, FollowUp, InboundEmail, InboundInquiry, Lead, Opportunity, Signal
 from aime.outreach import draft_outreach, eligible, gather_evidence, set_status
@@ -277,6 +277,12 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 f.blocked_reason = reason
                 out.blocked.append(BlockedItem(id=f.id, reason=reason))
                 continue
+            problem = compliance_problem(self.settings, f.body or "") if f.kind in ("outreach", "response") else None
+            if problem:  # e.g. the footer was edited out, or written before the postal address was configured
+                f.status, f.approved_at, f.approved_by = "awaiting_approval", None, None
+                f.blocked_reason = f"Not sent: {problem}; put the footer back and approve again"[:300]
+                out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+                continue
             if not in_window:
                 f.blocked_reason = "Waiting for the business-hours send window"
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
@@ -296,6 +302,14 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 # Rejected or never connected: nothing was delivered, safe to try again later.
                 f.status, f.send_started_at = "approved", None
                 f.blocked_reason = redact(f"Send failed (not delivered): {exc}")[:300]
+                out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+                session.commit()
+                continue
+            except ValueError as exc:
+                # The message could not be built (e.g. a malformed header): nothing left this computer.
+                f.status, f.send_started_at = "awaiting_approval", None
+                f.approved_at, f.approved_by = None, None
+                f.blocked_reason = redact(f"Could not be sent: {exc}; edit it and approve again")[:300]
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
                 session.commit()
                 continue

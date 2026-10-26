@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -229,6 +230,7 @@ def cmd_user(args, ctx, prompt_fn=None) -> int:
     """Dashboard accounts. Passwords are typed by you at the prompt and stored only as scrypt hashes."""
     import getpass
 
+    from aime.crm_ops import log_activity
     from aime.models import User
     from aime.web.auth import hash_password
 
@@ -244,6 +246,7 @@ def cmd_user(args, ctx, prompt_fn=None) -> int:
             print("--username is required")
             return 1
         user = s.execute(select(User).where(User.username == username)).scalars().first()
+        role = getattr(args, "role", None) or "sales_manager"
         if args.action == "create":
             if user:
                 print(f"User {username} already exists")
@@ -252,11 +255,11 @@ def cmd_user(args, ctx, prompt_fn=None) -> int:
             if password is None:
                 return 1
             try:
-                s.add(User(username=username, password_hash=hash_password(password), role=args.role))
+                s.add(User(username=username, password_hash=hash_password(password), role=role))
             except ValueError as exc:
                 print(exc)
                 return 1
-            print(f"Created {args.role} account {username}. Sign in at http://127.0.0.1:8765/login")
+            print(f"Created {role} account {username}. Sign in at http://127.0.0.1:8765/login")
             return 0
         if user is None:
             print(f"No user {username}")
@@ -280,6 +283,14 @@ def cmd_user(args, ctx, prompt_fn=None) -> int:
         elif args.action == "enable":
             user.active = True
             print(f"Enabled {username}")
+        elif args.action == "set-role":
+            # Only from the command line on this computer: the dashboard cannot change roles.
+            if not getattr(args, "role", None):
+                print("--role is required (sales_manager or admin)")
+                return 1
+            old, user.role = user.role, args.role
+            log_activity(s, f"Dashboard account {username}: role {old} -> {args.role}", "command line", type_="security")
+            print(f"{username} is now {args.role} (was {old})")
     return 0
 
 
@@ -299,6 +310,10 @@ def cmd_simulate_reply(args, ctx) -> int:
     from aime.models import FollowUp, InboundEmail, Lead
     from aime.reply_intel import process_pending
 
+    if ctx.settings.is_production and not os.environ.get("AIME_ENV_FILE"):
+        print("simulate-reply refused on live production data: a simulated reply would change real leads. Use a demo "
+              "folder or an acceptance copy (AIME_ENV_FILE, see docs/ACCEPTANCE.md).")
+        return 2
     with ctx.db.session() as s:
         lead = s.get(Lead, args.lead)
         if lead is None:
@@ -318,6 +333,23 @@ def cmd_simulate_reply(args, ctx) -> int:
         process_pending(s, ctx.settings, "simulate-reply")
         row = s.execute(select(InboundEmail).order_by(InboundEmail.id.desc())).scalars().first()
         print(f"SIMULATED reply from {row.from_email}: {row.category} ({row.confidence}) -> {row.status}; {row.action_note}")
+    return 0
+
+
+def cmd_acceptance_report(args, ctx) -> int:
+    """Read-only: what the records show for each of the 19 acceptance tests; also written as Markdown."""
+    from aime.acceptance import acceptance_evidence, render_markdown
+    from aime.timeutil import utcnow
+
+    with ctx.db.session() as s:
+        rows = acceptance_evidence(s, ctx.settings)
+    for r in rows:
+        print(f"{r['test']:>2}. {r['status']:<18} {r['name']}\n      {r['evidence']}")
+    label = f"{ctx.settings.data_role} data, {utcnow():%Y-%m-%d %H:%M} UTC"
+    out = ctx.settings.reports_dir / f"acceptance_{utcnow():%Y%m%d_%H%M}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(render_markdown(rows, label), encoding="utf-8")
+    print(f"Written to {out}")
     return 0
 
 
@@ -467,6 +499,7 @@ def build_parser() -> argparse.ArgumentParser:
     rd = sub.add_parser("restore-drill", help="Restore a backup into a temp folder and check it (never touches data/)")
     rd.add_argument("--source", help="Backup .db, bundle .zip or encrypted .aimebak (default: latest local backup)")
     rd.add_argument("--extract-to", help="New folder (outside data/) to receive the checked files for a manual restore")
+    sub.add_parser("acceptance-report", help="Read-only: evidence for each of the 19 acceptance tests")
     sr = sub.add_parser("simulate-reply", help="Process a clearly labelled SIMULATED reply from a lead (testing)")
     sr.add_argument("--lead", type=int, required=True)
     sr.add_argument("--text", required=True)
@@ -492,9 +525,9 @@ def build_parser() -> argparse.ArgumentParser:
     sd.add_argument("--data-dir", default=str(BASE_DIR / "demo_data"))
     sd.add_argument("--llm", default="template", choices=["template", "auto", "ollama"])
     us = sub.add_parser("user", help="Dashboard sign-in accounts (you type the password at the prompt)")
-    us.add_argument("action", choices=["create", "list", "set-password", "disable", "enable"])
+    us.add_argument("action", choices=["create", "list", "set-password", "set-role", "disable", "enable"])
     us.add_argument("--username")
-    us.add_argument("--role", default="sales_manager", choices=["sales_manager", "admin"])
+    us.add_argument("--role", choices=["sales_manager", "admin"], help="default for create: sales_manager")
     us.add_argument("--data-dir", help="Use another data folder (e.g. the demo database)")
     return p
 
@@ -505,6 +538,7 @@ COMMANDS = {
     "seed-demo": cmd_seed_demo, "doctor": cmd_doctor, "backup": cmd_backup, "maintenance": cmd_maintenance,
     "refresh-graphics": cmd_refresh_graphics, "backup-verify": cmd_backup_verify, "restore-drill": cmd_restore_drill,
     "user": cmd_user, "policy": cmd_policy, "simulate-reply": cmd_simulate_reply,
+    "acceptance-report": cmd_acceptance_report,
 }
 PRODUCTION_DATA_DIR = BASE_DIR / "data"
 
@@ -519,6 +553,12 @@ def main(argv: list[str] | None = None) -> int:
         resolved = Path(data_dir).resolve()
         role = "production" if resolved == PRODUCTION_DATA_DIR.resolve() else "demo"
         settings = Settings.load(data_dir=resolved, database_url="", data_role=role)
+    if os.environ.get("AIME_ENV_FILE"):
+        settings = settings or Settings.load()
+        if settings.data_dir.resolve() == PRODUCTION_DATA_DIR.resolve():
+            print("AIME_ENV_FILE is set but its AIME_DATA_DIR is the production data folder. An alternate settings file "
+                  "must use its own data folder (set AIME_DATA_DIR in it). Nothing was run.")
+            return 2
     ctx = create_context(settings)
     set_context(ctx)
     return COMMANDS[args.cmd](args, ctx)

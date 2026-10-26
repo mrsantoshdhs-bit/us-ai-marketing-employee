@@ -133,8 +133,20 @@ def current_username(request: Request) -> str:
     return user["username"] if user else "dashboard user"
 
 
+# Operations that change how the system runs, not the sales work itself: admin accounts only.
+# Sales Managers approve, edit, reply, log meetings and manage leads.
+ADMIN_ONLY_PREFIXES = ("/jobs/", "/integrations/linkedin/connect", "/integrations/linkedin/disconnect",
+                       "/inbound/process")
+
+
+def admin_only(method: str, path: str) -> bool:
+    if path.startswith("/integrations/linkedin/connect"):
+        return True  # starting OAuth changes the connected account, even though it is a GET
+    return method == "POST" and path.startswith(ADMIN_ONLY_PREFIXES)
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
-    """Every page and API needs a signed-in Sales Manager (when DASHBOARD_AUTH is on)."""
+    """Every page and API needs a signed-in user (when DASHBOARD_AUTH is on); operational changes need an admin."""
 
     def __init__(self, app, get_ctx):
         super().__init__(app)
@@ -156,4 +168,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if path.startswith("/api/"):
                 return JSONResponse({"detail": "Sign in required"}, status_code=401)
             return RedirectResponse(f"/login?next={quote(path)}", status_code=303)
+        if admin_only(request.method, path) and request.state.user["role"] != "admin":
+            return JSONResponse({"detail": "Admin only: ask an admin to do this"}, status_code=403)
         return await call_next(request)

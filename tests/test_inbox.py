@@ -10,6 +10,7 @@ from sqlalchemy import select
 from aime.agents.inbox_agent import InboxAgent
 from aime.agents.sales_workflow import SalesWorkflowAgent
 from aime.inbox import Mailbox, new_text, parse_message
+from aime.reply_intel import reply_footer
 from aime.integrations.email_smtp import EmailSender
 from aime.models import Activity, Alert, Contact, FollowUp, InboundEmail, Lead, Opportunity, Suppression
 from aime.reply_intel import classify
@@ -257,3 +258,26 @@ def test_lead_unaffected_when_inbox_not_configured(make_ctx):
     assert out.mailbox == "not configured" and out.fetched == 0
     with ctx.db.session() as s:
         assert s.execute(select(Lead)).scalar_one().outreach_status in (None, "drafted")
+
+
+def test_folded_subjects_and_unbuildable_emails_do_not_break_sending(make_ctx):
+    long_subject = "Re: [TEST for someone@example.com] Question about manual data entry at a company with a long name"
+    assert "\n" not in parse_message(mail("a@x.example", long_subject, "hi")).subject
+    ctx, sender, sent = contacted(make_ctx)
+    with ctx.db.session() as s:  # one broken approved email (as an old record could be) and one good one
+        for subject in ("Line one\nBcc: injected@evil.example", "A normal subject"):
+            s.add(FollowUp(lead_id=sent.lead_id, contact_id=sent.contact_id, company_id=sent.company_id, channel="email",
+                           kind="response", step=1, status="approved", approved_at=sent.approved_at, approved_by="x",
+                           subject=subject, body="Thanks." + reply_footer(ctx.settings), to_email=DAVID,
+                           in_reply_to="<m1@mail.example>"))
+        s.add(InboundEmail(message_id="<m1@mail.example>", from_email=DAVID, subject="Re: hi", status="actioned"))
+    before = len(FakeSMTP.sent)
+    out = SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})
+    assert out.ok
+    new = FakeSMTP.sent[before:]
+    assert len(new) == 2 and all("\n" not in m["Subject"] for m in new) and all(m["Bcc"] is None for m in new)
+    try:
+        sender.send("a@x.example\r\nBcc: b@y.example", "s", "b")
+        raise AssertionError("an address with a line break must be refused")
+    except Exception as exc:  # EmailNotReady
+        assert "invalid recipient" in str(exc)
