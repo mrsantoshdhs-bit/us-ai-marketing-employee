@@ -91,6 +91,44 @@ def test_parse_the_real_notice_layout_with_the_date_day_first():
     assert parse_calendly(REAL_SUBJECT, odd, set())["starts_at"] == info["starts_at"]
 
 
+# Calendly's reschedule email from the owner's account (27 Oct 2026), same replacements: an "Updated:" subject, the new
+# time as the event date/time, and the former one under "Date & Time".
+UPDATED_SUBJECT = "Updated: Ana Lima - 10:30am Wed, 28 Oct 2026 - 30 Minute Meeting"
+UPDATED_BODY = (REAL_BODY.replace("09:00am - Wednesday", "10:30am - Wednesday")
+                .replace("    India Standard Time\n", "    India Standard Time\n\n \n   \n    Date & Time:\n   \n   \n"
+                         "   Former:  09:00am - Wednesday, 28 October 2026 (India Standard Time)\n   \n   \n"
+                         "   Updated:  10:30am - Wednesday, 28 October 2026 (India Standard Time)\n")
+                .replace(" This is test ", " This is test \n Rescheduled by Ana Lima "))
+
+
+def test_parse_the_real_reschedule_email():
+    info = parse_calendly(UPDATED_SUBJECT, UPDATED_BODY, set())
+    assert info["kind"] == "rescheduled" and info["invitee_email"] == "ana@x.example"
+    assert (info["starts_at"], info["previous_starts_at"]) == (datetime(2026, 10, 28, 5, 0), datetime(2026, 10, 28, 3, 30))
+
+
+def test_the_real_reschedule_moves_the_right_one_of_two_bookings(make_ctx, monkeypatch):
+    monkeypatch.setattr(meetings, "utcnow", lambda: NOW)
+    ctx, _, _ = contacted(make_ctx, calendly_url=LINK)
+    as_david = {"Ana Lima": "David Chen", "ana@x.example": DAVID}
+
+    def real(subject, body, msg_id):
+        for a, b in as_david.items():
+            subject, body = subject.replace(a, b), body.replace(a, b)
+        return mail("Calendly <notifications@calendly.com>", subject, body, msg_id=msg_id)
+
+    FakeIMAP.messages = {1: real(REAL_SUBJECT, REAL_BODY, "<a@calendly.example>"),
+                         2: notice("New Event", ("2:00pm", "Friday, October 30, 2026", "Fri, Oct 30, 2026"))}
+    run_inbox(ctx)  # two upcoming bookings: only the former time says which one moved
+    FakeIMAP.messages[3] = real(UPDATED_SUBJECT, UPDATED_BODY, "<b@calendly.example>")
+    run_inbox(ctx)
+    with ctx.db.session() as s:
+        ms = s.execute(select(Meeting).order_by(Meeting.id)).scalars().all()
+        assert [(m.starts_at, m.rescheduled_from) for m in ms] == [
+            (datetime(2026, 10, 28, 5, 0), datetime(2026, 10, 28, 3, 30)), (datetime(2026, 10, 30, 8, 30), None)]
+        assert "meeting rescheduled" in latest_reply(ctx).action_note
+
+
 def test_meeting_length_comes_from_the_link():
     assert booking_minutes(SimpleNamespace(calendly_url=LINK)) == 30
     assert booking_minutes(SimpleNamespace(calendly_url="https://calendly.com/x/1-hour")) == 60

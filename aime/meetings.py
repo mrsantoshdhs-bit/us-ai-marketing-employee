@@ -136,7 +136,9 @@ def parse_calendly(subject: str, body: str, own: set[str], default_tz: str = "Am
         parsed = _when(f"{subject} {zone.group(0) if zone else ''}", default_tz, minutes)
     if not (parsed and email):
         return None
-    before = re.search(rf"(?:Former|Previous)(?: Event)? Date/Time:\s*(.+?)(?:Event Date/Time|{WHEN_ENDS})", text, re.I)
+    # "Former Event Date/Time: ...", or as Calendly's "Updated:" email has it: "Date & Time: Former: ... Updated: ..."
+    before = re.search(rf"(?:Former|Previous)(?: Event)?(?: Date/Time)?:\s*(.+?)(?:Updated:|Event Date/Time|{WHEN_ENDS})",
+                       text, re.I)
     previous = _when(before.group(1), default_tz, minutes) if before else None
     if kind == "booked" and previous is not None:
         kind = "rescheduled"  # a new event that names its former time is a reschedule
