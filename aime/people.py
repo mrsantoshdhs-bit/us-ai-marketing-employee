@@ -276,11 +276,15 @@ def extract_people(pages, company: str | None = None) -> list[PersonFinding]:
         for obj in page.jsonld:
             _jsonld_people(obj, page.url, found, company)
         on_team_page = page.kind in ("team", "about")
+        content = page.blocks if page.content_blocks is None else page.content_blocks
         if on_team_page:
-            _pairs([t for _, t in page.blocks], page.url, company, "high", found)
-            _pairs(page.segments, page.url, company, "high", found)
-        for _, text in page.blocks:
-            m = SPLIT_RE.match(text) if on_team_page else None
+            _pairs([t for _, t in content], page.url, company, "high", found)
+            _pairs(page.segments if page.content_segments is None else page.content_segments, page.url, company,
+                   "high", found)
+        content_set = set(content)
+        for block in page.blocks:
+            text = block[1]
+            m = SPLIT_RE.match(text) if on_team_page and block in content_set else None
             if m and looks_like_name(m["name"], company) and is_title(m["title"]) and not names_other_org(m["title"], company):
                 title = clean_title(m["title"])
                 found.append(PersonFinding(m["name"].strip(), title, role_category(title), "high", text, page.url))
@@ -308,14 +312,25 @@ def _sentence_around(text: str, start: int, end: int) -> str:
     return text[left: right + 1 if right != -1 else len(text)].strip()[:300]
 
 
+def same_name(a: str, b: str) -> bool:
+    """Normalized names of one person: equal, or equal once a middle initial is left out of one of them
+    ("john smith" and "john a smith"; but "john a smith" and "john b smith" are two people)."""
+    if a == b:
+        return True
+    bare_a = " ".join(w for w in a.split() if len(w) > 1)
+    bare_b = " ".join(w for w in b.split() if len(w) > 1)
+    return bare_a == bare_b and len(bare_a.split()) >= 2 and (bare_a == a or bare_b == b)
+
+
 def merge_findings(found: list[PersonFinding]) -> list[PersonFinding]:
     """One finding per person: the highest confidence, then the most specific title."""
     best: dict[str, PersonFinding] = {}
     rank = {"high": 2, "medium": 1}
     for f in found:
-        cur = best.get(f.key)
+        key = next((k for k in best if same_name(k, f.key)), f.key)
+        cur = best.get(key)
         if cur is None or (rank[f.confidence], len(f.title)) > (rank[cur.confidence], len(cur.title)):
-            best[f.key] = f
+            best[key] = f
     return list(best.values())
 
 

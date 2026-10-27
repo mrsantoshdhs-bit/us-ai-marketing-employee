@@ -342,3 +342,119 @@ def test_companies_that_sell_ai_agents_are_flagged_and_a_person_can_clear_it(mak
     LeadQualificationAgent(ctx).run({})
     with ctx.db.session() as s:
         assert s.execute(select(Lead)).scalar_one().status != "disqualified"
+
+
+def test_unreadable_robots_txt_means_do_not_crawl(make_ctx):
+    from aime.website_check import check_website
+    for code in (503, 500, 429):
+        requests: list[str] = []
+        ctx = make_ctx(handler=make_handler(requests, {"/robots.txt": ("text/plain", code)}))
+        cid = add_company(ctx)
+        assert CompanyResearchAgent(ctx).run({"company_ids": [cid]}).ok
+        with ctx.db.session() as s:
+            assert s.get(Company, cid).research_status == "blocked"
+        assert [u for u in requests if not u.endswith("/robots.txt")] == []
+        assert check_website(ctx, SITE, "Brightline Logistics").status == "blocked"
+    requests = []
+    ctx = make_ctx(handler=make_handler(requests, {"/robots.txt": ("text/plain", 404)}))  # none at all: allowed
+    cid = add_company(ctx)
+    assert CompanyResearchAgent(ctx).run({"company_ids": [cid]}).ok and people_of(ctx, cid)
+
+
+def test_a_site_that_redirects_to_another_domain_is_not_read(make_ctx):
+    requests: list[str] = []
+    other = '<html><body><p>Our founder, John Smith, started Othercorp in 2010 to sell shoes online.</p></body></html>'
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.host == SITE:
+            if request.url.path == "/robots.txt":
+                return httpx.Response(404)
+            return httpx.Response(301, headers={"location": "https://other.example/"})
+        return httpx.Response(200, text=other, headers={"content-type": "text/html"})
+    ctx = make_ctx(handler=handler)
+    cid = add_company(ctx)
+    assert CompanyResearchAgent(ctx).run({"company_ids": [cid]}).ok
+    with ctx.db.session() as s:
+        assert s.get(Company, cid).research_status == "redirected"
+    assert not people_of(ctx, cid) and not any("other.example" in u for u in requests)
+
+
+def test_a_page_that_fails_to_load_withdraws_nobody(make_ctx):
+    status = {"/team": 200}
+    base = make_handler([])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == SITE and status.get(request.url.path, 200) != 200:
+            return httpx.Response(status[request.url.path])
+        return base(request)
+    ctx = make_ctx(handler=handler)
+    cid = add_company(ctx)
+    assert CompanyResearchAgent(ctx).run({"company_ids": [cid]}).ok
+    assert people_of(ctx, cid)["Tom Baker"].source == "website"
+    status["/team"] = 503  # a bad moment on the re-check
+    res = CompanyResearchAgent(ctx).run({"company_ids": [cid]})
+    assert res.ok and res.output.contacts_withdrawn == 0
+    assert people_of(ctx, cid)["Tom Baker"].source == "website"
+
+
+def test_research_attaches_contacts_to_the_open_lead_not_an_old_one(make_ctx):
+    ctx = make_ctx(handler=make_handler([]))
+    with ctx.db.session() as s:
+        c = Company(name="Brightline Logistics", normalized_name="brightline logistics", domain=SITE,
+                    website=f"https://{SITE}", website_status="verified", source="hn_hiring")
+        s.add(c)
+        s.flush()
+        s.add(Lead(company_id=c.id, source="research", status="merged", score=10, grade="D"))
+        s.flush()
+        s.add(Lead(company_id=c.id, source="research", status="qualified", score=70, grade="B"))
+        cid = c.id
+    assert CompanyResearchAgent(ctx).run({"company_ids": [cid]}).ok
+    with ctx.db.session() as s:
+        old, current = s.execute(select(Lead).order_by(Lead.id)).scalars().all()
+        assert old.contact_id is None and current.contact_id is not None
+
+
+def test_menus_headers_and_footers_are_not_team_cards():
+    html = """<html><body><header><nav><ul><li><a href="/coaching">Career Coaching</a></li>
+    <li><a href="/exec">Executive Coaching</a></li><li><a href="/about">About</a></li></ul></nav></header>
+    <h1>About Summit Growth</h1><div>Mary Jones</div><div>Founder</div>
+    <article><header><h3>Paul Green</h3><p>Chief Operating Officer</p></header></article>
+    <footer><div>Grace Hall</div><div>Office Manager</div></footer></body></html>"""
+    found = {f.full_name: f.title for f in extract_people([parse_page("https://summit.example/about", "about", html)],
+                                                           "Summit Growth")}
+    assert found == {"Mary Jones": "Founder", "Paul Green": "Chief Operating Officer"}
+
+
+def test_sec_names_issuers_and_middle_initials():
+    from aime.people import same_name
+    from aime.sources.sec_officers import parse_ownership_xml
+    assert display_name("VAN DYKE RICHARD J") == "Richard J. Van Dyke"
+    assert display_name("DE LA CRUZ MARIA") == "Maria De La Cruz"
+    assert display_name("SMITH JOHN A") == "John A. Smith" and display_name("DEAN JAMES") == "James Dean"
+    other_issuer = ("<ownershipDocument><issuer><issuerCik>0000999999</issuerCik></issuer>" +
+                    FORM4.format(name="ROE RICHARD", d=1, o=0, t="").removeprefix("<ownershipDocument>"))
+    assert parse_ownership_xml(other_issuer, CIK) == []  # this company's stake in someone else
+    itself = ("<ownershipDocument><issuer><issuerCik>123456</issuerCik></issuer><reportingOwner><reportingOwnerId>"
+              "<rptOwnerCik>0000123456</rptOwnerCik><rptOwnerName>ATLAS CORP</rptOwnerName></reportingOwnerId>"
+              "<reportingOwnerRelationship><isDirector>1</isDirector></reportingOwnerRelationship></reportingOwner>"
+              "</ownershipDocument>")
+    assert parse_ownership_xml(itself, CIK) == []
+    assert [p["filed_name"] for p in parse_ownership_xml(SEC_DOCS[next(iter(SEC_DOCS))], CIK)] == ["SMITH JOHN A"]
+    assert same_name("john smith", "john a smith") and not same_name("john a smith", "john b smith")
+    assert not same_name("john smith", "jane smith")
+
+
+def test_the_same_person_from_the_website_and_an_sec_filing_is_one_contact(make_ctx):
+    from aime.company_research import save_contact
+    from aime.people import PersonFinding
+    ctx = make_ctx()
+    with ctx.db.session() as s:
+        c = Company(name="Smith Holdings", normalized_name="smith holdings", domain=SITE, source="sec_edgar")
+        s.add(c)
+        s.flush()
+        save_contact(s, c, PersonFinding("John Smith", "Chief Executive Officer", "executive", "high", "card",
+                                         f"https://{SITE}/team"), None)
+        _, created = save_contact(s, c, PersonFinding("John A. Smith", "CEO", "executive", "high", "Form 4",
+                                                      "https://www.sec.gov/x", source="sec_filing"), None)
+        assert not created and s.execute(select(func.count(Contact.id))).scalar_one() == 1

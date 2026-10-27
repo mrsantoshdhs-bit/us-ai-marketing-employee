@@ -111,7 +111,8 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             if public_created >= limit and not user_list:
                 out.limit_reached = True
                 # Still attach evidence to companies we already track.
-                existing = find_duplicate(session, cand.name, cand.domain, cand.state, cand.source_record_id)
+                existing = find_duplicate(session, cand.name, cand.domain, cand.state, cand.source_record_id,
+                                          cand.source)
                 if existing and add_signal(session, existing, cand.signal_type, cand.signal_text, cand.source,
                                            cand.source_url, cand.observed_at):
                     out.signals_added += 1

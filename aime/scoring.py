@@ -151,7 +151,7 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
             pts = round(3 + 4 * strength)
             reasons.append(f"+{pts} need: public evidence for {svc} (strength {strength:.2f})")
         need += pts
-    recent = [s for s in f.signals if now - s.observed_at <= timedelta(days=45)]
+    recent = [s for s in f.signals if s.matched_services and now - s.observed_at <= timedelta(days=45)]
     if recent and ranked:
         need += 5
         reasons.append("+5 need: evidence observed in the last 45 days")

@@ -186,7 +186,8 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         by_name: dict[tuple, list[Company]] = defaultdict(list)
         for c in companies:
             if c.id not in done and c.merged_into_id is None and c.normalized_name:
-                by_name[(c.normalized_name, c.state or "")].append(c)
+                # without a state, only records from the same source share a name (see dedupe.find_duplicate)
+                by_name[(c.normalized_name, c.state) if c.state else (c.normalized_name, "", c.source)].append(c)
         for members in by_name.values():
             keeper = members[0]
             for dup in members[1:]:

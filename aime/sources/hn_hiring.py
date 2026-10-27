@@ -35,15 +35,15 @@ def clean_html(raw: str) -> str:
 
 
 def pick_website(raw: str, header: str, name: str) -> str | None:
-    """Choose the company's own domain: one that matches the company name, else one linked in the
-    header line. Job boards, short links and media sites are skipped. Unknown beats wrong."""
+    """Choose the company's own domain: one that matches the company name. A header link that does not match
+    the name may be a customer, investor or partner, so it is not used. Job boards, short links and media sites
+    are skipped. Unknown beats wrong."""
     compact = normalize_name(name).replace(" ", "")
     tokens = [t for t in normalize_name(name).split() if len(t) >= 4]
     header_raw = raw.split("<p>", 1)[0]
     header_domains = {domain_from_url(html.unescape(h)) for h in _HREF_RE.findall(header_raw)}
     header_domains |= {d.lower() for d in _DOMAIN_TEXT_RE.findall(header)}
     candidates = [domain_from_url(html.unescape(h)) for h in _HREF_RE.findall(raw)] + sorted(header_domains - {None})
-    fallback = None
     for dom in candidates:
         if not dom or is_job_board(dom):
             continue
@@ -52,9 +52,7 @@ def pick_website(raw: str, header: str, name: str) -> str | None:
             return dom
         if any(t in label for t in tokens):
             return dom
-        if fallback is None and dom in header_domains:
-            fallback = dom
-    return fallback
+    return None
 
 
 def parse_post(item: dict) -> CompanyCandidate | None:

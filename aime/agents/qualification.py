@@ -121,7 +121,8 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                     for f in session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.status.in_(
                             ("pending", "awaiting_approval", "approved")))).scalars():
                         f.status, f.blocked_reason = "cancelled", f"Lead disqualified: {result.disqualify_reason}"[:300]
-            elif result.grade in ("A", "B") and prev_status in ("new", "nurture"):
+            elif (result.grade in ("A", "B") and prev_status in ("new", "nurture")
+                  and self._may_requalify(session, lead, company, signals, prev_status)):
                 lead.status = "qualified"
                 out.newly_qualified.append(lead.id)
             elif result.grade in ("C", "D") and prev_status == "new":
@@ -140,6 +141,20 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                              self.name, type_="status_change", company_id=company.id, lead_id=lead.id)
         out.grade_counts = dict(grades)
         return out
+
+    def _may_requalify(self, session: Session, lead: Lead, company: Company, signals: list[Signal],
+                       prev_status: str) -> bool:
+        """A lead that a person or the stale-lead rule moved to nurture is qualified again only on evidence
+        recorded after that move (a new signal or a new research read); the same score is not enough."""
+        if prev_status != "nurture":
+            return True
+        last = session.execute(select(Activity).where(Activity.lead_id == lead.id, Activity.type == "status_change")
+                               .order_by(Activity.created_at.desc(), Activity.id.desc())).scalars().first()
+        if last is None or last.actor == self.name or not ("→ nurture" in last.subject or "moved to nurture" in last.subject):
+            return True
+        moved = last.created_at
+        return (any(s.created_at and s.created_at > moved for s in signals)
+                or (company.researched_at is not None and company.researched_at > moved))
 
     @staticmethod
     def _human_touched(session: Session, lead: Lead) -> bool:

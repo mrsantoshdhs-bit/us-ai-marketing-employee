@@ -1,9 +1,12 @@
 """Business contact enrichment from what companies publish, and email validation. Nothing is guessed.
 
 An email is used only if the company's own website publishes it, on the company's own domain:
-- printed next to a named person (team card, "Email David at ...")  -> that person's email, high confidence;
+- printed next to a named person and its local part fits that person's name -> that person's email, high;
 - its local part matches exactly one named person's name (jane.doe@, jdoe@, jane@) -> that person, medium;
-- a general business inbox (info@, hello@, sales@, contact@ ...)    -> a "company inbox" contact.
+- a general business inbox (info@, hello@, sales@, contact@ ...)    -> a "company inbox" contact, even when
+  it is printed under someone's name.
+An address printed next to one person that does not fit their name is given to nobody: it may be theirs,
+an assistant's or a colleague's, and a wrong owner would put the wrong name in an email.
 Support, jobs, privacy, no-reply and similar addresses, placeholders and free-mail addresses are not used.
 Each domain is checked for a mail server (MX, or an A record as the implicit MX; a "null MX" means the
 domain accepts no mail). Statuses: published | role_address | no_mail_server | unchecked (DNS unknown);
@@ -123,11 +126,17 @@ def assign_published_emails(session: Session, company: Company, published: list[
             continue
         local, domain = email.split("@", 1)
         person, confidence, evidence = None, None, None
+        near = None
         if item.get("near"):
-            near = fold(item["near"])
-            person = next((p for p in people if fold(f"{p.first_name or ''}{p.last_name or ''}") == near), None)
-            confidence, evidence = "high", f'Published next to "{item["near"]}" on {item["url"]}'
-        if person is None and local not in ROLE_LOCALS:
+            folded = fold(item["near"])
+            near = next((p for p in people if fold(f"{p.first_name or ''}{p.last_name or ''}") == folded), None)
+        if local in ROLE_LOCALS:
+            pass  # a general inbox is the company's, never one person's own address
+        elif near is not None:
+            if local in name_patterns(near.first_name, near.last_name):
+                person, confidence = near, "high"
+                evidence = f'Published next to "{item["near"]}" on {item["url"]}'
+        else:
             matches = [p for p in people if local in name_patterns(p.first_name, p.last_name)]
             if len(matches) == 1:
                 person, confidence = matches[0], "medium"
@@ -153,11 +162,12 @@ def assign_published_emails(session: Session, company: Company, published: list[
     return stats
 
 
-def recheck_emails(session: Session, company: Company, checker) -> None:
-    """Refresh mail-server checks for already assigned, not-bounced researched emails."""
+def recheck_emails(session: Session, company: Company, checker, only: tuple[str, ...] | None = None) -> None:
+    """Refresh mail-server checks for already assigned, not-bounced researched emails (`only`: just these
+    statuses, e.g. "unchecked" after a DNS timeout)."""
     for c in session.execute(select(Contact).where(Contact.company_id == company.id, Contact.email.is_not(None),
                                                    Contact.source.in_(("website", "sec_filing")))).scalars():
-        if c.email_status in ("bounced", "invalid"):
+        if c.email_status in ("bounced", "invalid") or (only is not None and c.email_status not in only):
             continue
         c.email_status = _status(checker, c.email.split("@", 1)[1], role=c.role_category == "inbox")
         c.email_checked_at = utcnow()

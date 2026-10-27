@@ -58,3 +58,38 @@ def test_dedupe_helpers(ctx):
         assert find_duplicate(s, "Totally Different", "acme.com", None) is not None
         assert find_duplicate(s, "Acme", "other.com", "TX") is None  # same name, different site
         assert find_duplicate(s, "Acme", None, "CA") is None
+
+
+def test_names_alone_do_not_merge_different_companies(ctx):
+    from aime.sources.hn_hiring import pick_website
+    with ctx.db.session() as s:
+        s.add(Company(name="ATLAS CORP", normalized_name="atlas", state="NJ", source="sec_edgar"))
+        s.add(Company(name="Remote Co", normalized_name=normalize_name("Remote Co"), source="hn_hiring"))
+        s.flush()
+        assert find_duplicate(s, "Atlas", "atlas-ai.example", None, source="hn_hiring") is None  # remote startup
+        assert find_duplicate(s, "Atlas Corp", None, "NJ", source="csv_import") is not None  # same state
+        assert find_duplicate(s, "Remote Co", None, None, source="hn_hiring") is not None  # re-posted next month
+        assert find_duplicate(s, "Remote Co", None, None, source="csv_import") is None
+    # hosting platforms: each customer's subdomain is its own site
+    assert domain_from_url("https://sunnybakery.myshopify.com") == "sunnybakery.myshopify.com"
+    assert domain_from_url("https://bobsbikes.myshopify.com/") != domain_from_url("https://sunnybakery.myshopify.com")
+    assert domain_from_url("https://www.acme.com/x") == "acme.com"
+    # a hiring post that links a customer or partner does not get that company's website
+    header = "Lumen | Data engineer | NYC | we integrate with stripe.com"
+    assert pick_website(f'{header} <a href="https://stripe.com">stripe</a>', header, "Lumen") is None
+    assert pick_website('Lumen | <a href="https://lumen.dev">lumen.dev</a>', "Lumen | lumen.dev", "Lumen") == "lumen.dev"
+
+
+def test_discovery_keeps_a_persons_not_a_competitor_decision(ctx):
+    from aime.crm_ops import upsert_company
+    from aime.sources.base import CompanyCandidate
+    text = "Acme | Austin, TX | We build CRM integrations. We also offer staff augmentation to clients."
+    cand = CompanyCandidate(name="Acme", source="hn_hiring", source_url="https://news.ycombinator.com/item?id=1",
+                            source_record_id="hn:1", domain="acme.example", state="TX", is_us=True,
+                            signal_text=text, description=text)
+    assert detect_competitor(text)
+    with ctx.db.session() as s:
+        company, _ = upsert_company(s, cand)
+        company.is_competitor, company.competitor_cleared_by = False, "owner"
+        again, created = upsert_company(s, cand)  # the next run reads the same post
+        assert not created and again.id == company.id and not again.is_competitor
