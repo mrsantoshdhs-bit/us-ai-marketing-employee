@@ -27,7 +27,7 @@ from aime.email_templates import draft_reply
 from aime.integrations.email_smtp import EmailNotReady, EmailSender, compliance_problem
 from aime.knowledge.services import service_name
 from aime.models import Alert, FollowUp, InboundEmail, InboundInquiry, Lead, Opportunity, Signal
-from aime.outreach import draft_outreach, eligible, gather_evidence, set_status
+from aime.outreach import STOP_STATUSES, draft_outreach, eligible, gather_evidence, set_status
 from aime.pipeline import pipeline_checks
 from aime.outreach import policy as outreach_policy
 from aime.qc.email_checks import run_email_checks
@@ -185,8 +185,9 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             if outreach:
                 if lead.outreach_status != "contacted" or not eligible(session, self.settings, lead)[0]:
                     continue  # replied, unsubscribed, bounced, stopped, or no longer reachable
-            elif not lead.contact or lead.contact.consent_status not in CONSENTED:
-                continue
+            elif (not lead.contact or lead.contact.consent_status not in CONSENTED
+                    or lead.outreach_status in STOP_STATUSES):
+                continue  # they replied, booked, unsubscribed, bounced, or a person stopped the sequence
             has_open = session.execute(select(FollowUp.id).where(
                 FollowUp.lead_id == lead_id, FollowUp.channel == "email", FollowUp.status.in_(OPEN_FOLLOWUP))).first()
             if has_open:
@@ -283,6 +284,10 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                     or is_suppressed(session, contact.email)):
                 f.status = "cancelled"
                 f.blocked_reason = "No consent or contact suppressed"
+                out.cancelled += 1
+                continue
+            elif lead.outreach_status in STOP_STATUSES:
+                f.status, f.blocked_reason = "cancelled", f"Not sent: the sequence stopped ({lead.outreach_status})"
                 out.cancelled += 1
                 continue
             if lead.status != "qualified" and f.kind != "response":

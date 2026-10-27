@@ -185,3 +185,35 @@ def test_crm_maintenance_merges_duplicates_and_sets_lifecycle(ctx):
         merged = s.execute(select(Company).where(Company.merged_into_id.is_not(None))).scalars().one()
         assert merged.lifecycle_stage == "merged"
         assert s.execute(select(Lead).where(Lead.status == "merged")).scalars().one()
+
+
+def test_inquiry_sequence_stops_once_the_person_replied_or_booked(make_ctx):
+    ctx = make_ctx(outbound_email_enabled=True, smtp_host="smtp.example", smtp_from="hello@us.example",
+                   company_postal_address="1 Sample St, Austin, TX 78701")
+    FakeSMTP.sent = []
+    out = ingest(ctx)
+    LeadQualificationAgent(ctx).run({"lead_ids": out.inbound_lead_ids})
+    sender = EmailSender(ctx.settings, smtp_factory=FakeSMTP)
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})
+    approve_all(ctx)
+    assert SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()}).output.emails_sent >= 1
+    with ctx.db.session() as s:
+        first = s.execute(select(FollowUp).where(FollowUp.status == "sent")).scalars().first()
+        lead_id = first.lead_id
+        for f in s.execute(select(FollowUp).where(FollowUp.status == "sent")).scalars():
+            f.sent_at = TUESDAY_11AM_ET - timedelta(days=4)
+        s.get(Lead, lead_id).outreach_status = "meeting"  # they replied and booked a call
+    later = TUESDAY_11AM_ET + timedelta(minutes=5)
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": later.isoformat()})
+    with ctx.db.session() as s:
+        assert not s.execute(select(FollowUp).where(FollowUp.lead_id == lead_id, FollowUp.step == 2)).first()
+        # an already-approved later step of that sequence is not sent either
+        s.add(FollowUp(lead_id=lead_id, contact_id=first.contact_id, company_id=first.company_id, channel="email",
+                       step=2, due_at=later, status="approved", approved_by="test", approved_at=utcnow(),
+                       subject="Following up", body=first.body))
+    FakeSMTP.sent = []
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": later.isoformat()})
+    with ctx.db.session() as s:
+        step2 = s.execute(select(FollowUp).where(FollowUp.lead_id == lead_id, FollowUp.step == 2)).scalar_one()
+        assert step2.status == "cancelled" and "sequence stopped (meeting)" in step2.blocked_reason
+    assert FakeSMTP.sent == []
