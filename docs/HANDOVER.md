@@ -43,12 +43,10 @@ approved sends within 08:00–18:00 ET weekdays, pipeline automation) · publish
 
 - **Deployed 26 Oct 2026:** #19–#28 (production `main` at `6844bfe`), with outbound email and publishing off;
   `research-recheck` was run once afterwards.
-- **Waiting for your approval** (27 Oct audit fixes, each with CI; merge in this order):
-  - #29 operations: dashboard restart task, off-machine sync check, alerts that close themselves, crash recovery.
-  - #30 research accuracy: email owners, robots.txt failures, wrong merges, SEC officers.
-  - #31 dashboard and security: inbound API token, lockout, true figures, approvals always listed.
-  - #32 mail safety: verified TLS for Gmail, send limits under overlap, reply and bounce accuracy.
-  - #33 `docs/OPERATIONAL_READINESS.md`, the full report and your checklist.
+- **Deployed 27 Oct 2026 (06:26–06:37):** the audit fixes #29–#33 (production `main` at `318ae94`): #29 operations,
+  #30 research accuracy, #31 dashboard and security, #32 mail safety, #33 the report
+  (`docs/OPERATIONAL_READINESS.md`). Outbound email and publishing stayed off.
+- **Waiting for your approval:** #34, so the optional dashboard restart task can start the web server under pythonw.
 - **Same deploy flow as before:** verified backup, maintenance on, merge, fast-forward the production folder,
   tests and doctor, restart the dashboard, maintenance off, confirm the next tick.
 
