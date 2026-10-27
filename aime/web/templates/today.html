@@ -1,7 +1,16 @@
 {% extends "base.html" %}{% from "_macros.html" import status_pill, qc_pill %}
-{% block title %}Today · AI Marketing Employee{% endblock %}
+{% block title %}Command Center · AI Sales Employee{% endblock %}
 {% block content %}
-<h1>Today <span class="muted small">{{ company_name }}</span></h1>
+<div class="page-head">
+  <div>
+    <h1>Sales Command Center</h1>
+    <p class="subtitle">{{ company_name }} · every number below is counted from your records; nothing is estimated</p>
+  </div>
+  <div class="head-actions">
+    <a class="btn secondary" href="/automation">{{ automation.mode|title }} mode · {{ automation.state|replace('_', ' ') }}</a>
+    <a class="btn" href="/followups">Review approvals</a>
+  </div>
+</div>
 
 <div class="health">
   {% for label, state, detail in health %}
@@ -9,26 +18,51 @@
   {% endfor %}
 </div>
 
-<div class="two">
+<section aria-label="Key figures" class="kpi-grid">
+  {% for label, value, href, hint in kpis %}
+  <a class="kpi" href="{{ href }}"><div class="l">{{ label }}</div><div class="v">{{ value }}</div><div class="hint">{{ hint }}</div></a>
+  {% endfor %}
+</section>
+
+<div class="section-title"><h2>Performance</h2><span class="muted small">last 8 weeks, by week</span></div>
+<div class="three">
+  <div class="card"><div class="card-head"><h3>Lead generation</h3><span class="meta">leads created</span></div>{{ chart_leads }}</div>
+  <div class="card"><div class="card-head"><h3>Email performance</h3><span class="meta">sent and replies</span></div>{{ chart_email }}</div>
+  <div class="card"><div class="card-head"><h3>Meetings</h3><span class="meta">real bookings</span></div>{{ chart_meetings }}</div>
+  <div class="card"><div class="card-head"><h3>Sales funnel</h3><span class="meta">all time</span></div>{{ chart_funnel }}</div>
+  <div class="card"><div class="card-head"><h3>Pipeline by stage</h3><span class="meta">opportunities</span></div>{{ chart_pipeline }}</div>
+  <div class="card">
+    <div class="card-head"><h3>Automation status</h3><a class="meta" href="/automation">Control Center →</a></div>
+    <div class="status-row"><span class="k">Operating mode</span><span class="val">{{ automation.mode|title }}</span></div>
+    <div class="status-row"><span class="k">State</span><span class="val">{{ automation.state|replace('_', ' ')|title }}</span></div>
+    <div class="status-row"><span class="k">Active campaign authorizations</span><span class="val">{{ automation.active }}</span></div>
+    <div class="status-row"><span class="k">Emails without a person</span>
+      <span class="val">{% if automation.blockers %}<span class="pill warn">not possible now</span>{% else %}<span class="pill ok">within authorizations</span>{% endif %}</span></div>
+    {% if automation.blockers %}<div class="small muted" style="margin-top:6px">{{ automation.blockers[0] }}{% if automation.blockers|length > 1 %} (+{{ automation.blockers|length - 1 }} more){% endif %}</div>{% endif %}
+  </div>
+</div>
+
+<div class="main-side">
   <div>
-    <h2>Needs you <span class="muted small">approvals and exceptions</span></h2>
+    <div class="section-title"><h2>Needs you <span class="muted small">Sales Manager action center: approvals and exceptions</span></h2></div>
     <div class="card">
       {% for kind, href, text in exceptions %}
       <div class="row-item"><span class="pill bad">{{ kind }}</span> <a href="{{ href }}">{{ text[:140] }}</a></div>
       {% endfor %}
-      {% for p in posts %}
-      <div class="row-item">{{ qc_pill(p.qc_status) }} <a href="/content/{{ p.id }}">{{ p.title }}</a>
-        <span class="muted small">post · {{ p.scheduled_for|et }}{% if post_decisions.get(p.id) %} · policy: {{ post_decisions[p.id]|replace('_', ' ') }}{% endif %}</span></div>
-      {% endfor %}
       {% for r in replies %}
       <div class="row-item"><span class="pill warn">{{ 'SIMULATED ' if r.is_simulated }}reply: {{ (r.category or '')|replace('_', ' ') }}</span>
+        {% if r.intent %}<span class="pill {{ 'warn' if r.intent == 'pricing_request' else 'ok' }}">{{ r.intent|intent_label }}</span>{% endif %}
         <a href="/inbox">{{ r.subject }}</a> <span class="muted small">{{ r.from_email }}</span></div>
       {% endfor %}
       {% for f in emails %}
       <div class="row-item"><span class="pill warn">{{ 'outreach' if f.kind == 'outreach' else 'reply draft' }}</span> <a href="/followups#f{{ f.id }}">{{ f.subject }}</a>
         <span class="muted small">{{ f.lead.company.name if f.lead and f.lead.company else '' }}</span></div>
       {% endfor %}
-      {% if not exceptions and not posts and not emails and not replies %}<span class="muted">Nothing waiting for you.</span>{% endif %}
+      {% for p in posts %}
+      <div class="row-item">{{ qc_pill(p.qc_status) }} <a href="/content/{{ p.id }}">{{ p.title }}</a>
+        <span class="muted small">post · {{ p.scheduled_for|et }}{% if post_decisions.get(p.id) %} · policy: {{ post_decisions[p.id]|replace('_', ' ') }}{% endif %}</span></div>
+      {% endfor %}
+      {% if not exceptions and not posts and not emails and not replies %}<div class="empty-state"><b>Nothing waiting for you</b>New approvals, unclear replies and exceptions appear here.</div>{% endif %}
     </div>
 
     <h2>Alerts</h2>
@@ -39,15 +73,43 @@
         <form class="inline" method="post" action="/alerts/{{ a.id }}/ack"><button class="secondary">Acknowledge</button></form></div>
       {% else %}<span class="muted">No open alerts.</span>{% endfor %}
     </div>
-  </div>
 
-  <div>
-    <h2>Pipeline</h2>
+    <h2>Pipeline <span class="muted small">every stage, with links to the records</span></h2>
     <div class="grid">
       {% for label, value, href, note in funnel %}
       {% if href %}<a class="kpi" href="{{ href }}"><div class="v">{{ value }}</div><div class="l">{{ label }}</div></a>
       {% else %}<div class="kpi muted"><div class="v">–</div><div class="l">{{ label }}<br><span class="small">{{ note }}</span></div></div>{% endif %}
       {% endfor %}
+    </div>
+  </div>
+
+  <div>
+    <div class="section-title"><h2>Live AI activity</h2><a class="small" href="/agents">All agent runs →</a></div>
+    <div class="card">
+      {% if timeline %}
+      <ul class="timeline">
+        {% for at, kind, text, tone, href in timeline %}
+        <li><time>{{ at|local if at else '' }}</time>
+          <div><span class="kind {{ tone }}">{{ kind }}</span>{% if href %}<a href="{{ href }}">{{ text[:120] }}</a>{% else %}{{ text[:120] }}{% endif %}</div></li>
+        {% endfor %}
+      </ul>
+      {% else %}<div class="empty-state"><b>No activity yet</b>Agent runs and CRM changes appear here as the scheduled jobs work.</div>{% endif %}
+    </div>
+
+    <h2>Email</h2>
+    <div class="card">
+      <div class="status-row"><span class="k">Sending (OUTBOUND_EMAIL_ENABLED)</span><span class="val">{% if gmail.sending %}<span class="pill ok">on</span>{% else %}<span class="pill warn">off</span>{% endif %}</span></div>
+      <div class="status-row"><span class="k">Mail server</span><span class="val">{% if gmail.ready %}<span class="pill ok">ready</span>{% else %}<span class="small muted">{{ gmail.reason }}</span>{% endif %}</span></div>
+      <div class="status-row"><span class="k">Sender</span><span class="val">{{ gmail.sender or '—' }}</span></div>
+      <div class="status-row"><span class="k">Reply monitoring</span><span class="val">{{ 'reading the mailbox' if gmail.reading else 'off (IMAP not set)' }}</span></div>
+      <div class="status-row"><span class="k">Test mode</span><span class="val">{{ gmail.test_mode ~ ' test address(es)' if gmail.test_mode else 'off' }}</span></div>
+    </div>
+
+    <h2>Calendly</h2>
+    <div class="card">
+      <div class="status-row"><span class="k">Booking link</span><span class="val">{% if calendly.url %}<a href="{{ calendly.url|safe_url }}" target="_blank" rel="noopener noreferrer">{{ calendly.url|replace('https://', '') }}</a>{% else %}<span class="pill warn">not set</span>{% endif %}</span></div>
+      <div class="status-row"><span class="k">Upcoming real meetings</span><span class="val">{{ calendly.upcoming }}</span></div>
+      <div class="status-row"><span class="k">Last Calendly notice read</span><span class="val">{{ calendly.last_notice|local if calendly.last_notice else 'none yet' }}</span></div>
     </div>
 
     <h2>Upcoming meetings</h2>
@@ -75,5 +137,4 @@
     </div>
   </div>
 </div>
-<p class="small muted">Technical details (job runs, agent performance, integrations) are on <a href="/system">System</a>.</p>
 {% endblock %}

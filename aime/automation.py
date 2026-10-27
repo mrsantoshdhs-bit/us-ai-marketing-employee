@@ -1,0 +1,338 @@
+"""Operating modes, campaign authorizations and the stop switches behind the Automation Control Center.
+
+Modes (who may let an external email go out):
+- approval: every external email needs a person's approval.
+- hybrid (the default): research, CRM and drafting run on their own; routine outreach emails (the sequence steps)
+  to a recipient named in an active campaign authorization go out without a per-email approval. Replies, pricing,
+  discounts, contracts and other commitments, uncertain classifications and anything outside an authorization
+  still wait for a person.
+- automatic: as hybrid, and booking-link answers to clearly interested replies (high confidence, no pricing
+  question) to a recipient named in an authorization that covers replies go out too.
+
+In every mode nothing goes out unless, at the moment of sending: OUTBOUND_EMAIL_ENABLED=true;
+REQUIRE_HUMAN_APPROVAL=false (true keeps every email with a person, whatever the mode); the automation state is
+running; and an administrator has activated a campaign authorization that names the exact address, within its
+dates and limits. A campaign approves an email only at send time, inside the send lock, so switching sending on
+never releases a backlog of drafts a campaign approved earlier; the authorization is checked again before every
+send, so pausing or stopping it takes effect at once. The send loop's own checks (suppression, consent, sequence
+stops, compliance footer, quality checks, daily and per-domain limits, the business-hours window) still apply.
+
+States: running; paused (nothing is sent; research and drafting go on); stopped (scheduled and manual jobs wait
+too, except health monitoring and database housekeeping); emergency_stop (as stopped, and every active campaign
+authorization is stopped and must be activated again). Starting and resuming need an administrator; anyone signed
+in may pause or stop.
+
+Approvals a person gave while sending was off (for example drafts approved weeks earlier and never sent) do not
+go out the moment sending is switched on: each waits for "Confirm again" on Follow-ups.
+
+Every change, and every email a campaign approved, is written to the audit log (AuditEvent).
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import datetime, timedelta
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from aime.crm_ops import is_suppressed
+from aime.db import kv_get, kv_set
+from aime.models import AuditEvent, CampaignAuthorization, FollowUp, InboundEmail
+from aime.timeutil import utcnow
+
+MODES = {
+    "approval": "Every external email needs a person's approval.",
+    "hybrid": "Routine outreach to recipients on an active campaign authorization goes out on its own; replies, "
+              "pricing, commitments and anything uncertain need a person.",
+    "automatic": "As Hybrid, plus booking-link answers to clearly interested replies from authorized recipients.",
+}
+DEFAULT_MODE = "hybrid"
+STATES = {"running": "Running", "paused": "Paused: nothing is sent", "stopped": "Stopped: jobs wait",
+          "emergency_stop": "Emergency stop: jobs wait, campaign authorizations stopped"}
+# action: (states it may start from, resulting state)
+TRANSITIONS = {"start": (("stopped", "emergency_stop"), "running"), "resume": (("paused",), "running"),
+               "pause": (("running",), "paused"), "stop": (("running", "paused"), "stopped"),
+               "emergency_stop": (("running", "paused", "stopped"), "emergency_stop")}
+ADMIN_ACTIONS = ("start", "resume")
+ALWAYS_RUN_JOBS = ("monitor", "db_maintenance")  # health and housekeeping keep running while stopped
+KINDS = {"outreach": "Outreach sequence emails", "response": "Booking-link replies to interested prospects (Automatic mode)"}
+MAX_DAYS, MAX_RECIPIENTS, MAX_DAILY, MAX_TOTAL = 30, 50, 50, 500
+EMAIL = re.compile(r"^[a-z0-9.!#$&'+/=?^_`{|}~-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$")  # no * or %: no wildcards
+# Wording that always goes to a person, whatever the mode: prices, discounts and commitments.
+SENSITIVE = re.compile(r"\b(pric(e|es|ed|ing)|discount\w*|quot(e|es|ation)|contract\w*|agreement|terms and conditions|"
+                       r"invoice\w*|refund\w*|guarantee\w*|warrant(y|ies)|legal|lawyer|nda|payment\w*|free trial|"
+                       r"\d+\s?% off)\b", re.I)
+COUNTS_AS_SENT = ("sent", "sending", "uncertain")
+EPOCH = "1970-01-01T00:00:00"
+
+
+def audit(session: Session, actor: str | None, action: str, target: str | None = None, detail: str | None = None) -> None:
+    session.add(AuditEvent(at=utcnow(), actor=(actor or "system")[:80], action=action[:60],
+                           target=target[:120] if target else None, detail=detail))
+
+
+def get_mode(session: Session) -> str:
+    mode = kv_get(session, "automation.mode")
+    return mode if mode in MODES else DEFAULT_MODE
+
+
+def get_state(session: Session) -> str:
+    state = kv_get(session, "automation.state")
+    return state if state in STATES else "running"
+
+
+def set_mode(session: Session, mode: str, actor: str) -> str:
+    if mode not in MODES:
+        raise ValueError(f"Unknown mode {mode!r}")
+    old = get_mode(session)
+    if old != mode:
+        kv_set(session, "automation.mode", mode)
+        audit(session, actor, "mode_changed", mode, f"{old} -> {mode}")
+    return mode
+
+
+def change_state(session: Session, action: str, actor: str, reason: str = "") -> str:
+    if action not in TRANSITIONS:
+        raise ValueError(f"Unknown action {action!r}")
+    allowed, new = TRANSITIONS[action]
+    old = get_state(session)
+    if old not in allowed:
+        raise ValueError(f"Cannot {action.replace('_', ' ')} while {STATES[old].split(':')[0].lower()}")
+    kv_set(session, "automation.state", new)
+    audit(session, actor, f"state_{action}", new, f"{old} -> {new}" + (f": {reason}" if reason else ""))
+    if action == "emergency_stop":
+        for a in session.execute(select(CampaignAuthorization).where(CampaignAuthorization.status == "active")).scalars():
+            a.status = "stopped"
+            audit(session, actor, "authorization_stopped", f"#{a.id} {a.name}", "emergency stop")
+    return new
+
+
+# --------------------------------------------------------------------------- campaign authorizations
+
+def parse_recipients(text: str) -> tuple[list[str], list[str]]:
+    """Exact addresses, separated by new lines, commas or spaces: (valid, rejected). Wildcards and domains are
+    rejected: an authorization names people, not whole companies."""
+    valid: list[str] = []
+    rejected: list[str] = []
+    for item in re.split(r"[\s,;]+", text or ""):
+        item = item.strip().lower()
+        if not item or item in valid:
+            continue
+        (valid if EMAIL.match(item) else rejected).append(item)
+    return valid, rejected
+
+
+def create_authorization(session: Session, actor: str, name: str, recipients: str, kinds: list[str],
+                         daily_limit: int, total_limit: int, days: int, notes: str = "") -> CampaignAuthorization:
+    """A draft authorization; it lets nothing out until an administrator activates it."""
+    valid, rejected = parse_recipients(recipients)
+    if not name.strip():
+        raise ValueError("Give the campaign a name")
+    if rejected:
+        raise ValueError(f"Not an exact email address: {', '.join(rejected[:5])}")
+    if not valid:
+        raise ValueError("Name at least one exact recipient address")
+    if len(valid) > MAX_RECIPIENTS:
+        raise ValueError(f"At most {MAX_RECIPIENTS} recipients per authorization")
+    kinds = [k for k in KINDS if k in (kinds or [])]
+    if not kinds:
+        raise ValueError("Choose which emails it covers")
+    if not (1 <= daily_limit <= MAX_DAILY and 1 <= total_limit <= MAX_TOTAL and 1 <= days <= MAX_DAYS):
+        raise ValueError(f"Limits: 1-{MAX_DAILY} a day, 1-{MAX_TOTAL} in total, valid for 1-{MAX_DAYS} days")
+    now = utcnow()
+    a = CampaignAuthorization(name=name.strip()[:200], status="draft", recipients=valid, kinds=kinds,
+                              daily_limit=daily_limit, total_limit=total_limit, starts_at=now,
+                              expires_at=now + timedelta(days=days), notes=(notes or "").strip()[:2000] or None,
+                              created_by=actor)
+    session.add(a)
+    session.flush()
+    audit(session, actor, "authorization_created", f"#{a.id} {a.name}",
+          f"{len(valid)} recipient(s): {', '.join(valid[:10])}{' ...' if len(valid) > 10 else ''}; covers "
+          f"{', '.join(kinds)}; {daily_limit} a day, {total_limit} in total; until {a.expires_at:%Y-%m-%d %H:%M} UTC")
+    return a
+
+
+def change_authorization(session: Session, a: CampaignAuthorization, action: str, actor: str) -> None:
+    expire_authorizations(session)
+    if action == "activate":
+        if a.status not in ("draft", "paused"):
+            raise ValueError(f"Only a draft or paused authorization can be activated (this one is {a.status})")
+        a.status, a.authorized_by, a.authorized_at = "active", actor, utcnow()
+    elif action == "pause":
+        if a.status != "active":
+            raise ValueError("Only an active authorization can be paused")
+        a.status = "paused"
+    elif action == "stop":
+        if a.status not in ("draft", "active", "paused"):
+            raise ValueError(f"It is already {a.status}")
+        a.status = "stopped"
+    else:
+        raise ValueError(f"Unknown action {action!r}")
+    audit(session, actor, f"authorization_{action}", f"#{a.id} {a.name}", f"now {a.status}")
+
+
+def expire_authorizations(session: Session) -> None:
+    now = utcnow()
+    for a in session.execute(select(CampaignAuthorization).where(
+            CampaignAuthorization.status.in_(("draft", "active", "paused")), CampaignAuthorization.expires_at <= now)).scalars():
+        a.status = "expired"
+        audit(session, "system", "authorization_expired", f"#{a.id} {a.name}", f"ended {a.expires_at:%Y-%m-%d %H:%M} UTC")
+
+
+def active_authorizations(session: Session, now: datetime | None = None) -> list[CampaignAuthorization]:
+    now = now or utcnow()
+    return session.execute(select(CampaignAuthorization).where(
+        CampaignAuthorization.status == "active", CampaignAuthorization.starts_at <= now,
+        CampaignAuthorization.expires_at > now).order_by(CampaignAuthorization.id)).scalars().all()
+
+
+def sent_counts(session: Session, a: CampaignAuthorization, now: datetime | None = None) -> tuple[int, int]:
+    """(in the last 24 hours, in total) emails this authorization approved that went out or may have."""
+    now = now or utcnow()
+    base = select(func.count(FollowUp.id)).where(FollowUp.authorization_id == a.id, FollowUp.status.in_(COUNTS_AS_SENT))
+    day = session.execute(base.where(func.coalesce(FollowUp.sent_at, FollowUp.send_started_at) >= now - timedelta(hours=24))).scalar_one()
+    return day, session.execute(base).scalar_one()
+
+
+# --------------------------------------------------------------------------- send-time decisions
+
+def blockers(session: Session, settings, sender_ready: bool, sender_reason: str = "") -> list[str]:
+    """Why no email can go out without a person right now (empty: campaign approvals are possible)."""
+    out = []
+    if not settings.outbound_email_enabled:
+        out.append("OUTBOUND_EMAIL_ENABLED=false: nothing is sent at all")
+    elif not sender_ready:
+        out.append(f"Mail server not ready: {sender_reason}")
+    if settings.require_human_approval:
+        out.append("REQUIRE_HUMAN_APPROVAL=true: every email needs a person, whatever the mode")
+    if get_mode(session) == "approval":
+        out.append("Approval mode: every email needs a person")
+    state = get_state(session)
+    if state != "running":
+        out.append(f"Automation {STATES[state].split(':')[0].lower()}")
+    if not active_authorizations(session):
+        out.append("No active campaign authorization")
+    return out
+
+
+def recipient(f: FollowUp) -> str:
+    return (f.to_email or (f.contact.email if f.contact else "") or "").strip().lower()
+
+
+def campaign_for(session: Session, f: FollowUp, mode: str, now: datetime,
+                 pending: dict[int, int] | None = None) -> tuple[CampaignAuthorization | None, str]:
+    """The authorization that lets `f` go out without a person, or (None, why a person must approve it)."""
+    from aime.reply_intel import QUESTION_PLACEHOLDER
+
+    to = recipient(f)
+    camps = [a for a in active_authorizations(session, now) if to in (a.recipients or [])]
+    if not camps:
+        return None, "the recipient is not on an active campaign authorization"
+    if f.kind not in ("outreach", "response"):
+        return None, "answers to people who wrote to us always go to a person"
+    camps = [a for a in camps if f.kind in (a.kinds or [])]
+    if not camps:
+        return None, f"no active authorization covers {f.kind} emails to {to}"
+    if f.kind == "response":
+        if mode != "automatic":
+            return None, "replies need a person in Hybrid mode"
+        row = session.execute(select(InboundEmail).where(InboundEmail.suggested_followup_id == f.id)).scalars().first()
+        if row is None or row.category != "interested" or row.confidence != "high" or row.intent == "pricing_request":
+            return None, "the reply it answers is not a clear interested reply"
+        if "calendly.com/" not in (f.body or "").lower():
+            return None, "only booking-link replies go out on their own"
+    text = f"{f.subject or ''}\n{f.body or ''}"
+    if QUESTION_PLACEHOLDER in text:
+        return None, "it needs an answer written by a person"
+    sensitive = SENSITIVE.search(text)
+    if sensitive:
+        return None, f'it mentions "{sensitive.group(0)}": prices, discounts and commitments need a person'
+    qc = (((f.quality or {}).get("qc") or {}).get("status"))
+    if f.kind == "outreach" and qc in ("held", "failed"):
+        return None, f"its quality checks {qc}"
+    if (f.contact and f.contact.consent_status == "opted_out") or is_suppressed(session, to):
+        return None, "the recipient opted out or is suppressed"
+    for a in camps:
+        day, total = sent_counts(session, a, now)
+        extra = (pending or {}).get(a.id, 0)
+        if day + extra < a.daily_limit and total + extra < a.total_limit:
+            return a, ""
+    return None, "the campaign's daily or total limit is reached"
+
+
+def apply_campaign_approvals(session: Session, settings, now: datetime, actor: str) -> list[int]:
+    """Approve, at send time, the waiting emails an active campaign authorization covers. Call it inside the send
+    lock, and only when an email can actually go out now."""
+    mode = get_mode(session)
+    if mode == "approval" or settings.require_human_approval or not settings.outbound_email_enabled \
+            or get_state(session) != "running":
+        return []
+    expire_authorizations(session)
+    if not active_authorizations(session, now):
+        return []
+    waiting = session.execute(select(FollowUp).where(
+        FollowUp.channel == "email", FollowUp.status == "awaiting_approval", FollowUp.kind.in_(("outreach", "response")),
+        FollowUp.due_at <= now).order_by(FollowUp.due_at, FollowUp.id)).scalars().all()
+    pending: dict[int, int] = {}
+    approved = []
+    for f in waiting:
+        a, _why = campaign_for(session, f, mode, now, pending)
+        if a is None:
+            continue
+        f.status, f.approved_at, f.approved_by, f.authorization_id = "approved", now, f"campaign #{a.id}", a.id
+        f.blocked_reason = None
+        pending[a.id] = pending.get(a.id, 0) + 1
+        audit(session, actor, "auto_approved", f"follow-up #{f.id}",
+              f"{f.kind} email to {recipient(f)} approved by campaign #{a.id} {a.name} "
+              f"(authorized by {a.authorized_by}; {mode} mode)")
+        approved.append(f.id)
+    return approved
+
+
+def campaign_approval_problem(session: Session, f: FollowUp, now: datetime) -> str | None:
+    """For an email a campaign approved: why that approval no longer holds (None: it does)."""
+    if not f.authorization_id:
+        return None
+    a = session.get(CampaignAuthorization, f.authorization_id)
+    if a is None or a.status != "active" or not (a.starts_at <= now < a.expires_at):
+        return "its campaign authorization is no longer active"
+    if recipient(f) not in (a.recipients or []):
+        return "the recipient is no longer on its campaign authorization"
+    if get_state(session) != "running" or get_mode(session) == "approval":
+        return "automation is not running in Hybrid or Automatic mode"
+    return None
+
+
+def return_to_person(f: FollowUp, why: str) -> None:
+    f.status, f.approved_at, f.approved_by, f.authorization_id = "awaiting_approval", None, None, None
+    f.blocked_reason = f"Needs a person's approval: {why}"[:300]
+
+
+# --------------------------------------------------------------------------- approvals given while sending was off
+
+def observe_sending(session: Session, enabled: bool, now: datetime) -> None:
+    """Remember when sending was last switched on (the first observation counts as "always on")."""
+    state = kv_get(session, "outbound.state")
+    if not isinstance(state, dict):
+        kv_set(session, "outbound.state", {"enabled": enabled, "since": EPOCH if enabled else now.isoformat()})
+    elif bool(state.get("enabled")) != enabled:
+        kv_set(session, "outbound.state", {"enabled": enabled, "since": now.isoformat()})
+
+
+def sending_enabled_since(session: Session) -> datetime | None:
+    state = kv_get(session, "outbound.state")
+    if not isinstance(state, dict) or not state.get("enabled"):
+        return None
+    return datetime.fromisoformat(state["since"])
+
+
+def needs_reconfirmation(session: Session, f: FollowUp) -> bool:
+    """A person approved it before sending was switched on: it waits for "Confirm again" instead of going out."""
+    since = sending_enabled_since(session)
+    return bool(since and f.status == "approved" and not f.authorization_id and f.approved_at and f.approved_at < since)
+
+
+def reconfirm(session: Session, f: FollowUp, actor: str) -> None:
+    f.approved_at, f.approved_by, f.blocked_reason = utcnow(), actor, None
+    audit(session, actor, "approval_confirmed_again", f"follow-up #{f.id}", f"{f.kind or 'email'} to {recipient(f)}")

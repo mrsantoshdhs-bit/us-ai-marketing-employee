@@ -221,3 +221,27 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
         reasons=reasons,
         disqualify_reason=disqualify,
     )
+
+
+TIERS = ("HOT", "WARM", "COLD", "UNQUALIFIED")
+
+
+def lead_tier(lead) -> str:
+    """HOT | WARM | COLD | UNQUALIFIED, explained by tier_reason: engagement first (an interested reply or a meeting
+    is the strongest buying signal), then the score's grade, with inbound A/B leads hot."""
+    if lead is None or lead.status == "disqualified":
+        return "UNQUALIFIED"
+    if lead.outreach_status in ("interested", "meeting"):
+        return "HOT"
+    if lead.grade == "A" or (lead.grade == "B" and lead.source == "inbound"):
+        return "HOT"
+    return {"B": "WARM", "C": "COLD"}.get(lead.grade or "", "UNQUALIFIED")
+
+
+def tier_reason(lead) -> str:
+    tier = lead_tier(lead)
+    if lead is None or lead.status == "disqualified":
+        return "disqualified"
+    if lead.outreach_status in ("interested", "meeting"):
+        return f"{lead.outreach_status}: the prospect engaged"
+    return f"grade {lead.grade or '-'} (score {lead.score or 0})" + (" from an inbound inquiry" if tier == "HOT" and lead.source == "inbound" else "")

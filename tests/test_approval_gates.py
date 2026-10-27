@@ -104,4 +104,4 @@ def test_doctor_flags_email_sent_without_approval(ctx):
 def test_doctor_warns_when_approval_setting_is_false(make_ctx):
     ctx = make_ctx(require_human_approval=False)
     check = next(c for c in run_checks(ctx) if c["name"] == "Human approval setting")
-    assert not check["ok"] and check["severity"] == "warning" and "ignored" in check["detail"]
+    assert not check["ok"] and check["severity"] == "warning" and "campaign authorizations" in check["detail"]

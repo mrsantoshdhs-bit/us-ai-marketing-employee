@@ -1,5 +1,5 @@
 {% extends "base.html" %}{% from "_macros.html" import status_pill, state_pill, qc_pill, ext %}
-{% block title %}Follow-ups · AI Marketing Employee{% endblock %}
+{% block title %}Follow-ups · AI Sales Employee{% endblock %}
 {% block content %}
 <h1>Follow-ups and tasks</h1>
 <div class="card small">
@@ -44,6 +44,7 @@
     {% if f.channel == 'task' and f.status == 'pending' %}<form class="inline" method="post" action="/followups/{{ f.id }}/done"><button>Mark done</button></form>{% endif %}
     {% if f.status == 'uncertain' %}<form class="inline" method="post" action="/followups/{{ f.id }}/mark_sent"><button>It was delivered: mark sent</button></form>
       <form class="inline" method="post" action="/followups/{{ f.id }}/requeue"><button class="secondary">Not delivered: requeue</button></form>{% endif %}
+    {% if f.id in reconfirm %}<form class="inline" method="post" action="/followups/{{ f.id }}/reconfirm"><button>Confirm again</button></form>{% endif %}
     {% if f.status in ['pending', 'approved'] %}<form class="inline" method="post" action="/followups/{{ f.id }}/reject"><button class="danger">Cancel</button></form>{% endif %}
   </div>
   {% endif %}

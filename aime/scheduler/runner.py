@@ -20,7 +20,7 @@ from pathlib import Path
 from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
 
-from aime import maintenance
+from aime import automation, maintenance
 from aime.config import Settings
 from aime.context import AppContext
 from aime.models import AgentRun, JobRun, JobState
@@ -265,6 +265,12 @@ def run_job(ctx: AppContext, name: str, trigger: str = "manual", *, allow_during
     window = maintenance.active(ctx.settings.data_dir)
     if window and not allow_during_maintenance:
         return {"job": name, "status": "skipped", "reason": f"maintenance window until {window['until']}"}
+    if name not in automation.ALWAYS_RUN_JOBS:
+        with ctx.db.session() as s:
+            state = automation.get_state(s)
+        if state in ("stopped", "emergency_stop"):
+            return {"job": name, "status": "skipped",
+                    "reason": f"automation {state.replace('_', ' ')} in the Automation Control Center"}
     if recover_runs:  # manual runs close out crashed runs too, not only scheduled ticks
         recover(ctx)
     lock = FileLock(ctx.settings.locks_dir / f"job_{name}.lock")

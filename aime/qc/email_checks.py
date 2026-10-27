@@ -64,7 +64,7 @@ def run_email_checks(subject: str, body: str, evidence: list[dict], contact, sup
     claims = sorted({m.group(0).lower() for m in CLAIM_RE.finditer(plain)})
     results.append(CheckResult("unsupported claims", "fail" if claims else "pass",
                                ", ".join(claims) or "no results or endorsements claimed"))
-    numbers = re.findall(r"\d[\d,.%]*", re.sub(r"\b20-minute\b", "", plain))
+    numbers = re.findall(r"\d[\d,.%]*", re.sub(r"\b\d{1,3}-minute\b", "", plain))  # our meeting length is not a claim
     results.append(CheckResult("numbers", "uncertain" if numbers else "pass",
                                f"check the source for: {', '.join(numbers[:5])}" if numbers else "none outside quotes"))
 

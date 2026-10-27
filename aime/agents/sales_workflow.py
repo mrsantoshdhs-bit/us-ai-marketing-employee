@@ -21,6 +21,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent, RetryPolicy
+from aime import automation
 from aime.agents.contracts import BlockedItem
 from aime.crm_ops import is_suppressed, log_activity
 from aime.email_templates import draft_reply
@@ -241,7 +242,19 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
         due = select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "approved",
                                      FollowUp.approved_at.is_not(None), FollowUp.due_at <= now)
-        if not session.execute(due.limit(1)).first():
+        ready, _ = self.sender.status()
+        automation.observe_sending(session, self.settings.outbound_email_enabled, now)  # the switch, not readiness
+        state = automation.get_state(session)
+        if state != "running":  # paused or stopped in the Automation Control Center: nothing goes out
+            for f in session.execute(due).scalars():
+                f.blocked_reason = (f"Not sent: automation {automation.STATES[state].split(':')[0].lower()} "
+                                    "in the Automation Control Center")
+                out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+            return
+        # Hybrid/Automatic mode: an active campaign authorization may approve waiting emails, at send time only
+        by_campaign = (ready and not self.settings.require_human_approval and automation.get_mode(session) != "approval"
+                       and bool(automation.active_authorizations(session, now)))
+        if not by_campaign and not session.execute(due.limit(1)).first():
             return
         from aime.scheduler.runner import FileLock  # here, not at import time: the runner imports the agents
 
@@ -253,6 +266,9 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 out.blocked.append(BlockedItem(id=f.id, reason=SEND_BUSY))
             return
         try:
+            if by_campaign:
+                automation.apply_campaign_approvals(session, self.settings, now, self.name)
+                session.flush()
             self._send_locked(session, session.execute(due).scalars().all(), now, cfg, out)
         finally:
             lock.release()
@@ -265,6 +281,11 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         for f in approved:
             contact = f.contact
             lead = f.lead
+            gone = automation.campaign_approval_problem(session, f, now)  # a campaign's approval holds while it does
+            if gone:
+                automation.return_to_person(f, gone)
+                out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+                continue
             if f.kind == "response":
                 why = self._response_problem(session, f)
                 if why:
@@ -302,6 +323,10 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             if not ready:
                 f.blocked_reason = reason
                 out.blocked.append(BlockedItem(id=f.id, reason=reason))
+                continue
+            if automation.needs_reconfirmation(session, f):  # approved while sending was off: not released by switching it on
+                f.blocked_reason = "Approved before sending was switched on: confirm it again on Follow-ups before it is sent"
+                out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
                 continue
             problem = compliance_problem(self.settings, f.body or "")  # every kind: outreach, responses, inquiry replies
             if problem:  # e.g. the footer was edited out, or written before the postal address was configured

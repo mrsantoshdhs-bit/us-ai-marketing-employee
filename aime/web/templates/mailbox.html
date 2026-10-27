@@ -1,5 +1,5 @@
 {% extends "base.html" %}{% from "_macros.html" import status_pill %}
-{% block title %}Replies · AI Marketing Employee{% endblock %}
+{% block title %}Replies · AI Sales Employee{% endblock %}
 {% block content %}
 <h1>Replies</h1>
 <div class="card small">
@@ -13,7 +13,7 @@
 <div class="card" id="r{{ r.id }}">
   <div><strong>{{ r.subject or '(no subject)' }}</strong>
     {% if r.is_simulated %}<span class="pill bad">SIMULATED</span>{% endif %}
-    <span class="pill {{ 'ok' if r.category == 'interested' else 'warn' if r.category in ['objection', 'question', 'referral', 'other'] else '' }}">{{ (r.category or 'new')|replace('_', ' ') }}</span>
+    <span class="pill {{ 'ok' if r.category == 'interested' else 'warn' if r.category in ['objection', 'question', 'referral', 'other'] else '' }}">{{ (r.category or 'new')|replace('_', ' ') }}</span>{% if r.intent %} <span class="pill {{ 'warn' if r.intent == 'pricing_request' else 'ok' }}">{{ r.intent|intent_label }}</span>{% endif %}{% if r.confidence == 'low' %} <span class="pill warn">uncertain</span>{% endif %}
     <span class="small muted">{{ r.confidence }} confidence</span> {{ status_pill(r.status) }}</div>
   <div class="small muted">From {{ r.from_name or '' }} &lt;{{ r.from_email }}&gt; · {{ r.received_at|local }}
     {% if r.lead %} · lead <a href="/leads/{{ r.lead_id }}">{{ r.lead.company.name }}</a>{% else %} · not matched to a lead{% endif %}</div>

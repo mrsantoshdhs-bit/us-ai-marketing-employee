@@ -1,8 +1,8 @@
-{% extends "base.html" %}{% from "_macros.html" import grade, status_pill, ext %}
+{% extends "base.html" %}{% from "_macros.html" import grade, status_pill, ext, tier %}
 {% block title %}{{ lead.company.name }} · Lead{% endblock %}
 {% block content %}
 {% set c = lead.company %}
-<h1>{{ grade(lead.grade) }} {{ c.name }} <span class="muted small">lead #{{ lead.id }} · {{ lead.source }}</span> {{ status_pill(lead.status) }}
+<h1>{{ tier(lead) }} {{ grade(lead.grade) }} {{ c.name }} <span class="muted small">lead #{{ lead.id }} · {{ lead.source }}</span> {{ status_pill(lead.status) }}
   {% if lead.is_sample %}<span class="pill">sample data</span>{% endif %}</h1>
 <div class="two">
   <div class="card">

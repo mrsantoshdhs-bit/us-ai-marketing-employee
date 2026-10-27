@@ -1,0 +1,133 @@
+{% extends "base.html" %}{% from "_macros.html" import status_pill %}
+{% block title %}Automation Control · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Automation Control Center</h1>
+    <p class="subtitle">Operating mode, campaign authorizations and the stop switches. Every change is written to the <a href="/audit">audit log</a>.</p>
+  </div>
+  <div class="head-actions">
+    <span class="chip {{ 'ok' if state == 'running' else 'bad' }}"><span class="dot"></span>{{ states[state] }}</span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h3>Controls</h3><span class="meta">pause, stop and emergency stop are open to everyone signed in; start and resume need an administrator</span></div>
+  <div class="row-actions">
+    {% for action, label, cls in [('start', 'Start', ''), ('resume', 'Resume', ''), ('pause', 'Pause sending', 'secondary'), ('stop', 'Stop', 'secondary'), ('emergency_stop', 'Emergency stop', 'danger solid')] %}
+    {%- set allowed = state in transitions[action][0] and (is_admin or action not in admin_actions) -%}
+    <form class="inline" method="post" action="/automation/state/{{ action }}"><button class="{{ cls }}" {{ 'disabled' if not allowed }}>{{ label }}</button></form>
+    {% endfor %}
+  </div>
+  <p class="small muted" style="margin:10px 0 0">Paused: nothing is sent; research and drafting go on. Stopped: scheduled and manual jobs wait too (health monitoring keeps running).
+    Emergency stop: as Stopped, and every active campaign authorization is stopped.</p>
+</div>
+
+<div class="section-title"><h2>Operating mode</h2>{% if not is_admin %}<span class="muted small">only an administrator can change it</span>{% endif %}</div>
+<form method="post" action="/automation/mode" class="segmented">
+  {% for key, text in modes.items() %}
+  <button name="mode" value="{{ key }}" class="{{ 'current' if key == mode }}" {{ 'disabled' if not is_admin }}><b>{{ key|title }}{% if key == mode %} · current{% endif %}</b><span>{{ text }}</span></button>
+  {% endfor %}
+</form>
+
+<div class="two" style="margin-top:20px">
+  <div class="card">
+    <div class="card-head"><h3>Can an email go out without a person right now?</h3>
+      {% if blockers %}<span class="pill warn">No</span>{% else %}<span class="pill ok">Yes, within authorizations</span>{% endif %}</div>
+    {% for b in blockers %}<div class="row-item small">{{ b }}</div>{% else %}
+    <div class="small">Emails covered by an active authorization can go out at send time, after every send-loop check.</div>{% endfor %}
+    <p class="small muted" style="margin:10px 0 0">In every mode: prices, discounts, contracts, uncertain replies, answers to inquiries and anything outside an authorization wait for a person.
+      Suppression, opt-outs, the compliance footer, daily and per-domain limits and the business-hours window always apply.</p>
+  </div>
+  <div class="card">
+    <div class="card-head"><h3>Sending</h3><a class="meta" href="/integrations">Integrations →</a></div>
+    {% for k, v in settings_flags.items() %}
+    <div class="status-row"><span class="k">{{ k }}</span><span class="val">{% if v %}<span class="pill {{ 'ok' if k != 'REQUIRE_HUMAN_APPROVAL' else 'warn' }}">true</span>{% else %}<span class="pill {{ 'warn' if k != 'REQUIRE_HUMAN_APPROVAL' else 'ok' }}">false</span>{% endif %}</span></div>
+    {% endfor %}
+    <div class="status-row"><span class="k">Mail server</span><span class="val">{% if sender_ready %}<span class="pill ok">ready</span>{% else %}<span class="small muted">{{ sender_reason }}</span>{% endif %}</span></div>
+    <div class="status-row"><span class="k">Test mode recipients</span><span class="val">{{ test_recipients|join(', ') if test_recipients else 'off' }}</span></div>
+    <div class="status-row"><span class="k">Sent in the last 24 h</span><span class="val">{{ sent_24h }} (outreach limit {{ limits.daily }} a day, {{ limits.per_domain }} per domain, {{ limits.per_run }} per run)</span></div>
+    <div class="status-row"><span class="k">Waiting for approval</span><span class="val"><a href="/followups">{{ waiting }} emails</a> · <a href="/content">{{ posts_waiting }} posts</a></span></div>
+    <div class="status-row"><span class="k">Approved, not yet sent</span><span class="val">{{ queued }}{% if reconfirm %} ({{ reconfirm }} need “Confirm again”){% endif %}</span></div>
+  </div>
+</div>
+
+<div class="section-title" id="authorizations"><h2>Campaign authorizations</h2><span class="muted small">exact recipient addresses, dates and limits; used only in Hybrid and Automatic mode</span></div>
+<div class="card table-wrap"><table>
+  <tr><th>#</th><th>Campaign</th><th>Status</th><th>Recipients</th><th>Covers</th><th class="n">Sent 24 h</th><th class="n">Sent total</th><th>Valid</th><th>Authorized</th><th></th></tr>
+  {% for a in auths %}
+  <tr>
+    <td>{{ a.id }}</td><td><b>{{ a.name }}</b>{% if a.notes %}<div class="small muted">{{ a.notes[:160] }}</div>{% endif %}</td>
+    <td>{{ status_pill(a.status) }}</td>
+    <td class="small">{{ a.recipients[:5]|join(', ') }}{% if a.recipients|length > 5 %} +{{ a.recipients|length - 5 }} more{% endif %}</td>
+    <td class="small">{{ a.kinds|join(', ') }}</td>
+    <td class="n">{{ counts[a.id][0] }} / {{ a.daily_limit }}</td><td class="n">{{ counts[a.id][1] }} / {{ a.total_limit }}</td>
+    <td class="small">{{ a.starts_at|local }} → {{ a.expires_at|local }}</td>
+    <td class="small">{{ a.authorized_by or '—' }}{% if a.authorized_at %}<br>{{ a.authorized_at|local }}{% endif %}<div class="muted">created by {{ a.created_by }}</div></td>
+    <td><div class="row-actions">
+      {% if is_admin %}
+      {% if a.status in ['draft', 'paused'] %}<form class="inline" method="post" action="/automation/authorizations/{{ a.id }}/activate"><button>Activate</button></form>{% endif %}
+      {% if a.status == 'active' %}<form class="inline" method="post" action="/automation/authorizations/{{ a.id }}/pause"><button class="secondary">Pause</button></form>{% endif %}
+      {% if a.status in ['draft', 'active', 'paused'] %}<form class="inline" method="post" action="/automation/authorizations/{{ a.id }}/stop"><button class="danger">Stop</button></form>{% endif %}
+      {% endif %}
+    </div></td>
+  </tr>
+  {% else %}<tr><td colspan="10"><div class="empty-state"><b>No campaign authorizations</b>Without one, every email waits for a person, whatever the mode.</div></td></tr>{% endfor %}
+</table></div>
+
+{% if is_admin %}
+<div class="card" id="authorize">
+  <div class="card-head"><h3>New campaign authorization</h3><span class="meta">saved as a draft; it lets nothing out until you activate it</span></div>
+  <form method="post" action="/automation/authorizations">
+    <div class="form-grid">
+      <label class="field">Campaign name<input name="name" required maxlength="200" placeholder="e.g. Controlled test, 2 contacts"></label>
+      <label class="field">Emails per day<input name="daily_limit" type="number" min="1" max="{{ limits_max.daily }}" value="5"></label>
+      <label class="field">Emails in total<input name="total_limit" type="number" min="1" max="{{ limits_max.total }}" value="20"></label>
+      <label class="field">Valid for (days)<input name="days" type="number" min="1" max="{{ limits_max.days }}" value="7"></label>
+    </div>
+    <label class="field" style="margin-top:12px">Recipients <span class="help">exact addresses, one per line (at most {{ limits_max.recipients }}); domains and wildcards are refused</span>
+      <textarea name="recipients" required style="min-height:90px" placeholder="name@company.com"></textarea></label>
+    <div class="field" style="margin-top:12px">Covers
+      <div class="checks">{% for k, label in kinds.items() %}<label><input type="checkbox" name="kinds" value="{{ k }}" {{ 'checked' if k == 'outreach' }}> {{ label }}</label>{% endfor %}</div></div>
+    <label class="field" style="margin-top:12px">Notes <span class="help">why this campaign is authorized, who agreed</span><input name="notes" maxlength="2000"></label>
+    <div style="margin-top:14px"><button>Save as draft</button></div>
+  </form>
+</div>
+{% endif %}
+
+<div class="two">
+  <div>
+    <h2>AI agents <span class="muted small">last 24 hours</span></h2>
+    <div class="card table-wrap"><table>
+      <tr><th>Agent</th><th class="n">Runs</th><th class="n">Success</th><th class="n">Failed</th><th class="n">Retries</th><th>Last run</th></tr>
+      {% for r in agents %}
+      <tr><td>{{ r.agent|replace('_', ' ') }}</td><td class="n">{{ r.runs }}</td><td class="n">{{ r.success_rate }}%</td>
+        <td class="n">{{ r.failed }}</td><td class="n">{{ r.retries }}</td><td class="small">{{ r.last_run|local }}{% if r.last_error %}<div class="muted">{{ r.last_error[:90] }}</div>{% endif %}</td></tr>
+      {% else %}<tr><td colspan="6" class="muted">No agent ran in the last 24 hours.</td></tr>{% endfor %}
+    </table></div>
+    <p class="small"><a href="/agents">Agent details →</a></p>
+  </div>
+  <div>
+    <h2>Failed jobs and retries</h2>
+    <div class="card">
+      {% for st in failing %}<div class="row-item"><span class="pill bad">{{ st.consecutive_failures }} failures in a row</span> <b>{{ st.job }}</b>
+        <span class="small muted">retried with backoff on the next ticks{% if is_admin %}; <a href="/jobs">run it now on Jobs</a>{% endif %}</span></div>{% endfor %}
+      {% for r in failed_runs %}<div class="row-item small">{{ status_pill(r.status) }} <a href="/jobs/runs/{{ r.id }}">{{ r.job }}</a> · {{ r.started_at|local }}</div>{% endfor %}
+      {% if not failing and not failed_runs %}<span class="muted">No failed job in the last 24 hours.</span>{% endif %}
+      <div class="small muted" style="margin-top:8px">Scheduler: {% if heartbeat %}last tick {{ heartbeat.at }} ({{ heartbeat.state }}){% else %}no tick recorded yet{% endif %}</div>
+    </div>
+    <h2>Open alerts</h2>
+    <div class="card">
+      {% for a in alerts %}<div class="row-item small"><span class="pill {{ 'bad' if a.level == 'error' else 'warn' }}">{{ a.level }}</span> {{ a.message }}</div>
+      {% else %}<span class="muted">No open warnings or errors.</span>{% endfor %}
+    </div>
+  </div>
+</div>
+
+<div class="section-title"><h2>Audit history</h2><a class="small" href="/audit">Full audit log →</a></div>
+<div class="card table-wrap"><table>
+  <tr><th>When</th><th>Who</th><th>What</th><th>Detail</th></tr>
+  {% for e in events %}<tr><td class="small">{{ e.at|local }}</td><td>{{ e.actor }}</td><td>{{ e.action|replace('_', ' ') }}{% if e.target %} · {{ e.target }}{% endif %}</td><td class="small muted">{{ e.detail or '' }}</td></tr>
+  {% else %}<tr><td colspan="4" class="muted">No changes recorded yet.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

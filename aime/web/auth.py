@@ -139,7 +139,8 @@ def current_username(request: Request) -> str:
 # Operations that change how the system runs, not the sales work itself: admin accounts only.
 # Sales Managers approve, edit, reply, log meetings and manage leads.
 ADMIN_ONLY_PREFIXES = ("/jobs/", "/integrations/linkedin/connect", "/integrations/linkedin/disconnect",
-                       "/inbound/process")
+                       "/inbound/process", "/automation/mode", "/automation/authorizations",
+                       "/automation/state/start", "/automation/state/resume")  # pausing and stopping: anyone signed in
 
 
 def admin_only(method: str, path: str) -> bool:

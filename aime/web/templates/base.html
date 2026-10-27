@@ -3,40 +3,97 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}AI Marketing Employee{% endblock %}</title>
+  <title>{% block title %}AI Sales Employee{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
-<header class="top">
-  <span class="brand">AI Marketing Employee</span>
-  <nav>
-    {% set p = request.url.path %}
-    <a href="/" class="{{ 'active' if p == '/' }}">Today</a>
-    <a href="/leads" class="{{ 'active' if p.startswith('/leads') }}">Leads</a>
-    <a href="/companies" class="{{ 'active' if p.startswith('/companies') }}">Companies</a>
-    <a href="/contacts" class="{{ 'active' if p.startswith('/contacts') }}">Decision-makers</a>
-    <a href="/pipeline" class="{{ 'active' if p.startswith('/pipeline') }}">Pipeline</a>
-    <a href="/followups" class="{{ 'active' if p.startswith('/followups') }}">Follow-ups</a>
-    <a href="/inbox" class="{{ 'active' if p.startswith('/inbox') }}">Replies</a>
-    <a href="/meetings" class="{{ 'active' if p.startswith('/meetings') }}">Meetings</a>
-    <a href="/content" class="{{ 'active' if p.startswith('/content') }}">Content</a>
-    <a href="/campaigns" class="{{ 'active' if p.startswith('/campaigns') }}">Campaigns</a>
-    <a href="/inbound" class="{{ 'active' if p.startswith('/inbound') }}">Inbound</a>
-    <a href="/agents" class="{{ 'active' if p.startswith('/agents') }}">Agents</a>
-    <a href="/jobs" class="{{ 'active' if p.startswith('/jobs') }}">Jobs</a>
-    <a href="/reports" class="{{ 'active' if p.startswith('/reports') }}">Reports</a>
-    <a href="/integrations" class="{{ 'active' if p.startswith('/integrations') }}">Integrations</a>
-    <a href="/system" class="{{ 'active' if p.startswith('/system') }}">System</a>
-  </nav>
-  {% if current_user %}<form class="inline user" method="post" action="/logout">
-    <span class="small muted">Signed in as {{ current_user.username }}</span> <button class="secondary">Sign out</button>
-  </form>{% endif %}
-</header>
+{%- macro icon(name) -%}
+<svg viewBox="0 0 24 24" aria-hidden="true">{{ {
+  'dashboard': '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
+  'building': '<path d="M4 21V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v16"/><path d="M16 9h2a2 2 0 0 1 2 2v10M8 7h4M8 11h4M8 15h4M2 21h20"/>',
+  'users': '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6 6 0 0 1 3.5 6"/>',
+  'target': '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/>',
+  'kanban': '<rect x="3" y="4" width="5" height="16" rx="1.5"/><rect x="10" y="4" width="5" height="10" rx="1.5"/><rect x="17" y="4" width="4" height="13" rx="1.5"/>',
+  'calendar': '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+  'send': '<path d="M21 3 10 14"/><path d="M21 3 14 21l-4-7-7-4z"/>',
+  'reply': '<path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 6 6v5"/>',
+  'inbox': '<path d="M3 13h5l1.5 3h5L16 13h5"/><path d="M5 5h14l2 8v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-6z"/>',
+  'doc': '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>',
+  'megaphone': '<path d="M3 11v2a1 1 0 0 0 1 1h3l6 4V6L7 10H4a1 1 0 0 0-1 1z"/><path d="M17 8a5 5 0 0 1 0 8"/>',
+  'shield': '<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/>',
+  'sliders': '<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>',
+  'cpu': '<rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/>',
+  'clock': '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  'chart': '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+  'plug': '<path d="M9 2v5M15 2v5"/><path d="M6 7h12v4a6 6 0 0 1-12 0z"/><path d="M12 17v5"/>',
+  'server': '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>',
+  'list': '<path d="M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01"/>',
+  'menu': '<path d="M4 6h16M4 12h16M4 18h16"/>',
+  'chevron': '<path d="m15 6-6 6 6 6"/>',
+}[name]|safe }}</svg>
+{%- endmacro -%}
+{%- set p = request.url.path -%}
+<body class="{{ 'bare' if p == '/login' }}">
+{% if p == '/login' %}
 <main>
-  {% if data_role != 'production' %}<div class="flash demo">{{ data_role|upper }} DATABASE: sample data only. Nothing here is a real prospect.</div>{% endif %}
-  {% if maintenance %}<div class="flash">Maintenance in progress until {{ maintenance.until }} (UTC): scheduled and manual jobs are paused.</div>{% endif %}
+  <div class="brand-mark"><span class="logo">AI</span> AI Sales Employee</div>
   {% if msg %}<div class="flash">{{ msg }}</div>{% endif %}
-  {% block content %}{% endblock %}
+  {{ self.content() }}
 </main>
+{% else %}
+<input type="checkbox" id="nav-toggle" class="nav-toggle" aria-label="Show or collapse the menu">
+<div class="shell">
+  <aside class="sidebar" aria-label="Main navigation">
+    <div class="sidebar-brand"><span class="logo">AI</span><span class="brand-text"><b>AI Sales Employee</b><small>{{ company_name }}</small></span></div>
+    <nav>
+      {%- set sections = [
+        ('Overview', [('/', 'Command Center', 'dashboard', None)]),
+        ('Sales intelligence', [('/companies', 'Companies', 'building', None), ('/contacts', 'Decision-makers', 'users', None),
+                                ('/leads', 'Leads', 'target', None)]),
+        ('CRM', [('/pipeline', 'Pipeline', 'kanban', None), ('/meetings', 'Meetings', 'calendar', None)]),
+        ('Outreach', [('/followups', 'Approvals & follow-ups', 'send', nav_counts.approvals if nav_counts else None),
+                      ('/inbox', 'Replies', 'reply', nav_counts.replies if nav_counts else None),
+                      ('/inbound', 'Inbound inquiries', 'inbox', None)]),
+        ('Marketing', [('/content', 'LinkedIn content', 'doc', None), ('/campaigns', 'Campaigns', 'megaphone', None),
+                       ('/policy', 'Publishing policy', 'shield', None)]),
+        ('AI operations', [('/automation', 'Automation Control', 'sliders', None), ('/agents', 'AI agents', 'cpu', None),
+                           ('/jobs', 'Jobs', 'clock', None)]),
+        ('Analytics', [('/reports', 'Reports', 'chart', None)]),
+        ('Administration', [('/integrations', 'Integrations', 'plug', None), ('/system', 'System health', 'server', None),
+                            ('/audit', 'Audit log', 'list', None)]),
+      ] -%}
+      {% for heading, links in sections %}
+      <div class="nav-section">
+        <div class="nav-heading">{{ heading }}</div>
+        {% for href, label, ico, count in links %}
+        {%- set active = (p == '/') if href == '/' else p.startswith(href) -%}
+        <a href="{{ href }}" class="nav-link{{ ' active' if active }}" title="{{ label }}"{% if active %} aria-current="page"{% endif %}>{{ icon(ico) }}<span class="nav-label">{{ label }}</span>{% if count %}<span class="count">{{ count }}</span>{% endif %}</a>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </nav>
+    <div class="sidebar-foot"><label for="nav-toggle" class="collapse-btn" title="Collapse or expand the menu">{{ icon('chevron') }}<span class="nav-label">Collapse menu</span></label></div>
+  </aside>
+  <label for="nav-toggle" class="scrim" aria-hidden="true"></label>
+  <div class="content">
+    <header class="topbar">
+      <label for="nav-toggle" class="burger" title="Menu">{{ icon('menu') }}<span class="sr-only">Menu</span></label>
+      <span class="context hide-sm"><b>{{ company_name }}</b> · US sales &amp; marketing</span>
+      <span class="spacer"></span>
+      <span class="chip {{ 'env-production' if data_role == 'production' else 'env-other' }}">{{ (data_role or 'unknown')|upper }}</span>
+      {% if nav_status %}<a class="chip {{ 'ok' if nav_status.state == 'running' else 'bad' }}" href="/automation" title="Operating mode and automation state"><span class="dot"></span>{{ nav_status.mode|title }} · {{ nav_status.state|replace('_', ' ')|title }}</a>{% endif %}
+      <span class="chip {{ 'ok' if sending_on else 'warn' }}" title="OUTBOUND_EMAIL_ENABLED"><span class="dot"></span>Sending {{ 'on' if sending_on else 'off' }}</span>
+      {% if current_user %}<form class="user" method="post" action="/logout">
+        <span class="small muted hide-sm">Signed in as {{ current_user.username }}</span> <button class="secondary">Sign out</button>
+      </form>{% endif %}
+    </header>
+    <main>
+      {% if data_role != 'production' %}<div class="flash demo">{{ data_role|upper }} DATABASE: sample data only. Nothing here is a real prospect.</div>{% endif %}
+      {% if maintenance %}<div class="flash">Maintenance in progress until {{ maintenance.until }} (UTC): scheduled and manual jobs are paused.</div>{% endif %}
+      {% if msg %}<div class="flash">{{ msg }}</div>{% endif %}
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
+{% endif %}
 </body>
 </html>

@@ -105,6 +105,8 @@ def personal_line(ev: Evidence, company: str) -> str:
 
 
 def draft_outreach(settings: Settings, step: int, lead: Lead, contact, evidence: list[Evidence]) -> tuple[str, str]:
+    from aime.meetings import booking_minutes  # the length of the meeting the booking link offers
+
     company = lead.company.name
     topic = TOPICS.get(lead.primary_service or "", "your operations")
     inbox = contact.role_category == "inbox" or not contact.first_name
@@ -115,7 +117,7 @@ def draft_outreach(settings: Settings, step: int, lead: Lead, contact, evidence:
         line = personal_line(ev, company)
         ask = (f"Could you pass this to whoever looks after {topic}? A short call would tell us both quickly "
                "whether it is worth pursuing." if inbox else
-               f"Would a 20-minute call next week be useful to see whether this could help {company}? "
+               f"Would a {booking_minutes(settings)}-minute call next week be useful to see whether this could help {company}? "
                "If someone else looks after this, I would be grateful for a pointer.")
         subject = f"Question about {topic} at {company}"
         end = "" if line.endswith(('."', '!"', '?"')) else "."  # no doubled full stop after a quoted sentence
