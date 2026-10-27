@@ -167,6 +167,7 @@ def test_out_of_office_keeps_the_sequence_and_unmatched_mail_goes_to_review(make
         2: mail("someone@unknown.example", "Hello", "Who are you?"),
         3: mail("sales@us.example", "our own copy", "sent copy"),
     }
+    ctx.settings.inbox_scope = "all"  # a dedicated sales mailbox: mail from strangers is kept for review
     out = run_inbox(ctx)
     assert out.skipped_own == 1 and out.stored == 2
     with ctx.db.session() as s:
@@ -358,3 +359,22 @@ def test_a_plain_text_bounce_names_the_failed_recipient_not_our_own_address(make
         assert theirs.bounced_addresses == ["stranger@elsewhere.example"] and theirs.status == "needs_review"
         suppressed = {x.value for x in s.execute(select(Suppression)).scalars()}
         assert DAVID in suppressed and not suppressed & {"optout@us.example", "hello@us.example"}
+
+
+def test_a_shared_mailbox_keeps_only_sales_mail(make_ctx):
+    ctx, _, sent = contacted(make_ctx)
+    assert ctx.settings.inbox_scope == "related"
+    FakeIMAP.messages = {
+        1: mail(DAVID, f"Re: {sent.subject}", "Sounds interesting, can we talk Thursday?", in_reply_to=sent.message_id),
+        2: mail("friend@personal.example", "Dinner on Friday?", "Are you free?"),
+        3: mail("newsletter@vendor.example", "Our October offers", "Big discounts"),
+        4: mail("Calendly <notifications@calendly.com>", "New Event: Intro call", "Invitee: David Chen ..."),
+        5: bounce_for("old@" + SITE, "<nobody@us.example>"),
+        6: mail(f"maria@{SITE}", "Question", "A colleague forwarded your email."),  # a lead company's domain
+    }
+    out = run_inbox(ctx)
+    assert out.fetched == 6 and out.skipped_unrelated == 2 and out.stored == 4
+    with ctx.db.session() as s:
+        senders = {r.from_email for r in s.execute(select(InboundEmail)).scalars()}
+    assert "friend@personal.example" not in senders and "newsletter@vendor.example" not in senders
+    assert run_inbox(ctx).fetched == 0  # skipped mail is not read again

@@ -31,6 +31,16 @@ OUTBOUND_TEST_RECIPIENTS=<an address you control>  # test mode (see 4); empty fo
 OUTBOUND_EMAIL_ENABLED=false                       # keep false until you approve sending
 ```
 
+**Your own mail server instead of Gmail** (e.g. cPanel hosting, as for `digitalhubsolution.com`): use the
+server's name and the mailbox password, for example `SMTP_HOST=mail.yourdomain.com`, `SMTP_PORT=587`,
+`SMTP_USE_TLS=true`, `IMAP_HOST=mail.yourdomain.com`. The server's TLS certificate must be valid for that name
+(it is checked). `email-check` then checks that SPF authorizes that server's address and looks for the DKIM key
+at the usual selectors (`default` for cPanel).
+
+**A mailbox you also use for other work:** keep `INBOX_SCOPE=related` (the default). Only replies to our emails,
+bounces, Calendly notifications and mail from known contacts or lead companies are stored; everything else is
+left alone. Use `INBOX_SCOPE=all` only for a dedicated sales mailbox.
+
 Then check:
 
 ```

@@ -218,6 +218,11 @@ def cmd_backup(args, ctx) -> int:
         print("Off-machine copy:", result.get("file") or result.get("reason"))
         if result.get("file"):
             from aime.backup import offsite_sync
+            from aime.db import kv_set
+            from aime.timeutil import utcnow
+
+            with ctx.db.session() as s:  # doctor and the monitor job read this, as for the daily copy
+                kv_set(s, "backup.last_offsite", {"file": result["file"], "at": utcnow().isoformat()})
             print("Off-machine folder:", offsite_sync(ctx.settings.backup_offsite_dir)[1])
         if result["status"] != "ok":
             return 1

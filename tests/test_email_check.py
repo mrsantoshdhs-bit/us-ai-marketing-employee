@@ -105,7 +105,8 @@ def test_domain_problems_are_explained():
     checks = by_name(bad)
     assert checks["MX (replies can arrive)"].status == "fail" and checks["SPF"].status == "fail"
     assert "exactly one" in checks["SPF"].detail and checks["DKIM"].status == "warn" and checks["DMARC"].status == "warn"
-    one = by_name(check_domain("dhs.example", resolver({("dhs.example", "TXT"): ["v=spf1 include:mailgun.org ~all"]})))
+    one = by_name(check_domain("dhs.example", resolver({("dhs.example", "TXT"): ["v=spf1 include:mailgun.org ~all"]}),
+                               "smtp.gmail.com"))
     assert one["SPF"].status == "warn" and "_spf.google.com" in one["SPF"].detail
     personal = check_domain("gmail.com", resolver({}))
     assert len(personal) == 1 and personal[0].status == "warn" and "Google Workspace" in personal[0].detail
@@ -175,3 +176,38 @@ def test_mail_connections_verify_the_server_certificate_and_never_send_a_passwor
                                     imap_factory=FakeIMAP))["SMTP sign-in"]
     assert check.status == "fail" and "unencrypted" in check.detail and FakeSMTP.logins == []
     assert APP_PW not in check.detail
+
+
+OWN_SERVER_DNS = {
+    ("dhs.example", "MX"): ["0 mail.dhs.example."],
+    ("dhs.example", "A"): ["203.0.113.7"],
+    ("mail.dhs.example", "A"): ["203.0.113.7"],
+    ("dhs.example", "TXT"): ["v=spf1 ip4:203.0.113.7 include:_spf.google.com ~all"],
+    ("default._domainkey.dhs.example", "TXT"): ["v=DKIM1; k=rsa; p=MIIBIjANBgkq"],
+    ("_dmarc.dhs.example", "TXT"): ["v=DMARC1; p=none; rua=mailto:d@dhs.example"],
+}
+
+
+def test_an_own_mail_server_is_checked_by_its_address_and_its_dkim_selector():
+    checks = by_name(check_domain("dhs.example", resolver(OWN_SERVER_DNS), "mail.dhs.example"))
+    assert checks["SPF"].status == "pass" and "ip4:203.0.113.7" in checks["SPF"].detail
+    assert checks["DKIM"].status == "pass" and "default._domainkey" in checks["DKIM"].detail
+    for spf in ("v=spf1 mx ~all", "v=spf1 a ~all", "v=spf1 a:mail.dhs.example -all", "v=spf1 ip4:203.0.113.0/24 ~all"):
+        dns = {**OWN_SERVER_DNS, ("dhs.example", "TXT"): [spf]}
+        assert by_name(check_domain("dhs.example", resolver(dns), "mail.dhs.example"))["SPF"].status == "pass", spf
+    missing = {**OWN_SERVER_DNS, ("dhs.example", "TXT"): ["v=spf1 include:_spf.google.com ~all"]}
+    spf = by_name(check_domain("dhs.example", resolver(missing), "mail.dhs.example"))["SPF"]
+    assert spf.status == "warn" and "ip4:203.0.113.7" in spf.detail
+    no_dkim = {k: v for k, v in OWN_SERVER_DNS.items() if "_domainkey" not in k[0]}
+    dkim = by_name(check_domain("dhs.example", resolver(no_dkim), "mail.dhs.example"))["DKIM"]
+    assert dkim.status == "warn" and "Google" not in dkim.detail
+
+
+def test_a_refused_sign_in_on_an_own_server_does_not_mention_gmail(make_ctx):
+    reset()
+    FakeSMTP.refuse = True
+    ctx = make_ctx(**{**MAILBOX, "smtp_host": "mail.dhs.example", "imap_host": "mail.dhs.example"})
+    checks = by_name(run_email_check(ctx.settings, connect=True, resolve=resolver(OWN_SERVER_DNS), smtp_factory=FakeSMTP,
+                                     imap_factory=FakeIMAP))
+    assert checks["SMTP sign-in"].status == "fail" and "Gmail" not in checks["SMTP sign-in"].detail
+    assert APP_PW not in str(checks)

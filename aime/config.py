@@ -116,6 +116,7 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "imap_username": ("IMAP_USERNAME", str),
     "imap_password": ("IMAP_PASSWORD", str),
     "imap_folder": ("IMAP_FOLDER", str),
+    "inbox_scope": ("INBOX_SCOPE", str),
     "calendly_url": ("CALENDLY_URL", str),
     "dashboard_host": ("DASHBOARD_HOST", str),
     "dashboard_port": ("DASHBOARD_PORT", int),
@@ -189,6 +190,10 @@ class Settings:
     imap_username: str = ""  # defaults to SMTP_USERNAME
     imap_password: str = field(default="", repr=False)  # defaults to SMTP_PASSWORD
     imap_folder: str = "INBOX"
+    # related: keep only sales mail (replies to our emails, bounces, Calendly, known contacts and lead companies),
+    # so a mailbox you also use for other work is not copied into the CRM. all: keep every email (a dedicated
+    # sales mailbox, where new inquiries by email should show up too).
+    inbox_scope: str = "related"
     calendly_url: str = ""  # booking link offered to interested prospects
 
     dashboard_host: str = "127.0.0.1"
