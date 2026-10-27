@@ -1,5 +1,8 @@
 # Completion report: US AI Sales Employee (26 Oct 2026)
 
+> Superseded by `docs/OPERATIONAL_READINESS.md` (27 Oct 2026). #25–#28 were deployed on 26 Oct; the 27 Oct
+> audit and its fixes (#29–#32) are described there.
+
 **Verdict: TEST READY.** Everything that can run without your accounts is built, tested and running in production
 with outbound email and publishing off. It is not PRODUCTION READY for outreach: the live Gmail and Calendly
 acceptance tests (9–14, 19) have not run, because they need your mailbox, postal address, Calendly link and a
