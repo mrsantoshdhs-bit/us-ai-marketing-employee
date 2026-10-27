@@ -1,13 +1,16 @@
 """Windows Task Scheduler integration.
 
-Two tasks:
+Tasks:
 - `AIMarketingEmployee-Tick` runs `scripts/run_tick.py` with pythonw.exe every N minutes and catches up after
   sleep or boot (StartWhenAvailable). By default it runs only while you are logged on (no stored password).
   With `install(..., run_when_logged_off=True)` it also runs while you are signed out and after a reboot
   before you log in: Windows asks YOU for your password in the console (`/RP *`); this app never sees,
   stores or logs it. Your Windows profile is loaded, so DPAPI-encrypted tokens keep working.
 - `AIMarketingEmployee-Watchdog` (optional, interactive) runs `scripts/watchdog.py` hourly and shows a
-  desktop notification if ticks have stopped.
+  desktop notification if ticks have stopped or the dashboard is not running.
+- `AIMarketingEmployee-Dashboard` (optional, interactive) runs `scripts/dashboard_task.py` at logon and every
+  15 minutes: it starts the dashboard unless it is already running or a maintenance window is active, so the
+  dashboard comes back by itself after a crash, a reboot or a closed window.
 Before a task is replaced, its current definition is saved to data/ so it can be restored.
 """
 
@@ -25,6 +28,7 @@ from aime.config import Settings
 
 TASK_NAME = "AIMarketingEmployee-Tick"
 WATCHDOG_TASK = "AIMarketingEmployee-Watchdog"
+DASHBOARD_TASK = "AIMarketingEmployee-Dashboard"
 LOGON_TYPES = ("InteractiveToken", "Password")
 
 
@@ -45,8 +49,10 @@ def current_user() -> str:
 
 def build_task_xml(python_exe: Path, script: Path, workdir: Path, interval_minutes: int, user_id: str,
                    start: datetime | None = None, logon_type: str = "InteractiveToken",
-                   task_name: str = TASK_NAME, description: str | None = None) -> str:
-    """Task definition. `Password` logon adds a boot trigger; the XML never contains a password."""
+                   task_name: str = TASK_NAME, description: str | None = None, time_limit: str = "PT1H") -> str:
+    """Task definition. `Password` logon adds a boot trigger; the XML never contains a password.
+
+    `time_limit` is how long one run may take (PT0S: no limit, for the long-running dashboard)."""
     if logon_type not in LOGON_TYPES:
         raise ValueError(f"logon_type must be one of {LOGON_TYPES}")
     start = (start or datetime.now() + timedelta(minutes=1)).replace(second=0, microsecond=0)
@@ -105,7 +111,7 @@ def build_task_xml(python_exe: Path, script: Path, workdir: Path, interval_minut
     <Hidden>false</Hidden>
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>
+    <ExecutionTimeLimit>{escape(time_limit)}</ExecutionTimeLimit>
     <Priority>7</Priority>
   </Settings>
   <Actions Context="Author">
@@ -185,6 +191,19 @@ def install_watchdog(settings: Settings) -> dict:
     xml_path.parent.mkdir(parents=True, exist_ok=True)
     xml_path.write_text(xml, encoding="utf-16")
     proc = _schtasks("/Create", "/TN", WATCHDOG_TASK, "/XML", str(xml_path), "/F")
+    return {"ok": proc.returncode == 0, "output": (proc.stdout + proc.stderr).strip(), "xml": str(xml_path)}
+
+
+def install_dashboard(settings: Settings) -> dict:
+    script = settings.base_dir / "scripts" / "dashboard_task.py"
+    xml = build_task_xml(python_for_task(settings), script, settings.base_dir, 15, current_user(),
+                         task_name=DASHBOARD_TASK, time_limit="PT0S",
+                         description="AI Marketing Employee dashboard: starts it at logon and restarts it if it "
+                                     "has stopped (never during a maintenance window).")
+    xml_path = settings.data_dir / "dashboard_task.xml"
+    xml_path.parent.mkdir(parents=True, exist_ok=True)
+    xml_path.write_text(xml, encoding="utf-16")
+    proc = _schtasks("/Create", "/TN", DASHBOARD_TASK, "/XML", str(xml_path), "/F")
     return {"ok": proc.returncode == 0, "output": (proc.stdout + proc.stderr).strip(), "xml": str(xml_path)}
 
 

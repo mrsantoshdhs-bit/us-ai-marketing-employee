@@ -90,6 +90,8 @@ crm.example.com {
 - Stop publishing immediately: set `PUBLISHING_ENABLED=false` (checked on every run).
 - Stop email immediately: set `OUTBOUND_EMAIL_ENABLED=false`.
 - Restore data: replace `data/aime.db` with a backup.
+- With the dashboard task installed (`scheduler install-dashboard`), turn maintenance on before stopping the
+  dashboard: the task does not restart it during a maintenance window, and does after `maintenance off`.
 - Roll back the code (data kept): `python -m aime maintenance on`, stop the dashboard, then in the production
   folder `git switch -c rollback-<date> <previous commit>`. Start the dashboard, run `maintenance off`, and
   revert the merge on GitHub afterwards. Schema changes are additive, so older code runs on the newer database;

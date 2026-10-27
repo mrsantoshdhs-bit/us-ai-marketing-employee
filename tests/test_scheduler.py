@@ -1,5 +1,5 @@
 import xml.etree.ElementTree as ET
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -112,3 +112,95 @@ def test_task_xml_is_valid():
     assert root.find(".//t:Command", ns).text.endswith("pythonw.exe")
     assert root.find(".//t:LogonType", ns).text == "InteractiveToken"
     assert root.find(".//t:StartWhenAvailable", ns).text == "true"
+
+
+def test_dashboard_task_has_no_time_limit_and_ignores_overlapping_starts(tmp_path):
+    from aime.scheduler.windows import DASHBOARD_TASK, build_task_xml
+    xml = build_task_xml(Path("C:/py/pythonw.exe"), Path("C:/app/scripts/dashboard_task.py"), Path("C:/app"), 15,
+                         "PC\\me", task_name=DASHBOARD_TASK, time_limit="PT0S")
+    assert "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in xml and "<MultipleInstancesPolicy>IgnoreNew" in xml
+    assert "<LogonTrigger>" in xml and "Password" not in xml.split("<LogonType>")[1].split("<")[0]
+    assert "<ExecutionTimeLimit>PT1H</ExecutionTimeLimit>" in build_task_xml(
+        Path("C:/py/pythonw.exe"), Path("C:/app/scripts/run_tick.py"), Path("C:/app"), 15, "PC\\me")
+
+
+def test_dashboard_task_starts_nothing_when_running_or_in_maintenance(tmp_path, monkeypatch):
+    import importlib.util
+    import socket
+
+    from aime import maintenance
+    spec = importlib.util.spec_from_file_location("dashboard_task", Path(__file__).parent.parent / "scripts" / "dashboard_task.py")
+    task = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(task)
+    started = []
+    monkeypatch.setattr("aime.cli.main", lambda argv: started.append(argv) or 0)
+    monkeypatch.setenv("AIME_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("AIME_ENV_FILE", str(tmp_path / "none.env"))
+    with socket.socket() as srv:  # something already answers on the dashboard port
+        srv.bind(("127.0.0.1", 0))
+        srv.listen()
+        monkeypatch.setenv("DASHBOARD_PORT", str(srv.getsockname()[1]))
+        assert task.main() == 0 and started == []
+    maintenance.start(tmp_path, hours=1, reason="deploy")
+    assert task.main() == 0 and started == []
+    maintenance.stop(tmp_path)
+    assert task.main() == 0 and started == [["serve"]]
+
+
+def test_watchdog_reports_a_stopped_dashboard():
+    import importlib.util
+    import socket
+    spec = importlib.util.spec_from_file_location("watchdog", Path(__file__).parent.parent / "scripts" / "watchdog.py")
+    wd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(wd)
+    with socket.socket() as srv:
+        srv.bind(("127.0.0.1", 0))
+        port = srv.getsockname()[1]
+        assert "not running" in wd.dashboard_problem(port=port)  # bound but not listening: refused
+        srv.listen()
+        assert wd.dashboard_problem(port=port) is None
+
+
+def test_daily_failures_count_per_slot_not_across_days(ctx, monkeypatch):
+    from aime.timeutil import utcnow
+    with ctx.db.session() as s:  # yesterday: three failed attempts, then gave up
+        s.add(JobState(job="research", last_attempt_at=utcnow() - timedelta(days=1, hours=1), last_status="failed",
+                       consecutive_failures=3, enabled=True))
+    monkeypatch.setitem(runner.JOBS, "research", lambda ctx, job="research": (_ for _ in ()).throw(RuntimeError("down")))
+    assert run_job(ctx, "research")["status"] == "failed"
+    with ctx.db.session() as s:
+        assert s.get(JobState, "research").consecutive_failures == 1  # today's slot keeps its two retries
+
+
+def test_a_job_whose_result_cannot_be_recorded_does_not_stop_the_tick(ctx, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    real = runner._record
+
+    def locked(ctx, name, *a, **k):
+        if name == "db_maintenance":
+            raise OperationalError("UPDATE", {}, Exception("database is locked"))
+        return real(ctx, name, *a, **k)
+
+    monkeypatch.setattr(runner, "_record", locked)
+    monkeypatch.setattr(runner._time, "sleep", lambda _s: None)
+    result = tick(ctx, trigger="test")
+    ran = {r["job"]: r["status"] for r in result["ran"]}
+    assert ran["db_maintenance"] == "failed" and ran["monitor"] == "success"
+
+
+def test_research_recheck_waits_for_a_running_enrich_job(ctx, capsys):
+    from aime.cli import cmd_research_recheck
+    from aime.models import Company
+    from aime.timeutil import utcnow
+    with ctx.db.session() as s:
+        s.add(Company(name="Acme", normalized_name="acme", source="test", researched_at=utcnow()))
+    lock = FileLock(ctx.settings.locks_dir / "job_enrich.lock")
+    assert lock.acquire()
+    try:
+        class Args:
+            company = None
+        assert cmd_research_recheck(Args(), ctx) == 1
+    finally:
+        lock.release()
+    assert "enrich job is running" in capsys.readouterr().out

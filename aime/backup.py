@@ -196,6 +196,53 @@ def offsite_status(settings) -> tuple[bool, str]:
     return True, "ready"
 
 
+def onedrive_folders() -> list[Path]:
+    """Folders that a signed-in OneDrive account syncs (Windows). Empty elsewhere or when nobody is signed in."""
+    try:
+        import winreg
+    except ImportError:
+        return []
+    found: list[Path] = []
+    try:
+        accounts = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\OneDrive\Accounts")
+    except OSError:
+        return []
+    with accounts:
+        i = 0
+        while True:
+            try:
+                name = winreg.EnumKey(accounts, i)
+            except OSError:
+                break
+            i += 1
+            try:
+                with winreg.OpenKey(accounts, name) as key:
+                    folder, _ = winreg.QueryValueEx(key, "UserFolder")
+            except OSError:
+                continue
+            if folder:
+                found.append(Path(folder))
+    return found
+
+
+def offsite_sync(folder: str | Path, synced: list[Path] | None = None) -> tuple[bool | None, str]:
+    """Whether copies written to `folder` actually leave this PC.
+
+    True: inside a folder a signed-in OneDrive account syncs. False: a OneDrive path that no signed-in account
+    syncs, so the copies stay on this PC. None: another kind of folder (USB drive, network share) that this
+    check cannot judge.
+    """
+    path = Path(folder).expanduser().resolve()
+    for synced_root in onedrive_folders() if synced is None else synced:
+        synced_root = synced_root.expanduser().resolve()
+        if path == synced_root or synced_root in path.parents:
+            return True, f"synced by OneDrive ({synced_root})"
+    if any("onedrive" in part.lower() for part in path.parts):
+        return False, ("OneDrive is not signed in for this folder, so copies would stay on this PC: sign in to "
+                       "OneDrive (cloud icon in the taskbar) and check the folder shows as synced")
+    return None, "not a OneDrive folder: check yourself that it is on another device (USB drive, network share)"
+
+
 def write_offsite(settings, db_path: Path) -> dict:
     """Encrypted bundle into BACKUP_OFFSITE_DIR, then decrypt it again to prove it can be restored."""
     ready, reason = offsite_status(settings)
@@ -208,11 +255,14 @@ def write_offsite(settings, db_path: Path) -> dict:
         data = bundle.read_bytes()
         target = folder / f"{OFFSITE_PREFIX}{datetime.now():%Y%m%d-%H%M%S}.aimebak"
         partial = target.with_suffix(".partial")
-        partial.write_bytes(encrypt_bytes(data, settings.backup_passphrase))
-        if _sha256(decrypt_bytes(partial.read_bytes(), settings.backup_passphrase)) != _sha256(data):
-            partial.unlink()
-            raise BackupError("encrypted copy did not decrypt to the same bundle")
-        partial.replace(target)
+        try:
+            partial.write_bytes(encrypt_bytes(data, settings.backup_passphrase))
+            if _sha256(decrypt_bytes(partial.read_bytes(), settings.backup_passphrase)) != _sha256(data):
+                raise BackupError("encrypted copy did not decrypt to the same bundle")
+            partial.replace(target)
+        except BaseException:
+            partial.unlink(missing_ok=True)
+            raise
     return {"status": "ok", "file": target.name, "bytes": target.stat().st_size, "pruned": prune_offsite(folder)}
 
 

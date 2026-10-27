@@ -113,6 +113,10 @@ def cmd_scheduler(args, ctx) -> int:
         res = windows.install_watchdog(ctx.settings)
     elif args.action == "uninstall-watchdog":
         res = windows.uninstall(windows.WATCHDOG_TASK)
+    elif args.action == "install-dashboard":
+        res = windows.install_dashboard(ctx.settings)
+    elif args.action == "uninstall-dashboard":
+        res = windows.uninstall(windows.DASHBOARD_TASK)
     elif args.action == "uninstall":
         res = windows.uninstall()
     elif args.action == "run":
@@ -212,6 +216,9 @@ def cmd_backup(args, ctx) -> int:
     if args.offsite:
         result = write_offsite(ctx.settings, db_path)
         print("Off-machine copy:", result.get("file") or result.get("reason"))
+        if result.get("file"):
+            from aime.backup import offsite_sync
+            print("Off-machine folder:", offsite_sync(ctx.settings.backup_offsite_dir)[1])
         if result["status"] != "ok":
             return 1
     return 0 if check["ok"] else 1
@@ -318,18 +325,27 @@ def cmd_research_recheck(args, ctx) -> int:
     if not ids:
         print("No researched companies to re-check")
         return 0
-    res = CompanyResearchAgent(ctx).run({"company_ids": ids, "limit": len(ids)}, job="research_recheck")
-    if not res.ok:
-        print(f"Research re-check failed: {res.error}")
+    from aime.scheduler.runner import FileLock
+
+    lock = FileLock(ctx.settings.locks_dir / "job_enrich.lock")  # the scheduled research job uses the same lock
+    if not lock.acquire():
+        print("The enrich job is running now; run research-recheck again when it has finished.")
         return 1
-    o = res.output
-    if o.skipped:
-        print(f"Skipped: {o.skipped}")
-        return 1
-    print(f"Re-checked {o.companies_researched} company(ies): {o.people_found} decision-maker(s) named, "
-          f"{o.contacts_withdrawn} withdrawn, {len(o.competitors)} marked as possible competitors, "
-          f"{len(o.failed)} failed")
-    LeadQualificationAgent(ctx).run({}, job="research_recheck")
+    try:
+        res = CompanyResearchAgent(ctx).run({"company_ids": ids, "limit": len(ids)}, job="research_recheck")
+        if not res.ok:
+            print(f"Research re-check failed: {res.error}")
+            return 1
+        o = res.output
+        if o.skipped:
+            print(f"Skipped: {o.skipped}")
+            return 1
+        print(f"Re-checked {o.companies_researched} company(ies): {o.people_found} decision-maker(s) named, "
+              f"{o.contacts_withdrawn} withdrawn, {len(o.competitors)} marked as possible competitors, "
+              f"{len(o.failed)} failed")
+        LeadQualificationAgent(ctx).run({}, job="research_recheck")
+    finally:
+        lock.release()
     return 0
 
 
@@ -485,6 +501,8 @@ def cmd_scheduler_verify(ctx) -> int:
                   " `python -m aime scheduler install --run-when-logged-off` (Windows asks for your password).")
     if not windows.query(windows.WATCHDOG_TASK).get("installed"):
         print("NOTE: no watchdog task. Install it with `python -m aime scheduler install-watchdog`.")
+    if not windows.query(windows.DASHBOARD_TASK).get("installed"):
+        print("NOTE: nothing restarts the dashboard if it stops. Install `python -m aime scheduler install-dashboard`.")
     hb = read_heartbeat(ctx.settings)
     tick = int(ctx.settings.schedule.get("tick_minutes", 15))
     if not hb:
@@ -525,7 +543,8 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--data-dir", help="Serve another data folder (e.g. the demo database)")
     sc = sub.add_parser("scheduler", help="Manage the Windows Task Scheduler task")
     sc.add_argument("action", choices=["install", "uninstall", "status", "run", "verify", "restore-previous",
-                                       "install-watchdog", "uninstall-watchdog"])
+                                       "install-watchdog", "uninstall-watchdog", "install-dashboard",
+                                       "uninstall-dashboard"])
     sc.add_argument("--interval", type=int)
     sc.add_argument("--run-when-logged-off", action="store_true",
                     help="Keep running while signed out and after reboot (Windows prompts for your password)")

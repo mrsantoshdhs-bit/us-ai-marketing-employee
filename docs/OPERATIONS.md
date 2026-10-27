@@ -70,6 +70,9 @@ alert). If no slot is free it is never published late: it returns to "awaiting a
   cannot be read.**
 - Manual: `backup --label before-change` (add `--offsite` for an encrypted copy too);
   `backup-verify <file>` checks any backup.
+- An encrypted copy only counts as off-machine when the folder really leaves the PC. `doctor` checks that a
+  signed-in OneDrive account syncs `BACKUP_OFFSITE_DIR` ("Off-machine folder leaves this PC"); on 27 Oct
+  OneDrive was installed but not signed in, so the folder was local only.
 - `doctor` warns while the off-machine copy is not configured (folder or passphrase missing).
 - **Restore drill:** `restore-drill` (latest local backup) or `restore-drill --source <file.aimebak>`
   restores into a temporary folder and checks it. It never writes to `data/`.
@@ -81,8 +84,12 @@ alert). If no slot is free it is never published late: it returns to "awaiting a
 ## Scheduler recovery
 
 - Locks left by a crashed process are taken over immediately (the owner PID is checked).
-- Runs left "running" for over two hours are marked `abandoned` at the next tick (and by manual runs).
-- Failed daily/weekly jobs retry after 30, 60, then 120 minutes, then wait for the next slot.
+- A run left "running" by a crashed or killed process is marked `abandoned` at the next tick once its job lock
+  has no live owner (after 10 minutes; after two hours in any case), and counts as a failed attempt.
+- A failed daily/weekly job is retried twice for the same slot (after 30, then 60 minutes), then waits for the
+  next slot; failures from earlier days don't use up today's retries.
+- One job whose result cannot be recorded (for example "database is locked") no longer stops the other jobs in
+  the same tick.
 - A job running longer than `job_budget_minutes` (config/schedule.toml, default 30) raises a warning.
 - Reinstall the task at any time: `scheduler install` (per-user, no admin rights, no stored password;
   runs only while you are logged on).
@@ -90,7 +97,12 @@ alert). If no slot is free it is never published late: it returns to "awaiting a
   Windows asks for your Windows password in the console and stores it in Task Scheduler; the app never
   sees it. Undo with `scheduler restore-previous` (the previous definition is saved in `data/`).
 - **Watchdog:** `scheduler install-watchdog` adds an hourly task that shows a desktop notification if
-  ticks have stopped for 45 minutes (log: `data/logs/watchdog.log`). Remove: `scheduler uninstall-watchdog`.
+  ticks have stopped for 45 minutes or the dashboard is not running (log: `data/logs/watchdog.log`).
+  Remove: `scheduler uninstall-watchdog`.
+- **Dashboard restart:** the dashboard is a separate process, and nothing restarts it by default (on 26–27 Oct
+  it was down for about 5 hours after the window running it closed). `scheduler install-dashboard` adds a
+  task that starts it at logon and every 15 minutes if it is not answering; it never starts it during a
+  maintenance window, so deploys keep control. Remove: `scheduler uninstall-dashboard`.
 
 ## Local AI model (Ollama)
 
@@ -105,6 +117,10 @@ alert). If no slot is free it is never published late: it returns to "awaiting a
 
 New warning and error alerts also appear as a Windows notification (`ALERT_TOAST=true`, the default).
 Alerts are always stored and shown on the dashboard; notifications are an extra nudge.
+
+Alerts about a condition (a `doctor` check, the local model, a failing or stale job) are kept as one alert
+per condition with the latest details, and close themselves once the condition clears. Dismissing one keeps
+it quiet for 24 hours. One-off notices (a slow job, a rejected import file) stay until you dismiss them.
 
 ## Company research and decision-makers
 

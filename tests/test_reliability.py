@@ -175,3 +175,111 @@ def test_slow_job_raises_budget_alert_without_failing(make_ctx, monkeypatch):
     result = runner.run_job(ctx, "monitor")
     assert result["status"] == "success"
     assert _alerts(ctx, "Job 'monitor' took%")
+
+
+# ---------------------------------------------------------------- alerts resolve themselves
+def _open(ctx):
+    with ctx.db.session() as s:
+        return [a.message for a in s.execute(select(Alert).where(Alert.acknowledged.is_(False))).scalars()]
+
+
+def test_alerts_close_once_the_problem_is_gone_and_do_not_repeat_with_new_numbers(make_ctx):
+    from aime.cli import cmd_user
+    from aime.workflows import job_monitor
+    ctx = make_ctx(llm_provider="auto", dashboard_auth=True)
+    for _ in range(3):  # model down three checks in a row: one alert
+        with ctx.db.session() as s:
+            check_health(s, ctx.settings, llm_probe=lambda: False)
+    ctx.settings.llm_provider = "template"  # the monitor job below must not probe a real local model
+    job_monitor(ctx)
+    job_monitor(ctx)  # same problems again: no second copy
+    msgs = _open(ctx)
+    assert sum(m.startswith("Local AI model") for m in msgs) == 1
+    assert sum(m.startswith("Dashboard sign-in") for m in msgs) == 1
+    ctx.settings.llm_provider = "auto"
+    with ctx.db.session() as s:
+        check_health(s, ctx.settings, llm_probe=lambda: True)
+
+    class Args:
+        action, username, role = "create", "manager", "admin"
+    assert cmd_user(Args(), ctx, prompt_fn=lambda _p: "correct horse " + "battery staple") == 0
+    job_monitor(ctx)
+    msgs = _open(ctx)
+    assert not any(m.startswith(("Local AI model", "Dashboard sign-in")) for m in msgs), msgs
+    with ctx.db.session() as s:
+        closed = s.execute(select(Alert).where(Alert.resolved_at.is_not(None))).scalars().all()
+        assert {a.key for a in closed} >= {"llm:down", "doctor:Dashboard sign-in"}
+
+
+def test_a_changing_detail_updates_the_open_alert_instead_of_adding_one(ctx):
+    with ctx.db.session() as s:
+        assert alert_once(s, "warning", "doctor", "Recent verified backup: verified 31 h ago", key="doctor:Recent verified backup")
+    with ctx.db.session() as s:
+        assert not alert_once(s, "warning", "doctor", "Recent verified backup: verified 32 h ago",
+                              key="doctor:Recent verified backup")
+    assert _open(ctx) == ["Recent verified backup: verified 32 h ago"]
+
+
+def test_alerts_from_before_keys_existed_are_adopted_and_resolved(ctx):
+    from aime.monitoring import resolve_alerts
+    with ctx.db.session() as s:
+        s.add(Alert(level="warning", source="doctor", message="Dashboard sign-in: No account yet: run ..."))
+        s.add(Alert(level="warning", source="monitor", message="Job 'monitor' has not succeeded since 2026-10-26 02:21 UTC"))
+        s.add(Alert(level="warning", source="monitor", message="Job 'research' took 40 min (budget 30 min)"))
+    with ctx.db.session() as s:
+        assert not alert_once(s, "warning", "doctor", "Dashboard sign-in: still none", key="doctor:Dashboard sign-in")
+        assert resolve_alerts(s, ("doctor:", "job_stale:"), set()) == 2
+    assert _open(ctx) == ["Job 'research' took 40 min (budget 30 min)"]  # one-off notices stay for a person
+
+
+def test_a_dismissed_alert_stays_quiet_for_a_day(ctx):
+    with ctx.db.session() as s:
+        alert_once(s, "warning", "doctor", "Off-machine encrypted backup: not configured", key="doctor:Off-machine")
+    with ctx.db.session() as s:
+        s.execute(select(Alert)).scalars().first().acknowledged = True  # the Sales Manager dismissed it
+    with ctx.db.session() as s:
+        assert not alert_once(s, "warning", "doctor", "Off-machine encrypted backup: not configured",
+                              key="doctor:Off-machine")
+
+
+def test_monitor_never_reports_itself_as_stale(ctx):
+    from aime.models import JobState
+    from aime.timeutil import utcnow
+    with ctx.db.session() as s:
+        s.add(JobState(job="monitor", last_success_at=utcnow() - timedelta(hours=10), consecutive_failures=0,
+                       enabled=True))
+    with ctx.db.session() as s:
+        summary = check_health(s, ctx.settings)
+    assert not any("'monitor'" in i for i in summary["issues"])
+
+
+# ---------------------------------------------------------------- killed runs
+def test_a_killed_run_is_abandoned_once_its_lock_owner_is_gone_and_counts_as_a_failure(ctx):
+    from aime.models import JobRun, JobState
+    from aime.timeutil import utcnow
+    now = utcnow()
+    with ctx.db.session() as s:
+        s.add(JobRun(job="inbox", trigger="scheduler", status="running", started_at=now - timedelta(minutes=15)))
+        s.add(JobRun(job="enrich", trigger="scheduler", status="running", started_at=now - timedelta(minutes=3)))
+        s.add(JobRun(job="research", trigger="scheduler", status="running", started_at=now - timedelta(minutes=15)))
+    lock = runner.FileLock(ctx.settings.locks_dir / "job_research.lock")
+    assert lock.acquire()  # research is still running in a live process (this one)
+    try:
+        assert runner.recover(ctx, now)["abandoned_jobs"] == 1
+    finally:
+        lock.release()
+    with ctx.db.session() as s:
+        status = {r.job: r.status for r in s.execute(select(JobRun)).scalars()}
+        assert status == {"inbox": "abandoned", "enrich": "running", "research": "running"}
+        st = s.get(JobState, "inbox")
+        assert st.last_status == "abandoned" and st.consecutive_failures == 1
+
+
+def test_the_open_alert_is_updated_even_when_an_older_one_was_dismissed(ctx):
+    with ctx.db.session() as s:
+        s.add(Alert(level="warning", source="doctor", message="Off-machine encrypted backup: folder empty", acknowledged=True))
+        s.add(Alert(level="warning", source="doctor", message="Off-machine encrypted backup: passphrase too short"))
+    with ctx.db.session() as s:
+        assert not alert_once(s, "warning", "doctor", "Off-machine encrypted backup: passphrase missing",
+                              key="doctor:Off-machine encrypted backup")
+    assert _open(ctx) == ["Off-machine encrypted backup: passphrase missing"]

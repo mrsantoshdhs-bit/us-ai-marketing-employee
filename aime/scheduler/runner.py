@@ -2,12 +2,14 @@
 
 The OS scheduler (Windows Task Scheduler) only calls `tick` every few minutes; all timing
 decisions live here, so missed runs (PC asleep/off) are caught up on the next tick.
-Failed daily/weekly jobs are retried with exponential backoff (30, 60, 120 min); every job is
-idempotent or guarded by durable state, so retries never duplicate external actions.
+A failed daily/weekly job is retried twice for the same slot, after 30 and then 60 minutes; a run that was
+killed or crashed counts as a failure. Every job is idempotent or guarded by durable state, so retries never
+duplicate external actions.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import time as _time
 import traceback
@@ -16,6 +18,7 @@ from datetime import datetime, time, timedelta
 from pathlib import Path
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import OperationalError
 
 from aime import maintenance
 from aime.config import Settings
@@ -27,9 +30,11 @@ from aime.runtime import current_job_run_id
 from aime.timeutil import as_aware_utc, local_tz, to_naive_utc, utcnow
 from aime.workflows import JOBS
 
+log = logging.getLogger("aime.scheduler")
 RETRY_BACKOFF = timedelta(minutes=30)
 MAX_DAILY_RETRIES = 3
 ABANDON_AFTER = timedelta(hours=2)  # Task Scheduler kills a tick after 1 hour
+ORPHAN_AFTER = timedelta(minutes=10)  # a 'running' row whose job lock has no live owner is abandoned after this
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
@@ -183,15 +188,74 @@ class FileLock:
             self.held = False
 
 
+def _lock_owner_gone(ctx: AppContext, job: str) -> bool:
+    path = ctx.settings.locks_dir / f"job_{job}.lock"
+    try:
+        pid = int(path.read_text(encoding="utf-8").split()[0])
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError, IndexError):
+        return False
+    return pid != os.getpid() and not pid_alive(pid)
+
+
 def recover(ctx: AppContext, now: datetime | None = None) -> dict:
-    """Close out runs left 'running' by a crashed or killed process."""
-    cutoff = (now or utcnow()) - ABANDON_AFTER
+    """Close out runs left 'running' by a crashed or killed process, and count each one as a failed attempt.
+
+    A run is abandoned once its job lock has no live owner (after ORPHAN_AFTER), or after ABANDON_AFTER anyway.
+    """
+    now = now or utcnow()
+    cutoff, orphaned = now - ABANDON_AFTER, now - ORPHAN_AFTER
     with ctx.db.session() as s:
-        jobs = s.execute(update(JobRun).where(JobRun.status == "running", JobRun.started_at < cutoff).values(
-            status="abandoned", error="Process ended before the job finished (crash, sleep, or kill)")).rowcount
-        agents = s.execute(update(AgentRun).where(AgentRun.status == "running", AgentRun.started_at < cutoff).values(
+        dead = [r for r in s.execute(select(JobRun).where(JobRun.status == "running")).scalars()
+                if r.started_at < cutoff or (r.started_at < orphaned and _lock_owner_gone(ctx, r.job))]
+        for r in dead:
+            r.status, r.error = "abandoned", "Process ended before the job finished (crash, sleep, or kill)"
+            st = s.get(JobState, r.job) or JobState(job=r.job, consecutive_failures=0, enabled=True)
+            if st.last_attempt_at is None or st.last_attempt_at <= r.started_at:  # no later attempt recorded
+                st.last_attempt_at, st.last_status = r.started_at, "abandoned"
+                st.consecutive_failures = (st.consecutive_failures or 0) + 1
+            s.add(st)
+        ids = [r.id for r in dead]
+        agents = s.execute(update(AgentRun).where(AgentRun.status == "running", (AgentRun.started_at < cutoff)
+                                                  | AgentRun.job_run_id.in_(ids or [-1])).values(
             status="abandoned", error="Process ended before the agent finished")).rowcount
-    return {"abandoned_jobs": jobs, "abandoned_agent_runs": agents}
+    return {"abandoned_jobs": len(dead), "abandoned_agent_runs": agents}
+
+
+def _same_slot_failures(ctx: AppContext, name: str, state: JobState, started: datetime) -> int:
+    """Failures so far for the current slot of a daily/weekly job (earlier days' failures don't count)."""
+    spec = next((sp for sp in load_job_specs(ctx.settings) if sp.name == name), None)
+    previous = state.consecutive_failures or 0
+    if spec is None or spec.every_minutes or state.last_attempt_at is None:
+        return previous
+    tz = local_tz(ctx.settings.schedule.get("timezone"))
+    slot = to_naive_utc(_last_slot(spec, as_aware_utc(started).astimezone(tz), tz))
+    return previous if state.last_attempt_at >= slot else 0
+
+
+def _record(ctx: AppContext, name: str, run_id: int | None, started: datetime, status: str, detail: dict,
+            error: str | None, duration: int) -> None:
+    finished = utcnow()
+    with ctx.db.session() as s:
+        if run_id is not None:
+            row = s.get(JobRun, run_id)
+            row.status, row.finished_at, row.duration_ms = status, finished, duration
+            row.detail, row.error = detail, error
+        st = s.get(JobState, name) or JobState(job=name, consecutive_failures=0, enabled=True)
+        failures = _same_slot_failures(ctx, name, st, started)
+        st.last_attempt_at = started
+        st.last_status = status
+        if status == "success":
+            st.last_success_at = started
+            st.consecutive_failures = 0
+        else:
+            st.consecutive_failures = failures + 1
+        s.add(st)
+        budget = float(ctx.settings.schedule.get("job_budget_minutes", 30))
+        if duration > budget * 60_000:  # warn only; a running job is never killed
+            alert_once(s, "warning", "monitor", f"Job '{name}' took {duration // 60_000} min "
+                       f"(budget {budget:g} min); check the run log for a slow source or model", ctx.settings)
 
 
 def run_job(ctx: AppContext, name: str, trigger: str = "manual", *, allow_during_maintenance: bool = False,
@@ -206,6 +270,7 @@ def run_job(ctx: AppContext, name: str, trigger: str = "manual", *, allow_during
     lock = FileLock(ctx.settings.locks_dir / f"job_{name}.lock")
     if not lock.acquire():
         return {"job": name, "status": "skipped", "reason": "already running"}
+    ctx.reset_llm()  # pick up a local model that started (or stopped) since this process first looked
     started = utcnow()
     t0 = _time.perf_counter()
     status, detail, error, run_id = "failed", {}, None, None
@@ -231,27 +296,16 @@ def run_job(ctx: AppContext, name: str, trigger: str = "manual", *, allow_during
         error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=5)}"
     finally:
         lock.release()
-    finished = utcnow()
     duration = int((_time.perf_counter() - t0) * 1000)
     error = redact(error[:4000]) if error else None
-    with ctx.db.session() as s:
-        if run_id is not None:
-            row = s.get(JobRun, run_id)
-            row.status, row.finished_at, row.duration_ms = status, finished, duration
-            row.detail, row.error = detail, error
-        st = s.get(JobState, name) or JobState(job=name, consecutive_failures=0, enabled=True)
-        st.last_attempt_at = started
-        st.last_status = status
-        if status == "success":
-            st.last_success_at = started
-            st.consecutive_failures = 0
-        else:
-            st.consecutive_failures = (st.consecutive_failures or 0) + 1
-        s.add(st)
-        budget = float(ctx.settings.schedule.get("job_budget_minutes", 30))
-        if duration > budget * 60_000:  # warn only; a running job is never killed
-            alert_once(s, "warning", "monitor", f"Job '{name}' took {duration // 60_000} min "
-                       f"(budget {budget:g} min); check the run log for a slow source or model", ctx.settings)
+    for attempt in range(3):  # "database is locked" while recording must not lose the result
+        try:
+            _record(ctx, name, run_id, started, status, detail, error, duration)
+            break
+        except OperationalError:
+            if attempt == 2:
+                raise
+            _time.sleep(2)
     return {"job": name, "status": status, "duration_ms": duration, "error": error, "run_id": run_id}
 
 
@@ -279,7 +333,13 @@ def tick(ctx: AppContext, trigger: str = "scheduler", now: datetime | None = Non
         recovered = recover(ctx, now)
         for spec, due, reason in due_jobs(ctx, now):
             if due:
-                result = run_job(ctx, spec.name, trigger=trigger, recover_runs=False)
+                write_heartbeat(ctx.settings, {"trigger": trigger, "pid": os.getpid(), "state": "running",
+                                               "job": spec.name})
+                try:
+                    result = run_job(ctx, spec.name, trigger=trigger, recover_runs=False)
+                except Exception as exc:  # one job's bookkeeping failure must not skip the rest of the tick
+                    log.exception("Job %s could not be recorded", spec.name)
+                    result = {"job": spec.name, "status": "failed", "error": redact(f"{type(exc).__name__}: {exc}")}
                 result["reason"] = reason
                 ran.append(result)
         write_heartbeat(ctx.settings, {"trigger": trigger, "pid": os.getpid(), "state": "idle", "recovered": recovered,

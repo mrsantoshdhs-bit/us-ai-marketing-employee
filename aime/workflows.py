@@ -18,7 +18,7 @@ from aime.context import AppContext
 from aime.db import kv_set
 from aime.doctor import run_checks
 from aime.models import MarketingPlan
-from aime.monitoring import alert_once, check_health
+from aime.monitoring import alert_once, check_health, resolve_alerts
 from aime.policy import evaluate_shadow
 from aime.redact import redact
 from aime.sources.census import CensusMarketSource
@@ -215,8 +215,9 @@ def job_monitor(ctx: AppContext, job: str = "monitor") -> JobOutcome:
     with ctx.db.session() as s:
         for c in failing:
             created = alert_once(s, "error" if c["severity"] == "error" else "warning", "doctor",
-                                 f"{c['name']}: {c['detail']}", ctx.settings)
+                                 f"{c['name']}: {c['detail']}", ctx.settings, key=f"doctor:{c['name']}")
             summary["alerts_created"] += int(created)
+        summary["alerts_resolved"] += resolve_alerts(s, ("doctor:",), {f"doctor:{c['name']}" for c in failing})
     summary["doctor_failures"] = [f"{c['name']}: {c['detail']}" for c in failing]
     out.steps.append({"agent": "monitor", "status": "success", "output": summary})
     return out
