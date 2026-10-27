@@ -283,3 +283,23 @@ def test_the_open_alert_is_updated_even_when_an_older_one_was_dismissed(ctx):
         assert not alert_once(s, "warning", "doctor", "Off-machine encrypted backup: passphrase missing",
                               key="doctor:Off-machine encrypted backup")
     assert _open(ctx) == ["Off-machine encrypted backup: passphrase missing"]
+
+
+def test_a_new_outage_alerts_again_after_an_earlier_dismissed_one_cleared(make_ctx):
+    from aime.monitoring import resolve_alerts
+    ctx = make_ctx(llm_provider="auto")
+    with ctx.db.session() as s:  # an earlier outage, dismissed by the Sales Manager
+        s.add(Alert(level="warning", source="monitor", acknowledged=True,
+                    message="Local AI model (Ollama) unreachable since 2026-10-26 09:51 UTC; new posts use the template"))
+    for _ in range(2):  # a second outage ...
+        with ctx.db.session() as s:
+            check_health(s, ctx.settings, llm_probe=lambda: False)
+    with ctx.db.session() as s:  # ... that clears
+        check_health(s, ctx.settings, llm_probe=lambda: True)
+        assert resolve_alerts(s, ("llm:",), set()) == 0
+    for _ in range(2):  # a third outage must be reported, not silenced by the old dismissal
+        with ctx.db.session() as s:
+            check_health(s, ctx.settings, llm_probe=lambda: False)
+    with ctx.db.session() as s:
+        open_ = s.execute(select(Alert).where(Alert.acknowledged.is_(False))).scalars().all()
+    assert [a.key for a in open_] == ["llm:down"]

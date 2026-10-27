@@ -91,21 +91,25 @@ def alert_once(session: Session, level: str, source: str, message: str, settings
             if not a.acknowledged:
                 a.key, a.level, a.message = key, level, message[:500]
                 return False
-        if any(a.resolved_at is None for a in same):  # dismissed by a person within the last 24 hours
-            return False
+        latest = max(same, key=lambda a: a.id, default=None)
+        if latest is not None and latest.resolved_at is None:  # dismissed by a person within the last 24 hours
+            return False  # (a dismissal of an earlier episode that has since cleared does not silence a new one)
     session.add(Alert(level=level, source=source, message=message[:500], key=key))
     notify_alert(settings, level, message)
     return True
 
 
 def resolve_alerts(session: Session, prefixes: tuple[str, ...], active: set[str]) -> int:
-    """Close open alerts whose key starts with one of `prefixes` but is no longer in `active` (problem gone)."""
+    """Close open alerts whose key starts with one of `prefixes` but is no longer in `active` (problem gone).
+
+    Alerts a person dismissed are marked resolved as well, so the dismissal quiets only that episode: if the
+    problem comes back later, it is reported again."""
     closed = 0
-    for a in session.execute(select(Alert).where(Alert.acknowledged.is_(False))).scalars():
+    for a in session.execute(select(Alert).where(Alert.resolved_at.is_(None))).scalars():
         key = alert_key(a)
         if key and key.startswith(prefixes) and key not in active:
+            closed += 0 if a.acknowledged else 1
             a.key, a.acknowledged, a.resolved_at = key, True, utcnow()
-            closed += 1
     return closed
 
 
