@@ -116,9 +116,26 @@ def new_text(body: str) -> str:
     for line in body.replace("\r\n", "\n").split("\n"):
         stripped = line.strip()
         if QUOTE_START.match(stripped) or stripped == "--":
+            if stripped.lower().startswith("sent from my") and not any(x.strip() for x in lines):
+                continue  # a device signature above the reply, not the end of it
             break
         lines.append(line)
     return "\n".join(lines).strip()[:5000]
+
+
+QUOTE_LINE = re.compile(r"^(>.*|on .{4,200} wrote:|-{2,} ?original message ?-{2,}|sent from my \w+.*|_{5,}|-{3})$",
+                        re.I)
+OUR_FOOTER = re.compile(r"(to stop receiving emails from us|reply with \"?unsubscribe\"?|we emailed you because|"
+                        r"you are receiving this because)", re.I)
+
+
+def own_text(body: str) -> str:
+    """The sender's own words when nothing was written above the quote (a reply below or inside the quote, or
+    after "Sent from my iPhone"): quoted lines, quote headers and our own compliance footer are dropped, so
+    our "reply unsubscribe" line is never read as theirs."""
+    keep = [line for line in body.replace("\r\n", "\n").split("\n")
+            if not QUOTE_LINE.match(line.strip()) and not OUR_FOOTER.search(line)]
+    return "\n".join(keep).strip()[:5000]
 
 
 class Mailbox:

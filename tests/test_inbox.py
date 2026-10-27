@@ -239,6 +239,10 @@ def test_simulated_reply_is_labelled_and_reclassifying_applies_actions(make_ctx,
     ("This is spam. How did you get my email?", ("unsubscribe", "medium")),
     ("Interested, but honestly not interested until next year.", ("not_interested", "low")),
     ("Thanks.", ("other", "low")),
+    ("Not really interested, thanks.", ("other", "low")),
+    ("We are not at all interested.", ("other", "low")),
+    ("I am not available until January.", ("other", "low")),
+    ("Please don't send me more info.", ("other", "low")),
 ])
 def test_classification(text, expected):
     row = InboundEmail(from_email="x@y.example", subject="Re: hello", body_text=text, new_text=text)
@@ -283,3 +287,22 @@ def test_folded_subjects_and_unbuildable_emails_do_not_break_sending(make_ctx):
         raise AssertionError("an address with a line break must be refused")
     except Exception as exc:  # EmailNotReady
         assert "invalid recipient" in str(exc)
+
+
+def test_a_reply_below_the_quote_is_never_read_as_our_own_unsubscribe_line(make_ctx):
+    ctx, _, sent = contacted(make_ctx)
+    quoted = "\n".join("> " + line for line in sent.body.split("\n"))
+    header = "On Tue, Oct 27, 2026 at 11:00 AM Sales <sales@us.example> wrote:"
+    FakeIMAP.messages = {
+        1: mail(DAVID, "Re: " + sent.subject, f"{header}\n{quoted}\n\nYes, let's set up a call next week.\n\nDavid",
+                in_reply_to=sent.message_id),
+        2: mail(DAVID, "Re: " + sent.subject, f"Sent from my iPhone\n\n{header}\n{quoted}", in_reply_to=sent.message_id),
+    }
+    run_inbox(ctx)
+    with ctx.db.session() as s:
+        below, empty = s.execute(select(InboundEmail).order_by(InboundEmail.id)).scalars().all()
+        assert (below.category, below.confidence, below.status) == ("interested", "medium", "needs_review")
+        assert (empty.category, empty.confidence, empty.status) == ("other", "low", "needs_review")
+        assert not s.execute(select(Suppression)).first()
+        assert s.execute(select(Contact).where(Contact.email == DAVID)).scalar_one().consent_status != "opted_out"
+    assert new_text("Sent from my iPhone\n\nYes please, call me.") == "Yes please, call me."

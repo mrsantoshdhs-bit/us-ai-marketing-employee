@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from aime.crm_ops import log_activity, suppress
+from aime.inbox import own_text
 from aime.models import Alert, Contact, FollowUp, InboundEmail, Lead, Opportunity
 from aime.notify import notify_event
 from aime.integrations.email_smtp import POSTAL_PLACEHOLDER
@@ -45,20 +46,38 @@ COMPLAINT = re.compile(r"\b(spam|report(ed|ing)? (you|this)|lawyer|attorney|lega
 OOO = re.compile(r"\b(out of (the )?office|on (vacation|holiday|leave)|limited access to (my )?email|"
                  r"will be back|returning on|away until|automatic reply)\b", re.I)
 CALENDLY = re.compile(r"calendly\.com", re.I)
+# "not", "never", "don't" ... up to two words before an interest phrase: "not really interested", "don't send me more info"
+NEGATED = re.compile(r"(\bnot|\bnever|\bno longer|\bcannot|\bdont|\b\w+n['\u2019]t)\s+(\w+\s+){0,2}$", re.I)
 HUMAN = ("interested", "not_interested", "objection", "referral", "question", "other")
 OUTREACH_STAGE = {"interested": "interested", "not_interested": "not_interested"}
 QUESTION_PLACEHOLDER = "[Write your answer here]"
 
 
 def classify(row: InboundEmail) -> tuple[str, str, list[str]]:
-    text = row.new_text or row.body_text or ""
+    category, confidence, reasons = _classify(row)
+    if not row.new_text and confidence == "high" and category not in ("bounce", "calendly"):
+        # Nothing was written above the quote: the words were found below or inside it, so a person checks first.
+        return category, "medium", [*reasons, "reply written below the quoted email"]
+    return category, confidence, reasons
+
+
+def _classify(row: InboundEmail) -> tuple[str, str, list[str]]:
+    text = row.new_text or own_text(row.body_text or "")
     subject = row.subject or ""
     if row.bounced_addresses or re.match(r"^(mailer-daemon|postmaster)@", row.from_email or "", re.I):
         return "bounce", "high", ["delivery failure report"]
-    if CALENDLY.search(row.from_email or "") or (CALENDLY.search(text) and re.search(r"\b(new event|canceled|cancelled)\b", subject, re.I)):
+    if CALENDLY.search(row.from_email or "") or (CALENDLY.search(row.new_text or row.body_text or "")
+                                                  and re.search(r"\b(new event|canceled|cancelled)\b", subject, re.I)):
         return "calendly", "high", ["Calendly notification"]
+    if not text.strip():
+        return "other", "low", ["no new text of its own (only the quoted email)"]
     complaint = COMPLAINT.search(f"{subject}\n{text}")
     hits = {name: m.group(0) for name, rx in PATTERNS if (m := rx.search(f"{subject}\n{text}"))}
+    negated = None
+    if "interested" in hits:
+        m = dict(PATTERNS)["interested"].search(f"{subject}\n{text}")
+        if NEGATED.search(f"{subject}\n{text}"[:m.start()][-40:]):
+            negated = hits.pop("interested")
     if "unsubscribe" in hits or complaint:
         reasons = [f'"{hits["unsubscribe"]}"'] if "unsubscribe" in hits else []
         if complaint:
@@ -67,6 +86,9 @@ def classify(row: InboundEmail) -> tuple[str, str, list[str]]:
     if row.auto_submitted or OOO.search(f"{subject}\n{text[:400]}"):
         return "out_of_office", "high" if row.auto_submitted else "medium", ["automatic reply"]
     human = [k for k in ("not_interested", "interested", "objection", "referral") if k in hits]
+    if negated:  # "not really interested", "don't send me more info": a person reads it, nothing is automated
+        reasons = [f'negated interest: "{negated}"'] + [f'{k.replace("_", " ")}: "{hits[k]}"' for k in human]
+        return (human[0] if human else "other"), "low", reasons
     if not human:
         if "?" in text:
             return "question", "medium", ["asks a question"]
