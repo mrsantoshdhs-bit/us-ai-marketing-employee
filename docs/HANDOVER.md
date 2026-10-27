@@ -80,6 +80,7 @@ drafts; empty `IMAP_HOST` stops mailbox reading.
 - **Discovery sources:** most discovered companies come from public hiring posts, which favour tech startups.
   Some of these sell AI agents themselves, and #25 flags them. Better-fitting small businesses need other
   authorized sources (your CSV lists, or a source you approve).
-- Reply classification is rule-based; anything unclear goes to review.
+- Reply classification is rule-based (with typo-tolerant interest and meeting phrases); the local AI model only
+  suggests a category for unclear replies, which stay in review.
 - Calendly is read from its notification emails (works with the free plan); a changed format goes to review.
 - Wording of outreach is template-based around quoted evidence (no AI rewriting, to avoid unsupported claims).

@@ -78,7 +78,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                 out.stored += 1
             kv_set(session, "inbox.state", state)
             session.commit()
-        out.categories = process_pending(session, self.settings, self.name)
+        out.categories = process_pending(session, self.settings, self.name, llm=self.ctx.llm)
         out.needs_review = len(session.execute(select(InboundEmail.id).where(InboundEmail.status == "needs_review")).all())
         return out
 

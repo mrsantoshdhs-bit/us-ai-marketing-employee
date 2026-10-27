@@ -186,6 +186,13 @@ and what was done.
   unclear go to review with a suggested reply (a question's reply needs your answer before approval).
 - Unsubscribe requests and complaints are suppressed at once; bounces mark the address bounced and
   suppress it. Out-of-office replies leave the sequence running.
+- Interest is recognised in everyday wording and with common typos: "Sound interesting", "can we talk
+  Thursday?", "can we schedule (a) meeting", "let's arrange a call", "I'd like a demo", "send me a proposal".
+  A negation in front ("please don't schedule a call", "I can't meet this week") goes to review.
+- When the rules can only say "question" or "other", the local AI model (Ollama, if running) gives a second
+  opinion, shown in the reply's reasons ("AI … suggests: interested, asks for a meeting (please check)").
+  It never acts by itself: such a reply stays in review, with a "Possible interest" alert, until you
+  reclassify it. At most five replies per run get a second opinion (a few seconds each).
 - Reclassify on the Replies page applies the right actions and is logged.
 - Limits on approved outreach: 20 a day, one per company domain a day, five per run (`[outreach]`).
 - Test mode (`OUTBOUND_TEST_RECIPIENTS`): every email goes only to your test addresses, marked
