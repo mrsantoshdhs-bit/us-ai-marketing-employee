@@ -538,8 +538,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         """A person overrides the automatic competitor flag; research does not set it again."""
         with C().db.session() as s:
             company = s.get(Company, company_id) or _404()
+            from aime.crm_ops import primary_lead
+
             company.is_competitor, company.competitor_cleared_by = False, who(request)
-            lead = s.execute(select(Lead).where(Lead.company_id == company.id).order_by(Lead.id)).scalars().first()
+            lead = s.execute(select(Lead).where(Lead.company_id == company.id, Lead.status == "disqualified",
+                                                Lead.disqualify_reason.contains("competitor"))
+                             .order_by(Lead.id.desc())).scalars().first() or primary_lead(s, company.id)
             lead_id = lead.id if lead else None
             if lead and lead.status == "disqualified" and "competitor" in (lead.disqualify_reason or ""):
                 lead.status, lead.disqualify_reason = "new", None

@@ -155,3 +155,39 @@ def test_seniority_outranks_function_fit():
     assert score("Chief Operating Officer", "bpa") >= score("Chief Executive Officer", "bpa") > score("Director", "bpa")
     assert score("VP of Sales", "custom_crm") > score("Director of Product Development", "custom_crm")
     assert score("Chief Advisory Medical Officer", "bpa") < score("VP of Operations", "bpa")
+
+
+def test_an_inbox_or_an_address_printed_after_someone_else_is_not_a_persons_email(make_ctx):
+    from aime.company_research import published_contacts, save_contact
+    from aime.contact_validation import assign_published_emails
+    from aime.people import extract_people
+    from aime.site_reader import parse_page
+    html = (f'<html><body><div><span>Jane Doe</span><span>Managing Partner</span></div>'
+            f'<p>Email: <a href="mailto:info@{SITE}">info@{SITE}</a></p>'
+            f'<div>John Smith</div><div>Office Manager</div><p>Write to <a href="mailto:jane@{SITE}">jane@{SITE}</a></p>'
+            f'<div>Ann Lee</div><div>Chief Financial Officer</div>'
+            f'<p><a href="mailto:ann.lee@{SITE}">ann.lee@{SITE}</a></p></body></html>')
+    page = parse_page(f"https://{SITE}/team", "team", html)
+    emails, _ = published_contacts([page], SITE)
+    ctx = make_ctx()
+    with ctx.db.session() as s:
+        co = Company(name="Brightline Logistics", normalized_name="brightline logistics", domain=SITE, source="test")
+        s.add(co)
+        s.flush()
+        for f in extract_people([page], co.name):
+            save_contact(s, co, f, None)
+        assign_published_emails(s, co, emails, checker=lambda d: True)
+        got = {(c.display_name if c.last_name else c.title): c for c in
+               s.execute(select(Contact).where(Contact.company_id == co.id)).scalars()}
+        assert got["Jane Doe"].email is None  # info@ printed under her name is the company's inbox
+        assert got["John Smith"].email is None  # jane@ printed after John is not John's, and not given to anyone
+        assert got["Ann Lee"].email == f"ann.lee@{SITE}" and got["Ann Lee"].email_confidence == "high"
+        assert got["Company inbox"].email == f"info@{SITE}" and got["Company inbox"].email_status == "role_address"
+
+
+def test_emails_whose_mail_server_check_failed_are_checked_again(run_research, make_ctx):
+    ctx, cid, _ = run_research(answers={SITE: None})  # DNS timed out during research
+    assert contacts(ctx, cid)["Tom Baker"].email_status == "unchecked"
+    res = CompanyResearchAgent(ctx, mail_checker=lambda d: True).run({})  # nothing due for research
+    assert res.ok and res.output.companies_researched == 0 and res.output.emails_rechecked == 1
+    assert contacts(ctx, cid)["Tom Baker"].email_status == "published"

@@ -8,6 +8,7 @@ emails and phone numbers it publishes. Nothing is inferred beyond matching publi
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -15,7 +16,7 @@ from sqlalchemy.orm import Session
 from aime.dedupe import normalize_name, registrable_domain
 from aime.matching import match_services
 from aime.models import Company, Contact, ResearchSnapshot
-from aime.people import PersonFinding, looks_like_name, relevance, split_name
+from aime.people import PersonFinding, looks_like_name, relevance, same_name, split_name
 from aime.timeutil import utcnow
 
 MIN_DESCRIPTION = 60
@@ -122,7 +123,7 @@ WITHDRAWN = "website_withdrawn"  # recorded from the website earlier, not found 
 
 
 def _same_person(contact: Contact, finding: PersonFinding) -> bool:
-    return normalize_name(f"{contact.first_name or ''} {contact.last_name or ''}") == finding.key
+    return same_name(normalize_name(f"{contact.first_name or ''} {contact.last_name or ''}"), finding.key)
 
 
 def save_contact(session: Session, company: Company, finding: PersonFinding, service: str | None) -> tuple[Contact, bool]:
@@ -150,16 +151,30 @@ def save_contact(session: Session, company: Company, finding: PersonFinding, ser
     return contact, True
 
 
-def withdraw_missing(session: Session, company: Company, people: list[PersonFinding]) -> list[Contact]:
+def _page_key(url: str | None) -> str:
+    parsed = urlparse(url or "")
+    return f"{parsed.netloc.lower().removeprefix('www.')}{parsed.path.rstrip('/')}"
+
+
+def withdraw_missing(session: Session, company: Company, people: list[PersonFinding], pages=None) -> list[Contact]:
     """After a successful re-read of the company's site: people recorded from it earlier who are no longer found
     (or no longer pass the rules) are withdrawn, never deleted. Anyone with an email queued or sent is kept for a
-    person to review."""
+    person to review. With `pages`, only people whose page (or a page of the same kind) was read this time can
+    be withdrawn: a team page that failed to load says nothing about its people."""
     from aime.models import FollowUp
+    from aime.site_reader import classify_link
 
+    def kind_of(url: str | None) -> str | None:
+        return "home" if urlparse(url or "").path.rstrip("/") == "" else classify_link(url or "", "")
+
+    ok_pages = {_page_key(p.url) for p in pages or [] if p.ok}
+    ok_kinds = {p.kind for p in pages or [] if p.ok}
     withdrawn = []
     for c in session.execute(select(Contact).where(Contact.company_id == company.id, Contact.source == "website",
                                                    Contact.last_name.is_not(None))).scalars().all():
         if any(_same_person(c, f) for f in people):
+            continue
+        if pages is not None and _page_key(c.evidence_url) not in ok_pages and kind_of(c.evidence_url) not in ok_kinds:
             continue
         if session.execute(select(FollowUp.id).where(FollowUp.contact_id == c.id)).first():
             continue

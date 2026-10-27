@@ -22,6 +22,9 @@ SUBMISSIONS = "https://data.sec.gov/submissions/CIK{cik}.json"
 ARCHIVE = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/{doc}"
 INDEX = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/{accession}-index.htm"
 SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "md", "phd"}
+# Surname particles: "VAN DYKE RICHARD J" is Richard J. Van Dyke, "DE LA CRUZ MARIA" is Maria De La Cruz.
+PARTICLES = {"van", "von", "de", "del", "della", "der", "den", "da", "di", "du", "dos", "das", "la", "le", "st",
+             "ter", "ten", "bin", "al", "el", "mac", "o"}
 
 
 def _flag(rel, name: str) -> bool:
@@ -45,7 +48,10 @@ def display_name(filed: str) -> str:
         tokens = given.split() + [last.strip()]
     else:
         parts = raw.split()
-        tokens = parts[1:] + parts[:1] if len(parts) > 1 else parts
+        n = 0
+        while n < len(parts) - 2 and parts[n].lower().strip(".") in PARTICLES:
+            n += 1
+        tokens = parts[n + 1:] + parts[:n + 1] if len(parts) > n + 1 else parts
     suffix = [t for t in tokens if t.lower().strip(".") in SUFFIXES]
     tokens = [t for t in tokens if t not in suffix]
     out = []
@@ -55,16 +61,26 @@ def display_name(filed: str) -> str:
     return " ".join(out + [s.strip(".").capitalize() + "." for s in suffix])
 
 
-def parse_ownership_xml(xml_text: str) -> list[dict]:
+def _same_cik(a: str, b: str) -> bool:
+    return a.strip().lstrip("0") == b.strip().lstrip("0")
+
+
+def parse_ownership_xml(xml_text: str, issuer_cik: str | None = None) -> list[dict]:
+    """Reporting persons and their relationship to the issuer. With `issuer_cik`, a filing about another issuer
+    (this company reporting its own stake in someone else) gives nobody, and the company itself is never a person."""
     try:
         root = ET.fromstring(xml_text)  # noqa: S314 -- official SEC filings; expat resolves no external entities
     except ET.ParseError:
+        return []
+    if issuer_cik and not _same_cik(_text(root, "issuer/issuerCik") or issuer_cik, issuer_cik):
         return []
     people = []
     for owner in root.iter("reportingOwner"):
         filed = _text(owner, "reportingOwnerId/rptOwnerName")
         rel = owner.find("reportingOwnerRelationship")
         if not filed or rel is None:
+            continue
+        if issuer_cik and _same_cik(_text(owner, "reportingOwnerId/rptOwnerCik") or "-", issuer_cik):
             continue
         people.append({"filed_name": filed, "is_officer": _flag(rel, "isOfficer"), "is_director": _flag(rel, "isDirector"),
                        "officer_title": " ".join(_text(rel, "officerTitle").split())})
@@ -106,7 +122,7 @@ def sec_officers(ctx, cik: str, max_filings: int = 12, since_days: int = 730) ->
             if doc.status_code != 200:
                 continue
             url = INDEX.format(cik=int(cik10), acc=acc, accession=accession)
-            for p in parse_ownership_xml(doc.text):
+            for p in parse_ownership_xml(doc.text, cik10):
                 title = p["officer_title"] if p["is_officer"] and not re.search(r"see remarks", p["officer_title"], re.I) else ""
                 if not title and p["is_director"]:
                     title = "Director"
