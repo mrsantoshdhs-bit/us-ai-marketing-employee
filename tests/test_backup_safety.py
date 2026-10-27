@@ -6,8 +6,8 @@ import zipfile
 
 import pytest
 
-from aime.backup import (BackupError, backup_sqlite_file, create_bundle, decrypt_bytes, encrypt_bytes, prune_offsite,
-                         restore_drill, verify_backup, write_offsite)
+from aime.backup import (BackupError, backup_sqlite_file, create_bundle, decrypt_bytes, encrypt_bytes, offsite_sync,
+                         prune_offsite, restore_drill, verify_backup, write_offsite)
 from aime.config import Settings
 from aime.db import kv_get
 from aime.doctor import run_checks
@@ -149,3 +149,21 @@ def test_restore_drill_extracts_only_outside_the_data_folder(ctx, tmp_path):
     assert drill["ok"] and verify_backup(target / "aime.db")["ok"]
     with pytest.raises(BackupError):
         restore_drill(ctx.settings, extract_to=target)  # never overwrites an existing folder
+
+
+def test_offsite_folder_counts_as_off_machine_only_when_a_signed_in_onedrive_syncs_it(tmp_path):
+    synced = tmp_path / "OneDrive"
+    assert offsite_sync(synced / "AIME-Backups", synced=[synced])[0] is True
+    leaves, why = offsite_sync(tmp_path / "OneDrive" / "AIME-Backups", synced=[])
+    assert leaves is False and "not signed in" in why
+    assert offsite_sync(tmp_path / "usb" / "backups", synced=[])[0] is None
+
+
+def test_doctor_warns_when_the_offsite_folder_does_not_leave_the_pc(make_ctx, tmp_path, monkeypatch):
+    import aime.backup
+    monkeypatch.setattr(aime.backup, "onedrive_folders", lambda: [])
+    ctx = make_ctx(backup_offsite_dir=str(tmp_path / "OneDrive" / "AIME-Backups"), backup_passphrase=PASSPHRASE)
+    check = next(c for c in run_checks(ctx) if c["name"] == "Off-machine folder leaves this PC")
+    assert not check["ok"] and check["severity"] == "warning" and "sign in to OneDrive" in check["detail"]
+    monkeypatch.setattr(aime.backup, "onedrive_folders", lambda: [tmp_path / "OneDrive"])
+    assert next(c for c in run_checks(ctx) if c["name"] == "Off-machine folder leaves this PC")["ok"]

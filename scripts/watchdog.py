@@ -1,8 +1,8 @@
 """Scheduler watchdog (Windows Task Scheduler, hourly, while you are logged on).
 
-Reads data/heartbeat.json and shows a desktop notification if scheduled ticks have stopped. It changes
-nothing and does not import the app (only the small notify/redact helpers), so it works even when the app
-itself is broken. Findings are appended to data/logs/watchdog.log.
+Reads data/heartbeat.json and shows a desktop notification if scheduled ticks have stopped or the dashboard
+is not answering on its port. It changes nothing and does not import the app (only the small notify/redact
+helpers), so it works even when the app itself is broken. Findings are appended to data/logs/watchdog.log.
 """
 
 import json
@@ -39,8 +39,26 @@ def check(data_dir: Path, now: datetime | None = None) -> list[str]:
     return []
 
 
+def dashboard_problem(host: str = "127.0.0.1", port: int | None = None) -> str | None:
+    import socket
+
+    from dotenv import dotenv_values
+
+    port = port or int(os.environ.get("DASHBOARD_PORT") or dotenv_values(ROOT / ".env").get("DASHBOARD_PORT") or 8765)
+    try:
+        with socket.create_connection((host, port), timeout=2):
+            return None
+    except OSError:
+        return (f"The dashboard is not running (nothing on port {port}). Start it with scripts/start_dashboard.ps1, "
+                "or install `python -m aime scheduler install-dashboard` so it restarts by itself.")
+
+
 def main() -> int:
+    from aime import maintenance
+
     problems = check(DATA)
+    if not maintenance.active(DATA):
+        problems += [p for p in [dashboard_problem()] if p]
     if problems:
         from aime.notify import TITLE, toast
 

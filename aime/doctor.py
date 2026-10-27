@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import func, or_, select
 
-from aime.backup import integrity_check, offsite_status
+from aime.backup import integrity_check, offsite_status, offsite_sync
 from aime.context import AppContext
 from aime.db import kv_get
 from aime.integrations.linkedin import configured_author_urn
@@ -120,6 +120,9 @@ def run_checks(ctx: AppContext) -> list[dict]:
     else:
         hours = (utcnow() - datetime.fromisoformat(off["at"])).total_seconds() / 3600
         add("Off-machine encrypted backup", hours <= BACKUP_MAX_AGE_HOURS, f"{off['file']}, {hours:.0f} h ago")
+    if ctx.settings.backup_offsite_dir:
+        leaves, why = offsite_sync(ctx.settings.backup_offsite_dir)
+        add("Off-machine folder leaves this PC", leaves is True, why, "warning")
 
     st = ctx.settings
     if st.outbound_email_enabled and st.section("outreach").get("b2b_enabled"):

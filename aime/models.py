@@ -565,6 +565,10 @@ class Alert(Base):
     message: Mapped[str] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
+    # What the alert is about (e.g. "doctor:<check>", "llm:down"): an open alert with a key is updated instead of
+    # repeated, and closed by aime.monitoring.resolve_alerts once the problem is gone (resolved_at set then).
+    key: Mapped[str | None] = mapped_column(String(120))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
 class Report(Base):
