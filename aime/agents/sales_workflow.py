@@ -122,13 +122,14 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                               .order_by(InboundInquiry.id.desc())).scalars().first()
         return (inq.payload.get("message") if inq else None) or None
 
-    def _new_draft(self, session: Session, lead: Lead, step: int, due: datetime, out: SalesOutput) -> None:
+    def _new_draft(self, session: Session, lead: Lead, step: int, due: datetime, out: SalesOutput,
+                   in_reply_to: str | None = None) -> None:
         subject, body = draft_reply(self.settings, step, lead.contact.first_name, lead.primary_service,
                                     self._inquiry_excerpt(session, lead) if step == 1 else None)
         # Every email waits for a person to approve it; there is no setting that skips this.
         session.add(FollowUp(lead_id=lead.id, contact_id=lead.contact_id, company_id=lead.company_id,
                              channel="email", step=step, due_at=due, status="awaiting_approval",
-                             subject=subject, body=body))
+                             subject=subject, body=body, in_reply_to=in_reply_to))
         out.drafts_created += 1
         log_activity(session, f"Drafted follow-up email #{step} (awaiting approval)", self.name, type_="email_draft",
                      company_id=lead.company_id, lead_id=lead.id)
@@ -150,7 +151,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         return "created"
 
     def _new_outreach(self, session: Session, lead: Lead, step: int, due: datetime, evidence_dicts: list[dict],
-                      evidence, out: SalesOutput) -> None:
+                      evidence, out: SalesOutput, in_reply_to: str | None = None) -> None:
         contact = lead.contact
         subject, body = draft_outreach(self.settings, step, lead, contact, evidence)
         suppressed = is_suppressed(session, contact.email, lead.company.domain)
@@ -158,7 +159,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         # Every email waits for a person to approve it; there is no setting that skips this.
         session.add(FollowUp(lead_id=lead.id, contact_id=contact.id, company_id=lead.company_id, channel="email",
                              kind="outreach", step=step, due_at=due, status="awaiting_approval", subject=subject,
-                             body=body, to_email=contact.email, evidence=evidence_dicts, quality={"qc": qc}))
+                             body=body, to_email=contact.email, evidence=evidence_dicts, quality={"qc": qc},
+                             in_reply_to=in_reply_to))
         out.outreach_drafts += 1
         log_activity(session, f"Drafted outreach email #{step} to {contact.email} (awaiting approval; checks "
                      f"{qc['status']})", self.name, type_="email_draft", company_id=lead.company_id, lead_id=lead.id)
@@ -194,10 +196,12 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 continue
             gap = timedelta(days=intervals[last.step] - intervals[last.step - 1])
             if last.sent_at and now >= last.sent_at + gap:
+                # The next step answers the last one we sent, so it stays in the same conversation.
                 if outreach:
-                    self._new_outreach(session, lead, last.step + 1, now, list(last.evidence or []), [], out)
+                    self._new_outreach(session, lead, last.step + 1, now, list(last.evidence or []), [], out,
+                                       in_reply_to=last.message_id)
                 else:
-                    self._new_draft(session, lead, last.step + 1, now, out)
+                    self._new_draft(session, lead, last.step + 1, now, out, in_reply_to=last.message_id)
 
     def _ensure_task(self, session: Session, lead: Lead, out: SalesOutput) -> None:
         # A cancelled task (lead dropped below the threshold) does not block a fresh one if it re-qualifies.
@@ -320,7 +324,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             session.refresh(f)
             try:
                 msg_id = self.sender.send(f.to_email or contact.email, f.subject, f.body or "", in_reply_to=f.in_reply_to,
-                                          message_id=f.message_id)
+                                          message_id=f.message_id, references=self._references(session, f))
             except (EmailNotReady, smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused,
                     smtplib.SMTPConnectError, smtplib.SMTPAuthenticationError, ConnectionRefusedError,
                     socket.gaierror) as exc:
@@ -387,6 +391,21 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         if limits["domains"].get(domain, 0) >= limits["per_domain"]:
             return f"Already emailed {domain} today (limit {limits['per_domain']}); it will go out tomorrow"
         return None
+
+    @staticmethod
+    def _references(session: Session, f: FollowUp) -> str | None:
+        """The thread's Message-IDs, oldest first, ending with the email this one answers (References header)."""
+        if not f.in_reply_to:
+            return None
+        if f.kind == "response":
+            row = session.execute(select(InboundEmail).where(InboundEmail.message_id == f.in_reply_to)).scalars().first()
+            chain = (row.references or "").split() if row else []
+        else:  # earlier steps of the same sequence
+            same_kind = FollowUp.kind.is_(None) if f.kind is None else FollowUp.kind == f.kind
+            chain = [m for m in session.execute(select(FollowUp.message_id).where(
+                FollowUp.lead_id == f.lead_id, FollowUp.channel == "email", FollowUp.status == "sent", same_kind,
+                FollowUp.step < f.step).order_by(FollowUp.step)).scalars() if m]
+        return " ".join(list(dict.fromkeys([*chain, f.in_reply_to]))[-10:])
 
     @staticmethod
     def _response_problem(session: Session, f: FollowUp) -> str | None:

@@ -85,7 +85,7 @@ class EmailSender:
         return sorted(tests)[0], True
 
     def send(self, to: str, subject: str, body: str, in_reply_to: str | None = None,
-             message_id: str | None = None) -> str:
+             message_id: str | None = None, references: str | None = None) -> str:
         """Returns the Message-ID. Pass `message_id` (stored before sending) so it is known even if the send fails
         midway, and replies to a delivered-but-unconfirmed email still match by In-Reply-To."""
         ready, reason = self.status()
@@ -108,9 +108,9 @@ class EmailSender:
         msg["Message-ID"] = msg_id
         unsub = s.unsubscribe_email or s.smtp_from
         msg["List-Unsubscribe"] = f"<mailto:{unsub}?subject=unsubscribe>"
-        if in_reply_to:  # keep the reply in the prospect's thread
+        if in_reply_to:  # keep the reply in the thread: References carries the whole chain, ending with its parent
             msg["In-Reply-To"] = in_reply_to
-            msg["References"] = in_reply_to
+            msg["References"] = references or in_reply_to
         msg.set_content(body)
         with self.smtp_factory(s.smtp_host, s.smtp_port, timeout=MAIL_TIMEOUT) as smtp:
             if s.smtp_use_tls:

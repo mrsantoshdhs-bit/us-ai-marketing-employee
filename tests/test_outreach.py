@@ -335,3 +335,25 @@ def test_every_follow_up_template_passes_the_quality_checks(make_ctx, step):
         subject, body = draft_outreach(ctx.settings, step, lead, lead.contact, [])
         qc = run_email_checks(subject, body, [], lead.contact, False, step=step)
     assert qc["status"] == "passed", qc  # a template that always fails could only be sent with an override
+
+
+def test_follow_up_steps_reply_in_the_same_thread(make_ctx):
+    ctx = researched(make_ctx, **SENDING)
+    FakeSMTP.sent = []
+    sender = EmailSender(ctx.settings, smtp_factory=FakeSMTP)
+    day = TUESDAY_11AM_ET
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": day.isoformat()})
+    ids = []
+    for step, wait in ((1, 0), (2, 7), (3, 7)):  # whole weeks: every send lands on a Tuesday, inside the window
+        day = day + timedelta(days=wait, minutes=5)
+        SalesWorkflowAgent(ctx, sender=sender).run({"now": day.isoformat()})  # drafts the next step when due
+        approve_all(ctx)
+        SalesWorkflowAgent(ctx, sender=sender).run({"now": day.isoformat()})
+        assert len(FakeSMTP.sent) == step, [(f.step, f.status, f.blocked_reason) for f in drafts(ctx)]
+        msg = FakeSMTP.sent[-1]
+        if step == 1:
+            assert msg["In-Reply-To"] is None
+        else:
+            assert msg["In-Reply-To"] == ids[-1] and msg["References"].split() == ids
+        ids.append(msg["Message-ID"])
+    assert [f.message_id for f in drafts(ctx)] == ids
