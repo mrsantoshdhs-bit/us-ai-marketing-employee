@@ -4,10 +4,18 @@ Categories (first match wins, safety first): bounce, calendly, unsubscribe (incl
 out_of_office, then the human answers interested / not_interested / objection / referral / question,
 else other. Conflicting signals or a complaint lower the confidence and send the reply to review.
 
+Interest includes meeting requests in everyday wording ("can we talk Thursday?", "let's arrange a call",
+"I'd like a demo") and common misspellings ("sound interesting", "intrested"). A negation in front of it
+("don't schedule a call") still sends the reply to review.
+
 Every human reply stops the automated sequence. Unsubscribes and bounces suppress the address.
 Interested replies open (or advance) an opportunity and notify the Sales Manager. Suggested responses
 are drafts that wait for approval like every other email. Simulated replies (`aime simulate-reply`)
 are processed the same way and labelled SIMULATED wherever they appear.
+
+When the rules can only say "question" or "other", the local AI model (if one is running) gives a second
+opinion. It never acts on its own: a reply it reads as interest stays in review, with the suggestion in its
+reasons and a "possible interest" alert, and the Sales Manager decides (Replies page: reclassify).
 """
 
 from __future__ import annotations
@@ -19,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from aime.crm_ops import log_activity, suppress
 from aime.inbox import own_text
+from aime.llm.base import LLMError
 from aime.models import Alert, Contact, FollowUp, InboundEmail, Lead, Opportunity
 from aime.notify import notify_event
 from aime.integrations.email_smtp import POSTAL_PLACEHOLDER
@@ -30,7 +39,8 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
                                r"do not (email|contact)|don'?t (email|contact) me|opt[- ]?out)\b", re.I)),
     ("not_interested", re.compile(r"\b(not interested|no thanks|no, thank you|not a (good )?fit|we'?re all set|"
                                   r"not (looking|in the market)|pass on this|no need|not for us|we'?re good)\b", re.I)),
-    ("interested", re.compile(r"\b(interested|sounds (good|great|interesting)|let'?s (talk|chat|connect|set up)|"
+    ("interested", re.compile(r"\b(interested|sounds? (good|great|interesting|in(te|t|tr)[a-z]{0,3}st(ed|ing))|"
+                              r"in(te|tr)[a-z]{0,3}st(ed|ing)|let'?s (talk|chat|connect|set up)|"
                               r"happy to (chat|talk|connect|meet)|book a (time|call|meeting)|schedule a (call|meeting)|"
                               r"set up a (call|meeting)|tell me more|send (me )?(more|some) (info|details)|"
                               r"what (does it|would it) cost|how much|pricing|availab(le|ility)|free (on|next)|"
@@ -46,6 +56,18 @@ COMPLAINT = re.compile(r"\b(spam|report(ed|ing)? (you|this)|lawyer|attorney|lega
 OOO = re.compile(r"\b(out of (the )?office|on (vacation|holiday|leave)|limited access to (my )?email|"
                  r"will be back|returning on|away until|automatic reply)\b", re.I)
 CALENDLY = re.compile(r"calendly\.com", re.I)
+# Asking for a meeting, a call or a demo in everyday wording (and without the article: "schedule meeting").
+_TALK = r"(talk|chat|speak|meet|connect|discuss|catch up|hop on a call|jump on a call)"
+_THING = r"(time|meeting|call|demo|chat|session|appointment|slot|conversation|walkthrough|presentation)"
+_WHEN = r"(monday|tuesday|wednesday|thursday|friday|tomorrow|today|this week|next week)"
+MEETING = re.compile(
+    rf"\b((can|could|shall|should|would|may) (we|you|i) (please )?({_TALK}|schedule|set ?up|arrange|book|organi[sz]e)"
+    rf"|(schedule|arrange|set ?up|book|organi[sz]e|plan|fix) (a |an |the |some |our )?{_THING}"
+    rf"|(let'?s|lets|let us) ({_TALK}|schedule|arrange|set ?up|book|do|have)"
+    rf"|(would|i'?d|we'?d|i|we) (really )?(like|love|want|be happy|be glad|be keen) (to )?(see |get |have |book |schedule |set up )?"
+    rf"(a |an )?(demo|call|meeting|chat|walkthrough|presentation|quote|proposal|trial)"
+    rf"|(send|share|show) (me |us )?(a |an |the )?(demo|deck|proposal|quote)"
+    rf"|{_TALK}\b[^.?!\n]{{0,40}}\b{_WHEN})\b", re.I)
 # "not", "never", "don't" ... up to two words before an interest phrase: "not really interested", "don't send me more info"
 NEGATED = re.compile(r"(\bnot|\bnever|\bno longer|\bcannot|\bdont|\b\w+n['\u2019]t)\s+(\w+\s+){0,2}$", re.I)
 HUMAN = ("interested", "not_interested", "objection", "referral", "question", "other")
@@ -80,6 +102,12 @@ def _classify(row: InboundEmail) -> tuple[str, str, list[str]]:
         m = dict(PATTERNS)["interested"].search(f"{subject}\n{text}")
         if NEGATED.search(f"{subject}\n{text}"[:m.start()][-40:]):
             negated = hits.pop("interested")
+    meeting = MEETING.search(text)  # their own words only: our quoted email never asks them for a meeting
+    if meeting and NEGATED.search(text[:meeting.start()][-40:]):  # "please don't schedule a call"
+        negated = negated or meeting.group(0)
+        meeting = None
+    if meeting:
+        hits.setdefault("interested", meeting.group(0))
     if "unsubscribe" in hits or complaint:
         reasons = [f'"{hits["unsubscribe"]}"'] if "unsubscribe" in hits else []
         if complaint:
@@ -97,8 +125,35 @@ def _classify(row: InboundEmail) -> tuple[str, str, list[str]]:
         return "other", "low", ["no clear signal"]
     category = human[0]
     conflicting = len(set(human) & {"interested", "not_interested"}) == 2 or len(human) > 2
-    reasons = [f'{k.replace("_", " ")}: "{hits[k]}"' for k in human]
+    reasons = [f'{k.replace("_", " ")}: "{hits[k]}"' for k in human if not (k == "interested" and meeting
+                                                                              and hits[k] == meeting.group(0))]
+    if meeting and "interested" in human:
+        reasons.append(f'asks for a meeting, call, demo or proposal: "{meeting.group(0)}"')
     return category, "low" if conflicting else ("high" if len(human) == 1 else "medium"), reasons
+
+
+AI_SYSTEM = ("You read one reply to a B2B sales email. Answer with exactly one line in the form CATEGORY|MEETING. "
+             "CATEGORY is one of: interested, not_interested, question, objection, referral, unsubscribe, other. "
+             "MEETING is yes if the writer asks to talk, meet, have a call or see a demo, otherwise no. "
+             "Typos are common; judge the meaning. Write nothing else.")
+AI_ANSWER = re.compile(r"\b(interested|not[ _]interested|question|objection|referral|unsubscribe|other)\s*\|\s*(yes|no)\b", re.I)
+AI_PER_RUN = 5  # each answer takes several seconds on a local model
+
+
+def ai_second_opinion(llm, row: InboundEmail) -> tuple[str, bool] | None:
+    """The local model's reading of a reply the rules could not place: (category, asks for a meeting), or None
+    when no model is running or its answer is not in the expected form. Only ever a suggestion."""
+    text = (row.new_text or own_text(row.body_text or "")).strip()
+    if llm is None or not text:
+        return None
+    try:
+        answer = llm.generate(f"Reply:\n<<<\n{text[:1500]}\n>>>", system=AI_SYSTEM, max_tokens=12, temperature=0.0)
+    except (LLMError, OSError, ValueError):
+        return None
+    m = AI_ANSWER.search(answer or "")
+    if not m:
+        return None
+    return m.group(1).lower().replace(" ", "_"), m.group(2).lower() == "yes"
 
 
 def match(session: Session, row: InboundEmail) -> tuple[FollowUp | None, Contact | None, Lead | None]:
@@ -247,11 +302,27 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
                  actor, type_="reply", body=(row.new_text or "")[:2000], company_id=row.company_id, lead_id=row.lead_id)
 
 
-def process_pending(session: Session, settings, actor: str) -> dict:
+def process_pending(session: Session, settings, actor: str, llm=None) -> dict:
     stats: dict[str, int] = {}
+    ai_budget = AI_PER_RUN
     for row in session.execute(select(InboundEmail).where(InboundEmail.status == "new").order_by(InboundEmail.id)).scalars().all():
         row.category, row.confidence, row.reasons = classify(row)
+        opinion = None
+        if llm is not None and ai_budget > 0 and row.category in ("question", "other") and row.confidence != "high":
+            ai_budget -= 1
+            opinion = ai_second_opinion(llm, row)
+            if opinion:
+                ai_cat, ai_meeting = opinion
+                row.reasons = list(row.reasons or []) + [
+                    f"AI ({getattr(llm, 'label', 'local model')}) suggests: {ai_cat.replace('_', ' ')}"
+                    + (", asks for a meeting" if ai_meeting else "") + " (please check)"]
         act(session, settings, row, actor)
+        if opinion and (opinion[0] == "interested" or opinion[1]) and row.status == "needs_review":
+            where = f" ({row.lead.company.name})" if row.lead else ""
+            msg = (f"{'SIMULATED: ' if row.is_simulated else ''}Possible interest{', a meeting request' if opinion[1] else ''} "
+                   f"from {row.from_email}{where}: the AI reads it so, the rules were unsure. Please review it on Replies.")
+            session.add(Alert(level="info", source="inbox", message=msg[:500]))
+            notify_event(settings, msg)
         stats[row.category] = stats.get(row.category, 0) + 1
         session.commit()
     return stats
