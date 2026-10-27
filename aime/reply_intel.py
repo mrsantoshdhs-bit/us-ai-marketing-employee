@@ -64,8 +64,10 @@ def classify(row: InboundEmail) -> tuple[str, str, list[str]]:
 def _classify(row: InboundEmail) -> tuple[str, str, list[str]]:
     text = row.new_text or own_text(row.body_text or "")
     subject = row.subject or ""
-    if row.bounced_addresses or re.match(r"^(mailer-daemon|postmaster)@", row.from_email or "", re.I):
+    if row.bounced_addresses:
         return "bounce", "high", ["delivery failure report"]
+    if re.match(r"^(mailer-daemon|postmaster)@", row.from_email or "", re.I):
+        return "bounce", "low", ["delivery report without a permanently failed address (for example a delay)"]
     if CALENDLY.search(row.from_email or "") or (CALENDLY.search(row.new_text or row.body_text or "")
                                                   and re.search(r"\b(new event|canceled|cancelled)\b", subject, re.I)):
         return "calendly", "high", ["Calendly notification"]
@@ -179,14 +181,20 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
     row.company_id = lead.company_id if lead else (contact.company_id if contact else None)
     notes = []
     if row.category == "bounce":
-        for addr in row.bounced_addresses or ([f.to_email] if f and f.to_email else []):
+        # Only a permanent failure suppresses. A person who reclassifies a report as a bounce (confidence high)
+        # confirms the failed email's address.
+        failed = row.bounced_addresses or ([f.to_email] if f and f.to_email and row.confidence == "high" else [])
+        for addr in failed:
             for c in session.execute(select(Contact).where(func.lower(Contact.email) == addr.lower())).scalars():
                 c.email_status = "bounced"
             suppress(session, addr, "Bounced (delivery failure report)")
             notes.append(f"{addr} bounced: marked bounced and suppressed")
-        if lead and lead.outreach_status:
+        if failed and lead and lead.outreach_status:
             stop_sequence(session, lead, "bounced", "Email bounced", actor)
-        row.status = "actioned" if notes else "needs_review"
+        if not failed:
+            notes.append("No permanently failed address found (for example a delay notice): nothing suppressed; "
+                         "check it, and reclassify it as a bounce if delivery failed")
+        row.status = "actioned" if failed and (f or contact) else "needs_review"  # unmatched: a person checks
     elif row.category == "unsubscribe":
         suppress(session, row.from_email, f"Unsubscribe request by email{' (complaint)' if row.confidence != 'high' else ''}")
         if contact:

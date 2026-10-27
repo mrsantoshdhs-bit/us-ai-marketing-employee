@@ -49,13 +49,14 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
 
     def execute(self, inp: InboxInput, session: Session) -> InboxOutput:
         out = InboxOutput()
-        own = {a.lower() for a in (self.settings.smtp_from, self.settings.imap_credentials[0]) if a}
+        own = {a.lower() for a in (self.settings.smtp_from, self.settings.imap_credentials[0],
+                                    self.settings.unsubscribe_email) if a}
         if self.mailbox is not None and self.settings.network_enabled:
             out.mailbox = f"{self.settings.imap_host} / {self.settings.imap_folder} (read-only)"
             raws, state = self.mailbox.fetch_new(kv_get(session, "inbox.state"))
             out.fetched = len(raws)
             for key, raw in raws:
-                p = parse_message(raw)
+                p = parse_message(raw, own)
                 if p.from_email in own:
                     out.skipped_own += 1
                     continue

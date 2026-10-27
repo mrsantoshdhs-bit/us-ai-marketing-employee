@@ -67,28 +67,64 @@ def _text_of(msg: Message) -> str:
     return unescape(re.sub(r"<[^>]+>", " ", joined))
 
 
-def _dsn_info(msg: Message) -> tuple[list[str], str | None]:
-    recipients, original = [], None
+# Where a plain-text bounce starts copying the original message (our own footer and addresses are in it).
+COPY_START = re.compile(r"(?im)^.*\b(copy of (the|your) (original )?message|original message|returned message|"
+                        r"message headers follow|undelivered message)\b.*$")
+SOFT_TEXT = re.compile(r"\b(delay(ed)?|will (retry|keep trying|try again)|temporar(y|ily)|deferred|4\.\d{1,3}\.\d{1,3})\b", re.I)
+HARD_TEXT = re.compile(r"\b(permanent(ly)?|given up|5\.\d{1,3}\.\d{1,3}|no such|user unknown|does not exist|"
+                       r"address not found|no mailbox)\b", re.I)
+TEXT_RECIPIENT = re.compile(r"(?:Final-Recipient: rfc822;\s*|\bto\s+<?|\baddress:?\s+<?|^<)([\w.+-]+@[\w-]+(?:\.[\w-]+)+)",
+                            re.I | re.M)
+
+
+def _report_text(part: Message) -> str:
+    """The delivery report's own text: attachments and attached copies of the original message left out."""
+    if part.get_content_maintype() == "message":
+        return ""
+    if part.is_multipart():
+        return "\n".join(_report_text(p) for p in part.get_payload())
+    if part.get_content_type() != "text/plain" or part.get("Content-Disposition", "").startswith("attachment"):
+        return ""
+    try:
+        return part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", errors="replace")
+    except (AttributeError, LookupError):
+        return ""
+
+
+def _dsn_info(msg: Message, own: frozenset[str] = frozenset()) -> tuple[list[str], str | None]:
+    """Permanently failed recipients and the original Message-ID. A delay or other temporary notice (Action
+    delayed, Status 4.x.x) lists no recipient: the server is still trying, so nothing may be suppressed."""
+    recipients, original, structured = [], None, False
     for part in msg.walk():
         ctype = part.get_content_type()
         if ctype == "message/delivery-status":
+            structured = True
             for block in part.get_payload() if part.is_multipart() else [part]:
+                if not hasattr(block, "get_all"):
+                    continue
+                action = (block.get("Action") or "").strip().lower()
+                status = (block.get("Status") or "").strip()
+                if action != "failed" and not status.startswith("5"):
+                    continue  # delayed, delivered, relayed, or the per-message block
                 for key in ("Final-Recipient", "Original-Recipient"):
-                    for value in block.get_all(key, []) if hasattr(block, "get_all") else []:
-                        addr = value.split(";", 1)[-1].strip().lower()
-                        if "@" in addr and addr not in recipients:
+                    for value in block.get_all(key, []):
+                        addr = value.split(";", 1)[-1].strip().strip("<>").lower()
+                        if "@" in addr and addr not in recipients and addr not in own:
                             recipients.append(addr)
         elif ctype in ("message/rfc822", "text/rfc822-headers") and original is None:
             inner = part.get_payload(0) if part.is_multipart() else email.message_from_string(part.get_payload())
             original = (inner.get("Message-ID") or "").strip() or None
-    if not recipients:
-        text = _text_of(msg)
-        recipients = list(dict.fromkeys(m.lower() for m in re.findall(
-            r"(?:Final-Recipient: rfc822;|to\s+|address:?\s+)<?([\w.+-]+@[\w-]+(?:\.[\w-]+)+)>?", text, re.I)))
+    if not structured:  # a plain-text bounce: read only the report, before any copy of our message
+        text = _report_text(msg)
+        cut = COPY_START.search(text)
+        report = text[:cut.start()] if cut else text
+        if HARD_TEXT.search(report) or not SOFT_TEXT.search(report):
+            recipients = [a for a in dict.fromkeys(m.lower() for m in TEXT_RECIPIENT.findall(report)) if a not in own]
     return recipients, original
 
 
-def parse_message(raw: bytes) -> ParsedEmail:
+def parse_message(raw: bytes, own: frozenset[str] | set[str] = frozenset()) -> ParsedEmail:
+    """`own`: our own addresses (sender, mailbox, unsubscribe address), never taken as a bounced recipient."""
     msg = email.message_from_bytes(raw)
     name, addr = parseaddr(msg.get("From", ""))
     to = [a for _, a in getaddresses(msg.get_all("To", []))]
@@ -101,7 +137,7 @@ def parse_message(raw: bytes) -> ParsedEmail:
             or msg.get("Precedence", "").lower() in ("auto_reply", "bulk", "junk") or bool(AUTO_SUBJECT.search(subject)))
     is_bounce = bool(BOUNCE_SENDERS.search(addr or "")) or msg.get_content_type() == "multipart/report" \
         or bool(BOUNCE_SUBJECT.search(subject) and (auto or BOUNCE_SENDERS.search(addr or "")))
-    bounced, original = _dsn_info(msg) if is_bounce else ([], None)
+    bounced, original = _dsn_info(msg, frozenset(a.lower() for a in own)) if is_bounce else ([], None)
     return ParsedEmail(
         message_id=(msg.get("Message-ID") or "").strip() or None, in_reply_to=(msg.get("In-Reply-To") or "").strip() or None,
         references=" ".join((msg.get("References") or "").split()), from_email=(addr or "").lower(),

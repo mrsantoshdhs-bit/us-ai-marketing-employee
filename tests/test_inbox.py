@@ -306,3 +306,55 @@ def test_a_reply_below_the_quote_is_never_read_as_our_own_unsubscribe_line(make_
         assert not s.execute(select(Suppression)).first()
         assert s.execute(select(Contact).where(Contact.email == DAVID)).scalar_one().consent_status != "opted_out"
     assert new_text("Sent from my iPhone\n\nYes please, call me.") == "Yes please, call me."
+
+
+def delay_report(addr, original_id) -> bytes:
+    lines = ["From: Mail Delivery Subsystem <mailer-daemon@mx.example>", "To: sales@us.example",
+             "Subject: Delivery Status Notification (Delay)", "Message-ID: <delay-1@mail.example>",
+             "Date: Tue, 27 Oct 2026 17:00:00 +0000", "MIME-Version: 1.0",
+             'Content-Type: multipart/report; report-type=delivery-status; boundary="B"', "",
+             "--B", "Content-Type: text/plain; charset=utf-8", "",
+             f"Your message to {addr} has been delayed. Gmail will retry for 46 more hours.", "",
+             "--B", "Content-Type: message/delivery-status", "", "Reporting-MTA: dns; mx.example", "",
+             f"Final-Recipient: rfc822; {addr}", "Action: delayed", "Status: 4.4.7", "",
+             "--B", "Content-Type: text/rfc822-headers", "", f"Message-ID: {original_id}", f"To: {addr}", "",
+             "--B--", ""]
+    return "\r\n".join(lines).encode()
+
+
+def test_a_delay_notice_is_not_a_bounce(make_ctx):
+    ctx, _, sent = contacted(make_ctx)
+    FakeIMAP.messages = {1: delay_report(DAVID, sent.message_id)}
+    run_inbox(ctx)
+    r = latest_reply(ctx)
+    assert (r.category, r.confidence, r.status, r.bounced_addresses) == ("bounce", "low", "needs_review", [])
+    with ctx.db.session() as s:
+        assert not s.execute(select(Suppression)).first()
+        assert s.execute(select(Contact).where(Contact.email == DAVID)).scalar_one().email_status != "bounced"
+    assert lead_of(ctx).outreach_status == "contacted"  # the sequence goes on; the server is still trying
+
+
+def test_a_plain_text_bounce_names_the_failed_recipient_not_our_own_address(make_ctx):
+    ctx, _, sent = contacted(make_ctx, unsubscribe_email="optout@us.example")
+    m = EmailMessage()
+    m["From"], m["To"], m["Subject"] = "MAILER-DAEMON@mx.example", "sales@us.example", "failure notice"
+    m["Message-ID"], m["Date"] = "<qmail-1@mx.example>", "Tue, 27 Oct 2026 16:05:00 +0000"
+    m.set_content("Hi. This is the qmail-send program at mx.example.\n"
+                  "I'm afraid I wasn't able to deliver your message to the following addresses.\n"
+                  "This is a permanent error; I've given up.\n\n"
+                  f"<{DAVID}>:\nSorry, no mailbox here by that name. (#5.1.1)\n\n"
+                  "--- Below this line is a copy of the message.\n\n"
+                  f"Message-ID: {sent.message_id}\nTo: {DAVID}\n\n{sent.body}\n")
+    assert "optout@us.example" in sent.body  # our footer, copied into the bounce
+    unknown = EmailMessage()  # a bounce for an address we never emailed
+    unknown["From"], unknown["To"], unknown["Subject"] = "MAILER-DAEMON@mx.example", "sales@us.example", "failure notice"
+    unknown["Message-ID"] = "<qmail-2@mx.example>"
+    unknown.set_content("This is a permanent error.\n\n<stranger@elsewhere.example>:\nUser unknown (#5.1.1)\n")
+    FakeIMAP.messages = {1: bytes(m), 2: bytes(unknown)}
+    run_inbox(ctx)
+    with ctx.db.session() as s:
+        ours, theirs = s.execute(select(InboundEmail).order_by(InboundEmail.id)).scalars().all()
+        assert ours.bounced_addresses == [DAVID] and ours.status == "actioned"
+        assert theirs.bounced_addresses == ["stranger@elsewhere.example"] and theirs.status == "needs_review"
+        suppressed = {x.value for x in s.execute(select(Suppression)).scalars()}
+        assert DAVID in suppressed and not suppressed & {"optout@us.example", "hello@us.example"}
