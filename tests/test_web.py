@@ -1,3 +1,4 @@
+import json
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -151,3 +152,24 @@ def test_linkedin_oauth_flow(make_ctx):
 def test_linkedin_connect_requires_configuration(client):
     r = client.get("/integrations/linkedin/connect", follow_redirects=False)
     assert r.status_code == 303 and "LINKEDIN_CLIENT_ID" in r.headers["location"]
+
+
+def test_inbound_api_is_off_without_a_token_and_takes_only_json(make_ctx):
+    payload = {"email": "lee@sample.example", "company": "Sample LLC", "message": "Need a CRM"}
+    r = TestClient(create_app(make_ctx())).post("/api/inbound", json=payload)
+    assert r.status_code == 403 and "INBOUND_API_TOKEN" in r.json()["detail"]
+    ctx = make_ctx(inbound_api_token="secret-token")
+    c = TestClient(create_app(ctx))
+    token = {"x-inbound-token": "secret-token"}
+    # a cross-site page can send text/plain without a preflight; it must not be accepted
+    r = c.post("/api/inbound", content=json.dumps(payload), headers={**token, "content-type": "text/plain"})
+    assert r.status_code == 415
+    with ctx.db.session() as s:
+        assert s.execute(select(InboundInquiry)).scalars().first() is None
+    assert c.post("/api/inbound", json=payload, headers=token).status_code == 201
+
+
+def test_testserver_host_is_accepted_only_for_test_data(make_ctx):
+    prod = make_ctx(data_role="production")
+    assert TestClient(create_app(prod)).get("/login").status_code == 400
+    assert TestClient(create_app(prod), base_url="http://127.0.0.1:8765").get("/login").status_code == 200

@@ -50,8 +50,8 @@ from aime.reply_intel import act as act_on_reply
 from aime.meetings import record_meeting
 from aime.scheduler.runner import due_jobs, run_job
 from aime.timeutil import fmt_et, fmt_local, utcnow
-from aime.web.auth import (COOKIE, SESSION_SECONDS, AuthMiddleware, authenticate, current_username, make_cookie,
-                           safe_next, session_secret, user_count)
+from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username,
+                           make_cookie, safe_next, session_secret, user_count)
 
 WEB_DIR = Path(__file__).resolve().parent
 STAGES = ["new", "discovery", "proposal", "negotiation", "won", "lost"]
@@ -132,8 +132,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     app.add_middleware(AuthMiddleware, get_ctx=lambda: app.state.ctx or get_context())
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(OriginCheckMiddleware)
-    hosts = [h.strip() for h in (ctx or get_context()).settings.allowed_hosts.split(",") if h.strip()]
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts + ["testserver"])
+    settings = (ctx or get_context()).settings
+    hosts = [h.strip() for h in settings.allowed_hosts.split(",") if h.strip()]
+    if settings.data_role == "test":
+        hosts.append("testserver")  # the test client's host name; never accepted for real data
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
     app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
     templates = Jinja2Templates(directory=WEB_DIR / "templates")
     env = templates.env
@@ -164,7 +167,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/login")
     def login_submit(request: Request, username: str = Form(""), password: str = Form(""), next: str = Form("/")):
-        with C().db.session() as s:
+        with LOGIN_LOCK, C().db.session() as s:
             user, message = authenticate(s, username, password)
             cookie = make_cookie(session_secret(C().settings.data_dir), user) if user else None
         if not cookie:
@@ -829,8 +832,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         if not limiter.allow(client_ip):
             raise HTTPException(429, "Too many requests; try again in a minute")
         token = C().settings.inbound_api_token
-        if token and not hmac.compare_digest(request.headers.get("x-inbound-token", ""), token):
+        if not token:
+            raise HTTPException(403, "The inbound API is off: set INBOUND_API_TOKEN in .env and send it as the "
+                                     "X-Inbound-Token header")
+        if not hmac.compare_digest(request.headers.get("x-inbound-token", ""), token):
             raise HTTPException(401, "Invalid inbound token")
+        if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+            raise HTTPException(415, "Send the inquiry as JSON (Content-Type: application/json)")
         raw = await request.body()
         if len(raw) > MAX_INBOUND_BYTES:
             raise HTTPException(413, "Inquiry too large")

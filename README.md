@@ -76,7 +76,8 @@ job runs to `job_runs`; health metrics (success rate, avg/p95 latency, retries) 
 - **US Census County Business Patterns**: market sizing by state; needs a free `CENSUS_API_KEY`.
 - **Your CSV lists** in `data/imports/` (exports you are entitled to use). Every row is imported (up to
   5,000 per file); the 40-companies-per-run limit applies only to public sources.
-- **Inbound inquiries**: dashboard form, `POST /api/inbound`, or files in `data/inbox/`.
+- **Inbound inquiries**: dashboard form, files in `data/inbox/`, or `POST /api/inbound` (JSON; off until
+  `INBOUND_API_TOKEN` is set, then send it as `X-Inbound-Token`).
 
 Dropped files are moved to `processed/` only after their rows are saved, are never imported twice
 (recognized by their SHA-256), and unreadable files go to `rejected/` instead of being deleted.

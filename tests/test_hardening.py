@@ -89,7 +89,7 @@ def test_production_database_refuses_test_settings(make_ctx, tmp_path):
 
 
 def test_production_rejects_sample_records(make_ctx):
-    ctx = make_ctx(data_role="production")
+    ctx = make_ctx(data_role="production", inbound_api_token="tok")
     with ctx.db.session() as s:
         record_inquiry(s, {"email": "a@b.example", "company": "Sample", "message": "Need a CRM please",
                            "is_sample": True}, "api")
@@ -98,8 +98,9 @@ def test_production_rejects_sample_records(make_ctx):
         inq = s.execute(select(InboundInquiry)).scalars().one()
         assert inq.status == "rejected" and "production" in inq.error
         assert s.execute(select(Company)).scalars().first() is None
-    c = TestClient(create_app(ctx))
-    r = c.post("/api/inbound", json={"email": "z@y.example", "company": "Z", "message": "hello there", "is_sample": True})
+    c = TestClient(create_app(ctx), base_url="http://127.0.0.1:8765")  # "testserver" is refused for real data
+    r = c.post("/api/inbound", json={"email": "z@y.example", "company": "Z", "message": "hello there", "is_sample": True},
+               headers={"x-inbound-token": "tok"})
     assert r.status_code == 422
 
 
@@ -322,15 +323,16 @@ def test_redaction_of_secrets_and_emails(ctx, caplog):
     assert "supersecretvalue" not in record.getMessage()
 
 
-def test_security_headers_and_inbound_limits(ctx):
-    c = TestClient(create_app(ctx))
+def test_security_headers_and_inbound_limits(make_ctx):
+    c = TestClient(create_app(make_ctx(inbound_api_token="tok")))
     r = c.get("/")
     assert r.headers["X-Frame-Options"] == "DENY" and "script-src 'none'" in r.headers["Content-Security-Policy"]
+    token = {"x-inbound-token": "tok"}
     assert c.post("/api/inbound", content=b"{" + b" " * 21000 + b"}",
-                  headers={"content-type": "application/json"}).status_code == 413
-    assert c.post("/api/inbound", content=b"not json", headers={"content-type": "application/json"}).status_code == 422
-    codes = [c.post("/api/inbound", json={"email": f"p{i}@x.example", "company": "X", "message": "hello there"}).status_code
-             for i in range(25)]
+                  headers={**token, "content-type": "application/json"}).status_code == 413
+    assert c.post("/api/inbound", content=b"not json", headers={**token, "content-type": "application/json"}).status_code == 422
+    codes = [c.post("/api/inbound", json={"email": f"p{i}@x.example", "company": "X", "message": "hello there"},
+                    headers=token).status_code for i in range(25)]
     assert 429 in codes
 
 
@@ -401,3 +403,21 @@ def test_network_failures_fall_back_to_cached_threads(make_ctx):
     res = USBusinessResearchAgent(ctx).run({"sources": ["hn_hiring"]})
     assert res.ok and res.output.sources[0].ok
     _ = hn_handler
+
+
+def test_secret_scan_knows_every_credential_setting_and_settings_file():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("secret_scan", ROOT / "scripts" / "secret_scan.py")
+    scan = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(scan)
+    word = "PASS" + "WORD"
+    for line in (f"IMAP_{word}=abcdwxyzabcdwxyz", f"SMTP_{word}=abcd wxyz abcd wxyz", "BACKUP_PASS" + "PHRASE=long-phrase-2026",
+                 "LINKEDIN_CLIENT_SEC" + "RET=abc123", "INBOUND_API_TO" + "KEN=t0ken"):
+        assert any(p.search(line) for p, _ in scan.SECRET_PATTERNS), line
+    assert not any(p.search(f"SMTP_{word}=") for p, _ in scan.SECRET_PATTERNS)  # empty placeholder is fine
+    for path in ("acceptance.env", "config/acceptance.env", ".env.local", "deploy/.env"):
+        assert any(p.search(path) for p, _ in scan.FORBIDDEN_PATHS), path
+    assert not any(p.search(".env.example") for p, _ in scan.FORBIDDEN_PATHS)
+    ignored = subprocess.run(["git", "check-ignore", "acceptance.env", ".env.example"], cwd=ROOT, capture_output=True,
+                             text=True)
+    assert ignored.stdout.split() == ["acceptance.env"]
