@@ -17,13 +17,21 @@ from aime.timeutil import utcnow
 OPEN_LEAD_STATUSES = ("new", "qualified", "nurture")
 
 
+def primary_lead(session: Session, company_id: int) -> Lead | None:
+    """The lead a company's work belongs to: an open one (research leads first, then the newest), else the
+    newest that was not merged away."""
+    leads = session.execute(select(Lead).where(Lead.company_id == company_id).order_by(Lead.id.desc())).scalars().all()
+    open_leads = sorted((x for x in leads if x.status in OPEN_LEAD_STATUSES), key=lambda x: (x.source != "research", -x.id))
+    return (open_leads or [x for x in leads if x.status != "merged"] or leads or [None])[0]
+
+
 def fingerprint(*parts: str | None) -> str:
     raw = "|".join((p or "").strip().lower() for p in parts)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
 
 
 def upsert_company(session: Session, cand: CompanyCandidate) -> tuple[Company, bool]:
-    existing = find_duplicate(session, cand.name, cand.domain, cand.state, cand.source_record_id)
+    existing = find_duplicate(session, cand.name, cand.domain, cand.state, cand.source_record_id, cand.source)
     if existing:
         # Fill gaps only; never overwrite verified data with weaker data.
         for attr in ("website", "domain", "state", "city", "industry", "employee_range", "location_text"):
@@ -35,7 +43,7 @@ def upsert_company(session: Session, cand: CompanyCandidate) -> tuple[Company, b
                 existing.phone = cand.phone
         if cand.description and not existing.description:
             existing.description = cand.description
-        if detect_competitor(cand.signal_text or cand.description):
+        if detect_competitor(cand.signal_text or cand.description) and not existing.competitor_cleared_by:
             existing.is_competitor = True
         return existing, False
     company = Company(
@@ -196,6 +204,8 @@ def merge_companies(session: Session, keeper: Company, dup: Company, actor: str)
         if not getattr(keeper, attr) and getattr(dup, attr):
             setattr(keeper, attr, getattr(dup, attr))
     keeper.verified = keeper.verified or dup.verified
+    if not keeper.source_record_id and dup.source_record_id:
+        keeper.source_record_id = dup.source_record_id  # e.g. the SEC CIK, so officers are still looked up
     dup.merged_into_id = keeper.id
     dup.lifecycle_stage = "merged"
     log_activity(session, f"Merged duplicate company #{dup.id} ({dup.name}) into #{keeper.id}", actor,

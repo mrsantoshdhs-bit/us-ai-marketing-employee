@@ -33,6 +33,11 @@ JOB_BOARD_DOMAINS = {
     "dover.com", "teamtailor.com", "pinpointhq.com", "jobs.lever.co", "welcometothejungle.com", "otta.com",
 }
 _MULTI_PART_TLDS = {"co.uk", "com.au", "co.in", "com.br", "co.jp"}
+# Hosting platforms give each customer a subdomain: there the full host is the company's site, not the platform.
+HOSTED_PLATFORMS = {"myshopify.com", "wixsite.com", "github.io", "squarespace.com", "webflow.io", "wordpress.com",
+                    "blogspot.com", "netlify.app", "vercel.app", "herokuapp.com", "carrd.co", "weebly.com",
+                    "godaddysites.com", "square.site", "business.site", "framer.website", "pages.dev", "web.app",
+                    "firebaseapp.com", "glitch.me", "replit.app", "bubbleapps.io", "softr.app", "notion.site"}
 
 
 def normalize_name(name: str) -> str:
@@ -53,7 +58,7 @@ def registrable_domain(host: str) -> str:
     if host.startswith("www."):
         host = host[4:]
     parts = host.split(".")
-    if len(parts) >= 3 and ".".join(parts[-2:]) in _MULTI_PART_TLDS:
+    if len(parts) >= 3 and ".".join(parts[-2:]) in _MULTI_PART_TLDS | HOSTED_PLATFORMS:
         return ".".join(parts[-3:])
     return ".".join(parts[-2:]) if len(parts) >= 2 else host
 
@@ -97,9 +102,13 @@ def core_name(normalized: str) -> str:
 
 
 def find_duplicate(session: Session, name: str, domain: str | None, state: str | None,
-                   source_record_id: str | None = None) -> Company | None:
+                   source_record_id: str | None = None, source: str | None = None) -> Company | None:
     """Find an existing (non-merged) company by source record, domain, normalized name, core name,
-    or a close name in the same state."""
+    or a close name in the same state.
+
+    A name alone matches only with the same state. When either side has no state, only the same source
+    listing the same name again counts (a company re-posting in a later hiring thread); "Atlas" (remote) from
+    a hiring post is not "ATLAS CORP" (NJ) from an SEC filing."""
     active = Company.merged_into_id.is_(None)
     if source_record_id:
         hit = session.execute(select(Company).where(Company.source_record_id == source_record_id)).scalars().first()
@@ -118,9 +127,13 @@ def find_duplicate(session: Session, name: str, domain: str | None, state: str |
         return None
     candidates = session.execute(select(Company).where(active, Company.normalized_name == norm)).scalars().all()
     for c in candidates:
-        if not state or not c.state or c.state == state:
-            if domain and c.domain and c.domain != domain:
-                continue  # same name, different website: different companies
+        if domain and c.domain and c.domain != domain:
+            continue  # same name, different website: different companies
+        if state and c.state:
+            if c.state == state:
+                return c
+            continue
+        if source and c.source == source:
             return c
     core = core_name(norm)
     if len(norm) >= 4:
@@ -130,6 +143,8 @@ def find_duplicate(session: Session, name: str, domain: str | None, state: str |
             stmt = stmt.where(Company.state == state)
         for c in session.execute(stmt).scalars():
             if domain and c.domain and c.domain != domain:
+                continue
+            if not (state and c.state) and not (source and c.source == source):
                 continue
             if state and len(core) >= 4 and core_name(c.normalized_name) == core:
                 return c
