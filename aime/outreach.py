@@ -127,8 +127,9 @@ def draft_outreach(settings: Settings, step: int, lead: Lead, contact, evidence:
                 f"\n\n{_signature(settings)}")
     else:
         subject = f"Closing the loop on {topic}"
-        body = (f"{greeting}\n\nI will not keep following up. If {topic} becomes a priority, just reply to this "
-                f"email and we can pick it up from there.\n\n{_signature(settings)}")
+        body = (f"{greeting}\n\nThank you for taking the time to read my notes. I will not keep following up. If "
+                f"{topic} becomes a priority, just reply to this email and we can pick it up from there."
+                f"\n\n{_signature(settings)}")
     return subject, body + outreach_footer(settings)
 
 

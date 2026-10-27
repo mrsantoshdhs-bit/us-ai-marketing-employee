@@ -322,3 +322,16 @@ def test_an_email_confirmed_by_mark_sent_continues_the_sequence_and_keeps_its_me
     out = SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=FakeSMTP)).run(
         {"now": TUESDAY_11AM_ET.isoformat()}).output
     assert out.outreach_drafts == 1 and drafts(ctx)[-1].step == 2
+
+
+@pytest.mark.parametrize("step", [2, 3])
+def test_every_follow_up_template_passes_the_quality_checks(make_ctx, step):
+    from aime.outreach import draft_outreach
+    from aime.qc.email_checks import run_email_checks
+    ctx = researched(make_ctx, **SENDING)
+    lead = lead_of(ctx)
+    with ctx.db.session() as s:
+        lead = s.get(Lead, lead.id)
+        subject, body = draft_outreach(ctx.settings, step, lead, lead.contact, [])
+        qc = run_email_checks(subject, body, [], lead.contact, False, step=step)
+    assert qc["status"] == "passed", qc  # a template that always fails could only be sent with an override
