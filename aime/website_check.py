@@ -1,7 +1,8 @@
 """Company website verification: is the domain live, is it the company's own site, is it parked?
 
 One polite request per company: robots.txt is honoured, only the homepage is fetched, the response
-is capped at 300 KB, and the User-Agent identifies this tool.
+is capped at 300 KB, and the User-Agent identifies this tool. As RFC 9309 says, only a robots.txt that does
+not exist (4xx) allows everything; one that cannot be read (5xx, 429, too large) means "do not crawl".
 """
 
 from __future__ import annotations
@@ -57,22 +58,42 @@ def _read_capped(resp: httpx.Response) -> str:
     return b"".join(chunks)[:MAX_BYTES].decode(resp.encoding or "utf-8", errors="replace")
 
 
-def _robots_allows(client: httpx.Client, domain: str) -> bool:
-    try:
-        r = client.get(f"https://{domain}/robots.txt")
-    except httpx.HTTPError:
+def robots_verdict(response: httpx.Response) -> RobotFileParser | bool:
+    """A robots.txt response as rules, True (no robots.txt: everything allowed) or False (unreadable: nothing)."""
+    if response.status_code == 429 or response.status_code >= 500 or len(response.content) > 500_000:
+        return False
+    if response.status_code >= 400:
         return True
-    if r.status_code != 200 or len(r.content) > 500_000:
-        return True
-    parser = RobotFileParser()
-    parser.parse(r.text.splitlines())
-    return parser.can_fetch(USER_AGENT.split("/")[0], f"https://{domain}/")
+    rules = RobotFileParser()
+    rules.parse(response.text.splitlines())
+    return rules
+
+
+def _robots(client: httpx.Client, domain: str) -> tuple[str, str]:
+    """allow | disallow | unavailable (robots.txt unreadable) | unreachable (no answer at all), with a note."""
+    for scheme in ("https", "http"):
+        try:
+            r = client.get(f"{scheme}://{domain}/robots.txt")
+        except httpx.HTTPError:
+            continue
+        verdict = robots_verdict(r)
+        if verdict is False:
+            return "unavailable", f"HTTP {r.status_code}, {len(r.content)} bytes"
+        if verdict is True or verdict.can_fetch(USER_AGENT.split("/")[0], f"{scheme}://{domain}/"):
+            return "allow", ""
+        return "disallow", ""
+    return "unreachable", ""
 
 
 def check_website(ctx, domain: str, company_name: str) -> WebsiteResult:
     with ctx.http(timeout=12, headers={"Accept": "text/html,application/xhtml+xml"}) as client:
-        if not _robots_allows(client, domain):
+        robots, note = _robots(client, domain)
+        if robots == "disallow":
             return WebsiteResult("robots_disallowed", domain, None, "Live, but robots.txt disallows the homepage")
+        if robots == "unavailable":
+            return WebsiteResult("blocked", domain, None, f"robots.txt could not be read ({note}): not checked")
+        if robots == "unreachable":
+            return WebsiteResult("unreachable", None, None, "No answer (robots.txt request failed)")
         resp = body = None
         last_error: Exception | None = None
         for scheme in ("https", "http"):

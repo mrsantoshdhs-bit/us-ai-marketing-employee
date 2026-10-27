@@ -53,7 +53,8 @@ class Company(Timestamped, Base):
     website_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
     website_title: Mapped[str | None] = mapped_column(String(300))
     validation: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict)
-    # Reading the company's own pages (aime.company_research): done | no_people | no_website | blocked | failed
+    # Reading the company's own pages (aime.company_research): done | no_people | no_website | blocked | failed |
+    # redirected (the site now sends visitors to another domain, which is not read)
     research_status: Mapped[str | None] = mapped_column(String(20))
     researched_at: Mapped[datetime | None] = mapped_column(DateTime)
 

@@ -1,5 +1,8 @@
 """Read a company's own website politely, as the owner allowed: only its own pages, robots.txt honoured
 for every page, a handful of pages per company, each capped in size, with a pause between requests.
+A robots.txt that cannot be read (5xx, 429, too large, no answer) means "do not crawl" (RFC 9309); only a
+missing one (4xx) allows everything. Redirects are followed one hop at a time, each checked against
+robots.txt, and never to another domain: a site that now redirects elsewhere is not read.
 
 The homepage is read first; then links on the same registrable domain whose path or link text points to
 team / leadership, about, contact or services pages (a few well-known paths are tried when the homepage
@@ -23,7 +26,7 @@ import httpx
 
 from aime.context import USER_AGENT
 from aime.dedupe import registrable_domain
-from aime.website_check import _read_capped
+from aime.website_check import _read_capped, robots_verdict
 
 # A link is classified by the first kind whose keywords appear in its path or text.
 PAGE_KINDS: list[tuple[str, tuple[str, ...]]] = [
@@ -36,6 +39,7 @@ PAGE_KINDS: list[tuple[str, tuple[str, ...]]] = [
 # These name a team page only on their own ("/people", "/about/management", a "Management" link), never inside a
 # product name ("/customer-management", "People analytics"): product pages quote customers, not staff.
 TEAM_WORDS_ALONE = ("management", "people", "staff")
+MAX_REDIRECTS = 5
 KIND_ORDER = {"team": 0, "about": 1, "contact": 2, "services": 3}
 FALLBACK_PATHS = (("/about", "about"), ("/about-us", "about"), ("/team", "team"), ("/our-team", "team"),
                   ("/leadership", "team"), ("/contact", "contact"), ("/contact-us", "contact"))
@@ -46,6 +50,10 @@ BLOCK_TAGS = {"p", "div", "li", "td", "th", "dt", "dd", "h1", "h2", "h3", "h4", 
               "main", "aside", "nav", "figure", "table", "form", "button"}
 INLINE_TAGS = {"span", "strong", "b", "em", "i", "small", "a", "cite"}
 SKIP_TAGS = {"script", "style", "noscript", "svg", "template", "iframe", "select", "option"}
+# Menus, page headers and footers: their neighbouring items ("Career Coaching", "Executive Coaching") are not
+# name/title cards. A header or footer inside an article or section belongs to that content and is kept.
+CHROME_TAGS = {"nav", "header", "footer"}
+CONTENT_TAGS = {"article", "section", "main", "aside"}
 EMAIL_RE = re.compile(r"(?<![\w.+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,24}(?![\w-])")
 
 
@@ -53,13 +61,16 @@ EMAIL_RE = re.compile(r"(?<![\w.+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2
 class Page:
     url: str
     kind: str  # home | team | about | contact | services
-    status: str  # ok | robots_disallowed | http_<code> | error | not_html
+    # ok | robots_disallowed | robots_unavailable | offsite_redirect | http_<code> | error | not_html
+    status: str
     title: str = ""
     meta: dict = field(default_factory=dict)
     blocks: list[tuple[str, str]] = field(default_factory=list)  # (tag, text) per block element, reading order
     segments: list[str] = field(default_factory=list)  # text split at block and inline element boundaries
     links: list[tuple[str, str]] = field(default_factory=list)  # (absolute url, link text)
     jsonld: list = field(default_factory=list)
+    content_blocks: list[tuple[str, str]] | None = None  # blocks outside menus, headers, footers (None: not split)
+    content_segments: list[str] | None = None  # segments outside menus, headers, footers
     emails: list[str] = field(default_factory=list)  # as published: mailto: links and visible text
     phones: list[str] = field(default_factory=list)  # tel: links
 
@@ -89,6 +100,9 @@ class _PageParser(HTMLParser):
         self._skip = 0
         self.mailtos: list[str] = []
         self.tels: list[str] = []
+        self._chrome: list[str] = []  # open menu/header/footer elements
+        self.content_blocks: list[tuple[str, str]] = []
+        self.content_segments: list[str] = []
 
     def handle_starttag(self, tag, attrs):
         a = {k: (v or "") for k, v in attrs}
@@ -106,6 +120,8 @@ class _PageParser(HTMLParser):
                 self.meta[key] = " ".join(unescape(a.get("content", "")).split())
         if tag in BLOCK_TAGS or tag == "br":
             self._flush_block()
+            if tag in CHROME_TAGS and (tag == "nav" or not CONTENT_TAGS & set(self._stack)):
+                self._chrome.append(tag)
             if tag != "br":
                 self._stack.append(tag)
         elif tag in INLINE_TAGS:
@@ -133,6 +149,8 @@ class _PageParser(HTMLParser):
             self._link = None
         if tag in BLOCK_TAGS:
             self._flush_block()
+            if tag in self._chrome:
+                self._chrome.remove(tag)
             if tag in self._stack:
                 while self._stack and self._stack.pop() != tag:
                     pass
@@ -158,6 +176,8 @@ class _PageParser(HTMLParser):
         self._seg_buf = []
         if text:
             self.segments.append(text)
+            if not self._chrome:
+                self.content_segments.append(text)
 
     def _flush_block(self) -> None:
         self._flush_segment()
@@ -165,6 +185,8 @@ class _PageParser(HTMLParser):
         self._block_buf = []
         if text:
             self.blocks.append((self._stack[-1] if self._stack else "text", text))
+            if not self._chrome:
+                self.content_blocks.append(self.blocks[-1])
 
 
 def parse_page(url: str, kind: str, html: str) -> Page:
@@ -189,7 +211,8 @@ def parse_page(url: str, kind: str, html: str) -> Page:
         if EMAIL_RE.fullmatch(e) and e not in emails:
             emails.append(e)
     return Page(url=url, kind=kind, status="ok", title=" ".join(unescape(p.title).split()), meta=p.meta,
-                blocks=p.blocks, segments=p.segments, links=links, jsonld=jsonld, emails=emails,
+                blocks=p.blocks, segments=p.segments, content_blocks=p.content_blocks,
+                content_segments=p.content_segments, links=links, jsonld=jsonld, emails=emails,
                 phones=list(dict.fromkeys(t for t in p.tels if t)))
 
 
@@ -223,40 +246,51 @@ class SiteReader:
         self.max_pages = max(1, max_pages)
         self.delay = max(0.0, delay)
         self.requested: list[str] = []
-        self._robots: dict[str, RobotFileParser | None] = {}
+        self._robots: dict[str, RobotFileParser | bool | None] = {}  # None: robots.txt request got no answer
 
-    def _allowed(self, client: httpx.Client, url: str) -> bool:
+    def _robots_status(self, client: httpx.Client, url: str) -> str:
+        """ok | robots_disallowed | robots_unavailable | error (robots.txt got no answer)."""
         parsed = urlparse(url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
         if origin not in self._robots:
-            rules = None
             try:
                 self.requested.append(origin + "/robots.txt")
-                r = client.get(origin + "/robots.txt")
-                if r.status_code == 200 and len(r.content) < 500_000:
-                    rules = RobotFileParser()
-                    rules.parse(r.text.splitlines())
+                self._robots[origin] = robots_verdict(client.get(origin + "/robots.txt"))
             except httpx.HTTPError:
-                rules = None
-            self._robots[origin] = rules
+                self._robots[origin] = None
         rules = self._robots[origin]
-        return rules is None or rules.can_fetch(USER_AGENT.split("/")[0], url)
+        if rules is None:
+            return "error"
+        if rules is False:
+            return "robots_unavailable"
+        return "ok" if rules is True or rules.can_fetch(USER_AGENT.split("/")[0], url) else "robots_disallowed"
 
     def _fetch(self, client: httpx.Client, url: str, kind: str) -> tuple[Page, str]:
-        if not self._allowed(client, url):
-            return Page(url=url, kind=kind, status="robots_disallowed"), url
-        try:
-            self.requested.append(url)
-            with client.stream("GET", url) as r:
-                final = str(r.url)
-                if r.status_code >= 400:
-                    return Page(url=url, kind=kind, status=f"http_{r.status_code}"), final
-                if "html" not in r.headers.get("content-type", "").lower():
-                    return Page(url=url, kind=kind, status="not_html"), final
-                body = _read_capped(r)
-        except httpx.HTTPError as exc:
-            return Page(url=url, kind=kind, status="error", title=type(exc).__name__), url
-        return parse_page(final, kind, body), final
+        start, site = url, registrable_domain(self.domain) or self.domain
+        for _ in range(MAX_REDIRECTS + 1):
+            allowed = self._robots_status(client, url)
+            if allowed != "ok":
+                return Page(url=start, kind=kind, status=allowed,
+                            title="robots.txt unreachable" if allowed == "error" else ""), url
+            try:
+                self.requested.append(url)
+                with client.stream("GET", url, follow_redirects=False) as r:
+                    if r.has_redirect_location:
+                        target = urljoin(url, r.headers["location"])
+                        if registrable_domain(urlparse(target).netloc) != site:
+                            return Page(url=start, kind=kind, status="offsite_redirect",
+                                        title=urlparse(target).netloc[:200]), target
+                        url = target
+                        continue
+                    if r.status_code >= 400:
+                        return Page(url=start, kind=kind, status=f"http_{r.status_code}"), url
+                    if "html" not in r.headers.get("content-type", "").lower():
+                        return Page(url=start, kind=kind, status="not_html"), url
+                    body = _read_capped(r)
+            except httpx.HTTPError as exc:
+                return Page(url=start, kind=kind, status="error", title=type(exc).__name__), url
+            return parse_page(url, kind, body), url
+        return Page(url=start, kind=kind, status="error", title="too many redirects"), url
 
     def read(self) -> list[Page]:
         pages: list[Page] = []
