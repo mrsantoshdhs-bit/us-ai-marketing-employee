@@ -37,6 +37,8 @@ from aime.timeutil import as_aware_utc, utcnow
 
 CONSENTED = ("inquiry", "opt_in")
 OPEN_FOLLOWUP = ("pending", "awaiting_approval", "approved", "sending", "uncertain")
+COUNTS_AS_SENT = ("sent", "sending", "uncertain")  # for the daily limits: an uncertain email may have gone out
+SEND_BUSY = "Another run is sending emails right now; this one goes out on the next run"
 
 
 class SalesInput(BaseModel):
@@ -232,11 +234,26 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             f.status = "awaiting_approval"
             f.blocked_reason = "Needs a person's approval before it can be sent"
             out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
-        approved = session.execute(select(FollowUp).where(
-            FollowUp.channel == "email", FollowUp.status == "approved", FollowUp.approved_at.is_not(None),
-            FollowUp.due_at <= now)).scalars().all()
-        if not approved:
+        due = select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "approved",
+                                     FollowUp.approved_at.is_not(None), FollowUp.due_at <= now)
+        if not session.execute(due.limit(1)).first():
             return
+        from aime.scheduler.runner import FileLock  # here, not at import time: the runner imports the agents
+
+        # Several jobs run this agent (research, inbound, followups), each under its own job lock. One send
+        # lock across them keeps the daily and per-domain limits true when two runs overlap.
+        lock = FileLock(self.settings.locks_dir / "send.lock", stale_seconds=1800)
+        if not lock.acquire():
+            for f in session.execute(due).scalars():
+                out.blocked.append(BlockedItem(id=f.id, reason=SEND_BUSY))
+            return
+        try:
+            self._send_locked(session, session.execute(due).scalars().all(), now, cfg, out)
+        finally:
+            lock.release()
+
+    def _send_locked(self, session: Session, approved: list[FollowUp], now: datetime, cfg: dict,
+                     out: SalesOutput) -> None:
         ready, reason = self.sender.status()
         in_window = self._in_send_window(now, cfg)
         limits = self._outreach_limits(session, now, cfg)
@@ -341,13 +358,15 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             session.commit()
 
     def _outreach_limits(self, session: Session, now: datetime, cfg: dict) -> dict:
-        """Outreach already sent today (in the send-window time zone), overall and per recipient domain."""
+        """Outreach already sent today (in the send-window time zone), overall and per recipient domain.
+        Emails being sent or of unknown outcome count too: they may have been delivered."""
         pol = self.settings.section("outreach")
         tz = ZoneInfo(cfg.get("send_window_timezone", "America/New_York"))
         local = as_aware_utc(now).astimezone(tz)
         start = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
-        sent = session.execute(select(FollowUp.to_email).where(FollowUp.kind == "outreach", FollowUp.status == "sent",
-                                                               FollowUp.sent_at >= start)).scalars().all()
+        sent = session.execute(select(FollowUp.to_email).where(
+            FollowUp.kind == "outreach", FollowUp.status.in_(COUNTS_AS_SENT),
+            func.coalesce(FollowUp.sent_at, FollowUp.send_started_at) >= start)).scalars().all()
         domains: dict[str, int] = {}
         for addr in sent:
             d = (addr or "").split("@")[-1]

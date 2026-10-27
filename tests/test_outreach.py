@@ -219,3 +219,71 @@ def test_send_time_recheck_cancels(make_ctx, change):
     assert FakeSMTP.sent == [] and drafts(ctx)[0].status == "cancelled"
     # suppressing cancels queued emails at once; an address change is caught by the send-time re-check
     assert drafts(ctx)[0].blocked_reason.startswith("Not sent:" if change == "address_changed" else "Contact unsubscribed")
+
+
+def _second_lead_at_same_domain(ctx, status="approved", started_at=None):
+    """Another qualified lead whose published contact uses the same email domain as David."""
+    from aime.models import Company
+    from aime.timeutil import utcnow
+    with ctx.db.session() as s:
+        f1 = s.execute(select(FollowUp).where(FollowUp.kind == "outreach")).scalar_one()
+        c1 = f1.contact
+        co2 = Company(name="Second Co", normalized_name="second co", domain="second-co.example",
+                      website="https://second-co.example", website_status="verified", source="hn_hiring")
+        s.add(co2)
+        s.flush()
+        c2 = Contact(company_id=co2.id, email=f"maria@{SITE}", first_name="Maria", source=c1.source,
+                     email_source_url=c1.email_source_url, email_status=c1.email_status,
+                     role_category=c1.role_category, consent_status=c1.consent_status)
+        s.add(c2)
+        s.flush()
+        l2 = Lead(company_id=co2.id, contact_id=c2.id, source="research", status="qualified", score=70, grade="B",
+                  primary_service="bpa", outreach_status="approved")
+        s.add(l2)
+        s.flush()
+        s.add(FollowUp(lead_id=l2.id, contact_id=c2.id, company_id=co2.id, channel="email", kind="outreach", step=1,
+                       due_at=f1.due_at, status=status, approved_by="tester", approved_at=utcnow(),
+                       send_started_at=started_at, subject=f1.subject, body=f1.body,
+                       to_email=c2.email, evidence=f1.evidence, quality=f1.quality))
+
+
+def test_an_email_of_unknown_outcome_counts_toward_the_per_domain_limit(make_ctx):
+    ctx = researched(make_ctx, **SENDING)
+    FakeSMTP.sent = []
+    sender = EmailSender(ctx.settings, smtp_factory=FakeSMTP)
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})
+    approve_all(ctx)
+    _second_lead_at_same_domain(ctx, status="uncertain", started_at=TUESDAY_11AM_ET - timedelta(hours=1))  # may have arrived
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})
+    david = next(f for f in drafts(ctx) if f.to_email == f"david.chen@{SITE}")
+    assert FakeSMTP.sent == [] and david.status == "approved" and "Already emailed" in david.blocked_reason
+
+
+def test_overlapping_runs_share_one_send_lock_so_limits_hold(make_ctx):
+    from aime.agents.sales_workflow import SEND_BUSY
+    from aime.scheduler.runner import FileLock
+    ctx = researched(make_ctx, **SENDING)
+    FakeSMTP.sent = []
+    SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=FakeSMTP)).run(
+        {"now": TUESDAY_11AM_ET.isoformat()})
+    approve_all(ctx)
+    _second_lead_at_same_domain(ctx)
+    other = FileLock(ctx.settings.locks_dir / "send.lock")  # another job's run is sending
+    assert other.acquire()
+    out = SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=FakeSMTP)).run(
+        {"now": TUESDAY_11AM_ET.isoformat()}).output
+    assert FakeSMTP.sent == [] and {b.reason for b in out.blocked} == {SEND_BUSY}
+    other.release()
+
+    class OverlappingSMTP(FakeSMTP):  # a second run starts while the first is talking to the mail server
+        def send_message(self, msg):
+            if not getattr(OverlappingSMTP, "nested", False):
+                OverlappingSMTP.nested = True
+                SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=FakeSMTP)).run(
+                    {"now": TUESDAY_11AM_ET.isoformat()})
+            super().send_message(msg)
+
+    SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=OverlappingSMTP)).run(
+        {"now": TUESDAY_11AM_ET.isoformat()})
+    assert len(FakeSMTP.sent) == 1  # one email a day to that domain, however the runs overlap
+    assert not (ctx.settings.locks_dir / "send.lock").exists()
