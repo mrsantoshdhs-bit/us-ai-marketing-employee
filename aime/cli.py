@@ -403,12 +403,12 @@ def cmd_acceptance_report(args, ctx) -> int:
 
     with ctx.db.session() as s:
         rows = acceptance_evidence(s, ctx.settings)
-    for r in rows:
-        print(f"{r['test']:>2}. {r['status']:<18} {r['name']}\n      {r['evidence']}")
     label = f"{ctx.settings.data_role} data, {utcnow():%Y-%m-%d %H:%M} UTC"
     out = ctx.settings.reports_dir / f"acceptance_{utcnow():%Y%m%d_%H%M}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render_markdown(rows, label), encoding="utf-8")
+    out.write_text(render_markdown(rows, label), encoding="utf-8")  # the evidence file first, then the screen
+    for r in rows:
+        print(f"{r['test']:>2}. {r['status']:<18} {r['name']}\n      {r['evidence']}")
     print(f"Written to {out}")
     return 0
 
@@ -614,7 +614,19 @@ COMMANDS = {
 PRODUCTION_DATA_DIR = BASE_DIR / "data"
 
 
+def _console_safe() -> None:
+    """A Windows console (cp1252, cp437) cannot show every character our output uses ("→", "—"); print a
+    replacement character instead of failing the command (acceptance-report crashed exactly when test 19 passed)."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except (ValueError, OSError):  # a stream that cannot be reconfigured keeps its settings
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _console_safe()
     args = build_parser().parse_args(argv)
     if args.cmd == "seed-demo":
         return cmd_seed_demo(args, None)

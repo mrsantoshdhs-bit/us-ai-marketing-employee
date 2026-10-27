@@ -147,3 +147,16 @@ def test_simulated_replies_are_refused_on_live_production_data(make_ctx, monkeyp
     monkeypatch.delenv("AIME_ENV_FILE", raising=False)
     assert cmd_simulate_reply(Namespace(lead=1, text="hi", from_email=None), ctx) == 2
     assert "refused" in capsys.readouterr().out
+
+
+def test_cli_output_survives_a_console_that_cannot_show_arrows(make_ctx, capsys, monkeypatch):
+    import io
+    import sys
+
+    from aime.cli import _console_safe
+    narrow = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")  # a Windows console code page without "→"
+    monkeypatch.setattr(sys, "stdout", narrow)
+    _console_safe()
+    print("discovered → researched → meeting")
+    sys.stdout.flush()
+    assert narrow.buffer.getvalue().decode("cp1252") == "discovered ? researched ? meeting\n"
