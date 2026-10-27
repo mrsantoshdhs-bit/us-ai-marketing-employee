@@ -14,7 +14,7 @@ import subprocess
 import sys
 
 FORBIDDEN_PATHS = [
-    (re.compile(r"(^|/)\.env$|(^|/)\.env\.(?!example$)"), "environment file"),
+    (re.compile(r"\.env$|(^|/)\.env\.(?!example$)"), "environment file"),  # .env, acceptance.env, .env.local
     (re.compile(r"(^|/)(data|demo_data|backups)/"), "runtime data folder (CRM, leads, logs)"),
     (re.compile(r"\.(db|db-wal|db-shm|sqlite3?|log|jsonl)$"), "database or log file"),
     (re.compile(r"\.(pem|key|p12|pfx)$|(^|/)id_rsa"), "private key"),
@@ -30,7 +30,8 @@ SECRET_PATTERNS = [
     (re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}"), "JWT"),
     (re.compile(r"\bAQ[A-Za-z0-9_-]{60,}"), "LinkedIn access token"),
     (re.compile(r"\bWPL_AP\d\.[A-Za-z0-9._+/=-]{8,}"), "LinkedIn client secret"),
-    (re.compile(r"^(?:LINKEDIN_CLIENT_SECRET|SMTP_PASSWORD|CENSUS_API_KEY|INBOUND_API_TOKEN)=\S+", re.M),
+    # KEY=value with no spaces around "=", as in .env files (Python constants are written "NAME = value")
+    (re.compile(r"^[A-Z0-9_]*(?:PASSWORD|PASSPHRASE|SECRET|TOKEN|API_KEY)=[^\s#]+", re.M),
      "credential value in env-style file"),
     (re.compile(r"(?i)(?:password|client_secret|api_key)\s*=\s*[\"'][^\"'{}<>\s]{8,}[\"']"), "hard-coded credential"),
     (re.compile(r"[A-Za-z]:[\\/]+Users[\\/]+(?!Public)[A-Za-z0-9._-]+[\\/]"), "local Windows user path"),

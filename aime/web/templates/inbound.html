@@ -3,7 +3,7 @@
 {% block content %}
 <h1>Inbound inquiries</h1>
 <div class="card small">
-  Inquiries arrive three ways: this form (e.g. a phone call or email you log), <code>POST /api/inbound</code> (JSON, for a website
+  Inquiries arrive three ways: this form (e.g. a phone call or email you log), <code>POST /api/inbound</code> (JSON with the <code>X-Inbound-Token</code> header; off until INBOUND_API_TOKEN is set; for a website
   form webhook), or JSON/CSV files dropped in <code>data/inbox/</code>. The <strong>inbound</strong> job runs every 30 minutes.
   <form class="inline" method="post" action="/inbound/process"><button class="secondary">Process now</button></form>
 </div>

@@ -118,7 +118,9 @@ class AuthorizedPublishingAgent(BaseAgent[PublishInput, PublishOutput]):
                 slots = free_slots(session, self.settings, now)
                 if slots:
                     item.scheduled_for = slots[0]
-                    item.publish_blocked_reason = "Slot was missed; rescheduled to the next free slot"
+                    item.publish_blocked_reason = None  # not blocked: it goes out at the new slot
+                    log_activity(session, f"Post #{item.id} missed its slot; rescheduled to {slots[0]:%Y-%m-%d %H:%M} UTC",
+                                 self.name, type_="status_change")
                     out.rescheduled.append(item.id)
                     self._alert_once(session, f"Post #{item.id} missed its slot and was moved to {slots[0]:%Y-%m-%d %H:%M} UTC",
                                      level="info")
@@ -289,7 +291,9 @@ class AuthorizedPublishingAgent(BaseAgent[PublishInput, PublishOutput]):
                 item.status = "approved"
                 item.publish_attempt_id = None
                 item.publish_started_at = None
-                item.publish_blocked_reason = "Previous attempt confirmed absent on LinkedIn; requeued"
+                item.publish_blocked_reason = None
+                log_activity(session, f"Post #{item.id} requeued: LinkedIn confirms the previous attempt is not there",
+                             self.name, type_="status_change")
                 if attempt is not None:
                     attempt.outcome = "not_sent"
                 out.requeued.append(item.id)

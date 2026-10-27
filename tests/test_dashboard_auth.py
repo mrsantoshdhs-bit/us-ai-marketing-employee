@@ -159,3 +159,22 @@ def test_sales_pages_need_sign_in(auth_ctx):
     for path, method in (("/inbox/1/reviewed", "post"), ("/meetings/1/held", "post"), ("/leads/1/stop_outreach", "post")):
         r = getattr(client, method)(path, headers=ORIGIN, follow_redirects=False)
         assert r.status_code == 303 and r.headers["location"].startswith("/login"), path
+
+
+def test_parallel_wrong_passwords_still_lock_the_account(auth_ctx):
+    import threading
+    app = create_app(auth_ctx)
+    barrier = threading.Barrier(20)
+
+    def attempt():
+        c = TestClient(app, raise_server_exceptions=False)
+        barrier.wait()
+        _login(c, password="wrong password guess")
+
+    threads = [threading.Thread(target=attempt) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    with auth_ctx.db.session() as s:
+        assert s.execute(select(User)).scalar_one().locked_until is not None

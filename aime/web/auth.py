@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import os
+import threading
 import time
 from datetime import timedelta
 from urllib.parse import quote
@@ -37,6 +38,8 @@ MIN_PASSWORD = 12
 PUBLIC_PREFIXES = ("/login", "/static/")
 PUBLIC_PATHS = ("/api/inbound",)  # protected by its own token and rate limit
 _SECRETS: dict[str, bytes] = {}
+# One sign-in check at a time (the dashboard is one process): parallel wrong passwords each count towards the lock.
+LOGIN_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------- passwords

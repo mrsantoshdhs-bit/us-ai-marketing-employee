@@ -12,12 +12,13 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 from zoneinfo import ZoneInfo
 
+import httpx
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -50,8 +51,8 @@ from aime.reply_intel import act as act_on_reply
 from aime.meetings import record_meeting
 from aime.scheduler.runner import due_jobs, run_job
 from aime.timeutil import fmt_et, fmt_local, utcnow
-from aime.web.auth import (COOKIE, SESSION_SECONDS, AuthMiddleware, authenticate, current_username, make_cookie,
-                           safe_next, session_secret, user_count)
+from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username,
+                           make_cookie, safe_next, session_secret, user_count)
 
 WEB_DIR = Path(__file__).resolve().parent
 STAGES = ["new", "discovery", "proposal", "negotiation", "won", "lost"]
@@ -123,6 +124,10 @@ class InboundLimiter:
 
 
 MAX_INBOUND_BYTES = 20_000
+FOLLOWUPS_PAGE = 300
+# A contact the Sales Manager can actually email: researched, a checked published address, not opted out.
+USABLE_EMAIL = (Contact.source.in_(("website", "sec_filing")), Contact.email_status.in_(("published", "role_address")),
+                Contact.consent_status != "opted_out")
 
 
 def create_app(ctx: AppContext | None = None) -> FastAPI:
@@ -132,8 +137,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     app.add_middleware(AuthMiddleware, get_ctx=lambda: app.state.ctx or get_context())
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(OriginCheckMiddleware)
-    hosts = [h.strip() for h in (ctx or get_context()).settings.allowed_hosts.split(",") if h.strip()]
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts + ["testserver"])
+    settings = (ctx or get_context()).settings
+    hosts = [h.strip() for h in settings.allowed_hosts.split(",") if h.strip()]
+    if settings.data_role == "test":
+        hosts.append("testserver")  # the test client's host name; never accepted for real data
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts)
     app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
     templates = Jinja2Templates(directory=WEB_DIR / "templates")
     env = templates.env
@@ -164,7 +172,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/login")
     def login_submit(request: Request, username: str = Form(""), password: str = Form(""), next: str = Form("/")):
-        with C().db.session() as s:
+        with LOGIN_LOCK, C().db.session() as s:
             user, message = authenticate(s, username, password)
             cookie = make_cookie(session_secret(C().settings.data_dir), user) if user else None
         if not cookie:
@@ -219,8 +227,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     Contact.source.in_(("website", "sec_filing")), Contact.last_name.is_not(None))).scalar_one(),
                  "/contacts", ""),
                 ("Companies with a usable email", s.execute(select(func.count(func.distinct(Contact.company_id))).where(
-                    Contact.email_status.in_(("published", "role_address")))).scalar_one(), "/contacts?reachable=1", ""),
-                ("Qualified companies", cnt(Lead, Lead.status == "qualified"), "/leads?status=qualified", ""),
+                    *USABLE_EMAIL)).scalar_one(), "/contacts?reachable=1", ""),
+                ("Qualified companies", s.execute(select(func.count(func.distinct(Lead.company_id))).where(
+                    Lead.status == "qualified")).scalar_one(), "/leads?status=qualified", ""),
                 ("Emails awaiting approval", cnt(FollowUp, FollowUp.channel == "email", FollowUp.status == "awaiting_approval"),
                  "/followups", ""),
                 ("Posts awaiting approval", cnt(ContentItem, ContentItem.status == "awaiting_approval"), "/content", ""),
@@ -371,7 +380,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         with C().db.session() as s:
             stmt = select(Contact).where(Contact.source.in_(("website", "sec_filing")))
             if reachable:
-                stmt = stmt.where(Contact.email_status.in_(("published", "role_address")))
+                stmt = stmt.where(*USABLE_EMAIL)
             if confidence:
                 stmt = stmt.where(Contact.confidence == confidence)
             if role:
@@ -566,16 +575,19 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                    est_value: str = Form("")):
         if stage not in STAGES:
             raise HTTPException(400)
+        value = None
+        if est_value.strip():
+            try:
+                value = float(est_value.replace(",", "").replace("$", ""))
+            except ValueError:
+                return back("/pipeline", f"Estimated value '{est_value[:40]}' is not a number; nothing was changed")
         with C().db.session() as s:
             o = s.get(Opportunity, opp_id) or _404()
             old = o.stage
             o.stage, o.next_step = stage, next_step or o.next_step
             o.probability = {"new": 10, "discovery": 20, "proposal": 50, "negotiation": 70, "won": 100, "lost": 0}[stage]
-            if est_value.strip():
-                try:
-                    o.est_value = float(est_value.replace(",", "").replace("$", ""))
-                except ValueError:
-                    pass
+            if value is not None:
+                o.est_value = value
             if stage in ("won", "lost"):
                 o.closed_at = utcnow()
                 if stage == "won" and o.lead_id:
@@ -589,14 +601,20 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.get("/followups", response_class=HTMLResponse)
     def followups(request: Request, show: str = "open"):
         with C().db.session() as s:
-            stmt = select(FollowUp)
+            needs_you = ("awaiting_approval", "uncertain")  # always listed, whatever else is open
+            first = s.execute(select(FollowUp).where(FollowUp.status.in_(needs_you))
+                              .order_by(FollowUp.due_at)).scalars().all()
+            stmt = select(FollowUp).where(FollowUp.status.not_in(needs_you))
             if show == "open":
-                stmt = stmt.where(FollowUp.status.in_(("pending", "awaiting_approval", "approved", "sending", "uncertain")))
-            rows = s.execute(stmt.order_by(FollowUp.due_at).limit(300)).scalars().all()
+                stmt = stmt.where(FollowUp.status.in_(("pending", "approved", "sending")))
+            total = s.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
+            rest = s.execute(stmt.order_by(FollowUp.due_at).limit(FOLLOWUPS_PAGE)).scalars().all()
+            rows = first + rest
             for r in rows:
                 _ = r.lead.company, r.contact
         ready, reason = EmailSender(C().settings).status()
-        return render(request, "followups.html", rows=rows, show=show, email_ready=ready, email_reason=reason)
+        return render(request, "followups.html", rows=rows, show=show, email_ready=ready, email_reason=reason,
+                      hidden=total - len(rest), page_size=FOLLOWUPS_PAGE)
 
     @app.post("/followups/{fid}/{action}")
     def followup_action(request: Request, fid: int, action: str, subject: str = Form(""), body: str = Form(""),
@@ -704,7 +722,16 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def content_action(request: Request, cid: int, action: str, title: str = Form(""), body: str = Form(""),
                        hashtags: str = Form(""), scheduled_et: str = Form(""), post_ref: str = Form(""),
                        checked: str = Form(""), qc_override: str = Form("")):
+        if action == "save" and scheduled_et.strip():
+            try:
+                scheduled = datetime.fromisoformat(scheduled_et.strip()).replace(tzinfo=ZoneInfo("America/New_York"))
+            except ValueError:
+                return back(f"/content/{cid}", "The scheduled time is not a valid date and time; nothing was changed")
         with C().db.session() as s:
+            # Take the database write lock before reading the post: the publisher's claim then waits until this
+            # change is committed, so it can never publish an old text that this edit or rejection replaces.
+            s.execute(update(ContentItem).where(ContentItem.id == cid).values(status=ContentItem.status)
+                      .execution_options(synchronize_session=False))
             item = s.get(ContentItem, cid) or _404()
             if item.status == "published":
                 raise HTTPException(400, "Published posts cannot be changed here")
@@ -726,7 +753,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     s.query(PublishAttempt).filter(PublishAttempt.attempt_id == item.publish_attempt_id).update(
                         {"outcome": "not_sent", "finished_at": utcnow()})
                     item.status, item.publish_attempt_id, item.publish_started_at = "approved", None, None
-                    item.publish_blocked_reason = "Requeued after a person confirmed it is not on LinkedIn"
+                    item.publish_blocked_reason = None
+                    log_activity(s, f"Post #{item.id} requeued after {who(request)} confirmed it is not on LinkedIn",
+                                 who(request), type_="content")
                     msg = "Requeued for publishing"
                 else:
                     raise HTTPException(400, "Uncertain posts need: confirm with the LinkedIn post URL/URN, or "
@@ -738,8 +767,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 if hashtags.strip():
                     item.hashtags = ["#" + t.lstrip("#") for t in hashtags.replace(",", " ").split() if t.strip("#")]
                 if scheduled_et.strip():
-                    local = datetime.fromisoformat(scheduled_et).replace(tzinfo=ZoneInfo("America/New_York"))
-                    item.scheduled_for = local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+                    item.scheduled_for = scheduled.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
                 if item.status == "approved":
                     item.status = "awaiting_approval"  # edits need a fresh approval
                     item.approved_by, item.approved_at = None, None
@@ -754,7 +782,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 if item.qc_status in ("held", "failed") and qc_override != "yes":
                     return back(f"/content/{cid}", "Tick 'I reviewed the quality findings' to approve this post")
                 item.status, item.approved_by, item.approved_at = "approved", who(request), utcnow()
-                item.publish_attempts = 0
+                item.publish_attempts, item.publish_blocked_reason = 0, None  # old reasons no longer apply
                 msg = "Approved for publishing at its scheduled time (requires LinkedIn authorization)"
                 if item.qc_status in ("held", "failed"):
                     log_activity(s, f"Post #{item.id} approved despite quality findings: {qc_summary(item.qc)[:200]}",
@@ -788,10 +816,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.post("/campaigns")
     def create_campaign(name: str = Form(...), objective: str = Form(...), service: str = Form(""),
                         industry: str = Form(""), start_date: str = Form(...), end_date: str = Form(...)):
+        try:
+            start, end = date.fromisoformat(start_date.strip()), date.fromisoformat(end_date.strip())
+        except ValueError:
+            return back("/campaigns", "Start and end dates must be valid dates (YYYY-MM-DD); nothing was created")
         with C().db.session() as s:
             s.add(Campaign(name=name, objective=objective, service=service or None, industry=industry or None,
-                           start_date=date.fromisoformat(start_date), end_date=date.fromisoformat(end_date),
-                           status="active", created_by="human"))
+                           start_date=start, end_date=end, status="active", created_by="human"))
         return back("/campaigns", "Campaign created")
 
     @app.post("/campaigns/{camp_id}/status")
@@ -833,8 +864,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         if not limiter.allow(client_ip):
             raise HTTPException(429, "Too many requests; try again in a minute")
         token = C().settings.inbound_api_token
-        if token and not hmac.compare_digest(request.headers.get("x-inbound-token", ""), token):
+        if not token:
+            raise HTTPException(403, "The inbound API is off: set INBOUND_API_TOKEN in .env and send it as the "
+                                     "X-Inbound-Token header")
+        if not hmac.compare_digest(request.headers.get("x-inbound-token", ""), token):
             raise HTTPException(401, "Invalid inbound token")
+        if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+            raise HTTPException(415, "Send the inquiry as JSON (Content-Type: application/json)")
         raw = await request.body()
         if len(raw) > MAX_INBOUND_BYTES:
             raise HTTPException(413, "Inquiry too large")
@@ -959,6 +995,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 info = client.userinfo(tok["access_token"])
             except LinkedInAPIError as exc:
                 return back("/integrations", f"LinkedIn token exchange failed: {exc}")
+            except httpx.HTTPError as exc:
+                return back("/integrations", f"Could not reach LinkedIn ({type(exc).__name__}); please try again")
             client.store_token(s, tok, info)
         return back("/integrations", "LinkedIn connected")
 
@@ -1031,7 +1069,9 @@ def health_strip(ctx: AppContext, s) -> list[tuple[str, str, str]]:
     rows.append(("Post images", "ok" if browser else "warn",
                  f"designed ({browser.stem})" if browser else "simple cards (no designer)"))
     li = get_auth_status(st, s)
-    if li.expires_at:
+    if li.expires_at and li.expires_at <= utcnow():
+        rows.append(("LinkedIn connection", "bad", "expired: reconnect LinkedIn on Integrations"))
+    elif li.expires_at:
         days = (li.expires_at - utcnow()).days
         rows.append(("LinkedIn connection", "ok" if days > 14 else "warn", f"connected, {days} days left"))
     else:

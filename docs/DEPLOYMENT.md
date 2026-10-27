@@ -51,8 +51,8 @@ never publish it directly. If you need remote access or a public `POST /api/inbo
 website form:
 
 1. Put an authenticating reverse proxy in front (for example Caddy with `basic_auth`, or Cloudflare Access).
-2. Expose only `/api/inbound` publicly if possible, and set `INBOUND_API_TOKEN` so callers must send
-   `X-Inbound-Token`.
+2. Expose only `/api/inbound` publicly if possible. It is off until `INBOUND_API_TOKEN` is set; callers then
+   send it as `X-Inbound-Token` with a JSON body (`Content-Type: application/json`).
 3. Update `LINKEDIN_REDIRECT_URI` to the HTTPS URL and add it to the LinkedIn app.
 
 Example Caddyfile:
