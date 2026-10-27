@@ -107,6 +107,20 @@ def test_parse_the_real_reschedule_email():
     assert (info["starts_at"], info["previous_starts_at"]) == (datetime(2026, 10, 28, 5, 0), datetime(2026, 10, 28, 3, 30))
 
 
+# Calendly's real cancellation email (27 Oct 2026), same replacements: no event type, and no time in the subject.
+CANCELED_SUBJECT = "Canceled: 30 Minute Meeting with Ana Lima on 28 October 2026"
+CANCELED_BODY = ("  \n   Calendly \n\n    Hi Owner,\n\n  The event below has been canceled.\n\n    Invitee:\n   \n  Ana Lima\n\n"
+                 "    Invitee Email:\n   \n   ana@x.example \n\n    Event Date/Time:\n   \n  10:30am - Wednesday, 28 October 2026 "
+                 "(India Standard Time)\n\n    Cancellation Reason:\n   \n  Due to some personal issue\n\n    Canceled by:\n"
+                 "   \n  Ana Lima\n\n Sent from  Calendly \n Report this event \n")
+
+
+def test_parse_the_real_cancellation_email():
+    info = parse_calendly(CANCELED_SUBJECT, CANCELED_BODY, set())
+    assert (info["kind"], info["invitee_name"], info["invitee_email"]) == ("cancelled", "Ana Lima", "ana@x.example")
+    assert info["starts_at"] == datetime(2026, 10, 28, 5, 0)  # the exact time: it cancels that meeting, not a guess
+
+
 def test_the_real_reschedule_moves_the_right_one_of_two_bookings(make_ctx, monkeypatch):
     monkeypatch.setattr(meetings, "utcnow", lambda: NOW)
     ctx, _, _ = contacted(make_ctx, calendly_url=LINK)
