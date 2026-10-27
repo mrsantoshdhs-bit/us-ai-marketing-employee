@@ -269,6 +269,10 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             contact.consent_status = "opted_out"
         if lead and lead.outreach_status:
             stop_sequence(session, lead, "unsubscribed", "Asked not to be contacted", actor)
+        if contact and contact.email and contact.email.lower() != (row.from_email or "").lower():
+            # an opt-out in our thread from another address (a colleague, a personal address, test mode): the
+            # address we wrote to is suppressed as well
+            suppress(session, contact.email, "Unsubscribe request in the email thread")
         notes.append(f"{row.from_email} suppressed; no further email")
         row.status = "actioned" if row.confidence == "high" else "needs_review"
     elif row.category == "out_of_office":

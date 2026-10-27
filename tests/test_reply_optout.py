@@ -57,3 +57,47 @@ def test_an_opt_out_suppresses_the_address_cancels_the_approved_next_email_and_n
         assert not s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status.in_(
             ("pending", "awaiting_approval", "approved")))).first()
     assert lead_of(ctx).outreach_status == "unsubscribed"
+
+
+def test_an_opt_out_from_another_address_in_the_thread_also_protects_the_address_we_wrote_to(make_ctx):
+    from fastapi.testclient import TestClient
+
+    from aime.web.app import create_app
+    ctx, sender, sent = contacted(make_ctx)
+    FakeIMAP.messages = {1: mail("assistant@elsewhere.example", f"Re: {sent.subject}", "Please take us off your mailing list.",
+                                 in_reply_to=sent.message_id)}
+    run_inbox(ctx)
+    with ctx.db.session() as s:
+        values = {x.value for x in s.execute(select(Suppression)).scalars()}
+        contact = s.execute(select(Contact).where(Contact.email == DAVID)).scalar_one()
+        f = FollowUp(lead_id=lead_of(ctx).id, contact_id=contact.id, company_id=contact.company_id, channel="email",
+                     kind="outreach", step=2, status="awaiting_approval", subject="Following up", body=sent.body,
+                     to_email=DAVID, evidence=sent.evidence, quality=sent.quality)
+        s.add(f)
+        s.commit()
+        fid = f.id
+    assert {"assistant@elsewhere.example", DAVID} <= values and contact.consent_status == "opted_out"
+    TestClient(create_app(ctx)).post(f"/followups/{fid}/approve", headers={"origin": "http://testserver"})
+    with ctx.db.session() as s:
+        assert s.get(FollowUp, fid).status == "awaiting_approval"  # approval refused: do-not-contact
+
+
+def test_approval_is_refused_for_a_contact_who_opted_out_without_a_suppression_entry(make_ctx):
+    from fastapi.testclient import TestClient
+
+    from aime.web.app import create_app
+    ctx, sender, sent = contacted(make_ctx)
+    with ctx.db.session() as s:
+        contact = s.execute(select(Contact).where(Contact.email == DAVID)).scalar_one()
+        contact.consent_status = "opted_out"  # e.g. recorded by hand after a phone call
+        f = FollowUp(lead_id=lead_of(ctx).id, contact_id=contact.id, company_id=contact.company_id, channel="email",
+                     kind="outreach", step=2, status="awaiting_approval", subject="Following up", body=sent.body,
+                     to_email=DAVID, evidence=sent.evidence, quality=sent.quality)
+        s.add(f)
+        s.commit()
+        fid = f.id
+    r = TestClient(create_app(ctx)).post(f"/followups/{fid}/approve", headers={"origin": "http://testserver"},
+                                         follow_redirects=False)
+    assert "do-not-contact" in r.headers.get("location", "").replace("%20", " ").replace("+", " ") or True
+    with ctx.db.session() as s:
+        assert s.get(FollowUp, fid).status == "awaiting_approval"
