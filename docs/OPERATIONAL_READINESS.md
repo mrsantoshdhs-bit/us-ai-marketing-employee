@@ -27,7 +27,8 @@ Why it is not ready for live operation:
   - Our own quoted "reply unsubscribe" line could unsubscribe a prospect.
   - The dashboard could be down for hours with nothing to restart it.
 
-  All are fixed in PRs #29–#32, which are not merged. Together they pass 382 tests.
+  All are fixed in PRs #29–#32. Together they pass 382 tests. **They were deployed on 27 Oct at 06:26–06:37**
+  (section 22).
 
 ## 2. Verified production baseline (27 Oct, 05:18–05:25 local)
 
@@ -387,3 +388,27 @@ Not yet READY FOR LIVE OPERATION:
 
 Once items 1–8 in section 18 are done and the live acceptance passes, live outreach still needs your
 separate, explicit authorization.
+
+## 22. Deployment record (27 Oct 2026)
+
+Approved by you and run as written. Outbound email and publishing stayed off throughout.
+
+| Step | Result |
+|---|---|
+| CI | Passed on #29–#33; each head commit was the one tested |
+| Backup | `aime-pre-deploy-29-33-20261027-062638.db`: verified and restore-drilled (28 tables, 2,009 rows) |
+| Maintenance | On at 06:26, off at 06:33 |
+| Merge | #29 `b008fb9`, #30 `c0564fb`, #31 `fb573ce`, #32 `0cfeb99`, #33 `318ae94`. `main`'s tree matches the tested merge exactly |
+| Production folder | Fast-forwarded to `318ae94`. No requirement changes; your personal files and stash are untouched |
+| Tests | 382 passed in the production folder (scratch data folder) |
+| doctor | Migration added `alerts.key` and `alerts.resolved_at`, after the backup `aime-pre-migration-20261027-063044.db`. 21 pass, 0 errors; 2 warnings (OneDrive, passphrase) |
+| Dashboard | Restarted on the new code at 06:33, down about 3 minutes. Sign-in required; `/api/inbound` now 403 without a token |
+| First tick (06:36) | 5 jobs succeeded. The monitor closed the 3 stale alerts; only the 2 backup warnings are open |
+
+**Found during the deploy:**
+- **Problem:** the dashboard started with `pythonw.exe` exits at once, because uvicorn needs an output stream.
+  The new dashboard restart task (`scheduler install-dashboard`, not installed) runs `pythonw.exe`, so it would
+  fail the same way.
+- **Workaround in place:** the dashboard now runs from the normal Python in a hidden window, with its output in
+  `data/logs/dashboard.*.log`.
+- **Fix:** #34 gives the task script a log file. It needs your approval before you install the task.
