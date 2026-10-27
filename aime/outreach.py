@@ -127,8 +127,9 @@ def draft_outreach(settings: Settings, step: int, lead: Lead, contact, evidence:
                 f"\n\n{_signature(settings)}")
     else:
         subject = f"Closing the loop on {topic}"
-        body = (f"{greeting}\n\nI will not keep following up. If {topic} becomes a priority, just reply to this "
-                f"email and we can pick it up from there.\n\n{_signature(settings)}")
+        body = (f"{greeting}\n\nThank you for taking the time to read my notes. I will not keep following up. If "
+                f"{topic} becomes a priority, just reply to this email and we can pick it up from there."
+                f"\n\n{_signature(settings)}")
     return subject, body + outreach_footer(settings)
 
 
@@ -166,6 +167,17 @@ def set_status(session: Session, lead: Lead, status: str, actor: str, note: str 
     lead.outreach_status, lead.outreach_updated_at = status, utcnow()
     log_activity(session, f"Outreach: {status.replace('_', ' ')}" + (f" ({note})" if note else ""), actor,
                  type_="outreach", company_id=lead.company_id, lead_id=lead.id)
+
+
+def record_delivery(session: Session, f: FollowUp, sent_at, delivered_to: str | None, actor: str) -> None:
+    """What a delivered email changes, whether the send succeeded or a person confirmed it ("mark sent"): the
+    follow-up, the lead's last activity, and the outreach stage that lets the next step be drafted."""
+    f.status, f.sent_at, f.blocked_reason = "sent", sent_at, None
+    f.delivered_to = delivered_to or f.delivered_to
+    lead = f.lead
+    lead.last_activity_at = sent_at
+    if f.kind == "outreach" and lead.outreach_status in (None, "drafted", "approved"):
+        set_status(session, lead, "contacted", actor)
 
 
 def stop_sequence(session: Session, lead: Lead, status: str, reason: str, actor: str) -> int:

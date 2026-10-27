@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from aime.integrations.email_smtp import EmailNotReady, EmailSender, compliance_footer
+from aime.integrations.email_smtp import MAIL_TIMEOUT, EmailNotReady, EmailSender, compliance_footer, tls_context
 from aime.redact import redact
 
 GOOGLE_SPF = "include:_spf.google.com"
@@ -126,10 +126,12 @@ def check_domain(domain: str, resolve: Callable[[str, str], list[str]]) -> list[
 def check_smtp(s, smtp_factory=smtplib.SMTP) -> Check:
     if not (s.smtp_host and s.smtp_username and s.smtp_password):
         return Check("SMTP sign-in", "skip", "SMTP host, username or password not set")
+    if not s.smtp_use_tls:
+        return Check("SMTP sign-in", "fail", "not tried: SMTP_USE_TLS=false would send the password unencrypted; "
+                                              "set SMTP_USE_TLS=true (Gmail: port 587 with STARTTLS)")
     try:
-        with smtp_factory(s.smtp_host, s.smtp_port, timeout=20) as smtp:
-            if s.smtp_use_tls:
-                smtp.starttls()
+        with smtp_factory(s.smtp_host, s.smtp_port, timeout=MAIL_TIMEOUT) as smtp:
+            smtp.starttls(context=tls_context())  # certificate and host name are verified
             smtp.login(s.smtp_username, s.smtp_password)
             smtp.noop()
         return Check("SMTP sign-in", "pass", f"signed in to {s.smtp_host} as {s.smtp_username}; no email was sent")
@@ -145,7 +147,7 @@ def check_imap(s, imap_factory=imaplib.IMAP4_SSL) -> Check:
     if not (s.imap_host and user and password):
         return Check("IMAP read-only", "skip", "IMAP host, username or password not set")
     try:
-        conn = imap_factory(s.imap_host, s.imap_port)
+        conn = imap_factory(s.imap_host, s.imap_port, ssl_context=tls_context(), timeout=MAIL_TIMEOUT)
     except OSError as exc:
         return Check("IMAP read-only", "fail", redact(f"{type(exc).__name__}: {exc}")[:300])
     try:

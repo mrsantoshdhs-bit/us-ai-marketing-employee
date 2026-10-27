@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import smtplib
+import ssl
 from collections.abc import Callable
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
@@ -11,6 +12,15 @@ from aime.config import Settings
 
 
 POSTAL_PLACEHOLDER = "[postal address required before sending]"
+MAIL_TIMEOUT = 60  # seconds for SMTP and IMAP connections; a hung server must not hold a job for an hour
+
+
+def tls_context() -> ssl.SSLContext:
+    """Verified TLS for SMTP and IMAP: the server's certificate and host name are checked.
+
+    smtplib's starttls() and imaplib's IMAP4_SSL default to a context that checks neither, so anyone on the
+    network path could read the app password."""
+    return ssl.create_default_context()
 
 
 class EmailNotReady(Exception):
@@ -44,6 +54,10 @@ def compliance_footer(settings: Settings, outreach: bool = False) -> str:
     )
 
 
+def new_message_id(settings: Settings) -> str:
+    return make_msgid(domain=(settings.smtp_from or "localhost").split("@")[-1])
+
+
 class EmailSender:
     def __init__(self, settings: Settings, smtp_factory: Callable[..., smtplib.SMTP] = smtplib.SMTP):
         self.settings = settings
@@ -57,6 +71,8 @@ class EmailSender:
             return False, "NOT CONFIGURED: SMTP_HOST / SMTP_FROM missing"
         if not s.company_postal_address:
             return False, "NOT CONFIGURED: COMPANY_POSTAL_ADDRESS required (CAN-SPAM)"
+        if s.smtp_username and not s.smtp_use_tls:
+            return False, "NOT SAFE: SMTP_USE_TLS=false would send the mailbox password unencrypted; set it to true"
         if s.test_recipients:
             return True, "Ready in TEST MODE: every email is delivered only to " + ", ".join(sorted(s.test_recipients))
         return True, "Ready"
@@ -68,7 +84,10 @@ class EmailSender:
             return to, False
         return sorted(tests)[0], True
 
-    def send(self, to: str, subject: str, body: str, in_reply_to: str | None = None) -> str:
+    def send(self, to: str, subject: str, body: str, in_reply_to: str | None = None,
+             message_id: str | None = None, references: str | None = None) -> str:
+        """Returns the Message-ID. Pass `message_id` (stored before sending) so it is known even if the send fails
+        midway, and replies to a delivered-but-unconfirmed email still match by In-Reply-To."""
         ready, reason = self.status()
         if not ready:
             raise EmailNotReady(reason)
@@ -85,17 +104,17 @@ class EmailSender:
         msg["From"] = formataddr((s.sender_name or s.company_name, s.smtp_from))
         msg["To"] = actual
         msg["Subject"] = subject
-        msg_id = make_msgid(domain=s.smtp_from.split("@")[-1])
+        msg_id = message_id or new_message_id(s)
         msg["Message-ID"] = msg_id
         unsub = s.unsubscribe_email or s.smtp_from
         msg["List-Unsubscribe"] = f"<mailto:{unsub}?subject=unsubscribe>"
-        if in_reply_to:  # keep the reply in the prospect's thread
+        if in_reply_to:  # keep the reply in the thread: References carries the whole chain, ending with its parent
             msg["In-Reply-To"] = in_reply_to
-            msg["References"] = in_reply_to
+            msg["References"] = references or in_reply_to
         msg.set_content(body)
-        with self.smtp_factory(s.smtp_host, s.smtp_port, timeout=30) as smtp:
+        with self.smtp_factory(s.smtp_host, s.smtp_port, timeout=MAIL_TIMEOUT) as smtp:
             if s.smtp_use_tls:
-                smtp.starttls()
+                smtp.starttls(context=tls_context())
             if s.smtp_username:
                 smtp.login(s.smtp_username, s.smtp_password)
             smtp.send_message(msg)

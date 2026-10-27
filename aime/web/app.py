@@ -42,6 +42,7 @@ from aime.models import (Activity, AgentRun, Alert, Campaign, Company, Contact, 
 from aime.monitoring import agent_stats, read_heartbeat
 from aime.policy import agreement, environment_blockers, evaluate_shadow, policy_config
 from aime.qc import summary as qc_summary
+from aime.outreach import record_delivery
 from aime.outreach import set_status as set_outreach_status
 from aime.outreach import stop_sequence
 from aime.qc.checks import run_quality_checks
@@ -628,12 +629,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 if body.strip() and body.replace("\r\n", "\n") != f.body:
                     f.body, edited = body.replace("\r\n", "\n"), True
                 address = C().settings.company_postal_address
-                if f.kind in ("outreach", "response") and address and POSTAL_PLACEHOLDER in (f.body or ""):
-                    f.body, edited = f.body.replace(POSTAL_PLACEHOLDER, address), True  # drafted before it was set
+                if address and POSTAL_PLACEHOLDER in (f.body or ""):  # any email kind drafted before it was set
+                    f.body, edited = f.body.replace(POSTAL_PLACEHOLDER, address), True
+                recipient = f.to_email or (f.contact.email if f.contact else None)
+                suppressed = is_suppressed(s, recipient, f.lead.company.domain if f.kind == "outreach" else None)
                 qc_status = None
                 if f.kind == "outreach":
                     if edited or action == "save":  # an edited email is checked again before anyone approves it
-                        suppressed = is_suppressed(s, f.contact.email if f.contact else None, f.lead.company.domain)
                         f.quality = {**(f.quality or {}), "qc": run_email_checks(
                             f.subject, f.body or "", list(f.evidence or []), f.contact, suppressed, step=f.step)}
                     qc_status = ((f.quality or {}).get("qc") or {}).get("status")
@@ -641,7 +643,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     msg = "Saved" + (f"; quality checks: {qc_status}" if qc_status else "")
                 elif QUESTION_PLACEHOLDER in (f.body or ""):
                     return back(f"/followups#f{f.id}", "Write your answer in place of the placeholder before approving")
-                elif f.kind in ("outreach", "response") and (problem := compliance_problem(C().settings, f.body or "")):
+                elif suppressed:  # checked on every approval, edited or not
+                    return back(f"/followups#f{f.id}", "Cannot approve: this address is on the do-not-contact list")
+                elif problem := compliance_problem(C().settings, f.body or ""):
                     return back(f"/followups#f{f.id}", f"Cannot approve: {problem}. Put the footer back first")
                 elif qc_status in ("held", "failed") and qc_override != "yes":
                     return back(f"/followups#f{f.id}", f"Quality checks {qc_status}: review the findings and tick "
@@ -666,7 +670,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 f.status = "done"
                 msg = "Task completed"
             elif action == "mark_sent" and f.status == "uncertain":
-                f.status, f.sent_at, f.blocked_reason = "sent", f.send_started_at or utcnow(), None
+                to = f.to_email or (f.contact.email if f.contact else None)
+                record_delivery(s, f, f.send_started_at or utcnow(),
+                                EmailSender(C().settings).recipient_for(to)[0] if to else None, who(request))
                 msg = "Marked as sent (confirmed in your Sent folder)"
             elif action == "requeue" and f.status == "uncertain":
                 f.status, f.send_started_at = "approved", None

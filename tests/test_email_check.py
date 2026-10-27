@@ -27,6 +27,7 @@ class FakeSMTP:
     sent: list = []
     logins: list = []
     refuse = False
+    tls_context = None
 
     def __init__(self, host, port, timeout=30):
         pass
@@ -37,8 +38,8 @@ class FakeSMTP:
     def __exit__(self, *a):
         return False
 
-    def starttls(self):
-        pass
+    def starttls(self, context=None):
+        FakeSMTP.tls_context = context
 
     def login(self, user, password):
         if FakeSMTP.refuse:
@@ -54,9 +55,10 @@ class FakeSMTP:
 
 class FakeIMAP:
     readonly = None
+    ssl_context = None
 
-    def __init__(self, host, port):
-        pass
+    def __init__(self, host, port, ssl_context=None, timeout=None):
+        FakeIMAP.ssl_context = ssl_context
 
     def login(self, user, password):
         return "OK", [b"ok"]
@@ -71,6 +73,7 @@ class FakeIMAP:
 
 def reset():
     FakeSMTP.sent, FakeSMTP.logins, FakeSMTP.refuse, FakeIMAP.readonly = [], [], False, None
+    FakeSMTP.tls_context = FakeIMAP.ssl_context = None
 
 
 def by_name(checks):
@@ -139,3 +142,36 @@ def test_test_email_only_to_your_own_address_and_only_where_sending_is_on(make_c
 def test_calendly_link_must_be_a_calendly_event(make_ctx):
     ctx = make_ctx(**{**MAILBOX, "calendly_url": "http://example.com/book"})
     assert by_name(run_email_check(ctx.settings, resolve=resolver(GOOD_DNS)))["Calendly link"].status == "fail"
+
+
+def test_mail_connections_verify_the_server_certificate_and_never_send_a_password_unencrypted(make_ctx):
+    import ssl
+
+    from aime.inbox import Mailbox
+    from aime.integrations.email_smtp import EmailSender
+    from tests.test_inbound_sales import FakeSMTP as SendingSMTP
+    from tests.test_inbox import FakeIMAP as ReadingIMAP
+
+    def verified(context):
+        return isinstance(context, ssl.SSLContext) and context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+
+    reset()
+    ctx = make_ctx(**MAILBOX)
+    run_email_check(ctx.settings, connect=True, resolve=resolver(GOOD_DNS), smtp_factory=FakeSMTP, imap_factory=FakeIMAP)
+    assert verified(FakeSMTP.tls_context) and verified(FakeIMAP.ssl_context)
+    sending = make_ctx(**MAILBOX, outbound_email_enabled=True, outbound_test_recipients="me@owner.example")
+    SendingSMTP.tls_contexts = []
+    EmailSender(sending.settings, smtp_factory=SendingSMTP).send("me@owner.example", "Hello", "Body")
+    assert len(SendingSMTP.tls_contexts) == 1 and verified(SendingSMTP.tls_contexts[0])
+    ReadingIMAP.messages, ReadingIMAP.ssl_context = {}, None
+    Mailbox(ctx.settings, imap_factory=ReadingIMAP).fetch_new(None)
+    assert verified(ReadingIMAP.ssl_context) and ReadingIMAP.timeout
+
+    plain = make_ctx(**MAILBOX, smtp_use_tls=False, outbound_email_enabled=True)
+    ready, reason = EmailSender(plain.settings, smtp_factory=SendingSMTP).status()
+    assert not ready and "unencrypted" in reason
+    reset()
+    check = by_name(run_email_check(plain.settings, connect=True, resolve=resolver(GOOD_DNS), smtp_factory=FakeSMTP,
+                                    imap_factory=FakeIMAP))["SMTP sign-in"]
+    assert check.status == "fail" and "unencrypted" in check.detail and FakeSMTP.logins == []
+    assert APP_PW not in check.detail

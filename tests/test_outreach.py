@@ -219,3 +219,141 @@ def test_send_time_recheck_cancels(make_ctx, change):
     assert FakeSMTP.sent == [] and drafts(ctx)[0].status == "cancelled"
     # suppressing cancels queued emails at once; an address change is caught by the send-time re-check
     assert drafts(ctx)[0].blocked_reason.startswith("Not sent:" if change == "address_changed" else "Contact unsubscribed")
+
+
+def _second_lead_at_same_domain(ctx, status="approved", started_at=None):
+    """Another qualified lead whose published contact uses the same email domain as David."""
+    from aime.models import Company
+    from aime.timeutil import utcnow
+    with ctx.db.session() as s:
+        f1 = s.execute(select(FollowUp).where(FollowUp.kind == "outreach")).scalar_one()
+        c1 = f1.contact
+        co2 = Company(name="Second Co", normalized_name="second co", domain="second-co.example",
+                      website="https://second-co.example", website_status="verified", source="hn_hiring")
+        s.add(co2)
+        s.flush()
+        c2 = Contact(company_id=co2.id, email=f"maria@{SITE}", first_name="Maria", source=c1.source,
+                     email_source_url=c1.email_source_url, email_status=c1.email_status,
+                     role_category=c1.role_category, consent_status=c1.consent_status)
+        s.add(c2)
+        s.flush()
+        l2 = Lead(company_id=co2.id, contact_id=c2.id, source="research", status="qualified", score=70, grade="B",
+                  primary_service="bpa", outreach_status="approved")
+        s.add(l2)
+        s.flush()
+        s.add(FollowUp(lead_id=l2.id, contact_id=c2.id, company_id=co2.id, channel="email", kind="outreach", step=1,
+                       due_at=f1.due_at, status=status, approved_by="tester", approved_at=utcnow(),
+                       send_started_at=started_at, subject=f1.subject, body=f1.body,
+                       to_email=c2.email, evidence=f1.evidence, quality=f1.quality))
+
+
+def test_an_email_of_unknown_outcome_counts_toward_the_per_domain_limit(make_ctx):
+    ctx = researched(make_ctx, **SENDING)
+    FakeSMTP.sent = []
+    sender = EmailSender(ctx.settings, smtp_factory=FakeSMTP)
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})
+    approve_all(ctx)
+    _second_lead_at_same_domain(ctx, status="uncertain", started_at=TUESDAY_11AM_ET - timedelta(hours=1))  # may have arrived
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})
+    david = next(f for f in drafts(ctx) if f.to_email == f"david.chen@{SITE}")
+    assert FakeSMTP.sent == [] and david.status == "approved" and "Already emailed" in david.blocked_reason
+
+
+def test_overlapping_runs_share_one_send_lock_so_limits_hold(make_ctx):
+    from aime.agents.sales_workflow import SEND_BUSY
+    from aime.scheduler.runner import FileLock
+    ctx = researched(make_ctx, **SENDING)
+    FakeSMTP.sent = []
+    SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=FakeSMTP)).run(
+        {"now": TUESDAY_11AM_ET.isoformat()})
+    approve_all(ctx)
+    _second_lead_at_same_domain(ctx)
+    other = FileLock(ctx.settings.locks_dir / "send.lock")  # another job's run is sending
+    assert other.acquire()
+    out = SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=FakeSMTP)).run(
+        {"now": TUESDAY_11AM_ET.isoformat()}).output
+    assert FakeSMTP.sent == [] and {b.reason for b in out.blocked} == {SEND_BUSY}
+    other.release()
+
+    class OverlappingSMTP(FakeSMTP):  # a second run starts while the first is talking to the mail server
+        def send_message(self, msg):
+            if not getattr(OverlappingSMTP, "nested", False):
+                OverlappingSMTP.nested = True
+                SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=FakeSMTP)).run(
+                    {"now": TUESDAY_11AM_ET.isoformat()})
+            super().send_message(msg)
+
+    SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=OverlappingSMTP)).run(
+        {"now": TUESDAY_11AM_ET.isoformat()})
+    assert len(FakeSMTP.sent) == 1  # one email a day to that domain, however the runs overlap
+    assert not (ctx.settings.locks_dir / "send.lock").exists()
+
+
+def test_approval_rechecks_the_do_not_contact_list_even_without_edits(make_ctx):
+    from aime.models import Suppression
+    ctx = researched(make_ctx, **SENDING)
+    SalesWorkflowAgent(ctx).run({"now": TUESDAY_11AM_ET.isoformat()})
+    f = drafts(ctx)[0]
+    with ctx.db.session() as s:  # e.g. an imported do-not-contact list, which does not cancel drafts itself
+        s.add(Suppression(value=SITE, kind="domain", reason="Imported do-not-contact list"))
+    r = TestClient(create_app(ctx)).post(f"/followups/{f.id}/approve", headers=ORIGIN, follow_redirects=False)
+    assert "do-not-contact" in r.headers["location"].replace("%20", " ") and drafts(ctx)[0].status == "awaiting_approval"
+
+
+def test_an_email_confirmed_by_mark_sent_continues_the_sequence_and_keeps_its_message_id(make_ctx):
+    class TimeoutSMTP(FakeSMTP):
+        def send_message(self, msg):
+            TimeoutSMTP.message_id = msg["Message-ID"]
+            raise TimeoutError("timed out")
+
+    ctx = researched(make_ctx, **SENDING)
+    SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=FakeSMTP)).run(
+        {"now": TUESDAY_11AM_ET.isoformat()})
+    approve_all(ctx)
+    SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=TimeoutSMTP)).run(
+        {"now": TUESDAY_11AM_ET.isoformat()})
+    f = drafts(ctx)[0]
+    assert f.status == "uncertain" and f.message_id == TimeoutSMTP.message_id  # stored before the send failed
+    TestClient(create_app(ctx)).post(f"/followups/{f.id}/mark_sent", headers=ORIGIN)
+    f = drafts(ctx)[0]
+    assert f.status == "sent" and f.delivered_to == f"david.chen@{SITE}" and lead_of(ctx).outreach_status == "contacted"
+    with ctx.db.session() as s:
+        s.get(FollowUp, f.id).sent_at = TUESDAY_11AM_ET - timedelta(days=11)
+    out = SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=FakeSMTP)).run(
+        {"now": TUESDAY_11AM_ET.isoformat()}).output
+    assert out.outreach_drafts == 1 and drafts(ctx)[-1].step == 2
+
+
+@pytest.mark.parametrize("step", [2, 3])
+def test_every_follow_up_template_passes_the_quality_checks(make_ctx, step):
+    from aime.outreach import draft_outreach
+    from aime.qc.email_checks import run_email_checks
+    ctx = researched(make_ctx, **SENDING)
+    lead = lead_of(ctx)
+    with ctx.db.session() as s:
+        lead = s.get(Lead, lead.id)
+        subject, body = draft_outreach(ctx.settings, step, lead, lead.contact, [])
+        qc = run_email_checks(subject, body, [], lead.contact, False, step=step)
+    assert qc["status"] == "passed", qc  # a template that always fails could only be sent with an override
+
+
+def test_follow_up_steps_reply_in_the_same_thread(make_ctx):
+    ctx = researched(make_ctx, **SENDING)
+    FakeSMTP.sent = []
+    sender = EmailSender(ctx.settings, smtp_factory=FakeSMTP)
+    day = TUESDAY_11AM_ET
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": day.isoformat()})
+    ids = []
+    for step, wait in ((1, 0), (2, 7), (3, 7)):  # whole weeks: every send lands on a Tuesday, inside the window
+        day = day + timedelta(days=wait, minutes=5)
+        SalesWorkflowAgent(ctx, sender=sender).run({"now": day.isoformat()})  # drafts the next step when due
+        approve_all(ctx)
+        SalesWorkflowAgent(ctx, sender=sender).run({"now": day.isoformat()})
+        assert len(FakeSMTP.sent) == step, [(f.step, f.status, f.blocked_reason) for f in drafts(ctx)]
+        msg = FakeSMTP.sent[-1]
+        if step == 1:
+            assert msg["In-Reply-To"] is None
+        else:
+            assert msg["In-Reply-To"] == ids[-1] and msg["References"].split() == ids
+        ids.append(msg["Message-ID"])
+    assert [f.message_id for f in drafts(ctx)] == ids

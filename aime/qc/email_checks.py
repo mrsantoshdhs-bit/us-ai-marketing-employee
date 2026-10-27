@@ -74,7 +74,7 @@ def run_email_checks(subject: str, body: str, evidence: list[dict], contact, sup
     if bad:
         results.append(CheckResult("personalization", "fail", f'quote not found in the evidence: "{bad[0][:60]}"'))
     elif step > 1 and not quotes:
-        results.append(CheckResult("personalization", "pass", "follow-up in an existing thread"))
+        results.append(CheckResult("personalization", "pass", "follow-up to the earlier email; no new quote needed"))
     elif not evidence:
         results.append(CheckResult("personalization", "uncertain", "no recorded evidence behind this email"))
     elif not quotes:
