@@ -12,12 +12,13 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 from zoneinfo import ZoneInfo
 
+import httpx
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -570,16 +571,19 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                    est_value: str = Form("")):
         if stage not in STAGES:
             raise HTTPException(400)
+        value = None
+        if est_value.strip():
+            try:
+                value = float(est_value.replace(",", "").replace("$", ""))
+            except ValueError:
+                return back("/pipeline", f"Estimated value '{est_value[:40]}' is not a number; nothing was changed")
         with C().db.session() as s:
             o = s.get(Opportunity, opp_id) or _404()
             old = o.stage
             o.stage, o.next_step = stage, next_step or o.next_step
             o.probability = {"new": 10, "discovery": 20, "proposal": 50, "negotiation": 70, "won": 100, "lost": 0}[stage]
-            if est_value.strip():
-                try:
-                    o.est_value = float(est_value.replace(",", "").replace("$", ""))
-                except ValueError:
-                    pass
+            if value is not None:
+                o.est_value = value
             if stage in ("won", "lost"):
                 o.closed_at = utcnow()
                 if stage == "won" and o.lead_id:
@@ -714,7 +718,16 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def content_action(request: Request, cid: int, action: str, title: str = Form(""), body: str = Form(""),
                        hashtags: str = Form(""), scheduled_et: str = Form(""), post_ref: str = Form(""),
                        checked: str = Form(""), qc_override: str = Form("")):
+        if action == "save" and scheduled_et.strip():
+            try:
+                scheduled = datetime.fromisoformat(scheduled_et.strip()).replace(tzinfo=ZoneInfo("America/New_York"))
+            except ValueError:
+                return back(f"/content/{cid}", "The scheduled time is not a valid date and time; nothing was changed")
         with C().db.session() as s:
+            # Take the database write lock before reading the post: the publisher's claim then waits until this
+            # change is committed, so it can never publish an old text that this edit or rejection replaces.
+            s.execute(update(ContentItem).where(ContentItem.id == cid).values(status=ContentItem.status)
+                      .execution_options(synchronize_session=False))
             item = s.get(ContentItem, cid) or _404()
             if item.status == "published":
                 raise HTTPException(400, "Published posts cannot be changed here")
@@ -736,7 +749,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     s.query(PublishAttempt).filter(PublishAttempt.attempt_id == item.publish_attempt_id).update(
                         {"outcome": "not_sent", "finished_at": utcnow()})
                     item.status, item.publish_attempt_id, item.publish_started_at = "approved", None, None
-                    item.publish_blocked_reason = "Requeued after a person confirmed it is not on LinkedIn"
+                    item.publish_blocked_reason = None
+                    log_activity(s, f"Post #{item.id} requeued after {who(request)} confirmed it is not on LinkedIn",
+                                 who(request), type_="content")
                     msg = "Requeued for publishing"
                 else:
                     raise HTTPException(400, "Uncertain posts need: confirm with the LinkedIn post URL/URN, or "
@@ -748,8 +763,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 if hashtags.strip():
                     item.hashtags = ["#" + t.lstrip("#") for t in hashtags.replace(",", " ").split() if t.strip("#")]
                 if scheduled_et.strip():
-                    local = datetime.fromisoformat(scheduled_et).replace(tzinfo=ZoneInfo("America/New_York"))
-                    item.scheduled_for = local.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+                    item.scheduled_for = scheduled.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
                 if item.status == "approved":
                     item.status = "awaiting_approval"  # edits need a fresh approval
                     item.approved_by, item.approved_at = None, None
@@ -764,7 +778,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 if item.qc_status in ("held", "failed") and qc_override != "yes":
                     return back(f"/content/{cid}", "Tick 'I reviewed the quality findings' to approve this post")
                 item.status, item.approved_by, item.approved_at = "approved", who(request), utcnow()
-                item.publish_attempts = 0
+                item.publish_attempts, item.publish_blocked_reason = 0, None  # old reasons no longer apply
                 msg = "Approved for publishing at its scheduled time (requires LinkedIn authorization)"
                 if item.qc_status in ("held", "failed"):
                     log_activity(s, f"Post #{item.id} approved despite quality findings: {qc_summary(item.qc)[:200]}",
@@ -798,10 +812,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.post("/campaigns")
     def create_campaign(name: str = Form(...), objective: str = Form(...), service: str = Form(""),
                         industry: str = Form(""), start_date: str = Form(...), end_date: str = Form(...)):
+        try:
+            start, end = date.fromisoformat(start_date.strip()), date.fromisoformat(end_date.strip())
+        except ValueError:
+            return back("/campaigns", "Start and end dates must be valid dates (YYYY-MM-DD); nothing was created")
         with C().db.session() as s:
             s.add(Campaign(name=name, objective=objective, service=service or None, industry=industry or None,
-                           start_date=date.fromisoformat(start_date), end_date=date.fromisoformat(end_date),
-                           status="active", created_by="human"))
+                           start_date=start, end_date=end, status="active", created_by="human"))
         return back("/campaigns", "Campaign created")
 
     @app.post("/campaigns/{camp_id}/status")
@@ -974,6 +991,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 info = client.userinfo(tok["access_token"])
             except LinkedInAPIError as exc:
                 return back("/integrations", f"LinkedIn token exchange failed: {exc}")
+            except httpx.HTTPError as exc:
+                return back("/integrations", f"Could not reach LinkedIn ({type(exc).__name__}); please try again")
             client.store_token(s, tok, info)
         return back("/integrations", "LinkedIn connected")
 
@@ -1046,7 +1065,9 @@ def health_strip(ctx: AppContext, s) -> list[tuple[str, str, str]]:
     rows.append(("Post images", "ok" if browser else "warn",
                  f"designed ({browser.stem})" if browser else "simple cards (no designer)"))
     li = get_auth_status(st, s)
-    if li.expires_at:
+    if li.expires_at and li.expires_at <= utcnow():
+        rows.append(("LinkedIn connection", "bad", "expired: reconnect LinkedIn on Integrations"))
+    elif li.expires_at:
         days = (li.expires_at - utcnow()).days
         rows.append(("LinkedIn connection", "ok" if days > 14 else "warn", f"connected, {days} days left"))
     else:
