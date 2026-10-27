@@ -154,7 +154,7 @@ def test_cli_output_survives_a_console_that_cannot_show_arrows(make_ctx, capsys,
     import sys
 
     from aime.cli import _console_safe
-    narrow = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")  # a Windows console code page without "→"
+    narrow = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", newline="\n")  # a console code page without "→"
     monkeypatch.setattr(sys, "stdout", narrow)
     _console_safe()
     print("discovered → researched → meeting")
