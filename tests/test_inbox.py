@@ -378,3 +378,111 @@ def test_a_shared_mailbox_keeps_only_sales_mail(make_ctx):
         senders = {r.from_email for r in s.execute(select(InboundEmail)).scalars()}
     assert "friend@personal.example" not in senders and "newsletter@vendor.example" not in senders
     assert run_inbox(ctx).fetched == 0  # skipped mail is not read again
+
+
+# ---------------------------------------------------------------- interest in everyday wording (27 Oct real replies)
+REAL_UID_6564 = "Sound interesting can we talk this Thursday"  # real test replies to the acceptance mailbox, 27 Oct 2026
+REAL_UID_6565 = "Sound interesting, can we schedule meeting this Thursday?"
+
+
+@pytest.mark.parametrize("text", [
+    REAL_UID_6564, REAL_UID_6565, "Sound interesting,", "Sounds interesting,", "Can we talk Thursday?",
+    "Can we schedule a meeting?", "Let's arrange a call", "I would like a demo.", "We are intrested.",
+    "Sounds intresting, lets talk next week", "Could you send me a proposal?", "Happy to talk next week.",
+])
+def test_interest_and_meeting_requests_in_everyday_wording(text):
+    row = InboundEmail(from_email="x@y.example", subject="Re: hello", body_text=text, new_text=text)
+    assert classify(row)[:2] == ("interested", "high"), classify(row)
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Please don't schedule a call.", ("other", "low")),
+    ("I can't meet this week.", ("other", "low")),
+    ("We do not want a demo.", ("other", "low")),
+    ("Interesting, but not for us.", ("not_interested", "low")),
+    ("May I have your company's address?", ("question", "medium")),
+    ("Can we do this next year?", ("objection", "high")),
+    ("Can you remove me from your list?", ("unsubscribe", "high")),
+    ("Can we talk about this later? Not now.", ("interested", "medium")),  # a brush-off goes to review
+    ("Can we talk about removing my data?", ("unsubscribe", "medium")),  # data removal: suppress, a person checks
+    ("Please delete our information.", ("unsubscribe", "medium")),
+])
+def test_negations_questions_and_opt_outs_are_not_read_as_interest(text, expected):
+    row = InboundEmail(from_email="x@y.example", subject="Re: hello", body_text=text, new_text=text)
+    assert classify(row)[:2] == expected, classify(row)
+
+
+def test_the_real_meeting_request_opens_an_opportunity_and_alerts_the_sales_manager(make_ctx):
+    ctx, _, sent = contacted(make_ctx)
+    FakeIMAP.messages = {1: mail(DAVID, f"Re: {sent.subject}", f"{REAL_UID_6565}\n\nBest Regards\nDavid",
+                                 in_reply_to=sent.message_id)}
+    run_inbox(ctx)
+    r = latest_reply(ctx)
+    assert (r.category, r.confidence, r.status) == ("interested", "high", "actioned"), (r.category, r.reasons)
+    with ctx.db.session() as s:
+        opp = s.execute(select(Opportunity)).scalar_one()
+        alerts = [a.message for a in s.execute(select(Alert).where(Alert.source == "inbox")).scalars()]
+        suggestion = s.get(FollowUp, r.suggested_followup_id)
+    assert opp.lead_id == r.lead_id and lead_of(ctx).outreach_status == "interested"
+    assert any(m.startswith("Interested reply from") for m in alerts) and suggestion.status == "awaiting_approval"
+
+
+def test_the_local_model_only_suggests_and_the_reply_stays_in_review(make_ctx):
+    from tests.conftest import FakeLLM
+    ctx, _, sent = contacted(make_ctx)
+    FakeIMAP.messages = {1: mail(DAVID, f"Re: {sent.subject}", "Hmm, maybe. Ping me after the 15th?", in_reply_to=sent.message_id)}
+    llm = FakeLLM(["interested|yes"])
+    InboxAgent(ctx, mailbox=Mailbox(ctx.settings, imap_factory=FakeIMAP)).run({})
+    from aime.reply_intel import process_pending
+    with ctx.db.session() as s:  # the agent used ctx.llm (none here); run the same step with a model for this reply
+        r = s.execute(select(InboundEmail)).scalar_one()
+        r.status = "new"
+        s.commit()
+        process_pending(s, ctx.settings, "test", llm=llm)
+        r = s.execute(select(InboundEmail)).scalar_one()
+        opps = s.execute(select(Opportunity)).scalars().all()
+        alerts = [a.message for a in s.execute(select(Alert).where(Alert.source == "inbox")).scalars()]
+    assert llm.calls == 1 and (r.category, r.status) == ("question", "needs_review")
+    assert any("AI (fake:test) suggests: interested, asks for a meeting" in x for x in r.reasons)
+    assert opps == [] and any(m.startswith("Possible interest, a meeting request") for m in alerts)
+
+
+@pytest.mark.parametrize("answer", ["I think they are keen!", "", "interested maybe"])
+def test_an_unusable_model_answer_changes_nothing(answer):
+    from aime.reply_intel import ai_second_opinion
+    from tests.conftest import FakeLLM
+    row = InboundEmail(from_email="x@y.example", subject="Re: hi", body_text="Ping me after the 15th?",
+                       new_text="Ping me after the 15th?")
+    assert ai_second_opinion(FakeLLM([answer]), row) is None
+    assert ai_second_opinion(None, row) is None
+    assert ai_second_opinion(FakeLLM(["Not interested | no"]), row) == ("not_interested", False)
+
+
+def test_a_slow_local_model_is_asked_once_per_run(monkeypatch):
+    import aime.reply_intel as ri
+    from tests.conftest import FakeLLM
+    clock = iter([0.0, 31.0] + [31.0 + i for i in range(20)])
+    monkeypatch.setattr(ri.time, "perf_counter", lambda: next(clock))
+    llm = FakeLLM(["question|no"])
+    rows = [InboundEmail(from_email=f"x{i}@y.example", subject="Re: hi", body_text="Hmm?", new_text="Hmm?", status="new")
+            for i in range(3)]
+
+    class Session:  # just enough of a session for process_pending
+        def execute(self, _stmt):
+            class R:
+                def scalars(self):
+                    class S:
+                        def all(self):
+                            return rows
+                    return S()
+            return R()
+
+        def add(self, _x):
+            pass
+
+        def commit(self):
+            pass
+
+    monkeypatch.setattr(ri, "act", lambda session, settings, row, actor: setattr(row, "status", "needs_review"))
+    ri.process_pending(Session(), None, "test", llm=llm)
+    assert llm.calls == 1  # the first answer took 31 s: no more second opinions in this run
