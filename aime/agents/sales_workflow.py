@@ -281,6 +281,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         for f in approved:
             contact = f.contact
             lead = f.lead
+            test_auth = None  # the authorization a given test contact's email goes out under
             gone = automation.campaign_approval_problem(session, f, now)  # a campaign's approval holds while it does
             if gone:
                 automation.return_to_person(f, gone)
@@ -293,9 +294,19 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                     out.cancelled += 1
                     continue
             elif f.kind == "outreach":
-                ok, why = eligible(session, self.settings, lead, for_send=True)
-                if ok and (lead.contact_id != f.contact_id or (f.to_email or "").lower() != (contact.email or "").lower()):
-                    ok, why = False, "the contact or address changed after approval; draft a new email"
+                if automation.is_given_test_contact(contact):  # an address the owner gave for testing, never published
+                    test_auth, test_why = automation.test_contact_authorization(session, f, now)
+                    if test_auth is None:  # held, not cancelled: an authorization may still be activated for it
+                        f.blocked_reason = f"Not sent: test contact; {test_why}"[:300]
+                        out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+                        continue
+                    ok, why = True, ""
+                    if (f.to_email or "").lower() != (contact.email or "").lower():
+                        ok, why = False, "the address changed after approval; draft a new email"
+                else:
+                    ok, why = eligible(session, self.settings, lead, for_send=True)
+                    if ok and (lead.contact_id != f.contact_id or (f.to_email or "").lower() != (contact.email or "").lower()):
+                        ok, why = False, "the contact or address changed after approval; draft a new email"
                 if not ok:
                     f.status, f.blocked_reason = "cancelled", f"Not sent: {why}"[:300]
                     out.cancelled += 1
@@ -315,7 +326,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 f.status, f.blocked_reason = "cancelled", f"Not sent: the sequence stopped ({lead.outreach_status})"
                 out.cancelled += 1
                 continue
-            if lead.status != "qualified" and f.kind != "response":
+            if lead.status != "qualified" and f.kind != "response" and test_auth is None:
                 f.status = "cancelled"
                 f.blocked_reason = f"Lead is {lead.status}"
                 out.cancelled += 1
@@ -338,6 +349,12 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 f.blocked_reason = "Waiting for the business-hours send window"
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
                 continue
+            if test_auth is not None:  # counts against, and is checked again with, the authorization
+                f.authorization_id = test_auth.id
+                qc = ((f.quality or {}).get("qc") or {}).get("status", "not checked")
+                automation.audit(session, self.name, "test_contact_send", f"follow-up #{f.id}",
+                                 f"to {f.to_email} under campaign #{test_auth.id} {test_auth.name}; approved by "
+                                 f"{f.approved_by}; quality checks {qc}")
             # Durable claim before talking to the mail server: at most one send per follow-up. The Message-ID is
             # stored with it, so a reply to an email whose delivery was never confirmed still finds its thread.
             claimed = session.execute(update(FollowUp).where(FollowUp.id == f.id, FollowUp.status == "approved")

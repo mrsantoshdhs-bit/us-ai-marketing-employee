@@ -95,14 +95,25 @@ Run in the acceptance environment only, with nothing sent.
 - The footer is truthful: the address "was given to us directly as a business contact; it was not taken from your website".
 - The meeting offered is 30 minutes.
 
-**Still not sendable:**
-- Quality checks fail on the user-provided address.
-- The lead is disqualified as a company selling similar services.
-- The outreach pipeline sends only to published addresses.
+**Controlled send path (added on your request; nothing sent).** An outreach email to a given test contact goes out only when all of these hold:
+1. A person approved it, ticking "I reviewed the quality findings". The failed recipient check stays on the email, in the approval screen and in the audit entry.
+2. An active campaign authorization covering outreach names the exact address, within its dates and limits.
+3. The address is not suppressed or opted out, and the sequence has not stopped.
+4. The send loop's other checks pass: sending on, limits, business-hours window, compliance footer.
 
-A controlled test needs your decision on how to send to these two addresses.
+Other rules:
+- Campaign auto-approval never applies to test contacts.
+- Without an authorization the email stays approved but blocked, not cancelled.
+- Each send records `test_contact_send` in the audit log and counts against the authorization.
+- Follow-ups labels these emails as test contacts.
 
-A controlled test needs a decision first: either use the test addresses as `OUTBOUND_TEST_RECIPIENTS` on a published lead, or add a test-contact path with its own truthful footer.
+**To send #49 and #50 in acceptance** (needs your explicit go-ahead):
+1. Approve each with the quality tick.
+2. Create and activate an authorization naming the two exact addresses.
+3. Add the addresses to `OUTBOUND_TEST_RECIPIENTS`. Otherwise test mode redirects them to the current test address.
+4. Switch sending on.
+
+Approvals given while sending is off will need "Confirm again". The acceptance code checkout must run this branch.
 
 ## Known issues and blockers
 

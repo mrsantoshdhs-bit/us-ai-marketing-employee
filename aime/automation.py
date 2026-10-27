@@ -242,6 +242,8 @@ def campaign_for(session: Session, f: FollowUp, mode: str, now: datetime,
             return None, "the reply it answers is not a clear interested reply"
         if "calendly.com/" not in (f.body or "").lower():
             return None, "only booking-link replies go out on their own"
+    if is_given_test_contact(f.contact):
+        return None, "an address given to us for testing always needs a person's approval"
     text = f"{f.subject or ''}\n{f.body or ''}"
     if QUESTION_PLACEHOLDER in text:
         return None, "it needs an answer written by a person"
@@ -299,7 +301,7 @@ def campaign_approval_problem(session: Session, f: FollowUp, now: datetime) -> s
         return "its campaign authorization is no longer active"
     if recipient(f) not in (a.recipients or []):
         return "the recipient is no longer on its campaign authorization"
-    if get_state(session) != "running" or get_mode(session) == "approval":
+    if (f.approved_by or "").startswith("campaign") and (get_state(session) != "running" or get_mode(session) == "approval"):
         return "automation is not running in Hybrid or Automatic mode"
     return None
 
@@ -307,6 +309,40 @@ def campaign_approval_problem(session: Session, f: FollowUp, now: datetime) -> s
 def return_to_person(f: FollowUp, why: str) -> None:
     f.status, f.approved_at, f.approved_by, f.authorization_id = "awaiting_approval", None, None, None
     f.blocked_reason = f"Needs a person's approval: {why}"[:300]
+
+
+# --------------------------------------------------------------------------- test contacts given by the owner
+
+GIVEN = "user_provided"  # Contact.email_status of an address the owner gave for testing (never "published")
+
+
+def is_given_test_contact(contact) -> bool:
+    """An address the owner gave us for controlled testing rather than one the company published."""
+    return bool(contact is not None and contact.email_status == GIVEN)
+
+
+def test_contact_authorization(session: Session, f: FollowUp, now: datetime) -> tuple[CampaignAuthorization | None, str]:
+    """The only way an outreach email to a given test address goes out: a person approved it (seeing its quality
+    findings, which stay on the email) and an active campaign authorization covering outreach names the exact
+    address, under its limits. Returns (authorization, "") or (None, why not). Opt-outs, suppression and stopped
+    sequences still stop it; the send loop's other checks (limits, window, footer) still apply."""
+    from aime.outreach import STOP_STATUSES
+
+    to = recipient(f)
+    if not f.approved_at or not f.approved_by or f.approved_by.startswith("campaign"):
+        return None, "a person must approve it"
+    if (f.contact and f.contact.consent_status == "opted_out") or is_suppressed(session, to):
+        return None, "the address opted out or is suppressed"
+    if f.lead is not None and f.lead.outreach_status in STOP_STATUSES:
+        return None, f"the sequence stopped ({f.lead.outreach_status})"
+    camps = [a for a in active_authorizations(session, now) if to in (a.recipients or []) and "outreach" in (a.kinds or [])]
+    if not camps:
+        return None, "no active campaign authorization names this exact address"
+    for a in camps:
+        day, total = sent_counts(session, a, now)
+        if day < a.daily_limit and total < a.total_limit:
+            return a, ""
+    return None, "the campaign's daily or total limit is reached"
 
 
 # --------------------------------------------------------------------------- approvals given while sending was off
