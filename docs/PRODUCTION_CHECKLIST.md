@@ -30,12 +30,21 @@ Nothing in A sends email. Live sending (B8) happens only on your explicit author
 4. In the production folder, run `git pull --ff-only`. Only `main` moves; your untracked files and the stash stay.
 5. Tests, against a scratch data folder, never `data\`:
    `AIME_DATA_DIR=<scratch> AIME_DATA_ROLE=test python scripts/pytest_with_timeout.py 1500`
-   Expect every test to pass (445 when this was written).
+   Expect every test to pass (445 when this was written; about 3 minutes).
+   - **Under heavy load the PC can fail the two browser-render tests** in `tests/test_design.py`
+     (`test_browser_renders_a_checked_portrait_image`, `test_blank_patch_triggers_one_retake`). They render post
+     images in a browser with time limits.
+   - This happened on 27 Oct: the run took over 10 minutes instead of about 3, and both passed alone and in a full
+     re-run.
+   - If those two fail, run `tests/test_design.py` alone, then the full suite again. Treat any other failure, or a
+     repeat, as a real failure and stop.
 6. `python -m aime doctor`: expect 0 errors. The warnings today are the OneDrive sign-in and, until the next daily backup, "no copy written yet".
-7. Restart the dashboard:
+7. `python -m aime maintenance off`. This comes before the dashboard restart: the dashboard task deliberately does
+   not start the dashboard while a maintenance window is on.
+8. Restart the dashboard:
    - `schtasks /End /TN AIMarketingEmployee-Dashboard`, then `schtasks /Run /TN AIMarketingEmployee-Dashboard`.
    - Check that http://127.0.0.1:8765/login answers.
-8. `python -m aime maintenance off`, then confirm the next tick (`data\heartbeat.json`, state idle, every job a success).
+   - Confirm the next tick: `data\heartbeat.json` shows state idle, and every job succeeded.
 9. Rollback: see `docs/DEPLOYMENT.md`. Code can roll back with the data kept (schema changes are additive), or a backup can be restored.
 
 ## B. Before any live sales operation (each step needs your decision)
