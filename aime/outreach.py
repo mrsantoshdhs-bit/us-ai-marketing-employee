@@ -87,8 +87,16 @@ def gather_evidence(session: Session, lead: Lead) -> list[Evidence]:
     return out
 
 
-def outreach_footer(settings: Settings) -> str:
-    return compliance_footer(settings, outreach=True)
+PUBLISHED_SOURCES = ("website", "sec_filing")
+GIVEN_TO_US = ("We emailed you because this address was given to us directly as a business contact; "
+               "it was not taken from your website.")
+
+
+def outreach_footer(settings: Settings, contact=None) -> str:
+    """The opt-out footer, with the true reason: a published business address, or one that was given to us (a manual
+    entry or a test contact), which must never be described as published."""
+    given = contact is not None and getattr(contact, "source", None) not in PUBLISHED_SOURCES
+    return compliance_footer(settings, outreach=True, why=GIVEN_TO_US if given else None)
 
 
 def _signature(settings: Settings) -> str:
@@ -132,7 +140,7 @@ def draft_outreach(settings: Settings, step: int, lead: Lead, contact, evidence:
         body = (f"{greeting}\n\nThank you for taking the time to read my notes. I will not keep following up. If "
                 f"{topic} becomes a priority, just reply to this email and we can pick it up from there."
                 f"\n\n{_signature(settings)}")
-    return subject, body + outreach_footer(settings)
+    return subject, body + outreach_footer(settings, contact)
 
 
 def eligible(session: Session, settings: Settings, lead: Lead, for_send: bool = False) -> tuple[bool, str]:

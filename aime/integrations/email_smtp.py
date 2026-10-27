@@ -39,13 +39,14 @@ def compliance_problem(settings: Settings, body: str) -> str | None:
     return None
 
 
-def compliance_footer(settings: Settings, outreach: bool = False) -> str:
+def compliance_footer(settings: Settings, outreach: bool = False, why: str | None = None) -> str:
     """CAN-SPAM footer: why the person is receiving this, how to opt out, and our postal address.
-    Outreach (B2B first touch) says it was sent to a business contact the company published."""
+    Outreach (B2B first touch) says it was sent to a business contact the company published, unless `why` gives
+    the true reason (for an address that was given to us rather than published)."""
     unsub = settings.unsubscribe_email or settings.smtp_from or "this address"
     address = settings.company_postal_address or POSTAL_PLACEHOLDER
-    why = ("We emailed you because your company publishes this address as a business contact."
-           if outreach else f"You are receiving this because you contacted {settings.company_name}.")
+    why = why or ("We emailed you because your company publishes this address as a business contact."
+                  if outreach else f"You are receiving this because you contacted {settings.company_name}.")
     return (
         "\n\n---\n"
         f"{why} "

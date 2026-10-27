@@ -10,12 +10,14 @@ from datetime import date, datetime, timedelta
 
 from markupsafe import Markup
 
+from aime.timeutil import utcnow
+
 EMPTY = Markup('<div class="chart-empty">{}</div>')
 
 
 def weekly_buckets(dates: list[datetime | date | None], weeks: int = 8, today: date | None = None) -> list[tuple[str, int]]:
     """Counts per week (Monday to Sunday) over the last `weeks` weeks, oldest first, labelled by the Monday."""
-    today = today or datetime.utcnow().date()
+    today = today or utcnow().date()
     start = today - timedelta(days=today.weekday()) - timedelta(weeks=weeks - 1)
     counts = [0] * weeks
     for d in dates:
