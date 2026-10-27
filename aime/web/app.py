@@ -632,7 +632,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 if address and POSTAL_PLACEHOLDER in (f.body or ""):  # any email kind drafted before it was set
                     f.body, edited = f.body.replace(POSTAL_PLACEHOLDER, address), True
                 recipient = f.to_email or (f.contact.email if f.contact else None)
-                suppressed = is_suppressed(s, recipient, f.lead.company.domain if f.kind == "outreach" else None)
+                suppressed = (is_suppressed(s, recipient, f.lead.company.domain if f.kind == "outreach" else None)
+                              or bool(f.contact and f.contact.consent_status == "opted_out"))  # opted out any way
                 qc_status = None
                 if f.kind == "outreach":
                     if edited or action == "save":  # an edited email is checked again before anyone approves it

@@ -36,8 +36,16 @@ from aime.outreach import stop_sequence
 from aime.timeutil import utcnow
 
 PATTERNS: list[tuple[str, re.Pattern]] = [
-    ("unsubscribe", re.compile(r"\b(unsubscribe|remove me|take me off|stop (emailing|contacting|sending)|"
-                               r"do not (email|contact)|don'?t (email|contact) me|opt[- ]?out)\b", re.I)),
+    # Opt-outs in everyday wording and with typos ("unsubcribe", "remove my email from your list", "no more emails").
+    ("unsubscribe", re.compile(
+        r"\b(un-?su[bs]{1,2}c?r?i?b?e?d?|"
+        r"(remove|delete|drop|take) (me|us|my (e-?mail|address|name|details|contact details)|our (e-?mail|address|details))"
+        r"( (from|off) (your|the|this|all) ((mailing|e-?mail|contact|marketing) )?(list|lists|database))?|"
+        r"(off|from) (your|the|this) ((mailing|e-?mail|marketing) )?list|"
+        r"stop (emailing|contacting|sending|messaging|writing to)|stop (all |the |these |your )?(e-?mails|messages|spam)|"
+        r"no (more|further) (e-?mails|messages|contact)|"
+        r"(do not|don'?t|never) (e-?mail|contact|message|write to) (me|us)|do not (email|contact)|"
+        r"opt (me |us )?out|opt[- ]?out|leave (me|us) alone)\b", re.I)),
     ("not_interested", re.compile(r"\b(not interested|no thanks|no, thank you|not a (good )?fit|we'?re all set|"
                                   r"not (looking|in the market)|pass on this|no need|not for us|we'?re good)\b", re.I)),
     ("interested", re.compile(r"\b(interested|sounds? (good|great|interesting|in(te|t|tr)[a-z]{0,3}st(ed|ing))|"
@@ -261,6 +269,10 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             contact.consent_status, contact.consent_at = "opted_out", utcnow()
         if lead and lead.outreach_status:
             stop_sequence(session, lead, "unsubscribed", "Asked not to be contacted", actor)
+        if contact and contact.email and contact.email.lower() != (row.from_email or "").lower():
+            # an opt-out in our thread from another address (a colleague, a personal address, test mode): the
+            # address we wrote to is suppressed as well
+            suppress(session, contact.email, "Unsubscribe request in the email thread")
         notes.append(f"{row.from_email} suppressed; no further email")
         row.status = "actioned" if row.confidence == "high" else "needs_review"
     elif row.category == "out_of_office":
