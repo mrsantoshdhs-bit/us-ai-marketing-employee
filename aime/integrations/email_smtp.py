@@ -54,6 +54,10 @@ def compliance_footer(settings: Settings, outreach: bool = False) -> str:
     )
 
 
+def new_message_id(settings: Settings) -> str:
+    return make_msgid(domain=(settings.smtp_from or "localhost").split("@")[-1])
+
+
 class EmailSender:
     def __init__(self, settings: Settings, smtp_factory: Callable[..., smtplib.SMTP] = smtplib.SMTP):
         self.settings = settings
@@ -80,7 +84,10 @@ class EmailSender:
             return to, False
         return sorted(tests)[0], True
 
-    def send(self, to: str, subject: str, body: str, in_reply_to: str | None = None) -> str:
+    def send(self, to: str, subject: str, body: str, in_reply_to: str | None = None,
+             message_id: str | None = None) -> str:
+        """Returns the Message-ID. Pass `message_id` (stored before sending) so it is known even if the send fails
+        midway, and replies to a delivered-but-unconfirmed email still match by In-Reply-To."""
         ready, reason = self.status()
         if not ready:
             raise EmailNotReady(reason)
@@ -97,7 +104,7 @@ class EmailSender:
         msg["From"] = formataddr((s.sender_name or s.company_name, s.smtp_from))
         msg["To"] = actual
         msg["Subject"] = subject
-        msg_id = make_msgid(domain=s.smtp_from.split("@")[-1])
+        msg_id = message_id or new_message_id(s)
         msg["Message-ID"] = msg_id
         unsub = s.unsubscribe_email or s.smtp_from
         msg["List-Unsubscribe"] = f"<mailto:{unsub}?subject=unsubscribe>"

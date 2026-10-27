@@ -24,10 +24,10 @@ from aime.agents.base import BaseAgent, RetryPolicy
 from aime.agents.contracts import BlockedItem
 from aime.crm_ops import is_suppressed, log_activity
 from aime.email_templates import draft_reply
-from aime.integrations.email_smtp import EmailNotReady, EmailSender, compliance_problem
+from aime.integrations.email_smtp import EmailNotReady, EmailSender, compliance_problem, new_message_id
 from aime.knowledge.services import service_name
 from aime.models import Alert, FollowUp, InboundEmail, InboundInquiry, Lead, Opportunity, Signal
-from aime.outreach import STOP_STATUSES, draft_outreach, eligible, gather_evidence, set_status
+from aime.outreach import STOP_STATUSES, draft_outreach, eligible, gather_evidence, record_delivery, set_status
 from aime.pipeline import pipeline_checks
 from aime.outreach import policy as outreach_policy
 from aime.qc.email_checks import run_email_checks
@@ -309,15 +309,18 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 f.blocked_reason = "Waiting for the business-hours send window"
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
                 continue
-            # Durable claim before talking to the mail server: at most one send per follow-up.
+            # Durable claim before talking to the mail server: at most one send per follow-up. The Message-ID is
+            # stored with it, so a reply to an email whose delivery was never confirmed still finds its thread.
             claimed = session.execute(update(FollowUp).where(FollowUp.id == f.id, FollowUp.status == "approved")
-                                      .values(status="sending", send_started_at=utcnow())).rowcount
+                                      .values(status="sending", send_started_at=utcnow(),
+                                              message_id=f.message_id or new_message_id(self.settings))).rowcount
             session.commit()
             if claimed != 1:
                 continue
             session.refresh(f)
             try:
-                msg_id = self.sender.send(f.to_email or contact.email, f.subject, f.body or "", in_reply_to=f.in_reply_to)
+                msg_id = self.sender.send(f.to_email or contact.email, f.subject, f.body or "", in_reply_to=f.in_reply_to,
+                                          message_id=f.message_id)
             except (EmailNotReady, smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused,
                     smtplib.SMTPConnectError, smtplib.SMTPAuthenticationError, ConnectionRefusedError,
                     socket.gaierror) as exc:
@@ -344,19 +347,13 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 session.add(Alert(level="error", source=self.name, message=f"Follow-up #{f.id}: {f.blocked_reason}"))
                 session.commit()
                 continue
-            f.status = "sent"
-            f.sent_at = utcnow()
             f.message_id = msg_id
-            f.delivered_to = self.sender.recipient_for(f.to_email or contact.email)[0]
-            f.blocked_reason = None
-            lead.last_activity_at = f.sent_at
+            record_delivery(session, f, utcnow(), self.sender.recipient_for(f.to_email or contact.email)[0], self.name)
             if f.kind == "outreach":
                 limits["sent_today"] += 1
                 limits["run"] += 1
                 domain = (f.to_email or "").split("@")[-1]
                 limits["domains"][domain] = limits["domains"].get(domain, 0) + 1
-                if lead.outreach_status in (None, "drafted", "approved"):
-                    set_status(session, lead, "contacted", self.name)
             out.emails_sent += 1
             log_activity(session, f"Email sent: {f.subject}", self.name, type_="email_sent", body=f.body,
                          company_id=f.company_id, lead_id=f.lead_id)

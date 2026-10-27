@@ -12,7 +12,7 @@ from sqlalchemy.exc import OperationalError
 from aime.agents import AuthorizedPublishingAgent, SalesWorkflowAgent
 from aime.agents.publishing import PublishOutput
 from aime.doctor import run_checks
-from aime.integrations.email_smtp import EmailSender
+from aime.integrations.email_smtp import EmailSender, compliance_footer
 from aime.integrations.linkedin import format_commentary
 from aime.models import Alert, Company, Contact, ContentItem, FollowUp, Lead, OAuthToken, PublishAttempt
 from aime.publish_journal import confirmed
@@ -253,7 +253,8 @@ def _approved_followup(ctx):
         s.add(lead)
         s.flush()
         f = FollowUp(lead_id=lead.id, contact_id=ct.id, company_id=co.id, channel="email", step=1,
-                     due_at=utcnow() - timedelta(minutes=1), status="approved", subject="Hi", body="Body",
+                     due_at=utcnow() - timedelta(minutes=1), status="approved", subject="Hi",
+                     body="Body" + compliance_footer(ctx.settings),
                      approved_by="test", approved_at=utcnow())
         s.add(f)
         s.flush()

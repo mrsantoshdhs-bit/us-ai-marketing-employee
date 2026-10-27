@@ -41,6 +41,7 @@ from aime.models import (Activity, AgentRun, Alert, Campaign, Company, Contact, 
 from aime.monitoring import agent_stats, read_heartbeat
 from aime.policy import agreement, environment_blockers, evaluate_shadow, policy_config
 from aime.qc import summary as qc_summary
+from aime.outreach import record_delivery
 from aime.outreach import set_status as set_outreach_status
 from aime.outreach import stop_sequence
 from aime.qc.checks import run_quality_checks
@@ -647,7 +648,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 f.status = "done"
                 msg = "Task completed"
             elif action == "mark_sent" and f.status == "uncertain":
-                f.status, f.sent_at, f.blocked_reason = "sent", f.send_started_at or utcnow(), None
+                to = f.to_email or (f.contact.email if f.contact else None)
+                record_delivery(s, f, f.send_started_at or utcnow(),
+                                EmailSender(C().settings).recipient_for(to)[0] if to else None, who(request))
                 msg = "Marked as sent (confirmed in your Sent folder)"
             elif action == "requeue" and f.status == "uncertain":
                 f.status, f.send_started_at = "approved", None

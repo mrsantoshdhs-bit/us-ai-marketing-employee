@@ -298,3 +298,27 @@ def test_approval_rechecks_the_do_not_contact_list_even_without_edits(make_ctx):
         s.add(Suppression(value=SITE, kind="domain", reason="Imported do-not-contact list"))
     r = TestClient(create_app(ctx)).post(f"/followups/{f.id}/approve", headers=ORIGIN, follow_redirects=False)
     assert "do-not-contact" in r.headers["location"].replace("%20", " ") and drafts(ctx)[0].status == "awaiting_approval"
+
+
+def test_an_email_confirmed_by_mark_sent_continues_the_sequence_and_keeps_its_message_id(make_ctx):
+    class TimeoutSMTP(FakeSMTP):
+        def send_message(self, msg):
+            TimeoutSMTP.message_id = msg["Message-ID"]
+            raise TimeoutError("timed out")
+
+    ctx = researched(make_ctx, **SENDING)
+    SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=FakeSMTP)).run(
+        {"now": TUESDAY_11AM_ET.isoformat()})
+    approve_all(ctx)
+    SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=TimeoutSMTP)).run(
+        {"now": TUESDAY_11AM_ET.isoformat()})
+    f = drafts(ctx)[0]
+    assert f.status == "uncertain" and f.message_id == TimeoutSMTP.message_id  # stored before the send failed
+    TestClient(create_app(ctx)).post(f"/followups/{f.id}/mark_sent", headers=ORIGIN)
+    f = drafts(ctx)[0]
+    assert f.status == "sent" and f.delivered_to == f"david.chen@{SITE}" and lead_of(ctx).outreach_status == "contacted"
+    with ctx.db.session() as s:
+        s.get(FollowUp, f.id).sent_at = TUESDAY_11AM_ET - timedelta(days=11)
+    out = SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=FakeSMTP)).run(
+        {"now": TUESDAY_11AM_ET.isoformat()}).output
+    assert out.outreach_drafts == 1 and drafts(ctx)[-1].step == 2
