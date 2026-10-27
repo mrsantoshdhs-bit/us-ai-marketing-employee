@@ -96,8 +96,6 @@ def test_approval_is_refused_for_a_contact_who_opted_out_without_a_suppression_e
         s.add(f)
         s.commit()
         fid = f.id
-    r = TestClient(create_app(ctx)).post(f"/followups/{fid}/approve", headers={"origin": "http://testserver"},
-                                         follow_redirects=False)
-    assert "do-not-contact" in r.headers.get("location", "").replace("%20", " ").replace("+", " ") or True
+    TestClient(create_app(ctx)).post(f"/followups/{fid}/approve", headers={"origin": "http://testserver"})
     with ctx.db.session() as s:
         assert s.get(FollowUp, fid).status == "awaiting_approval"
