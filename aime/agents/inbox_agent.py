@@ -15,8 +15,9 @@ from sqlalchemy.orm import Session
 from aime.agents.base import BaseAgent, RetryPolicy
 from aime.db import kv_get, kv_set
 from aime.inbox import Mailbox, ParsedEmail, new_text, parse_message
+from aime.meetings import check_double_bookings
 from aime.models import Company, Contact, FollowUp, InboundEmail, Lead
-from aime.reply_intel import process_pending
+from aime.reply_intel import CALENDLY_NOTICE, process_pending
 
 
 class InboxInput(BaseModel):
@@ -79,6 +80,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
             kv_set(session, "inbox.state", state)
             session.commit()
         out.categories = process_pending(session, self.settings, self.name, llm=self.ctx.llm)
+        check_double_bookings(session, self.settings)  # after the whole batch: a reschedule's two notices are one change
         out.needs_review = len(session.execute(select(InboundEmail.id).where(InboundEmail.status == "needs_review")).all())
         return out
 
@@ -87,13 +89,14 @@ CALENDLY_SUBJECT = re.compile(r"\b(new event|canceled|cancelled|rescheduled|invi
 
 
 def sales_related(session: Session, p: ParsedEmail) -> bool:
-    """Is this email part of the sales work? A reply in one of our threads, a bounce, a Calendly notification, or
-    mail from a known contact or a lead's company domain. Everything else in a shared mailbox is left alone."""
+    """Is this email part of the sales work? A reply in one of our threads, a bounce, a Calendly booking notice
+    (also forwarded), or mail from a known contact or a lead's company domain. Everything else in a shared mailbox,
+    Calendly's own newsletters included, is left alone."""
     if p.is_bounce or p.bounced_addresses:
         return True
     sender_domain = p.from_email.rsplit("@", 1)[-1]
-    if sender_domain.endswith("calendly.com") or ("calendly.com" in (p.body_text or "").lower()
-                                                   and CALENDLY_SUBJECT.search(p.subject or "")):
+    if (sender_domain.endswith("calendly.com") or "calendly.com" in (p.body_text or "").lower()) \
+            and (CALENDLY_SUBJECT.search(p.subject or "") or CALENDLY_NOTICE.match(p.subject or "")):
         return True
     ids = {i.strip() for i in [p.in_reply_to or "", *(p.references or "").split()] if i.strip()}
     if ids and session.execute(select(FollowUp.id).where(FollowUp.message_id.in_(ids))).first():

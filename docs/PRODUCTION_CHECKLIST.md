@@ -76,17 +76,36 @@ Nothing in A sends email. Live sending (B8) happens only on your explicit author
 
 The app does not use the Calendly API. It reads Calendly's notification emails from the monitored mailbox and puts your booking link in approved replies.
 
-1. A Calendly account (the free plan works) with one event type, for example a 20-minute intro.
-2. That event's link (`https://calendly.com/<you>/<event>`) in `CALENDLY_URL`, in production `.env` and in `acceptance.env`.
+1. A Calendly account (the free plan works) with one event type. Yours: a 30-minute meeting.
+2. That event's link (`https://calendly.com/<you>/<event>`) in `CALENDLY_URL`:
+   - set in `acceptance.env` on 27 Oct;
+   - production `.env` needs it too, on your approval.
+
+   The suggested reply offers a slot of the length in the link ("30min"), mentions the day the prospect asked for and
+   what the call is about, and waits for your approval. A lead that has already booked gets a confirmation of that
+   meeting instead of a second link.
 3. Calendly's host notifications (new event, cancelled, rescheduled) delivered to the mailbox the app reads:
-   - the Calendly account's email is the sales mailbox, or the notifications are forwarded to it;
-   - for the Gmail test, they must arrive in the Gmail test mailbox that the acceptance settings read;
-   - with `INBOX_SCOPE=related`, emails from calendly.com are always kept.
-4. Keep the standard notification wording. The app reads the invitee's name and email, and the event date, time and time zone, from it.
-5. Matching a booking to a lead:
+   - the Calendly account's email is the sales mailbox, or the notifications are forwarded to it (a Gmail filter that
+     forwards them, or a manual "Fwd:", both work);
+   - your Calendly account is on the Gmail test mailbox, so in the acceptance environment the notifications arrive
+     where the acceptance settings read; for production with the business mailbox, forward them there;
+   - with `INBOX_SCOPE=related`, Calendly booking notices are kept and Calendly's newsletters are not.
+4. Keep the standard notification wording. The app reads the invitee's name and email, the event type, and the event
+   date, time and time zone. It accepts both a time range and the start time alone (the length then comes from the
+   event type, "30 Minute Meeting"). The exact layout of your account's emails is confirmed by the first real booking
+   (step 7).
+5. When a booking arrives, the app:
+   - records the meeting (Meetings page, Today) and moves the lead to *meeting* and the opportunity to 30%;
+   - cancels the lead's remaining sequence emails and any booking-link reply still waiting;
+   - tells you: an alert on the System page and a desktop notification.
+
+   A second upcoming booking by the same lead raises a "Possible double booking" warning until one is cancelled in
+   Calendly. A reschedule moves the meeting, whether Calendly reports it as one email or as a new event plus a
+   cancellation; Calendly's cancellation of the former time then changes nothing.
+6. Matching a booking to a lead:
    - the invitee books with the email address the outreach went to; in test mode, that is the test address;
    - otherwise the booking shows on Meetings as "not matched", with **Link to lead**.
-6. **Test**, in the acceptance environment:
+7. **Test**, in the acceptance environment:
    1. From the approved test recipient's mailbox, book through the link in an approved test reply.
    2. Run the inbox job: the meeting is recorded, the lead moves to *meeting* and the opportunity to 30%.
    3. Reschedule in Calendly: the meeting moves, and there is still only one.

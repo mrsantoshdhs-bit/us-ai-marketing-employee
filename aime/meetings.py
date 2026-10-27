@@ -1,21 +1,28 @@
 """Meetings: bookings detected from Calendly's notification emails in the sales mailbox, or logged by hand.
 
 Calendly sends the host "New Event: <invitee> - <time> <date> - <event type>" and "Canceled: ..." emails
-with the invitee's name and email and the event date/time with its time zone. A booking is matched to the
-lead by the invitee's email, then by their company's domain; the meeting is recorded, the lead moves to
-"meeting", the opportunity to 30%, and the Sales Manager is notified. Cancellations reopen the lead
-("interested") with a follow-up next step. Reschedules ("Rescheduled:"/"Updated:", with the former time when
-Calendly gives it) move the recorded meeting instead of adding a second one. A cancellation or reschedule whose
-time matches nothing applies to the invitee's only upcoming meeting; otherwise it goes to review. Overlapping
-meetings raise an alert (Calendly itself prevents double booking on the calendar it manages). Unmatched or
-unparseable notifications go to review, and an unmatched booking can be linked to a lead on the Meetings page.
+with the invitee's name and email and the event date/time with its time zone, given either as a range
+("10:00am - 10:30am (Eastern Time) Thursday, October 29, 2026") or as the start only ("10:00am - Thursday,
+October 29, 2026 (India Standard Time)"; the length then comes from the event type, "30 Minute Meeting"). A booking
+is matched to the lead by the invitee's email, then by their company's domain; the meeting is recorded, the lead
+moves to "meeting", the opportunity to 30%, the lead's remaining sequence emails and any booking link still waiting
+to go out are cancelled, and the Sales Manager is notified. Cancellations reopen the lead ("interested") with a
+follow-up next step, unless another meeting with it is still booked. Reschedules ("Rescheduled:"/"Updated:", or a
+"New Event:" that names its former time) move the recorded meeting instead of adding a second one; Calendly's
+cancellation of the former time then changes nothing. A cancellation or reschedule whose time matches nothing
+applies to the invitee's only upcoming meeting; otherwise it goes to review. Two upcoming meetings for one lead
+(the same person booking twice) raise a warning until one is cancelled; overlapping meetings with different people
+raise an alert (Calendly itself prevents double booking on the calendar it manages). Unmatched or unparseable
+notifications go to review, and an unmatched booking can be linked to a lead on the Meetings page.
 Nothing here creates, moves or cancels anything in Calendly: it only records what Calendly reports.
 """
 
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import func, select
@@ -34,10 +41,16 @@ TZ_NAMES = {
     "hawaii": "Pacific/Honolulu", "india": "Asia/Kolkata", "ist": "Asia/Kolkata", "utc": "UTC", "gmt": "UTC",
 }
 TIME_RANGE = re.compile(r"(\d{1,2}(?::\d{2})?\s*[ap]m)\s*(?:-|–|to)\s*(\d{1,2}(?::\d{2})?\s*[ap]m)", re.I)
-DATE_RE = re.compile(r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun),?\s+"
-                     r"([a-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})", re.I)
+ONE_TIME = re.compile(r"\d{1,2}(?::\d{2})?\s*[ap]m", re.I)
+# Calendly writes the date as the account's locale does: "Thursday, October 29, 2026" or "Wednesday, 28 October 2026"
+_WEEKDAY = r"(?:(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun),?\s+)?"
+DATE_MDY = re.compile(_WEEKDAY + r"\b([a-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})", re.I)
+DATE_DMY = re.compile(_WEEKDAY + r"\b(\d{1,2})\s+([a-z]{3,9})\.?,?\s+(\d{4})", re.I)
+LENGTH = re.compile(r"\b(\d{1,3})\s*-?\s*(min|mins|minute|minutes|hr|hrs|hour|hours)\b", re.I)
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-WHEN_ENDS = r"Former|Previous|Invitee|Location|Description|Questions|View event|$"  # what follows a date/time field
+# what follows a date/time field
+WHEN_ENDS = r"Former|Previous|Invitee|Location|Description|Questions|View event|Event Type|Cancel|Reason|$"
+OPEN = ("pending", "awaiting_approval", "approved")
 
 
 def _zone(text: str, default: str) -> ZoneInfo:
@@ -60,9 +73,40 @@ def _clock(value: str) -> tuple[int, int]:
     return (hour % 12) + (12 if ampm == "pm" else 0), minute
 
 
-def parse_calendly(subject: str, body: str, own: set[str], default_tz: str = "America/New_York") -> dict | None:
+def _length(text: str, default: int) -> int:
+    """Minutes named in an event type or link ("30 Minute Meeting", "30min", "1 Hour"), else `default`."""
+    m = LENGTH.search(text or "")
+    if not m:
+        return default
+    return max(5, min(int(m.group(1)) * (60 if m.group(2).lower().startswith("h") else 1), 480))
+
+
+def booking_minutes(settings, default: int = 30) -> int:
+    """The length of the meeting the booking link offers, from the link itself (calendly.com/<you>/30min)."""
+    return _length(urlparse(getattr(settings, "calendly_url", "") or "").path.replace("/", " "), default)
+
+
+def local_time(at: datetime, tz: str | None) -> str:
+    """"Thu Oct 29, 10:00 AM IST" for a naive UTC time, in the meeting's own time zone (UTC when unknown)."""
+    try:
+        zone = ZoneInfo(tz or "UTC")
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = ZoneInfo("UTC")
+    local = at.replace(tzinfo=ZoneInfo("UTC")).astimezone(zone)
+    return f"{local:%a %b %d}, {local.hour % 12 or 12}:{local:%M %p} {local.tzname()}"
+
+
+def _when_label(m: Meeting) -> str:
+    local = local_time(m.starts_at, m.timezone)
+    return local if local.endswith(" UTC") else f"{local} ({m.starts_at:%H:%M} UTC)"
+
+
+def parse_calendly(subject: str, body: str, own: set[str], default_tz: str = "America/New_York",
+                   default_minutes: int = 30) -> dict | None:
     """{kind, invitee_name, invitee_email, starts_at, ends_at (UTC naive), event, tz, previous_starts_at} or None.
-    kind: booked | cancelled | rescheduled."""
+    kind: booked | cancelled | rescheduled. Without an end time the length comes from the event type
+    ("30 Minute Meeting"), else `default_minutes`."""
+    subject = re.sub(r"^\s*(?:(?:fwd?|fw)\s*:\s*)+", "", subject, flags=re.I)  # a notice forwarded to the sales mailbox
     kind = ("cancelled" if re.match(r"\s*cancel+ed\s*:", subject, re.I)
             else "booked" if re.match(r"\s*new event\s*:", subject, re.I)
             else "rescheduled" if re.match(r"\s*(?:rescheduled|updated)\s*:", subject, re.I) else None)
@@ -82,34 +126,56 @@ def parse_calendly(subject: str, body: str, own: set[str], default_tz: str = "Am
         email = m.group(1).lower()
     else:
         email = next((e.lower() for e in EMAIL_RE.findall(text) if e.lower() not in own and "calendly" not in e.lower()), None)
+    m = re.search(r"Event Type:\s*(.+?)\s+(?:Invitee|Event Date|Date/Time|Location|$)", text, re.I)
+    event = (m.group(1) if m else re.split(r"\s+-\s+", subject)[-1] if " - " in subject else "Meeting").strip()
+    minutes = _length(event, default_minutes)
     when = re.search(rf"(?<!former )(?<!previous )Event Date/Time:\s*(.+?)(?:{WHEN_ENDS})", text, re.I)
-    parsed = _when(when.group(1) if when else subject, default_tz)
+    parsed = _when(when.group(1), default_tz, minutes) if when else None
+    if parsed is None:  # the subject has the start: "New Event: Ana - 10:00am Thu, Oct 29, 2026 - 30 Minute Meeting"
+        zone = re.search(r"\([^)]*\)", when.group(1)) if when else None
+        parsed = _when(f"{subject} {zone.group(0) if zone else ''}", default_tz, minutes)
     if not (parsed and email):
         return None
-    before = re.search(rf"(?:Former|Previous)(?: Event)? Date/Time:\s*(.+?)(?:Event Date/Time|{WHEN_ENDS})", text, re.I)
-    previous = _when(before.group(1), default_tz) if before else None
-    event = re.split(r"\s+-\s+", subject)[-1].strip() if " - " in subject else "Meeting"
+    # "Former Event Date/Time: ...", or as Calendly's "Updated:" email has it: "Date & Time: Former: ... Updated: ..."
+    before = re.search(rf"(?:Former|Previous)(?: Event)?(?: Date/Time)?:\s*(.+?)(?:Updated:|Event Date/Time|{WHEN_ENDS})",
+                       text, re.I)
+    previous = _when(before.group(1), default_tz, minutes) if before else None
+    if kind == "booked" and previous is not None:
+        kind = "rescheduled"  # a new event that names its former time is a reschedule
     return {"kind": kind, "invitee_name": name, "invitee_email": email, "starts_at": parsed[0], "ends_at": parsed[1],
             "event": event[:200], "tz": parsed[2], "previous_starts_at": previous[0] if previous else None}
 
 
-def _when(when_text: str, default_tz: str) -> tuple[datetime, datetime, str] | None:
-    """(start, end) in UTC (naive) and the zone name, from "10:00am - 10:20am (Eastern Time) Thursday, October 29, 2026"."""
-    times, date = TIME_RANGE.search(when_text), DATE_RE.search(when_text)
-    if not (times and date):
-        return None
-    try:
-        day = datetime.strptime(f"{date.group(1)[:3]} {date.group(2)} {date.group(3)}", "%b %d %Y")
-    except ValueError:
+def _when(when_text: str, default_tz: str, minutes: int = 30) -> tuple[datetime, datetime, str] | None:
+    """(start, end) in UTC (naive) and the zone name, from "10:00am - 10:20am (Eastern Time) Thursday, October 29, 2026"
+    or, with the start only, "10:00am - Thursday, October 29, 2026 (India Standard Time)" (end = start + minutes)."""
+    times, day = TIME_RANGE.search(when_text), _date(when_text)
+    one = None if times else ONE_TIME.search(when_text)
+    if not (day and (times or one)):
         return None
     tz = _zone(when_text, default_tz)
-    (h1, m1), (h2, m2) = _clock(times.group(1)), _clock(times.group(2))
+    to_utc = lambda d: d.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)  # noqa: E731
+    h1, m1 = _clock(times.group(1) if times else one.group(0))
     start = day.replace(hour=h1, minute=m1, tzinfo=tz)
+    if not times:
+        return to_utc(start), to_utc(start) + timedelta(minutes=minutes), str(tz)
+    h2, m2 = _clock(times.group(2))
     end = day.replace(hour=h2, minute=m2, tzinfo=tz)
     if end <= start:
         end += timedelta(days=1)
-    to_utc = lambda d: d.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)  # noqa: E731
     return to_utc(start), to_utc(end), str(tz)
+
+
+def _date(text: str) -> datetime | None:
+    """The first date written month first ("Oct 29, 2026") or day first ("28 October 2026"), with a real month name."""
+    found = [(m.start(), m.group(1), m.group(2), m.group(3)) for m in (DATE_MDY.search(text),) if m] + \
+            [(m.start(), m.group(2), m.group(1), m.group(3)) for m in (DATE_DMY.search(text),) if m]
+    for _, month, day, year in sorted(found):
+        try:
+            return datetime.strptime(f"{month[:3]} {day} {year}", "%b %d %Y")
+        except ValueError:
+            continue
+    return None
 
 
 def match_lead(session: Session, email: str) -> tuple[Lead | None, Contact | None]:
@@ -152,30 +218,29 @@ def record_meeting(session: Session, settings, info: dict, actor: str, row: Inbo
         else:
             old = moved.starts_at
             moved.starts_at, moved.ends_at, moved.timezone = info["starts_at"], info["ends_at"], info.get("tz")
+            moved.rescheduled_from = old
             for opp in session.execute(select(Opportunity).where(Opportunity.id == moved.opportunity_id,
                                                                  Opportunity.stage.not_in(("won", "lost")))).scalars():
                 opp.next_step = f"Meeting {moved.starts_at:%Y-%m-%d %H:%M} UTC (rescheduled): prepare, then record the outcome"
             msg = f"{'SIMULATED: ' if moved.is_simulated else ''}Meeting rescheduled: {info['invitee_name'] or info['invitee_email']} " \
-                  f"from {old:%a %b %d %H:%M} to {moved.starts_at:%a %b %d %H:%M} UTC"
+                  f"from {local_time(old, moved.timezone)} to {_when_label(moved)}"
             _tell(session, settings, msg, actor, moved)
             return moved, "meeting rescheduled"
     if info["kind"] == "cancelled":
         if existing is None:
+            moved = session.execute(select(Meeting).where(func.lower(Meeting.invitee_email) == info["invitee_email"],
+                                                          Meeting.rescheduled_from == info["starts_at"])).scalars().first()
+            if moved is not None:  # Calendly also cancels the former time of a meeting it moved
+                return moved, "former time of a rescheduled meeting: nothing to cancel"
             existing = _the_meeting(session, info["invitee_email"], None)
         if existing is None:
             return None, f"cancellation for an unknown meeting with {info['invitee_email']}"
         if existing.status == "cancelled":
             return existing, "already cancelled"
         existing.status = "cancelled"
-        if existing.lead_id:
-            lead = session.get(Lead, existing.lead_id)
-            if lead.outreach_status == "meeting":
-                set_status(session, lead, "interested", actor, "meeting cancelled")
-            for opp in session.execute(select(Opportunity).where(Opportunity.lead_id == lead.id,
-                                                                 Opportunity.stage.not_in(("won", "lost")))).scalars():
-                opp.next_step = f"Meeting on {info['starts_at']:%Y-%m-%d} was cancelled: follow up to rebook"
+        reopen_after_cancel(session, existing, actor)
         _tell(session, settings, f"{'SIMULATED: ' if existing.is_simulated else ''}Meeting cancelled: "
-                                 f"{info['invitee_name'] or info['invitee_email']} ({existing.starts_at:%a %b %d %H:%M} UTC)",
+                                 f"{info['invitee_name'] or info['invitee_email']} ({_when_label(existing)})",
               actor, existing)
         return existing, "meeting cancelled"
     if scheduled:
@@ -187,24 +252,91 @@ def record_meeting(session: Session, settings, info: dict, actor: str, row: Inbo
                       status="scheduled", inbound_email_id=row.id if row else None, is_simulated=simulated)
     session.add(meeting)
     session.flush()
+    label = "SIMULATED: " if simulated else ""
+    who = info["invitee_name"] or info["invitee_email"]
     if lead is None:
+        msg = f"{label}Meeting booked with {who} on {_when_label(meeting)}, not matched to a lead: link it on Meetings"
+        session.add(Alert(level="info", source="meetings", message=msg[:500]))
+        notify_event(settings, msg)
         return meeting, f"meeting with {info['invitee_email']} recorded but not matched to a lead"
     meeting.opportunity_id = _advance_opportunity(session, lead, meeting, actor).id
     set_status(session, lead, "meeting", actor, f"{info['starts_at']:%Y-%m-%d %H:%M} UTC")
     lead.last_activity_at = utcnow()
+    closed = close_open_emails(session, lead, f"Meeting booked for {_when_label(meeting)}: not needed")
     overlap = session.execute(select(Meeting.id).where(Meeting.id != meeting.id, Meeting.status == "scheduled",
+                                                       func.lower(Meeting.invitee_email) != info["invitee_email"],
                                                        Meeting.starts_at < meeting.ends_at, Meeting.ends_at > meeting.starts_at)).first()
     if overlap:
         session.add(Alert(level="warning", source="meetings",
                           message=f"Meeting #{meeting.id} overlaps meeting #{overlap[0]}: check your calendar"))
-    label = "SIMULATED: " if simulated else ""
-    msg = f"{label}Meeting booked with {info['invitee_name'] or info['invitee_email']} ({lead.company.name}) on " \
-          f"{info['starts_at']:%a %b %d %H:%M} UTC"
+    msg = f"{label}Meeting booked with {who} ({lead.company.name}) on {_when_label(meeting)}"
     session.add(Alert(level="info", source="meetings", message=msg[:500]))
     notify_event(settings, msg)
-    log_activity(session, msg, actor, type_="meeting", company_id=lead.company_id, lead_id=lead.id,
-                 opportunity_id=meeting.opportunity_id)
+    log_activity(session, msg + (f"; {closed} unsent email(s) to them cancelled" if closed else ""), actor,
+                 type_="meeting", company_id=lead.company_id, lead_id=lead.id, opportunity_id=meeting.opportunity_id)
     return meeting, "meeting recorded; lead moved to meeting; opportunity advanced"
+
+
+def close_open_emails(session: Session, lead: Lead, reason: str) -> int:
+    """A lead who booked gets no more sequence emails, and no booking link that is still waiting to be approved or
+    sent. Other answers being written to them stay. Returns how many were cancelled."""
+    n = 0
+    for f in session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
+                                                    FollowUp.status.in_(OPEN))).scalars():
+        if f.kind == "outreach" or (f.kind == "response" and "calendly.com/" in (f.body or "").lower()):
+            f.status, f.blocked_reason = "cancelled", reason[:300]
+            n += 1
+    return n
+
+
+def next_meeting(session: Session, lead_id: int, exclude: int | None = None, upcoming: bool = True) -> Meeting | None:
+    """The lead's next scheduled meeting (with `upcoming=False`, also one that has passed without an outcome)."""
+    q = select(Meeting).where(Meeting.lead_id == lead_id, Meeting.status == "scheduled", Meeting.id != (exclude or 0))
+    if upcoming:
+        q = q.where(Meeting.ends_at >= utcnow())
+    return session.execute(q.order_by(Meeting.starts_at)).scalars().first()
+
+
+def reopen_after_cancel(session: Session, meeting: Meeting, actor: str) -> None:
+    """After a cancellation the lead goes back to "interested" with a rebooking next step, unless another meeting with
+    it is still booked (for example the new time of a reschedule that Calendly reported as a new event)."""
+    if not meeting.lead_id:
+        return
+    lead = session.get(Lead, meeting.lead_id)
+    other = next_meeting(session, lead.id, exclude=meeting.id, upcoming=False)
+    if other is None and lead.outreach_status == "meeting":
+        set_status(session, lead, "interested", actor, "meeting cancelled")
+    for opp in session.execute(select(Opportunity).where(Opportunity.lead_id == lead.id,
+                                                         Opportunity.stage.not_in(("won", "lost")))).scalars():
+        opp.next_step = (f"Meeting {other.starts_at:%Y-%m-%d %H:%M} UTC: prepare, then record the outcome" if other
+                         else f"Meeting on {meeting.starts_at:%Y-%m-%d} was cancelled: follow up to rebook")
+
+
+def check_double_bookings(session: Session, settings) -> int:
+    """Warn when one lead (or one unmatched invitee) has two or more upcoming meetings: usually the same person booked
+    twice. The extra one is cancelled in Calendly, and its cancellation email updates the CRM; the warning then
+    closes by itself. Runs after each inbox batch, so a reschedule reported as new event + cancellation stays quiet."""
+    from aime.monitoring import alert_once, resolve_alerts
+
+    groups: dict[str, list[Meeting]] = defaultdict(list)
+    for m in session.execute(select(Meeting).where(Meeting.status == "scheduled", Meeting.ends_at >= utcnow())
+                             .order_by(Meeting.starts_at)).scalars():
+        groups[f"lead{m.lead_id}" if m.lead_id else m.invitee_email.lower()].append(m)
+    active = set()
+    for group, ms in groups.items():
+        if len(ms) < 2:
+            continue
+        key = f"meeting_double:{group}"
+        active.add(key)
+        first = ms[0]
+        where = f" ({first.lead.company.name})" if first.lead else ""
+        times = "; ".join(f"#{m.id} {local_time(m.starts_at, m.timezone)}" for m in ms)
+        msg = (f"{'SIMULATED: ' if all(m.is_simulated for m in ms) else ''}Possible double booking: "
+               f"{first.invitee_name or first.invitee_email}{where} has {len(ms)} upcoming meetings ({times}). "
+               "Cancel the extra one in Calendly; its cancellation email updates the CRM.")
+        alert_once(session, "warning", "meetings", msg, settings, key=key)
+    resolve_alerts(session, ("meeting_double:",), active)
+    return len(active)
 
 
 def _the_meeting(session: Session, email: str, starts_at: datetime | None) -> Meeting | None:
@@ -231,6 +363,7 @@ def link_meeting(session: Session, meeting: Meeting, lead: Lead, actor: str) -> 
     if meeting.status == "scheduled":
         meeting.opportunity_id = _advance_opportunity(session, lead, meeting, actor).id
         set_status(session, lead, "meeting", actor, f"{meeting.starts_at:%Y-%m-%d %H:%M} UTC (linked by hand)")
+        close_open_emails(session, lead, f"Meeting booked for {_when_label(meeting)}: not needed")
     log_activity(session, f"Meeting with {meeting.invitee_name or meeting.invitee_email} linked to this lead by {actor}",
                  actor, type_="meeting", company_id=lead.company_id, lead_id=lead.id, opportunity_id=meeting.opportunity_id)
 
@@ -247,7 +380,8 @@ def _advance_opportunity(session: Session, lead: Lead, meeting: Meeting, actor: 
 def handle_calendly_email(session: Session, settings, row: InboundEmail, actor: str) -> str:
     own = {a.lower() for a in (settings.smtp_from, settings.imap_credentials[0]) if a}
     info = parse_calendly(row.subject or "", row.body_text or "", own,
-                          settings.section("followup").get("send_window_timezone", "America/New_York"))
+                          settings.section("followup").get("send_window_timezone", "America/New_York"),
+                          booking_minutes(settings))
     if info is None:
         row.status = "needs_review"
         return "Calendly notification could not be read (time or invitee missing): check it in Calendly"

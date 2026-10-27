@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 from aime.crm_ops import log_activity, suppress
 from aime.inbox import own_text
 from aime.llm.base import LLMError
-from aime.models import Alert, Contact, FollowUp, InboundEmail, Lead, Opportunity
+from aime.models import Alert, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity
 from aime.notify import notify_event
 from aime.integrations.email_smtp import POSTAL_PLACEHOLDER
 from aime.outreach import stop_sequence
@@ -68,10 +68,14 @@ COMPLAINT = re.compile(r"\b(spam|report(ed|ing)? (you|this)|lawyer|attorney|lega
 OOO = re.compile(r"\b(out of (the )?office|on (vacation|holiday|leave)|limited access to (my )?email|"
                  r"will be back|returning on|away until|automatic reply)\b", re.I)
 CALENDLY = re.compile(r"calendly\.com", re.I)
+# Calendly's own subject, also forwarded ("Fwd: New Event: ..."); a reply ("Re: ...") never starts like this
+CALENDLY_NOTICE = re.compile(r"\s*(?:(?:fwd?|fw)\s*:\s*)*(?:new event|cancel+ed|rescheduled|updated)\s*:", re.I)
 # Asking for a meeting, a call or a demo in everyday wording (and without the article: "schedule meeting").
 _TALK = r"(talk|chat|speak|meet|connect|discuss|catch up|hop on a call|jump on a call)"
 _THING = r"(time|meeting|call|demo|chat|session|appointment|slot|conversation|walkthrough|presentation)"
 _WHEN = r"(monday|tuesday|wednesday|thursday|friday|tomorrow|today|this week|next week)"
+ASKED_WHEN = re.compile(rf"\b{_WHEN}\b", re.I)
+WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday")
 MEETING = re.compile(
     rf"\b((can|could|shall|should|would|may) (we|you|i) (please )?({_TALK}|schedule|set ?up|arrange|book|organi[sz]e)"
     rf"|(schedule|arrange|set ?up|book|organi[sz]e|plan|fix) (a |an |the |some |our )?{_THING}"
@@ -102,8 +106,8 @@ def _classify(row: InboundEmail) -> tuple[str, str, list[str]]:
         return "bounce", "high", ["delivery failure report"]
     if re.match(r"^(mailer-daemon|postmaster)@", row.from_email or "", re.I):
         return "bounce", "low", ["delivery report without a permanently failed address (for example a delay)"]
-    if CALENDLY.search(row.from_email or "") or (CALENDLY.search(row.new_text or row.body_text or "")
-                                                  and re.search(r"\b(new event|canceled|cancelled)\b", subject, re.I)):
+    if CALENDLY.search(row.from_email or "") or (CALENDLY.search(row.body_text or "")  # also a forwarded notice
+                                                  and CALENDLY_NOTICE.match(subject)):
         return "calendly", "high", ["Calendly notification"]
     if not text.strip():
         return "other", "low", ["no new text of its own (only the quoted email)"]
@@ -199,18 +203,40 @@ def reply_footer(settings) -> str:
             f"{settings.company_name} · {address}")
 
 
-def suggest(settings, category: str, row: InboundEmail, contact: Contact | None) -> tuple[str, str] | None:
+def suggest(settings, category: str, row: InboundEmail, contact: Contact | None, lead: Lead | None = None,
+            meeting: Meeting | None = None) -> tuple[str, str] | None:
+    """The reply a person approves (or edits) before it goes out, in the prospect's thread. An interested reply gets
+    the booking link, mentioning the day they asked for and what the call is about; one from a lead that has already
+    booked (`meeting`) confirms that meeting instead of offering a second booking."""
     name = (row.from_name or "").split()[0] if row.from_name else (contact.first_name if contact and contact.first_name else "there")
     subject = row.subject if row.subject.lower().startswith("re:") else f"Re: {row.subject}"
     sign = _signature(settings)
     if category == "interested":
-        if settings.calendly_url:
-            body = (f"Hi {name},\n\nThank you for getting back to me. You can pick a time that suits you here: "
-                    f"{settings.calendly_url}\n\nIf none of those times work, reply with a few that do and I will fit "
+        from aime.knowledge.services import service_name
+        from aime.meetings import booking_minutes, local_time
+        minutes = booking_minutes(settings)
+        asked = ASKED_WHEN.search(row.new_text or own_text(row.body_text or ""))  # the day they asked for, if any
+        day = asked.group(0).lower() if asked else None
+        weekday = day in WEEKDAYS
+        day = day.capitalize() if weekday else day
+        service = service_name(lead.primary_service) if lead else "—"
+        topic = (f" about {service} for {lead.company.name}" if lead and service != "—"
+                 else f" with the {lead.company.name} team" if lead else "")
+        if meeting is not None:  # in the US time zone we write in; Calendly's own emails give them theirs
+            us_zone = settings.section("followup").get("send_window_timezone", "America/New_York")
+            body = (f"Hi {name},\n\nThank you for getting back to me. Our meeting is in my calendar for "
+                    f"{local_time(meeting.starts_at, us_zone)} and I look forward to it. If that time stops "
+                    f"working, the link in your Calendly confirmation lets you move it.\n\n{sign}")
+        elif settings.calendly_url:
+            pick = (f"You mentioned {day}: you can pick any open {minutes}-minute slot then, or at another time that "
+                    f"suits you, here:" if day else f"You can pick a {minutes}-minute slot that suits you here:")
+            body = (f"Hi {name},\n\nThank you for getting back to me. I would be glad to talk{topic}.\n\n{pick}\n"
+                    f"{settings.calendly_url}\n\nIf none of the times work, reply with a few that do and I will fit "
                     f"around you.\n\n{sign}")
         else:
-            body = (f"Hi {name},\n\nThank you for getting back to me. Could you share two or three times next week "
-                    f"that suit you for a 20-minute call?\n\n{sign}")
+            body = (f"Hi {name},\n\nThank you for getting back to me. I would be glad to talk{topic}. Could you share "
+                    f"two or three times {f'on {day}' if weekday else day or 'next week'} that suit "
+                    f"you for a {minutes}-minute call?\n\n{sign}")
     elif category == "objection":
         body = (f"Hi {name},\n\nThank you for the honest answer. Would it be useful if I checked back in a few months, "
                 f"or would you rather I did not? Either is fine.\n\n{sign}")
@@ -301,7 +327,11 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             if lead.status == "qualified":
                 lead.status = "nurture"
             notes.append("lead moved to nurture")
-        proposal = suggest(settings, row.category, row, contact)
+        booked = None
+        if row.category == "interested":
+            from aime.meetings import next_meeting
+            booked = next_meeting(session, lead.id)
+        proposal = suggest(settings, row.category, row, contact, lead, booked)
         if proposal:
             subject, body = proposal
             draft = FollowUp(lead_id=lead.id, contact_id=contact.id if contact else None, company_id=lead.company_id,

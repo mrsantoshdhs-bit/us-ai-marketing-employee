@@ -97,7 +97,8 @@ class EmailSender:
         subject = " ".join(subject.split())  # a header is one line: no folding, no injected headers
         actual, redirected = self.recipient_for(to)
         if redirected:  # controlled test: nobody outside the test list is ever emailed
-            subject = f"[TEST for {to}] {subject}"
+            if f"[TEST for {to}]" not in subject:  # a reply in a test thread keeps its subject, so it stays threaded
+                subject = f"[TEST for {to}] {subject}"
             body = (f"TEST MODE: this email would have gone to {to}. Only addresses in OUTBOUND_TEST_RECIPIENTS "
                     f"receive email.\n\n{body}")
         msg = EmailMessage()

@@ -49,7 +49,7 @@ from aime.qc.checks import run_quality_checks
 from aime.qc.email_checks import run_email_checks
 from aime.reply_intel import QUESTION_PLACEHOLDER
 from aime.reply_intel import act as act_on_reply
-from aime.meetings import record_meeting
+from aime.meetings import check_double_bookings, record_meeting, reopen_after_cancel
 from aime.scheduler.runner import due_jobs, run_job
 from aime.timeutil import fmt_et, fmt_local, utcnow
 from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username,
@@ -508,8 +508,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     opp.next_step = "Meeting held: send a proposal or decide the next step"
                 elif action == "no_show":
                     opp.next_step = "No-show: follow up to rebook"
-                else:
-                    opp.next_step = "Meeting cancelled: follow up to rebook"
+            if action == "cancel":  # as for a cancellation Calendly reports: the lead reopens unless another is booked
+                reopen_after_cancel(s, m, who(request))
             if m.lead_id and action == "no_show":
                 s.add(FollowUp(lead_id=m.lead_id, company_id=m.company_id, channel="task", step=1, status="pending",
                                subject=f"Rebook the meeting with {m.invitee_name or m.invitee_email}",
@@ -521,6 +521,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             log_activity(s, f"Meeting {m.status.replace('_', ' ')}: {m.invitee_name or m.invitee_email}", who(request),
                          type_="meeting", body=notes or None, company_id=m.company_id, lead_id=m.lead_id,
                          opportunity_id=m.opportunity_id)
+            check_double_bookings(s, C().settings)
         return back("/meetings", f"Meeting marked {m.status.replace('_', ' ')}")
 
     @app.post("/leads/{lead_id}/meeting")
@@ -541,6 +542,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     "starts_at": start_utc, "ends_at": start_utc + timedelta(minutes=max(5, min(minutes, 480))),
                     "event": title[:200] or "Meeting", "tz": "America/New_York"}
             meeting, note = record_meeting(s, C().settings, info, who(request), source="manual")
+            check_double_bookings(s, C().settings)
         return back(f"/leads/{lead_id}", f"Meeting logged: {note}")
 
     @app.post("/companies/{company_id}/not_competitor")

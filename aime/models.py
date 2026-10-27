@@ -270,6 +270,7 @@ class Meeting(Timestamped, Base):
     starts_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     ends_at: Mapped[datetime] = mapped_column(DateTime)
     timezone: Mapped[str | None] = mapped_column(String(60))
+    rescheduled_from: Mapped[datetime | None] = mapped_column(DateTime)  # the time a reschedule moved it from (UTC)
     source: Mapped[str] = mapped_column(String(20))  # calendly_email | manual
     status: Mapped[str] = mapped_column(String(20), default="scheduled", index=True)  # scheduled | cancelled | completed | no_show
     notes: Mapped[str | None] = mapped_column(Text)
