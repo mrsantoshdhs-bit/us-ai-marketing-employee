@@ -150,7 +150,8 @@ def suppress(session: Session, value: str, reason: str) -> None:
     contacts = session.execute(select(Contact).where(
         or_(Contact.email == value, Contact.email.like(f"%@{value}")))).scalars().all()
     for c in contacts:
-        c.consent_status = "opted_out"
+        if c.consent_status != "opted_out":
+            c.consent_status, c.consent_at = "opted_out", utcnow()  # when: emails sent before it were allowed
         for f in session.execute(select(FollowUp).where(
                 FollowUp.contact_id == c.id, FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
             f.status = "cancelled"

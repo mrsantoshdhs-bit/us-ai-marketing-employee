@@ -197,8 +197,8 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         row.status = "actioned" if failed and (f or contact) else "needs_review"  # unmatched: a person checks
     elif row.category == "unsubscribe":
         suppress(session, row.from_email, f"Unsubscribe request by email{' (complaint)' if row.confidence != 'high' else ''}")
-        if contact:
-            contact.consent_status = "opted_out"
+        if contact and contact.consent_status != "opted_out":
+            contact.consent_status, contact.consent_at = "opted_out", utcnow()
         if lead and lead.outreach_status:
             stop_sequence(session, lead, "unsubscribed", "Asked not to be contacted", actor)
         notes.append(f"{row.from_email} suppressed; no further email")

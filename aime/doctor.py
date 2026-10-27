@@ -60,16 +60,21 @@ def run_checks(ctx: AppContext) -> list[dict]:
         stuck = n(ContentItem, ContentItem.status == "publishing",
                   ContentItem.publish_started_at < utcnow() - timedelta(minutes=15))
         add("No stuck publishing claims", stuck == 0, f"{stuck} claim(s) older than 15 minutes")
-        no_consent = s.execute(select(func.count(FollowUp.id)).join(Contact, Contact.id == FollowUp.contact_id).where(
-            FollowUp.status == "sent", FollowUp.kind.is_distinct_from("outreach"),
-            Contact.consent_status.not_in(("inquiry", "opt_in", "opted_out")))).scalar_one()
-        bad_outreach = s.execute(select(func.count(FollowUp.id)).join(Contact, Contact.id == FollowUp.contact_id).where(
-            FollowUp.status == "sent", FollowUp.kind == "outreach",
-            (Contact.email_source_url.is_(None)) | (Contact.consent_status == "opted_out")
-            | (FollowUp.approved_at.is_(None)))).scalar_one()
-        add("Emails only to consenting contacts or approved B2B outreach", no_consent == 0 and bad_outreach == 0,
-            f"{no_consent} replies sent without consent; {bad_outreach} outreach emails without a published address, "
-            "an approval record, or sent after an opt-out")
+        sent_to = lambda *w: s.execute(select(func.count(FollowUp.id)).join(  # noqa: E731
+            Contact, Contact.id == FollowUp.contact_id).where(FollowUp.status == "sent", *w)).scalar_one()
+        # Replies to people who contacted us need their inquiry or opt-in. A response answers an email the
+        # prospect sent us (kind "response"), so it must name that email. An opt-out forbids what is sent after it.
+        no_consent = sent_to(FollowUp.kind.is_(None), Contact.consent_status.not_in(("inquiry", "opt_in", "opted_out")))
+        unanswered = n(FollowUp, FollowUp.status == "sent", FollowUp.kind == "response", FollowUp.in_reply_to.is_(None))
+        after_opt_out = sent_to(Contact.consent_status == "opted_out",
+                                Contact.consent_at.is_(None) | (FollowUp.sent_at >= Contact.consent_at))
+        bad_outreach = sent_to(FollowUp.kind == "outreach",
+                               Contact.email_source_url.is_(None) | FollowUp.approved_at.is_(None))
+        add("Emails only to consenting contacts or approved B2B outreach",
+            no_consent == 0 and unanswered == 0 and after_opt_out == 0 and bad_outreach == 0,
+            f"{no_consent} replies to inquiries without consent; {unanswered} responses that answer no received "
+            f"email; {after_opt_out} emails sent after an opt-out; {bad_outreach} outreach emails without a published "
+            "address or an approval record")
         other_sources = n(Contact, Contact.source.not_in(("inbound", "manual", "import", "website", "sec_filing",
                                                           "website_withdrawn")))
         add("Contacts only from approved sources", other_sources == 0,

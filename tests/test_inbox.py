@@ -378,3 +378,29 @@ def test_a_shared_mailbox_keeps_only_sales_mail(make_ctx):
         senders = {r.from_email for r in s.execute(select(InboundEmail)).scalars()}
     assert "friend@personal.example" not in senders and "newsletter@vendor.example" not in senders
     assert run_inbox(ctx).fetched == 0  # skipped mail is not read again
+
+
+def test_doctor_accepts_a_reply_and_an_unsubscribe_but_flags_email_sent_after_an_opt_out(make_ctx):
+    from datetime import timedelta
+
+    from aime.doctor import run_checks
+    ctx, sender, sent = contacted(make_ctx)
+    consent = lambda: next(c for c in run_checks(ctx) if c["name"].startswith("Emails only to consenting"))  # noqa: E731
+    FakeIMAP.messages = {1: mail(DAVID, f"Re: {sent.subject}", "Sounds interesting, can we talk Thursday?",
+                                 in_reply_to=sent.message_id)}
+    run_inbox(ctx)
+    approve_all(ctx)
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": (TUESDAY_11AM_ET + timedelta(minutes=30)).isoformat()})
+    with ctx.db.session() as s:
+        assert s.execute(select(FollowUp).where(FollowUp.kind == "response", FollowUp.status == "sent")).scalar_one()
+    assert consent()["ok"], consent()  # answering the prospect's own reply is allowed
+    FakeIMAP.messages[2] = mail(DAVID, f"Re: {sent.subject}", "Please unsubscribe me.", in_reply_to=sent.message_id)
+    run_inbox(ctx)
+    with ctx.db.session() as s:
+        contact = s.execute(select(Contact).where(Contact.email == DAVID)).scalar_one()
+        assert contact.consent_status == "opted_out" and contact.consent_at is not None
+    assert consent()["ok"], consent()  # what was sent before the opt-out stays allowed
+    with ctx.db.session() as s:
+        s.get(FollowUp, sent.id).sent_at = contact.consent_at + timedelta(minutes=1)  # as if sent after it
+    check = consent()
+    assert not check["ok"] and "1 emails sent after an opt-out" in check["detail"]
