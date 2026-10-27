@@ -138,11 +138,14 @@ def record_meeting(session: Session, settings, info: dict, actor: str, row: Inbo
     """Create, or cancel, the meeting described by `info`. Returns (meeting, note)."""
     lead, contact = match_lead(session, info["invitee_email"])
     simulated = bool(row and row.is_simulated)
-    existing = session.execute(select(Meeting).where(func.lower(Meeting.invitee_email) == info["invitee_email"],
-                                                     Meeting.starts_at == info["starts_at"])).scalars().first()
+    same_slot = select(Meeting).where(func.lower(Meeting.invitee_email) == info["invitee_email"],
+                                      Meeting.starts_at == info["starts_at"])
+    # A booking repeats only a meeting that is still scheduled: re-booking a cancelled time is a new booking.
+    scheduled = session.execute(same_slot.where(Meeting.status == "scheduled")).scalars().first()
+    existing = scheduled or session.execute(same_slot.order_by(Meeting.id.desc())).scalars().first()
     if info["kind"] == "rescheduled":
-        if existing is not None:
-            return existing, "already recorded"
+        if scheduled is not None:
+            return scheduled, "already recorded"
         moved = _the_meeting(session, info["invitee_email"], info.get("previous_starts_at"))
         if moved is None:
             info = {**info, "kind": "booked"}  # nothing to move: record it as a booking
@@ -161,6 +164,8 @@ def record_meeting(session: Session, settings, info: dict, actor: str, row: Inbo
             existing = _the_meeting(session, info["invitee_email"], None)
         if existing is None:
             return None, f"cancellation for an unknown meeting with {info['invitee_email']}"
+        if existing.status == "cancelled":
+            return existing, "already cancelled"
         existing.status = "cancelled"
         if existing.lead_id:
             lead = session.get(Lead, existing.lead_id)
@@ -173,8 +178,8 @@ def record_meeting(session: Session, settings, info: dict, actor: str, row: Inbo
                                  f"{info['invitee_name'] or info['invitee_email']} ({existing.starts_at:%a %b %d %H:%M} UTC)",
               actor, existing)
         return existing, "meeting cancelled"
-    if existing:
-        return existing, "already recorded"
+    if scheduled:
+        return scheduled, "already recorded"
     meeting = Meeting(lead_id=lead.id if lead else None, company_id=lead.company_id if lead else None,
                       contact_id=contact.id if contact else None, invitee_email=info["invitee_email"],
                       invitee_name=info.get("invitee_name"), title=info.get("event") or "Meeting",

@@ -207,3 +207,30 @@ def test_an_unmatched_booking_can_be_linked_to_its_lead(make_ctx):
         assert s.execute(select(InboundEmail)).scalar_one().status == "actioned"
     assert lead_of(ctx).outreach_status == "meeting"
     assert client.post(f"/meetings/{mid}/link", data={"lead_id": sent.lead_id}, headers=ORIGIN).status_code == 400
+
+
+def test_rebooking_a_cancelled_time_is_a_new_booking_and_a_repeated_cancellation_is_ignored(make_ctx):
+    ctx, _, _ = contacted(make_ctx)
+    cancelled = calendly(BOOKED_SUBJECT.replace("New Event", "Canceled"), BOOKED_BODY)
+    FakeIMAP.messages = {1: calendly(), 2: cancelled}
+    run_inbox(ctx)
+    assert lead_of(ctx).outreach_status == "interested"
+    with ctx.db.session() as s:
+        alerts = s.execute(select(func.count(Alert.id)).where(Alert.source == "meetings")).scalar_one()
+    FakeIMAP.messages[3] = mail("Calendly <notifications@calendly.com>", BOOKED_SUBJECT, BOOKED_BODY,
+                                msg_id="<rebooked@calendly.example>")
+    run_inbox(ctx)
+    with ctx.db.session() as s:
+        meetings = s.execute(select(Meeting).order_by(Meeting.id)).scalars().all()
+        assert [m.status for m in meetings] == ["cancelled", "scheduled"]
+        assert s.execute(select(func.count(Alert.id)).where(Alert.source == "meetings")).scalar_one() == alerts + 1
+    assert lead_of(ctx).outreach_status == "meeting"
+    FakeIMAP.messages[4] = mail("Calendly <notifications@calendly.com>", BOOKED_SUBJECT.replace("New Event", "Canceled"),
+                                BOOKED_BODY, msg_id="<cancel-again@calendly.example>")
+    run_inbox(ctx)  # cancels the new booking, once
+    FakeIMAP.messages[5] = mail("Calendly <notifications@calendly.com>", BOOKED_SUBJECT.replace("New Event", "Canceled"),
+                                BOOKED_BODY, msg_id="<cancel-repeat@calendly.example>")
+    run_inbox(ctx)
+    with ctx.db.session() as s:
+        assert [m.status for m in s.execute(select(Meeting).order_by(Meeting.id)).scalars()] == ["cancelled", "cancelled"]
+        assert "already cancelled" in latest_reply(ctx).action_note
