@@ -287,3 +287,14 @@ def test_overlapping_runs_share_one_send_lock_so_limits_hold(make_ctx):
         {"now": TUESDAY_11AM_ET.isoformat()})
     assert len(FakeSMTP.sent) == 1  # one email a day to that domain, however the runs overlap
     assert not (ctx.settings.locks_dir / "send.lock").exists()
+
+
+def test_approval_rechecks_the_do_not_contact_list_even_without_edits(make_ctx):
+    from aime.models import Suppression
+    ctx = researched(make_ctx, **SENDING)
+    SalesWorkflowAgent(ctx).run({"now": TUESDAY_11AM_ET.isoformat()})
+    f = drafts(ctx)[0]
+    with ctx.db.session() as s:  # e.g. an imported do-not-contact list, which does not cancel drafts itself
+        s.add(Suppression(value=SITE, kind="domain", reason="Imported do-not-contact list"))
+    r = TestClient(create_app(ctx)).post(f"/followups/{f.id}/approve", headers=ORIGIN, follow_redirects=False)
+    assert "do-not-contact" in r.headers["location"].replace("%20", " ") and drafts(ctx)[0].status == "awaiting_approval"

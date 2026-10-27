@@ -217,3 +217,36 @@ def test_inquiry_sequence_stops_once_the_person_replied_or_booked(make_ctx):
         step2 = s.execute(select(FollowUp).where(FollowUp.lead_id == lead_id, FollowUp.step == 2)).scalar_one()
         assert step2.status == "cancelled" and "sequence stopped (meeting)" in step2.blocked_reason
     assert FakeSMTP.sent == []
+
+
+def test_replies_to_inquiries_get_the_postal_address_and_keep_their_footer(make_ctx):
+    from fastapi.testclient import TestClient
+
+    from aime.web.app import create_app
+    origin = {"origin": "http://testserver"}
+    ctx = make_ctx(outbound_email_enabled=True, smtp_host="smtp.example", smtp_from="hello@us.example")  # no address yet
+    FakeSMTP.sent = []
+    out = ingest(ctx)
+    LeadQualificationAgent(ctx).run({"lead_ids": out.inbound_lead_ids})
+    sender = EmailSender(ctx.settings, smtp_factory=FakeSMTP)
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})
+    ctx.settings.company_postal_address = "1 Sample St, Austin, TX 78701"  # configured afterwards
+    with ctx.db.session() as s:
+        (a_id, a_body), (b_id, b_body) = [(f.id, f.body) for f in s.execute(
+            select(FollowUp).where(FollowUp.channel == "email").order_by(FollowUp.id)).scalars()][:2]
+    assert "[postal address required" in a_body
+    client = TestClient(create_app(ctx))
+    client.post(f"/followups/{a_id}/approve", headers=origin)
+    r = client.post(f"/followups/{b_id}/approve", data={"body": b_body.split("\n\n---\n")[0]}, headers=origin,
+                    follow_redirects=False)
+    assert "Cannot%20approve" in r.headers["location"]  # the opt-out footer was edited out
+    with ctx.db.session() as s:
+        a, b = s.get(FollowUp, a_id), s.get(FollowUp, b_id)
+        assert a.status == "approved" and "1 Sample St" in a.body and "[postal" not in a.body
+        assert b.status == "awaiting_approval"
+        b.body, b.status, b.approved_by, b.approved_at = b_body.split("\n\n---\n")[0], "approved", "x", utcnow()
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})
+    assert [m["To"] for m in FakeSMTP.sent] and all("unsubscribe" in m.get_content().lower() for m in FakeSMTP.sent)
+    with ctx.db.session() as s:  # approved behind the dashboard's back without a footer: refused at send time
+        b = s.get(FollowUp, b_id)
+        assert b.status == "awaiting_approval" and "opt-out line" in b.blocked_reason

@@ -299,7 +299,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 f.blocked_reason = reason
                 out.blocked.append(BlockedItem(id=f.id, reason=reason))
                 continue
-            problem = compliance_problem(self.settings, f.body or "") if f.kind in ("outreach", "response") else None
+            problem = compliance_problem(self.settings, f.body or "")  # every kind: outreach, responses, inquiry replies
             if problem:  # e.g. the footer was edited out, or written before the postal address was configured
                 f.status, f.approved_at, f.approved_by = "awaiting_approval", None, None
                 f.blocked_reason = f"Not sent: {problem}; put the footer back and approve again"[:300]

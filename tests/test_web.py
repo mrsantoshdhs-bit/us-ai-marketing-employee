@@ -86,11 +86,15 @@ def test_content_approval_flow(client, seeded):
 
 def test_followup_approval(client, seeded):
     with seeded.db.session() as s:
-        fid = s.execute(select(FollowUp.id).where(FollowUp.status == "awaiting_approval")).scalars().first()
+        f = s.execute(select(FollowUp).where(FollowUp.status == "awaiting_approval")).scalars().first()
+        fid, footer = f.id, "\n\n---\n" + f.body.split("\n\n---\n")[1]
     client.post(f"/followups/{fid}/approve", headers=ORIGIN, data={"subject": "Hi", "body": "Edited"})
+    with seeded.db.session() as s:  # the edit dropped the opt-out footer: not approved
+        assert s.get(FollowUp, fid).status == "awaiting_approval"
+    client.post(f"/followups/{fid}/approve", headers=ORIGIN, data={"subject": "Hi", "body": "Edited" + footer})
     with seeded.db.session() as s:
         f = s.get(FollowUp, fid)
-        assert f.status == "approved" and f.body == "Edited"
+        assert f.status == "approved" and f.body == "Edited" + footer
 
 
 def test_api_inbound(make_ctx):
