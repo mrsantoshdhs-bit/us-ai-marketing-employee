@@ -128,7 +128,8 @@ def run_checks(ctx: AppContext) -> list[dict]:
     if st.outbound_email_enabled and st.section("outreach").get("b2b_enabled"):
         add("Sales mailbox monitored", st.imap_configured,
             "replies, unsubscribes and bounces are read" if st.imap_configured else
-            "outreach can be sent but replies, unsubscribes and bounces are not read: set IMAP_HOST (Gmail: imap.gmail.com)",
+            "outreach can be sent but replies, unsubscribes and bounces are not read: set IMAP_HOST (your mail server's "
+            "IMAP host, e.g. imap.gmail.com)",
             "warning")
     mode = str(ctx.settings.section("publish_policy").get("mode", "shadow")).lower()
     add("Auto-publish policy is shadow-only", mode == "shadow",

@@ -6,14 +6,16 @@ tested; real mailbox reading starts once IMAP_HOST and the credentials are set.
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent, RetryPolicy
 from aime.db import kv_get, kv_set
-from aime.inbox import Mailbox, new_text, parse_message
-from aime.models import InboundEmail
+from aime.inbox import Mailbox, ParsedEmail, new_text, parse_message
+from aime.models import Company, Contact, FollowUp, InboundEmail, Lead
 from aime.reply_intel import process_pending
 
 
@@ -26,6 +28,7 @@ class InboxOutput(BaseModel):
     fetched: int = 0
     stored: int = 0
     skipped_own: int = 0
+    skipped_unrelated: int = 0  # INBOX_SCOPE=related: not sales mail, so not stored
     categories: dict[str, int] = Field(default_factory=dict)
     needs_review: int = 0
 
@@ -63,6 +66,9 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                 if p.message_id and session.execute(select(InboundEmail.id).where(
                         InboundEmail.message_id == p.message_id)).first():
                     continue
+                if self.settings.inbox_scope != "all" and not sales_related(session, p):
+                    out.skipped_unrelated += 1  # read once (the mailbox position moves on), never stored
+                    continue
                 session.add(InboundEmail(
                     mailbox_uid=key, message_id=p.message_id,
                     in_reply_to=p.bounced_message_id if p.is_bounce and p.bounced_message_id else p.in_reply_to,
@@ -75,3 +81,24 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         out.categories = process_pending(session, self.settings, self.name)
         out.needs_review = len(session.execute(select(InboundEmail.id).where(InboundEmail.status == "needs_review")).all())
         return out
+
+
+CALENDLY_SUBJECT = re.compile(r"\b(new event|canceled|cancelled|rescheduled|invitee)\b", re.I)
+
+
+def sales_related(session: Session, p: ParsedEmail) -> bool:
+    """Is this email part of the sales work? A reply in one of our threads, a bounce, a Calendly notification, or
+    mail from a known contact or a lead's company domain. Everything else in a shared mailbox is left alone."""
+    if p.is_bounce or p.bounced_addresses:
+        return True
+    sender_domain = p.from_email.rsplit("@", 1)[-1]
+    if sender_domain.endswith("calendly.com") or ("calendly.com" in (p.body_text or "").lower()
+                                                   and CALENDLY_SUBJECT.search(p.subject or "")):
+        return True
+    ids = {i.strip() for i in [p.in_reply_to or "", *(p.references or "").split()] if i.strip()}
+    if ids and session.execute(select(FollowUp.id).where(FollowUp.message_id.in_(ids))).first():
+        return True
+    if session.execute(select(Contact.id).where(func.lower(Contact.email) == p.from_email)).first():
+        return True
+    return bool(session.execute(select(Lead.id).join(Company, Company.id == Lead.company_id).where(
+        func.lower(Company.domain) == sender_domain, Company.merged_into_id.is_(None))).first())

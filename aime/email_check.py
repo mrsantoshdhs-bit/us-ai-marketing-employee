@@ -8,6 +8,7 @@ test address only, and only where sending is enabled (the acceptance settings). 
 from __future__ import annotations
 
 import imaplib
+import ipaddress
 import smtplib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -18,6 +19,16 @@ from aime.redact import redact
 
 GOOGLE_SPF = "include:_spf.google.com"
 PERSONAL_GMAIL = {"gmail.com", "googlemail.com"}
+# The SPF include a hosted mail provider needs, by SMTP host. Any other server (your own, cPanel, a VPS) must be
+# authorized by its address: ip4:, a, a:<host> or mx.
+PROVIDER_SPF = {"gmail": GOOGLE_SPF, "google": GOOGLE_SPF, "office365": "include:spf.protection.outlook.com",
+                "outlook": "include:spf.protection.outlook.com"}
+# Where providers publish DKIM keys: Google, Microsoft 365, cPanel/Exim ("default"), and other common selectors.
+DKIM_SELECTORS = ("google", "selector1", "selector2", "default", "dkim", "mail", "k1", "s1", "s2", "zmail")
+
+
+def is_gmail(host: str | None) -> bool:
+    return any(k in (host or "").lower() for k in ("gmail", "google"))
 
 
 @dataclass
@@ -46,12 +57,13 @@ def check_settings(s) -> list[Check]:
         add("Gmail SMTP", s.smtp_port == 587 and s.smtp_use_tls, "smtp.gmail.com:587 with STARTTLS",
             "Gmail needs SMTP_PORT=587 and SMTP_USE_TLS=true", "warn")
     if s.smtp_from and s.smtp_username and s.smtp_from.lower() != s.smtp_username.lower():
-        out.append(Check("Sender identity", "warn", f"SMTP_FROM ({s.smtp_from}) differs from SMTP_USERNAME: Gmail "
-                                                     "sends as the signed-in mailbox unless it is a verified "
-                                                     "'Send mail as' alias"))
+        out.append(Check("Sender identity", "warn", f"SMTP_FROM ({s.smtp_from}) differs from SMTP_USERNAME: most "
+                                                     "servers send as the signed-in mailbox unless it is an allowed "
+                                                     "alias ('Send mail as' in Gmail)"))
     user, password = s.imap_credentials
     add("IMAP settings", bool(s.imap_host and user and password), f"{s.imap_host}:{s.imap_port}, folder {s.imap_folder}",
-        "IMAP_HOST (imap.gmail.com) is needed to read replies; it reuses the SMTP username and password")
+        "IMAP_HOST (your mail server's IMAP host, e.g. imap.gmail.com or mail.<your domain>) is needed to read "
+        "replies; it reuses the SMTP username and password")
     if s.smtp_from and user and s.smtp_from.lower() != user.lower():
         out.append(Check("Replies reach the monitored inbox", "warn",
                          f"emails are sent from {s.smtp_from} but the inbox job reads {user}: replies may be missed"))
@@ -91,7 +103,41 @@ def dns_resolver(timeout: float = 5.0) -> Callable[[str, str], list[str]]:
     return resolve
 
 
-def check_domain(domain: str, resolve: Callable[[str, str], list[str]]) -> list[Check]:
+def _host_ips(name: str, resolve) -> set[str]:
+    return {ip.strip() for ip in resolve(name.rstrip("."), "A")}
+
+
+def _spf_authorizes(spf: str, domain: str, smtp_host: str, resolve) -> str | None:
+    """The SPF mechanism that authorizes `smtp_host` to send for `domain`, or None."""
+    terms = [t.lstrip("+") for t in spf.lower().split()[1:]]
+    want = next((inc for key, inc in PROVIDER_SPF.items() if key in smtp_host.lower()), None)
+    if want and want in terms:
+        return want
+    ips = _host_ips(smtp_host, resolve)
+    if not ips:
+        return None
+    for t in terms:
+        if t.startswith("ip4:"):
+            try:
+                net = ipaddress.ip_network(t[4:], strict=False)
+            except ValueError:
+                continue
+            if any(ipaddress.ip_address(ip) in net for ip in ips if ":" not in ip):
+                return t
+        elif t in ("a", f"a:{domain}") and ips & _host_ips(domain, resolve):
+            return t
+        elif t.startswith("a:") and ips & _host_ips(t[2:], resolve):
+            return t
+        elif t == "mx":
+            for mx in resolve(domain, "MX"):
+                if ips & _host_ips(mx.split()[-1], resolve):
+                    return t
+    return None
+
+
+def check_domain(domain: str, resolve: Callable[[str, str], list[str]], smtp_host: str | None = None) -> list[Check]:
+    """MX, SPF, DKIM and DMARC of the sending domain. With `smtp_host`, SPF must authorize that server: the
+    provider's include (Google, Microsoft 365) or, for any other server, its address."""
     domain = domain.lower().strip()
     if domain in PERSONAL_GMAIL:
         return [Check("Sending domain", "warn", f"a personal @{domain} address: SPF and DKIM cannot be set, and business "
@@ -102,17 +148,31 @@ def check_domain(domain: str, resolve: Callable[[str, str], list[str]]) -> list[
     out.append(Check("MX (replies can arrive)", "pass" if mx else "fail",
                      ", ".join(sorted(mx))[:200] if mx else f"{domain} has no MX record: replies cannot be delivered"))
     spf = [t for t in resolve(domain, "TXT") if t.lower().startswith("v=spf1")]
+    gmail = is_gmail(smtp_host)
     if not spf:
-        out.append(Check("SPF", "fail", f"no SPF record on {domain}: add TXT \"v=spf1 {GOOGLE_SPF} ~all\""))
+        mechanism = GOOGLE_SPF if gmail or not smtp_host else f"a:{smtp_host}"
+        out.append(Check("SPF", "fail", f"no SPF record on {domain}: add TXT \"v=spf1 {mechanism} ~all\""))
     elif len(spf) > 1:
         out.append(Check("SPF", "fail", f"{len(spf)} SPF records on {domain}: there must be exactly one"))
+    elif not smtp_host:
+        out.append(Check("SPF", "warn", f"{spf[0][:160]}: set SMTP_HOST to check that it authorizes your mail server"))
     else:
-        ok = GOOGLE_SPF in spf[0].lower()
-        out.append(Check("SPF", "pass" if ok else "warn",
-                         spf[0][:200] if ok else f"{spf[0][:160]} does not include {GOOGLE_SPF} (needed for Google Workspace)"))
-    dkim = [t for t in resolve(f"google._domainkey.{domain}", "TXT") if "p=" in t]
-    out.append(Check("DKIM", "pass" if dkim else "warn", "google._domainkey key published" if dkim else
-                     "no DKIM key at google._domainkey: turn on DKIM signing in the Google Admin console"))
+        how = _spf_authorizes(spf[0], domain, smtp_host, resolve)
+        ips = ", ".join(sorted(_host_ips(smtp_host, resolve))) or "its address"
+        need = GOOGLE_SPF if gmail else next((inc for k, inc in PROVIDER_SPF.items() if k in smtp_host.lower()),
+                                             f"ip4:{ips}")
+        out.append(Check("SPF", "pass" if how else "warn",
+                         f"{spf[0][:160]} (authorizes {smtp_host} via {how})" if how else
+                         f"{spf[0][:140]} does not authorize {smtp_host} ({ips}): add {need} before ~all"))
+    selectors = ("google",) + tuple(x for x in DKIM_SELECTORS if x != "google") if gmail else DKIM_SELECTORS
+    found = next((sel for sel in selectors if any("p=" in t for t in resolve(f"{sel}._domainkey.{domain}", "TXT"))),
+                 None)
+    hint = ("turn on DKIM signing in the Google Admin console" if gmail else
+            "turn on DKIM signing at your mail provider (cPanel: Email Deliverability)")
+    out.append(Check("DKIM", "pass" if found else "warn",
+                     f"key published at {found}._domainkey; a test email's headers show whether the server signs "
+                     "with it (dkim=pass)" if found else
+                     f"no DKIM key at the usual selectors ({', '.join(selectors)}): {hint}"))
     dmarc = [t for t in resolve(f"_dmarc.{domain}", "TXT") if t.lower().startswith("v=dmarc1")]
     if dmarc:
         policy = next((p.split("=", 1)[1].strip() for p in dmarc[0].split(";") if p.strip().lower().startswith("p=")), "?")
@@ -136,8 +196,10 @@ def check_smtp(s, smtp_factory=smtplib.SMTP) -> Check:
             smtp.noop()
         return Check("SMTP sign-in", "pass", f"signed in to {s.smtp_host} as {s.smtp_username}; no email was sent")
     except smtplib.SMTPAuthenticationError:
-        return Check("SMTP sign-in", "fail", "sign-in refused. Gmail needs an app password (Google account > Security > "
-                                              "2-Step Verification > App passwords), not your normal password")
+        hint = ("Gmail needs an app password (Google account > Security > 2-Step Verification > App passwords), not "
+                "your normal password" if is_gmail(s.smtp_host) else
+                "check SMTP_USERNAME (usually the full email address) and the mailbox password")
+        return Check("SMTP sign-in", "fail", f"sign-in refused. {hint}")
     except (OSError, smtplib.SMTPException) as exc:
         return Check("SMTP sign-in", "fail", redact(f"{type(exc).__name__}: {exc}")[:300])
 
@@ -158,8 +220,9 @@ def check_imap(s, imap_factory=imaplib.IMAP4_SSL) -> Check:
         count = (data[0] or b"?").decode() if data else "?"
         return Check("IMAP read-only", "pass", f"opened {s.imap_folder} read-only ({count} messages); nothing was changed")
     except imaplib.IMAP4.error:
-        return Check("IMAP read-only", "fail", "sign-in refused. In Gmail: Settings > Forwarding and POP/IMAP > Enable "
-                                               "IMAP, and use the app password")
+        hint = ("In Gmail: Settings > Forwarding and POP/IMAP > Enable IMAP, and use the app password"
+                if is_gmail(s.imap_host) else "check IMAP_USERNAME/IMAP_PASSWORD (default: the SMTP ones)")
+        return Check("IMAP read-only", "fail", f"sign-in refused. {hint}")
     except OSError as exc:
         return Check("IMAP read-only", "fail", redact(f"{type(exc).__name__}: {exc}")[:300])
     finally:
@@ -192,7 +255,7 @@ def run_email_check(s, *, connect: bool = False, send: bool = False, domain: str
     domain = domain or (s.smtp_from.rsplit("@", 1)[-1] if "@" in (s.smtp_from or "") else None)
     if domain:
         try:
-            checks += check_domain(domain, resolve or dns_resolver())
+            checks += check_domain(domain, resolve or dns_resolver(), s.smtp_host or None)
         except TimeoutError as exc:
             checks.append(Check("Sending domain", "warn", str(exc)))
     else:

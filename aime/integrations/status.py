@@ -58,7 +58,7 @@ def integration_statuses(ctx: AppContext, session: Session, include_scheduler: b
                  ("DISABLED" if "DISABLED" in reason else "NOT CONFIGURED"), "detail": reason, "action": ""})
     rows.append({"name": "Sales mailbox (replies, bounces)", "state": "CONFIGURED" if s.imap_configured else "NOT CONFIGURED",
                  "detail": f"{s.imap_host} / {s.imap_folder}, read-only" if s.imap_configured else "IMAP_HOST and credentials empty",
-                 "action": "" if s.imap_configured else "Gmail: IMAP_HOST=imap.gmail.com with your app password"})
+                 "action": "" if s.imap_configured else "Set IMAP_HOST to your mail server's IMAP host (Gmail: imap.gmail.com with an app password)"})
     rows.append({"name": "Booking link (Calendly)", "state": "CONFIGURED" if s.calendly_url else "NOT CONFIGURED",
                  "detail": s.calendly_url or "CALENDLY_URL empty: replies ask for times instead", "action": ""})
 
