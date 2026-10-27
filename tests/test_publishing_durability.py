@@ -230,7 +230,7 @@ class TimeoutSMTP:
     def __exit__(self, *a):
         return False
 
-    def starttls(self):
+    def starttls(self, context=None):
         pass
 
     def login(self, u, p):

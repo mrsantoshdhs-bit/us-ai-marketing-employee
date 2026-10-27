@@ -19,6 +19,7 @@ SATURDAY_ET = datetime(2026, 10, 31, 11, 0, tzinfo=ET).astimezone(timezone.utc).
 
 class FakeSMTP:
     sent = []
+    tls_contexts: list = []
 
     def __init__(self, host, port, timeout=30):
         self.host = host
@@ -29,8 +30,8 @@ class FakeSMTP:
     def __exit__(self, *a):
         return False
 
-    def starttls(self):
-        pass
+    def starttls(self, context=None):
+        FakeSMTP.tls_contexts.append(context)
 
     def login(self, u, p):
         pass

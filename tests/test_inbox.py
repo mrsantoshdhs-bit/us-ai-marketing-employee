@@ -29,9 +29,11 @@ class FakeIMAP:
     messages: dict[int, bytes] = {}
     validity = "777"
     readonly = None
+    ssl_context = None
+    timeout = None
 
-    def __init__(self, host, port):
-        pass
+    def __init__(self, host, port, ssl_context=None, timeout=None):
+        FakeIMAP.ssl_context, FakeIMAP.timeout = ssl_context, timeout
 
     def login(self, user, password):
         return "OK", [b"logged in"]

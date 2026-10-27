@@ -18,6 +18,7 @@ from email.message import Message
 from email.utils import getaddresses, parseaddr, parsedate_to_datetime
 from html import unescape
 
+from aime.integrations.email_smtp import MAIL_TIMEOUT, tls_context
 from aime.timeutil import utcnow
 
 BOUNCE_SENDERS = re.compile(r"^(mailer-daemon|postmaster|mail-daemon|mailerdaemon)@", re.I)
@@ -132,7 +133,7 @@ class Mailbox:
     def fetch_new(self, state: dict | None) -> tuple[list[tuple[str, bytes]], dict]:
         s = self.settings
         user, password = s.imap_credentials
-        conn = self.imap_factory(s.imap_host, s.imap_port)
+        conn = self.imap_factory(s.imap_host, s.imap_port, ssl_context=tls_context(), timeout=MAIL_TIMEOUT)
         try:
             conn.login(user, password)
             typ, data = conn.select(f'"{s.imap_folder}"', readonly=True)  # EXAMINE: never changes the mailbox
