@@ -42,8 +42,10 @@ TZ_NAMES = {
 }
 TIME_RANGE = re.compile(r"(\d{1,2}(?::\d{2})?\s*[ap]m)\s*(?:-|–|to)\s*(\d{1,2}(?::\d{2})?\s*[ap]m)", re.I)
 ONE_TIME = re.compile(r"\d{1,2}(?::\d{2})?\s*[ap]m", re.I)
-DATE_RE = re.compile(r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun),?\s+"
-                     r"([a-z]{3,9})\s+(\d{1,2}),?\s+(\d{4})", re.I)
+# Calendly writes the date as the account's locale does: "Thursday, October 29, 2026" or "Wednesday, 28 October 2026"
+_WEEKDAY = r"(?:(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun),?\s+)?"
+DATE_MDY = re.compile(_WEEKDAY + r"\b([a-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})", re.I)
+DATE_DMY = re.compile(_WEEKDAY + r"\b(\d{1,2})\s+([a-z]{3,9})\.?,?\s+(\d{4})", re.I)
 LENGTH = re.compile(r"\b(\d{1,3})\s*-?\s*(min|mins|minute|minutes|hr|hrs|hour|hours)\b", re.I)
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 # what follows a date/time field
@@ -145,13 +147,9 @@ def parse_calendly(subject: str, body: str, own: set[str], default_tz: str = "Am
 def _when(when_text: str, default_tz: str, minutes: int = 30) -> tuple[datetime, datetime, str] | None:
     """(start, end) in UTC (naive) and the zone name, from "10:00am - 10:20am (Eastern Time) Thursday, October 29, 2026"
     or, with the start only, "10:00am - Thursday, October 29, 2026 (India Standard Time)" (end = start + minutes)."""
-    times, date = TIME_RANGE.search(when_text), DATE_RE.search(when_text)
+    times, day = TIME_RANGE.search(when_text), _date(when_text)
     one = None if times else ONE_TIME.search(when_text)
-    if not (date and (times or one)):
-        return None
-    try:
-        day = datetime.strptime(f"{date.group(1)[:3]} {date.group(2)} {date.group(3)}", "%b %d %Y")
-    except ValueError:
+    if not (day and (times or one)):
         return None
     tz = _zone(when_text, default_tz)
     to_utc = lambda d: d.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)  # noqa: E731
@@ -164,6 +162,18 @@ def _when(when_text: str, default_tz: str, minutes: int = 30) -> tuple[datetime,
     if end <= start:
         end += timedelta(days=1)
     return to_utc(start), to_utc(end), str(tz)
+
+
+def _date(text: str) -> datetime | None:
+    """The first date written month first ("Oct 29, 2026") or day first ("28 October 2026"), with a real month name."""
+    found = [(m.start(), m.group(1), m.group(2), m.group(3)) for m in (DATE_MDY.search(text),) if m] + \
+            [(m.start(), m.group(2), m.group(1), m.group(3)) for m in (DATE_DMY.search(text),) if m]
+    for _, month, day, year in sorted(found):
+        try:
+            return datetime.strptime(f"{month[:3]} {day} {year}", "%b %d %Y")
+        except ValueError:
+            continue
+    return None
 
 
 def match_lead(session: Session, email: str) -> tuple[Lead | None, Contact | None]:

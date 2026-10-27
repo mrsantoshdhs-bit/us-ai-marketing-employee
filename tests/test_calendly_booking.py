@@ -64,6 +64,33 @@ def test_parse_the_host_layout_with_the_start_time_only():
     assert moved["starts_at"] == datetime(2026, 10, 30, 8, 30)
 
 
+# The layout of a real host notice from the owner's account (27 Oct 2026), names, addresses and the meeting link
+# replaced: the start time only, the date day first, the account's time zone.
+REAL_SUBJECT = "New Event: Ana Lima - 09:00am Wed, 28 Oct 2026 - 30 Minute Meeting"
+REAL_BODY = ("  \n   Calendly \n\n \n    Hi Owner,\n\n\n\n \n  A new event has been scheduled.\n\n\n\n \n   \n    Event Type:\n"
+             "   \n   \n  30 Minute Meeting\n\n\n\n \n   \n    Invitee:\n   \n   \n  Ana Lima\n\n\n\n \n   \n    Invitee Email:\n"
+             "   \n   \n   ana@x.example \n\n\n\n\n\n \n   \n    Event Date/Time:\n   \n   \n  09:00am - Wednesday, 28 October "
+             "2026 (India Standard Time)\n\n\n\n\n\n \n   \n    Location: \n   \n   \n  This is a Zoom web conference.\n\n"
+             "       Attendees can join this meeting from a computer, tablet or smartphone.  \n       https://zoom.example/j/1\n"
+             "\n \n   \n    Invitee Time Zone:\n   \n   \n    India Standard Time\n\n\n\n\n\n Questions:\n\n \n \nPlease share "
+             "anything that will help prepare for our meeting.\n \n \n\n\n This is test \n\n\n\n \n View event in Calendly \n"
+             "\n\n\n\n\n\n \n \nPro Tip!\n \nCheck multiple calendars for availability\n \n Sent from  Calendly \n")
+
+
+def test_parse_the_real_notice_layout_with_the_date_day_first():
+    info = parse_calendly(REAL_SUBJECT, REAL_BODY, {"owner@x.example"})
+    assert (info["kind"], info["invitee_name"], info["invitee_email"], info["event"], info["tz"]) == \
+        ("booked", "Ana Lima", "ana@x.example", "30 Minute Meeting", "Asia/Kolkata")
+    assert (info["starts_at"], info["ends_at"]) == (datetime(2026, 10, 28, 3, 30), datetime(2026, 10, 28, 4, 0))
+    cancelled = parse_calendly(REAL_SUBJECT.replace("New Event", "Canceled"),
+                               REAL_BODY.replace("A new event has been scheduled.", "The event below has been canceled."),
+                               set())
+    assert cancelled["kind"] == "cancelled" and cancelled["starts_at"] == info["starts_at"]
+    # the subject alone, also day first, when the body's date cannot be read
+    odd = REAL_BODY.replace("Wednesday, 28 October 2026", "see Calendly")
+    assert parse_calendly(REAL_SUBJECT, odd, set())["starts_at"] == info["starts_at"]
+
+
 def test_meeting_length_comes_from_the_link():
     assert booking_minutes(SimpleNamespace(calendly_url=LINK)) == 30
     assert booking_minutes(SimpleNamespace(calendly_url="https://calendly.com/x/1-hour")) == 60
