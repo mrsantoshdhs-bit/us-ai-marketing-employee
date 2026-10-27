@@ -9,6 +9,8 @@
   Leads that cannot be contacted get a review task instead.
   <a href="?show={{ 'all' if show == 'open' else 'open' }}">{{ 'Show all' if show == 'open' else 'Show open only' }}</a>
 </div>
+{% if hidden > 0 %}<div class="flash">Emails awaiting approval and uncertain sends are always listed first. Of the other
+  items, the {{ page_size }} due soonest are shown: {{ hidden }} more not shown.</div>{% endif %}
 {% for f in rows %}
 <div class="card" id="f{{ f.id }}">
   <div class="filters" style="justify-content:space-between">

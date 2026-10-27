@@ -169,6 +169,31 @@ def test_inbound_api_is_off_without_a_token_and_takes_only_json(make_ctx):
     assert c.post("/api/inbound", json=payload, headers=token).status_code == 201
 
 
+def test_followups_page_always_lists_emails_awaiting_approval(ctx):
+    from datetime import timedelta
+
+    from aime.models import Company, Lead
+    from aime.timeutil import utcnow
+    with ctx.db.session() as s:
+        co = Company(name="Co", normalized_name="co", domain="co.example", source="test")
+        s.add(co)
+        s.flush()
+        lead = Lead(company_id=co.id, source="research", status="new")
+        s.add(lead)
+        s.flush()
+        for i in range(301):
+            s.add(FollowUp(lead_id=lead.id, company_id=co.id, channel="task", status="pending", subject=f"Review {i}",
+                           due_at=utcnow() - timedelta(days=10, minutes=i)))
+        f = FollowUp(lead_id=lead.id, company_id=co.id, channel="email", kind="response", status="awaiting_approval",
+                     subject="Reply to Jane", body="Hi", due_at=utcnow())
+        s.add(f)
+        s.flush()
+        fid = f.id
+    page = TestClient(create_app(ctx)).get("/followups").text
+    assert f'id="f{fid}"' in page
+    assert "1 more not shown" in page
+
+
 def test_testserver_host_is_accepted_only_for_test_data(make_ctx):
     prod = make_ctx(data_role="production")
     assert TestClient(create_app(prod)).get("/login").status_code == 400

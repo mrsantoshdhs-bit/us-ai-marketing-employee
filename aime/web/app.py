@@ -123,6 +123,10 @@ class InboundLimiter:
 
 
 MAX_INBOUND_BYTES = 20_000
+FOLLOWUPS_PAGE = 300
+# A contact the Sales Manager can actually email: researched, a checked published address, not opted out.
+USABLE_EMAIL = (Contact.source.in_(("website", "sec_filing")), Contact.email_status.in_(("published", "role_address")),
+                Contact.consent_status != "opted_out")
 
 
 def create_app(ctx: AppContext | None = None) -> FastAPI:
@@ -222,8 +226,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     Contact.source.in_(("website", "sec_filing")), Contact.last_name.is_not(None))).scalar_one(),
                  "/contacts", ""),
                 ("Companies with a usable email", s.execute(select(func.count(func.distinct(Contact.company_id))).where(
-                    Contact.email_status.in_(("published", "role_address")))).scalar_one(), "/contacts?reachable=1", ""),
-                ("Qualified companies", cnt(Lead, Lead.status == "qualified"), "/leads?status=qualified", ""),
+                    *USABLE_EMAIL)).scalar_one(), "/contacts?reachable=1", ""),
+                ("Qualified companies", s.execute(select(func.count(func.distinct(Lead.company_id))).where(
+                    Lead.status == "qualified")).scalar_one(), "/leads?status=qualified", ""),
                 ("Emails awaiting approval", cnt(FollowUp, FollowUp.channel == "email", FollowUp.status == "awaiting_approval"),
                  "/followups", ""),
                 ("Posts awaiting approval", cnt(ContentItem, ContentItem.status == "awaiting_approval"), "/content", ""),
@@ -374,7 +379,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         with C().db.session() as s:
             stmt = select(Contact).where(Contact.source.in_(("website", "sec_filing")))
             if reachable:
-                stmt = stmt.where(Contact.email_status.in_(("published", "role_address")))
+                stmt = stmt.where(*USABLE_EMAIL)
             if confidence:
                 stmt = stmt.where(Contact.confidence == confidence)
             if role:
@@ -588,14 +593,20 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.get("/followups", response_class=HTMLResponse)
     def followups(request: Request, show: str = "open"):
         with C().db.session() as s:
-            stmt = select(FollowUp)
+            needs_you = ("awaiting_approval", "uncertain")  # always listed, whatever else is open
+            first = s.execute(select(FollowUp).where(FollowUp.status.in_(needs_you))
+                              .order_by(FollowUp.due_at)).scalars().all()
+            stmt = select(FollowUp).where(FollowUp.status.not_in(needs_you))
             if show == "open":
-                stmt = stmt.where(FollowUp.status.in_(("pending", "awaiting_approval", "approved", "sending", "uncertain")))
-            rows = s.execute(stmt.order_by(FollowUp.due_at).limit(300)).scalars().all()
+                stmt = stmt.where(FollowUp.status.in_(("pending", "approved", "sending")))
+            total = s.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
+            rest = s.execute(stmt.order_by(FollowUp.due_at).limit(FOLLOWUPS_PAGE)).scalars().all()
+            rows = first + rest
             for r in rows:
                 _ = r.lead.company, r.contact
         ready, reason = EmailSender(C().settings).status()
-        return render(request, "followups.html", rows=rows, show=show, email_ready=ready, email_reason=reason)
+        return render(request, "followups.html", rows=rows, show=show, email_ready=ready, email_reason=reason,
+                      hidden=total - len(rest), page_size=FOLLOWUPS_PAGE)
 
     @app.post("/followups/{fid}/{action}")
     def followup_action(request: Request, fid: int, action: str, subject: str = Form(""), body: str = Form(""),
