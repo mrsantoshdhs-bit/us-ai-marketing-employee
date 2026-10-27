@@ -286,7 +286,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 f.blocked_reason = "No consent or contact suppressed"
                 out.cancelled += 1
                 continue
-            elif lead.outreach_status in STOP_STATUSES:
+            elif f.step > 1 and lead.outreach_status in STOP_STATUSES:  # step 1 answers a new inquiry: always fine
                 f.status, f.blocked_reason = "cancelled", f"Not sent: the sequence stopped ({lead.outreach_status})"
                 out.cancelled += 1
                 continue

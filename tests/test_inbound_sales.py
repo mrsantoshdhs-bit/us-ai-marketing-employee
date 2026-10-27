@@ -250,3 +250,28 @@ def test_replies_to_inquiries_get_the_postal_address_and_keep_their_footer(make_
     with ctx.db.session() as s:  # approved behind the dashboard's back without a footer: refused at send time
         b = s.get(FollowUp, b_id)
         assert b.status == "awaiting_approval" and "opt-out line" in b.blocked_reason
+
+
+def test_first_answer_to_a_new_inquiry_is_sent_even_after_earlier_outreach_stopped(make_ctx):
+    ctx = make_ctx(outbound_email_enabled=True, smtp_host="smtp.example", smtp_from="hello@us.example",
+                   company_postal_address="1 Sample St, Austin, TX 78701")
+    FakeSMTP.sent = []
+    out = ingest(ctx)
+    LeadQualificationAgent(ctx).run({"lead_ids": out.inbound_lead_ids})
+    sender = EmailSender(ctx.settings, smtp_factory=FakeSMTP)
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})
+    approve_all(ctx)
+    with ctx.db.session() as s:  # we contacted them earlier and they said no; now they send an inquiry
+        first = s.execute(select(FollowUp).where(FollowUp.status == "approved", FollowUp.step == 1)).scalars().first()
+        lead_id, to = first.lead_id, first.contact.email
+        s.get(Lead, lead_id).outreach_status = "not_interested"
+        s.add(FollowUp(lead_id=lead_id, contact_id=first.contact_id, company_id=first.company_id, channel="email",
+                       step=2, due_at=first.due_at, status="approved", approved_by="test", approved_at=utcnow(),
+                       subject="Following up", body=first.body))
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})
+    assert to in [m["To"] for m in FakeSMTP.sent] and "Following up" not in [m["Subject"] for m in FakeSMTP.sent]
+    with ctx.db.session() as s:
+        steps = {f.step: f for f in s.execute(select(FollowUp).where(FollowUp.lead_id == lead_id,
+                                                                     FollowUp.channel == "email")).scalars()}
+        assert steps[1].status == "sent"
+        assert steps[2].status == "cancelled" and "sequence stopped (not_interested)" in steps[2].blocked_reason
