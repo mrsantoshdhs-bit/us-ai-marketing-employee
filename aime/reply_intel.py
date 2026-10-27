@@ -21,6 +21,7 @@ reasons and a "possible interest" alert, and the Sales Manager decides (Replies 
 from __future__ import annotations
 
 import re
+import time
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -45,14 +46,17 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
                               r"set up a (call|meeting)|tell me more|send (me )?(more|some) (info|details)|"
                               r"what (does it|would it) cost|how much|pricing|availab(le|ility)|free (on|next)|"
                               r"(monday|tuesday|wednesday|thursday|friday) (works|at|morning|afternoon))\b", re.I)),
-    ("objection", re.compile(r"\b(too expensive|no budget|budget (is|was)|not (a priority|right now)|maybe later|"
+    ("objection", re.compile(r"\b(too expensive|no budget|budget (is|was)|not (a priority|right now|now)|maybe later|"
                              r"next (quarter|year)|bad timing|already (work|working|use|using|have)|in-house|"
                              r"circle back|check back)\b", re.I)),
     ("referral", re.compile(r"\b(you should (talk|speak|reach out) to|reach out to|the right person|"
                             r"(cc|cc'?ing|copying|looping in)\b|forward(ed|ing)? (this|your)|contact our)", re.I)),
 ]
 COMPLAINT = re.compile(r"\b(spam|report(ed|ing)? (you|this)|lawyer|attorney|legal action|harass|gdpr|can-?spam|"
-                       r"how did you get (my|this) (email|address))\b", re.I)
+                       r"how did you get (my|this) (email|address)|"
+                       # a request to remove personal data: suppressed at once, and a person handles the deletion
+                       r"(remov|delet|eras)(e|es|ed|ing) (all )?(my|our) (personal )?(data|details|information|info)|"
+                       r"right to be forgotten|ccpa|data (removal|deletion))\b", re.I)
 OOO = re.compile(r"\b(out of (the )?office|on (vacation|holiday|leave)|limited access to (my )?email|"
                  r"will be back|returning on|away until|automatic reply)\b", re.I)
 CALENDLY = re.compile(r"calendly\.com", re.I)
@@ -138,6 +142,7 @@ AI_SYSTEM = ("You read one reply to a B2B sales email. Answer with exactly one l
              "Typos are common; judge the meaning. Write nothing else.")
 AI_ANSWER = re.compile(r"\b(interested|not[ _]interested|question|objection|referral|unsubscribe|other)\s*\|\s*(yes|no)\b", re.I)
 AI_PER_RUN = 5  # each answer takes several seconds on a local model
+AI_SLOW_SECONDS = 30  # a slower (or timed-out) answer stops the second opinions for the rest of the run
 
 
 def ai_second_opinion(llm, row: InboundEmail) -> tuple[str, bool] | None:
@@ -310,7 +315,10 @@ def process_pending(session: Session, settings, actor: str, llm=None) -> dict:
         opinion = None
         if llm is not None and ai_budget > 0 and row.category in ("question", "other") and row.confidence != "high":
             ai_budget -= 1
+            started = time.perf_counter()
             opinion = ai_second_opinion(llm, row)
+            if time.perf_counter() - started > AI_SLOW_SECONDS:  # a stuck model must not hold up the inbox job
+                ai_budget = 0
             if opinion:
                 ai_cat, ai_meeting = opinion
                 row.reasons = list(row.reasons or []) + [

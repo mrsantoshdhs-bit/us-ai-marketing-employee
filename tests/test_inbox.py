@@ -403,6 +403,9 @@ def test_interest_and_meeting_requests_in_everyday_wording(text):
     ("May I have your company's address?", ("question", "medium")),
     ("Can we do this next year?", ("objection", "high")),
     ("Can you remove me from your list?", ("unsubscribe", "high")),
+    ("Can we talk about this later? Not now.", ("interested", "medium")),  # a brush-off goes to review
+    ("Can we talk about removing my data?", ("unsubscribe", "medium")),  # data removal: suppress, a person checks
+    ("Please delete our information.", ("unsubscribe", "medium")),
 ])
 def test_negations_questions_and_opt_outs_are_not_read_as_interest(text, expected):
     row = InboundEmail(from_email="x@y.example", subject="Re: hello", body_text=text, new_text=text)
@@ -453,3 +456,33 @@ def test_an_unusable_model_answer_changes_nothing(answer):
     assert ai_second_opinion(FakeLLM([answer]), row) is None
     assert ai_second_opinion(None, row) is None
     assert ai_second_opinion(FakeLLM(["Not interested | no"]), row) == ("not_interested", False)
+
+
+def test_a_slow_local_model_is_asked_once_per_run(monkeypatch):
+    import aime.reply_intel as ri
+    from tests.conftest import FakeLLM
+    clock = iter([0.0, 31.0] + [31.0 + i for i in range(20)])
+    monkeypatch.setattr(ri.time, "perf_counter", lambda: next(clock))
+    llm = FakeLLM(["question|no"])
+    rows = [InboundEmail(from_email=f"x{i}@y.example", subject="Re: hi", body_text="Hmm?", new_text="Hmm?", status="new")
+            for i in range(3)]
+
+    class Session:  # just enough of a session for process_pending
+        def execute(self, _stmt):
+            class R:
+                def scalars(self):
+                    class S:
+                        def all(self):
+                            return rows
+                    return S()
+            return R()
+
+        def add(self, _x):
+            pass
+
+        def commit(self):
+            pass
+
+    monkeypatch.setattr(ri, "act", lambda session, settings, row, actor: setattr(row, "status", "needs_review"))
+    ri.process_pending(Session(), None, "test", llm=llm)
+    assert llm.calls == 1  # the first answer took 31 s: no more second opinions in this run
