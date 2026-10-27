@@ -41,17 +41,16 @@ approved sends within 08:00–18:00 ET weekdays, pipeline automation) · publish
 
 ## Deployment status
 
-- **Deployed 26 Oct 2026:** #19–#24 (production `main` at `715f881`), with outbound email and publishing off.
-- **Waiting for your approval** (each with CI; merge in this order):
-  - #25 research accuracy: no product pages as team pages, no places or customers as staff, competitors from
-    their own site, withdrawal of people no longer found, and disqualified leads' drafts cancelled.
-  - #26 `email-check`.
-  - #27 Calendly reschedules, late cancellations and linking unmatched bookings.
-  - #28 Today tiles and these docs.
+- **Deployed 26 Oct 2026:** #19–#28 (production `main` at `6844bfe`), with outbound email and publishing off;
+  `research-recheck` was run once afterwards.
+- **Waiting for your approval** (27 Oct audit fixes, each with CI; merge in this order):
+  - #29 operations: dashboard restart task, off-machine sync check, alerts that close themselves, crash recovery.
+  - #30 research accuracy: email owners, robots.txt failures, wrong merges, SEC officers.
+  - #31 dashboard and security: inbound API token, lockout, true figures, approvals always listed.
+  - #32 mail safety: verified TLS for Gmail, send limits under overlap, reply and bounce accuracy.
+  - #33 `docs/OPERATIONAL_READINESS.md`, the full report and your checklist.
 - **Same deploy flow as before:** verified backup, maintenance on, merge, fast-forward the production folder,
   tests and doctor, restart the dashboard, maintenance off, confirm the next tick.
-- **After #25, run `python -m aime research-recheck` once.** On a copy of production it withdrew the three wrong
-  contacts, found Curai's CEO and flagged five competitors.
 
 **Nothing is sent after deploying**: outbound stays off, every email needs approval, and drafts only appear for
 researched contacts with a published email.
@@ -69,7 +68,8 @@ drafts; empty `IMAP_HOST` stops mailbox reading.
 2. Calendly link, with notifications to the sales mailbox.
 3. Your account is admin (set on 26 Oct with `user set-role`). Add Sales Manager accounts with
    `python -m aime user create --username <name>` if others help.
-4. The off-machine backup passphrase (`docs/SALES_SETUP.md` section 7).
+4. Sign in to OneDrive (it is installed but not signed in, so the backup folder does not leave this PC),
+   then the off-machine backup passphrase (`docs/SALES_SETUP.md` section 7).
 5. The live acceptance run (`docs/ACCEPTANCE.md`) with a test address you control.
 6. Going live: your explicit decision, after the acceptance report.
 
