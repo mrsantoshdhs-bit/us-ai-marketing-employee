@@ -204,3 +204,18 @@ def test_research_recheck_waits_for_a_running_enrich_job(ctx, capsys):
     finally:
         lock.release()
     assert "enrich job is running" in capsys.readouterr().out
+
+
+def test_dashboard_task_gives_a_console_less_process_somewhere_to_write(tmp_path, monkeypatch):
+    import importlib.util
+    import sys
+    spec = importlib.util.spec_from_file_location("dashboard_task", Path(__file__).parent.parent / "scripts" / "dashboard_task.py")
+    task = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(task)
+    monkeypatch.setattr(sys, "stdout", None)  # what pythonw.exe gives the process
+    monkeypatch.setattr(sys, "stderr", None)
+    task.ensure_output(tmp_path / "logs" / "dashboard.log")
+    print("Uvicorn running")
+    sys.stderr.write("INFO: started\n")
+    sys.stdout.close()
+    assert "Uvicorn running" in (tmp_path / "logs" / "dashboard.log").read_text(encoding="utf-8")
