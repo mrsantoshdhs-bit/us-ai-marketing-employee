@@ -88,12 +88,19 @@ Run in the acceptance environment only, with nothing sent.
 | Contact | Result |
 |---|---|
 | santosh@digitalhubsolution.com | REAL research: the site is verified; research found only a company inbox. The company is flagged as selling similar services, so the lead is disqualified. Draft #49 was written; quality checks FAILED because the address is user-provided, not published. |
-| abhishek@digitalhubsolution.net | REAL: the domain redirects to digitalhubsolution.com, and the result is the same. Draft #50, quality checks FAILED. |
+| abhishek@digitalhubsolution.net | REAL: the domain redirects to digitalhubsolution.com, so the website check merged it into the same company. Draft #50, quality checks FAILED. |
 
-**These drafts must not be sent as they are:**
-- They use the domain as the company name.
-- The standard footer says the company published the address, which is not true for user-provided contacts.
-- The outreach pipeline sends only to published addresses, so it cannot send to these contacts.
+**Regenerated on 27 Oct** (still waiting for approval, nothing sent):
+- The company is now "Digital Hub Solution", taken from its homepage title.
+- The footer is truthful: the address "was given to us directly as a business contact; it was not taken from your website".
+- The meeting offered is 30 minutes.
+
+**Still not sendable:**
+- Quality checks fail on the user-provided address.
+- The lead is disqualified as a company selling similar services.
+- The outreach pipeline sends only to published addresses.
+
+A controlled test needs your decision on how to send to these two addresses.
 
 A controlled test needs a decision first: either use the test addresses as `OUTBOUND_TEST_RECIPIENTS` on a published lead, or add a test-contact path with its own truthful footer.
 
