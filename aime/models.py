@@ -249,6 +249,8 @@ class FollowUp(Timestamped, Base):
     to_email: Mapped[str | None] = mapped_column(String(200))  # the address the approval applies to
     evidence: Mapped[list[Any] | None] = mapped_column(JSON, default=list)  # [{fact, url, kind}] used in the email
     quality: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict)  # email quality-check report
+    # the campaign authorization that approved it at send time instead of a person (aime.automation)
+    authorization_id: Mapped[int | None] = mapped_column(Integer)
 
     lead: Mapped[Lead] = relationship()
     contact: Mapped[Contact | None] = relationship()
@@ -304,6 +306,8 @@ class InboundEmail(Base):
     # calendly | other
     category: Mapped[str | None] = mapped_column(String(30), index=True)
     confidence: Mapped[str | None] = mapped_column(String(10))  # high | medium | low
+    # what they ask for, alongside the category: meeting_request | pricing_request | more_info | None
+    intent: Mapped[str | None] = mapped_column(String(30))
     reasons: Mapped[list[Any] | None] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(20), default="new", index=True)  # new | actioned | needs_review | reviewed | ignored
     company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"))
@@ -620,3 +624,40 @@ class KeyValue(Base):
     key: Mapped[str] = mapped_column(String(80), primary_key=True)
     value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+# --------------------------------------------------------------------------- automation (aime.automation)
+
+class CampaignAuthorization(Timestamped, Base):
+    """An administrator's permission for emails to go out without a per-email approval: the exact recipient
+    addresses, which kinds of email, dates and limits. Used only in Hybrid and Automatic mode, at send time."""
+
+    __tablename__ = "campaign_authorizations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)  # draft | active | paused | stopped | expired
+    recipients: Mapped[list[Any]] = mapped_column(JSON, default=list)  # exact addresses, lower case
+    kinds: Mapped[list[Any]] = mapped_column(JSON, default=list)  # outreach | response
+    daily_limit: Mapped[int] = mapped_column(Integer, default=5)
+    total_limit: Mapped[int] = mapped_column(Integer, default=20)
+    starts_at: Mapped[datetime] = mapped_column(DateTime)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str] = mapped_column(String(60))
+    authorized_by: Mapped[str | None] = mapped_column(String(60))
+    authorized_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class AuditEvent(Base):
+    """Who changed an operating mode, the automation state or a campaign authorization, and every email a campaign
+    approved instead of a person. Append-only."""
+
+    __tablename__ = "audit_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    actor: Mapped[str] = mapped_column(String(80))
+    action: Mapped[str] = mapped_column(String(60), index=True)
+    target: Mapped[str | None] = mapped_column(String(120))
+    detail: Mapped[str | None] = mapped_column(Text)

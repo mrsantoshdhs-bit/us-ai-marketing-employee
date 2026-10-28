@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
 import pytest
 
+import aime.timeutil
 from aime.config import Settings
 from aime.context import create_context, set_context
 from aime.llm.base import LLMProvider
@@ -84,3 +86,16 @@ def make_ctx(tmp_path):
 @pytest.fixture
 def ctx(make_ctx):
     return make_ctx()
+
+
+# The tests describe Tuesday 27 Oct 2026 (TUESDAY_11AM_ET, Calendly bookings on the 29th ...) and mix those simulated
+# times with what the code stamps itself (a draft's due time, a status change). The code's clock starts that morning,
+# 10:00 US Eastern, and keeps running, so the two stay on one timeline whatever the real date is.
+TEST_DAY_START = datetime(2026, 10, 27, 14, 0)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _clock_on_test_day():
+    aime.timeutil.CLOCK_OFFSET = TEST_DAY_START - datetime.now(timezone.utc).replace(tzinfo=None)
+    yield
+    aime.timeutil.CLOCK_OFFSET = type(aime.timeutil.CLOCK_OFFSET)(0)

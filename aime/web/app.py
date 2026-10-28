@@ -6,9 +6,11 @@ import hmac
 import json
 import threading
 import time
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Annotated
 from urllib.parse import quote, urlparse
 from zoneinfo import ZoneInfo
 
@@ -35,8 +37,9 @@ from aime.integrations.status import integration_statuses
 from aime.knowledge.geo import US_REGIONS
 from aime.knowledge.industries import INDUSTRIES, industry_label
 from aime.knowledge.services import SERVICES, service_name
-from aime.models import (Activity, AgentRun, Alert, Campaign, Company, Contact, ContentItem, FollowUp, InboundEmail,
-                         InboundInquiry, Meeting,
+from aime import automation as am
+from aime.models import (Activity, AgentRun, Alert, AuditEvent, Campaign, CampaignAuthorization, Company, Contact,
+                         ContentItem, FollowUp, InboundEmail, InboundInquiry, Meeting,
                          JobRun, JobState, Lead, MarketingPlan, Opportunity, PolicyDecision, PublishAttempt, Report,
                          ResearchSnapshot, ResearchTopic, Signal)
 from aime.monitoring import agent_stats, read_heartbeat
@@ -47,10 +50,11 @@ from aime.outreach import set_status as set_outreach_status
 from aime.outreach import stop_sequence
 from aime.qc.checks import run_quality_checks
 from aime.qc.email_checks import run_email_checks
-from aime.reply_intel import QUESTION_PLACEHOLDER
+from aime.reply_intel import INTENT_LABELS, QUESTION_PLACEHOLDER
 from aime.reply_intel import act as act_on_reply
 from aime.meetings import check_double_bookings, record_meeting, reopen_after_cancel
 from aime.scheduler.runner import due_jobs, run_job
+from aime.scoring import lead_tier, tier_reason
 from aime.timeutil import fmt_et, fmt_local, utcnow
 from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username,
                            make_cookie, safe_next, session_secret, user_count)
@@ -146,7 +150,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     app.mount("/static", StaticFiles(directory=WEB_DIR / "static"), name="static")
     templates = Jinja2Templates(directory=WEB_DIR / "templates")
     env = templates.env
-    env.filters.update(local=fmt_local, et=fmt_et, service=service_name, industry=industry_label, safe_url=safe_url)
+    env.filters.update(local=fmt_local, et=fmt_et, service=service_name, industry=industry_label, safe_url=safe_url,
+                       tier=lead_tier, tier_reason=tier_reason, intent_label=lambda i: INTENT_LABELS.get(i or "", ""))
     env.globals.update(SERVICES=SERVICES, INDUSTRIES=INDUSTRIES, STATES=US_REGIONS, STAGES=STAGES,
                        LEAD_STATUSES=LEAD_STATUSES)
 
@@ -159,6 +164,22 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         data.setdefault("data_role", C().settings.data_role)
         data.setdefault("maintenance", maintenance.active(C().settings.data_dir))
         data.setdefault("current_user", getattr(request.state, "user", None))
+        data.setdefault("sending_on", C().settings.outbound_email_enabled)
+        user = data["current_user"]
+        data.setdefault("user_name", (user["username"].title() if user else C().settings.sender_name or ""))
+        data.setdefault("user_role", {"admin": "Administrator", "sales_manager": "Sales Manager"}.get(
+            (user or {}).get("role", ""), "Preview · no sign-in"))
+        if "nav_status" not in data and request.url.path != "/login":  # the top bar and sidebar on every page
+            with C().db.session() as s:
+                state = am.get_state(s)
+                data["nav_status"] = {"mode": am.get_mode(s), "state": state, "transitions": am.TRANSITIONS,
+                                      "duty": employee_duty(C().settings, state)}
+                cnt = lambda m, *c: s.execute(select(func.count(m.id)).where(*c)).scalar_one()  # noqa: E731
+                data["nav_counts"] = {
+                    "approvals": cnt(FollowUp, FollowUp.channel == "email", FollowUp.status == "awaiting_approval")
+                    + cnt(ContentItem, ContentItem.status == "awaiting_approval"),
+                    "replies": cnt(InboundEmail, InboundEmail.status == "needs_review"),
+                    "alerts": cnt(Alert, Alert.acknowledged.is_(False), Alert.level.in_(("error", "warning")))}
         return templates.TemplateResponse(request, name, data)
 
     who = current_username  # the signed-in Sales Manager, recorded on approvals and activities
@@ -260,9 +281,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             policy_now = {"would_publish": sum(r["decision"] == "would_publish" for r in pending),
                           "would_hold": sum(r["decision"] == "would_hold" for r in pending), **policy["counts"]}
             post_decisions = {r["content_id"]: r["decision"] for r in policy["rows"]}
+            days = 30 if request.query_params.get("range") == "30" else 7
+            center = {**command_center(ctx, s), **ai_employee(ctx, s), **dashboard_view(ctx, s, days)}
         return render(request, "today.html", posts=posts, emails=emails, tasks=tasks, task_total=task_total,
                       exceptions=exceptions, alerts=alerts, funnel=funnel, stages=stages, health=health,
-                      policy=policy_now, post_decisions=post_decisions, replies=replies, upcoming=upcoming)
+                      policy=policy_now, post_decisions=post_decisions, replies=replies, upcoming=upcoming, **center)
 
     # ------------------------------------------------------------------ replies (sales mailbox)
     @app.get("/inbox", response_class=HTMLResponse)
@@ -615,9 +638,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             rows = first + rest
             for r in rows:
                 _ = r.lead.company, r.contact
+            reconfirm = {r.id for r in rows if am.needs_reconfirmation(s, r)}
         ready, reason = EmailSender(C().settings).status()
         return render(request, "followups.html", rows=rows, show=show, email_ready=ready, email_reason=reason,
-                      hidden=total - len(rest), page_size=FOLLOWUPS_PAGE)
+                      hidden=total - len(rest), page_size=FOLLOWUPS_PAGE, reconfirm=reconfirm)
 
     @app.post("/followups/{fid}/{action}")
     def followup_action(request: Request, fid: int, action: str, subject: str = Form(""), body: str = Form(""),
@@ -664,6 +688,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                             log_activity(s, f"Outreach email #{f.id} approved despite {qc_status} quality checks",
                                          who(request), type_="override", company_id=f.company_id, lead_id=f.lead_id)
                     msg = "Approved. It will be sent by the follow-ups job if outbound email is enabled."
+            elif action == "reconfirm" and f.channel == "email" and f.status == "approved" and f.approved_at:
+                am.reconfirm(s, f, who(request))  # approved before sending was switched on: a person confirms it again
+                msg = "Confirmed again: it goes out on the next follow-ups run"
             elif action == "reject" and f.status in ("awaiting_approval", "approved", "pending"):
                 f.status = "rejected"
                 if f.kind == "outreach" and f.step == 1 and f.lead.outreach_status in ("drafted", "approved"):
@@ -919,6 +946,196 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             run = s.get(AgentRun, run_pk) or _404()
         return render(request, "agent_run.html", run=run)
 
+    # ------------------------------------------------------------------ search, approval queue, settings
+    @app.get("/search", response_class=HTMLResponse)
+    def search_page(request: Request, q: str = ""):
+        q = " ".join(q.split())[:100]
+        groups: list[tuple[str, str, list[tuple[str, str, str]]]] = []
+        if len(q) >= 2:
+            like = f"%{q.lower()}%"
+            with C().db.session() as s:
+                companies = s.execute(select(Company).where(Company.merged_into_id.is_(None), or_(
+                    func.lower(Company.name).like(like), func.lower(Company.domain).like(like))).limit(12)).scalars().all()
+                leads = {lead.company_id: lead.id for lead in s.execute(select(Lead).where(
+                    Lead.company_id.in_([c.id for c in companies] or [0]))).scalars()}
+                groups.append(("Companies", "building", [
+                    (c.name, f"/leads/{leads[c.id]}" if c.id in leads else "/companies", " · ".join(
+                        x for x in (c.domain, c.state, c.website_status) if x)) for c in companies]))
+                contacts = s.execute(select(Contact).where(or_(
+                    func.lower(Contact.first_name).like(like), func.lower(Contact.last_name).like(like),
+                    func.lower(Contact.email).like(like), func.lower(Contact.title).like(like))).limit(12)).scalars().all()
+                groups.append(("Contacts", "users", [
+                    (c.display_name, "/contacts", " · ".join(x for x in (c.title, c.email, c.company.name if c.company else None) if x))
+                    for c in contacts]))
+                emails = s.execute(select(FollowUp).where(FollowUp.channel == "email", or_(
+                    func.lower(FollowUp.subject).like(like), func.lower(FollowUp.to_email).like(like)))
+                    .order_by(FollowUp.id.desc()).limit(12)).scalars().all()
+                groups.append(("Emails", "mail", [(f.subject, f"/followups#f{f.id}", f"{f.status.replace('_', ' ')} · to {f.to_email or '—'}")
+                                                  for f in emails]))
+                replies = s.execute(select(InboundEmail).where(or_(
+                    func.lower(InboundEmail.subject).like(like), func.lower(InboundEmail.from_email).like(like)))
+                    .order_by(InboundEmail.id.desc()).limit(12)).scalars().all()
+                groups.append(("Conversations", "chat", [(r.subject or "(no subject)", "/inbox?show=all",
+                                                          f"{r.from_email} · {(r.category or 'new').replace('_', ' ')}") for r in replies]))
+                meetings = s.execute(select(Meeting).where(or_(
+                    func.lower(Meeting.invitee_name).like(like), func.lower(Meeting.invitee_email).like(like),
+                    func.lower(Meeting.title).like(like))).order_by(Meeting.starts_at.desc()).limit(12)).scalars().all()
+                groups.append(("Meetings", "calendar", [(f"{m.invitee_name or m.invitee_email} · {m.title}",
+                                                         f"/leads/{m.lead_id}" if m.lead_id else "/meetings",
+                                                         f"{fmt_et(m.starts_at)} · {m.status}") for m in meetings]))
+        return render(request, "search.html", q=q, groups=groups, found=sum(len(rows) for _, _, rows in groups))
+
+    @app.get("/approvals", response_class=HTMLResponse)
+    def approvals_page(request: Request):
+        with C().db.session() as s:
+            emails = s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status.in_(
+                ("awaiting_approval", "uncertain"))).order_by(FollowUp.due_at)).scalars().all()
+            for f in emails:
+                _ = f.lead.company, f.contact
+            posts = s.execute(select(ContentItem).where(ContentItem.status == "awaiting_approval")
+                              .order_by(ContentItem.scheduled_for)).scalars().all()
+            reconfirm = s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "approved")).scalars().all()
+            reconfirm = [f for f in reconfirm if am.needs_reconfirmation(s, f)]
+            for f in reconfirm:
+                _ = f.lead.company
+        return render(request, "approvals.html", emails=emails, posts=posts, reconfirm=reconfirm)
+
+    @app.get("/settings", response_class=HTMLResponse)
+    def settings_page(request: Request):
+        ctx = C()
+        st = ctx.settings
+        ready, reason = EmailSender(st).status()
+        with ctx.db.session() as s:
+            mode, state = am.get_mode(s), am.get_state(s)
+        follow = st.section("followup")
+        outreach = st.section("outreach")
+        sections = [
+            ("Company", [("Company name", st.company_name), ("Sender name", st.sender_name or "—"),
+                         ("Postal address (CAN-SPAM footer)", st.company_postal_address or "not set"),
+                         ("Unsubscribe address", st.unsubscribe_email or st.smtp_from or "—")]),
+            ("Automation", [("Operating mode", mode.title()), ("Automation state", state.replace("_", " ").title()),
+                            ("REQUIRE_HUMAN_APPROVAL", str(st.require_human_approval).lower()),
+                            ("PUBLISHING_ENABLED", str(st.publishing_enabled).lower())]),
+            ("Email", [("OUTBOUND_EMAIL_ENABLED", str(st.outbound_email_enabled).lower()),
+                       ("Mail server", st.smtp_host or "not set"), ("Sender address", st.smtp_from or "not set"),
+                       ("Mail server status", "ready" if ready else reason), ("Reading replies (IMAP)", st.imap_host or "off"),
+                       ("Test mode recipients", ", ".join(sorted(st.test_recipients)) or "off")]),
+            ("Outreach rules", [("Send window", f"{follow.get('send_window_start', '08:00')}–{follow.get('send_window_end', '18:00')} "
+                                                f"{follow.get('send_window_timezone', 'America/New_York')}, weekdays"),
+                                ("Daily outreach limit", str(outreach.get("daily_send_limit", 20))),
+                                ("Per domain per day", str(outreach.get("per_domain_daily_limit", 1))),
+                                ("Sequence (days after the first email)", ", ".join(str(d) for d in outreach.get("intervals_days", [0, 4, 10])))]),
+            ("Meetings", [("Calendly link", st.calendly_url or "not set")]),
+            ("This installation", [("Data", st.data_role), ("Data folder", str(st.data_dir)),
+                                   ("Dashboard sign-in", "on" if st.dashboard_auth else "off (local preview)")]),
+        ]
+        return render(request, "settings.html", sections=sections)
+
+    # ------------------------------------------------------------------ automation control center
+    def is_admin(request: Request) -> bool:
+        user = getattr(request.state, "user", None)
+        return not C().settings.dashboard_auth or bool(user and user.get("role") == "admin")
+
+    @app.get("/automation", response_class=HTMLResponse)
+    def automation_page(request: Request):
+        ctx = C()
+        ready, reason = EmailSender(ctx.settings).status()
+        now = utcnow()
+        with ctx.db.session() as s:
+            am.expire_authorizations(s)
+            auths = s.execute(select(CampaignAuthorization).order_by(CampaignAuthorization.id.desc()).limit(50)).scalars().all()
+            queued = s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "approved")).scalars().all()
+            pol = ctx.settings.section("outreach")
+            data = dict(
+                mode=am.get_mode(s), state=am.get_state(s), auths=auths, counts={a.id: am.sent_counts(s, a, now) for a in auths},
+                blockers=am.blockers(s, ctx.settings, ready, reason), sender_ready=ready, sender_reason=reason,
+                waiting=s.execute(select(func.count(FollowUp.id)).where(FollowUp.channel == "email",
+                                                                    FollowUp.status == "awaiting_approval")).scalar_one(),
+                posts_waiting=s.execute(select(func.count(ContentItem.id)).where(
+                    ContentItem.status == "awaiting_approval")).scalar_one(),
+                queued=len(queued), reconfirm=sum(am.needs_reconfirmation(s, f) for f in queued),
+                sent_24h=s.execute(select(func.count(FollowUp.id)).where(
+                    FollowUp.channel == "email", FollowUp.status.in_(am.COUNTS_AS_SENT),
+                    func.coalesce(FollowUp.sent_at, FollowUp.send_started_at) >= now - timedelta(hours=24))).scalar_one(),
+                limits={"daily": pol.get("daily_send_limit", 20), "per_domain": pol.get("per_domain_daily_limit", 1),
+                        "per_run": pol.get("sends_per_run", 5)},
+                failing=s.execute(select(JobState).where(JobState.consecutive_failures > 0)).scalars().all(),
+                failed_runs=s.execute(select(JobRun).where(JobRun.status.in_(("failed", "partial")),
+                                                           JobRun.started_at >= now - timedelta(hours=24))
+                                      .order_by(JobRun.id.desc()).limit(8)).scalars().all(),
+                agents=agent_stats(s, days=1),
+                alerts=s.execute(select(Alert).where(Alert.acknowledged.is_(False), Alert.level.in_(("error", "warning")))
+                                 .order_by(Alert.id.desc()).limit(8)).scalars().all(),
+                events=s.execute(select(AuditEvent).order_by(AuditEvent.id.desc()).limit(20)).scalars().all(),
+            )
+        return render(request, "automation.html", modes=am.MODES, states=am.STATES, kinds=am.KINDS,
+                      transitions=am.TRANSITIONS, admin_actions=am.ADMIN_ACTIONS, is_admin=is_admin(request),
+                      test_recipients=sorted(ctx.settings.test_recipients), heartbeat=read_heartbeat(ctx.settings),
+                      settings_flags={"OUTBOUND_EMAIL_ENABLED": ctx.settings.outbound_email_enabled,
+                                      "REQUIRE_HUMAN_APPROVAL": ctx.settings.require_human_approval,
+                                      "PUBLISHING_ENABLED": ctx.settings.publishing_enabled},
+                      limits_max={"days": am.MAX_DAYS, "recipients": am.MAX_RECIPIENTS, "daily": am.MAX_DAILY,
+                                  "total": am.MAX_TOTAL}, **data)
+
+    @app.post("/automation/mode")
+    def automation_mode(request: Request, mode: str = Form(...)):
+        if not is_admin(request):
+            raise HTTPException(403, "Only an administrator can change the operating mode")
+        with C().db.session() as s:
+            try:
+                am.set_mode(s, mode, who(request))
+            except ValueError as exc:
+                return back("/automation", str(exc))
+        return back("/automation", f"Operating mode set to {mode.title()}")
+
+    @app.post("/automation/state/{action}")
+    def automation_state(request: Request, action: str, reason: str = Form("")):
+        if action in am.ADMIN_ACTIONS and not is_admin(request):
+            raise HTTPException(403, "Only an administrator can start or resume automation")
+        with C().db.session() as s:
+            try:
+                new = am.change_state(s, action, who(request), reason.strip()[:300])
+            except ValueError as exc:
+                return back("/automation", str(exc))
+        return back("/automation", f"Automation: {am.STATES[new]}")
+
+    @app.post("/automation/authorizations")
+    def automation_authorize(request: Request, name: str = Form(...), recipients: str = Form(...),
+                             kinds: Annotated[list[str] | None, Form()] = None, daily_limit: int = Form(5), total_limit: int = Form(20),
+                             days: int = Form(7), notes: str = Form("")):
+        if not is_admin(request):
+            raise HTTPException(403, "Only an administrator can authorize a campaign")
+        with C().db.session() as s:
+            try:
+                a = am.create_authorization(s, who(request), name, recipients, kinds or [], daily_limit, total_limit, days, notes)
+            except ValueError as exc:
+                return back("/automation#authorize", str(exc))
+            aid = a.id
+        return back("/automation#authorizations", f"Campaign authorization #{aid} saved as a draft: activate it to use it")
+
+    @app.post("/automation/authorizations/{aid}/{action}")
+    def automation_authorization_action(request: Request, aid: int, action: str):
+        if not is_admin(request):
+            raise HTTPException(403, "Only an administrator can change a campaign authorization")
+        with C().db.session() as s:
+            a = s.get(CampaignAuthorization, aid) or _404()
+            try:
+                am.change_authorization(s, a, action, who(request))
+            except ValueError as exc:
+                return back("/automation#authorizations", str(exc))
+            status = a.status
+        return back("/automation#authorizations", f"Campaign authorization #{aid} is now {status}")
+
+    @app.get("/audit", response_class=HTMLResponse)
+    def audit_page(request: Request, action: str = ""):
+        with C().db.session() as s:
+            q = select(AuditEvent).order_by(AuditEvent.id.desc()).limit(300)
+            if action:
+                q = q.where(AuditEvent.action.like(f"{action}%"))
+            events = s.execute(q).scalars().all()
+            actions = [r[0] for r in s.execute(select(AuditEvent.action).distinct().order_by(AuditEvent.action))]
+        return render(request, "audit.html", events=events, actions=actions, action=action)
+
     @app.get("/jobs", response_class=HTMLResponse)
     def jobs(request: Request):
         ctx = C()
@@ -1097,3 +1314,351 @@ def health_strip(ctx: AppContext, s) -> list[tuple[str, str, str]]:
     ready, reason = offsite_status(st)
     rows.append(("Off-machine backup", "ok" if ready else "warn", "configured" if ready else reason))
     return rows
+
+
+HUMAN_REPLIES = ("interested", "not_interested", "objection", "referral", "question", "other")
+
+
+def money(value: float | None) -> str:
+    return f"${value:,.0f}" if value else "—"
+
+
+def command_center(ctx: AppContext, s) -> dict:
+    """What the Sales Command Center shows beyond Today's lists, all counted from the database: KPI tiles, weekly
+    trends, the funnel, pipeline by stage, the live activity timeline, and the automation, email and Calendly status.
+    Nothing is estimated: a rate with nothing to divide by shows a dash."""
+    from aime.web import charts
+
+    st = ctx.settings
+    now = utcnow()
+    since = now - timedelta(weeks=8)
+    cnt = lambda m, *c: s.execute(select(func.count(m.id)).where(*c)).scalar_one()  # noqa: E731
+    rate = lambda a, b: f"{100 * a / b:.0f}%" if b else "—"  # noqa: E731
+    open_co = (Company.merged_into_id.is_(None),)
+    open_opps = (Opportunity.stage.not_in(("won", "lost")),)
+    tiers = Counter(lead_tier(SimpleNamespace(grade=g, status=status, outreach_status=o, source=src, score=sc))
+                    for g, status, o, src, sc in s.execute(select(Lead.grade, Lead.status, Lead.outreach_status,
+                                                                   Lead.source, Lead.score)).all())
+    value = s.execute(select(func.sum(Opportunity.est_value)).where(*open_opps)).scalar_one()
+    outreach_sent = cnt(FollowUp, FollowUp.kind == "outreach", FollowUp.status == "sent")
+    replies = cnt(InboundEmail, InboundEmail.is_simulated.is_(False), InboundEmail.category.in_(HUMAN_REPLIES))
+    interested = cnt(Lead, Lead.outreach_status.in_(("interested", "meeting")))
+    meetings = cnt(Meeting, Meeting.is_simulated.is_(False), Meeting.status != "cancelled")
+    pending_mail = cnt(FollowUp, FollowUp.channel == "email", FollowUp.status == "awaiting_approval")
+    pending_posts = cnt(ContentItem, ContentItem.status == "awaiting_approval")
+    failed = cnt(JobRun, JobRun.status.in_(("failed", "partial")), JobRun.started_at >= now - timedelta(hours=24))
+    agents_ran = s.execute(select(func.count(func.distinct(AgentRun.agent))).where(
+        AgentRun.started_at >= now - timedelta(hours=24))).scalar_one()
+    verified_sites = cnt(Company, Company.website_status == "verified", *open_co)
+    kpis = [
+        ("Companies discovered", cnt(Company, *open_co), "/companies", f"{verified_sites} websites verified"),
+        ("Decision-makers", cnt(Contact, Contact.source.in_(("website", "sec_filing")), Contact.last_name.is_not(None)),
+         "/contacts", "named on company sites or SEC filings"),
+        ("Verified business contacts", cnt(Contact, *USABLE_EMAIL), "/contacts?reachable=1", "address the company published"),
+        ("Qualified leads", cnt(Lead, Lead.status == "qualified"), "/leads?status=qualified",
+         f"all leads: {tiers['HOT']} hot · {tiers['WARM']} warm · {tiers['COLD']} cold"),
+        ("Open opportunities", cnt(Opportunity, *open_opps), "/pipeline",
+         f"pipeline value {money(value)}" if value else "no deal values entered yet"),
+        ("Emails sent", cnt(FollowUp, FollowUp.channel == "email", FollowUp.status == "sent"), "/followups?show=all",
+         f"{outreach_sent} outreach"),
+        ("Replies received", replies, "/inbox?show=all", f"reply rate {rate(replies, outreach_sent)}"),
+        ("Interested prospects", interested, "/pipeline", f"{rate(meetings, interested)} went on to book"),
+        ("Meetings booked", meetings, "/meetings", "real bookings, cancellations excluded"),
+        ("Follow-ups due", cnt(FollowUp, FollowUp.status.in_(("pending", "approved")), FollowUp.due_at <= now),
+         "/followups", "emails and tasks due now"),
+        ("Pending approvals", pending_mail + pending_posts, "/followups", f"{pending_mail} emails · {pending_posts} posts"),
+        ("Failed jobs (24 h)", failed, "/jobs", f"{agents_ran} agents ran in 24 h"),
+    ]
+
+    def weeks(column, *where):
+        return charts.weekly_buckets(s.execute(select(column).where(column >= since, *where)).scalars().all())
+
+    leads_w = weeks(Lead.created_at)
+    sent_w = weeks(FollowUp.sent_at, FollowUp.status == "sent")
+    replies_w = weeks(InboundEmail.received_at, InboundEmail.is_simulated.is_(False),
+                      InboundEmail.category.in_(HUMAN_REPLIES))
+    meetings_w = weeks(Meeting.created_at, Meeting.is_simulated.is_(False))
+    labels = [w for w, _ in leads_w]
+    contacted = s.execute(select(func.count(func.distinct(FollowUp.lead_id))).where(
+        FollowUp.kind == "outreach", FollowUp.status == "sent")).scalar_one()
+    replied = s.execute(select(func.count(func.distinct(InboundEmail.lead_id))).where(
+        InboundEmail.is_simulated.is_(False), InboundEmail.category.in_(HUMAN_REPLIES),
+        InboundEmail.lead_id.is_not(None))).scalar_one()
+    by_stage = dict(s.execute(select(Opportunity.stage, func.count(Opportunity.id)).group_by(Opportunity.stage)).all())
+    funnel = [("Companies discovered", cnt(Company, *open_co), "/companies"),
+              ("Qualified", cnt(Lead, Lead.status == "qualified"), "/leads?status=qualified"),
+              ("Contacted", contacted, "/followups?show=all"), ("Replied", replied, "/inbox?show=all"),
+              ("Interested", interested, "/pipeline"), ("Meeting booked", meetings, "/meetings"),
+              ("Won", by_stage.get("won", 0), "/pipeline")]
+
+    timeline = []
+    for r in s.execute(select(AgentRun).where(AgentRun.status != "running").order_by(AgentRun.id.desc()).limit(12)).scalars():
+        took = f" in {r.duration_ms / 1000:.1f} s" if r.duration_ms else ""
+        timeline.append((r.finished_at or r.started_at, "Agent", f"{r.agent.replace('_', ' ')} {r.status}{took}",
+                         "ok" if r.status == "success" else "bad", f"/agents/runs/{r.id}"))
+    for a in s.execute(select(Activity).order_by(Activity.id.desc()).limit(12)).scalars():
+        timeline.append((a.created_at, a.type.replace("_", " ").capitalize(), a.subject, "",
+                         f"/leads/{a.lead_id}" if a.lead_id else None))
+    for e in s.execute(select(AuditEvent).order_by(AuditEvent.id.desc()).limit(6)).scalars():
+        target = f": {e.target}" if e.target else ""
+        timeline.append((e.at, "Control", f"{e.action.replace('_', ' ')}{target} by {e.actor}", "warn", "/audit"))
+    timeline.sort(key=lambda row: row[0] or datetime.min, reverse=True)
+
+    ready, reason = EmailSender(st).status()
+    return dict(
+        kpis=kpis, tiers=tiers,
+        chart_leads=charts.column_chart(labels, [("Leads", [n for _, n in leads_w])], "Leads created per week",
+                                        "No leads created in the last 8 weeks"),
+        chart_email=charts.column_chart(labels, [("Emails sent", [n for _, n in sent_w]),
+                                                 ("Replies", [n for _, n in replies_w])],
+                                        "Emails sent and replies per week", "No emails sent or replies in the last 8 weeks"),
+        chart_meetings=charts.column_chart(labels, [("Meetings booked", [n for _, n in meetings_w])],
+                                           "Meetings booked per week", "No meetings booked in the last 8 weeks"),
+        chart_funnel=charts.bar_list(funnel, "Sales funnel", "The funnel fills as research runs"),
+        chart_pipeline=charts.bar_list([(stage.title(), by_stage.get(stage, 0), "/pipeline") for stage in STAGES],
+                                       "Opportunities by stage", "No opportunities yet: they open on an interested reply"),
+        timeline=timeline[:16],
+        automation={"mode": am.get_mode(s), "state": am.get_state(s), "active": len(am.active_authorizations(s, now)),
+                    "blockers": am.blockers(s, st, ready, reason)},
+        gmail={"sending": st.outbound_email_enabled, "ready": ready, "reason": reason, "sender": st.smtp_from,
+               "reading": bool(st.imap_host), "test_mode": len(st.test_recipients)},
+        calendly={"url": st.calendly_url,
+                  "upcoming": cnt(Meeting, Meeting.status == "scheduled", Meeting.ends_at >= now,
+                                  Meeting.is_simulated.is_(False)),
+                  "last_notice": s.execute(select(func.max(InboundEmail.received_at)).where(
+                      InboundEmail.category == "calendly")).scalar_one()},
+    )
+
+
+# The AI employee's team as the Command Center shows it: the agent, what it does, and how its state is read.
+TEAM = [
+    ("research", "Company discovery", "Finds US companies from approved sources"),
+    ("company_research", "Company research", "Reads company websites and SEC filings; finds decision-makers"),
+    ("qualification", "Lead qualification", "Scores and tiers every lead, with its reasons"),
+    ("sales_workflow", "Outreach & follow-ups", "Drafts emails for approval; sends approved ones"),
+    ("inbox_monitor", "Reply intelligence", "Reads replies, classifies intent, updates the CRM"),
+    ("crm", "CRM upkeep", "Verifies websites, merges duplicates, keeps records clean"),
+    ("marketing_manager", "Marketing planner", "Plans LinkedIn themes and campaigns"),
+    ("linkedin_content", "Content writer", "Drafts LinkedIn posts with quality checks"),
+    ("publishing", "Publishing", "Publishes approved posts"),
+    ("analytics", "Analytics", "Daily and weekly sales reports"),
+]
+
+
+def employee_duty(settings, state: str) -> tuple[str, str, str, str]:
+    """(status, tone, detail, headline) of the AI employee, from the scheduler's heartbeat and the automation state:
+    working, on duty, off duty (no recent check-in) or stopped. Never claims work that is not happening."""
+    now = utcnow()
+    hb = read_heartbeat(settings)
+    if state in ("stopped", "emergency_stop"):
+        duty = ("Stopped", "bad", "automation is stopped in the Control Center", "AI is stopped")
+    elif hb is None:
+        duty = ("Off duty", "warn", "no scheduled run recorded for this database", "AI is off duty")
+    else:
+        beat = datetime.fromisoformat(hb["at"].rstrip("Z"))
+        if hb.get("state") == "running":
+            duty = ("Working now", "ok", "running its scheduled jobs", "AI is working for you!")
+        elif now - beat <= timedelta(minutes=35):
+            duty = ("On duty", "ok", f"last check-in {ago(beat, now)}; it checks in every 15 minutes", "AI is working for you!")
+        else:
+            duty = ("Off duty", "warn", f"last check-in {ago(beat, now)}: the PC may be asleep or the scheduler stopped",
+                    "AI is off duty")
+    if state == "paused":
+        duty = (duty[0], "warn", duty[2] + "; sending paused", "Sending is paused")
+    return duty
+
+
+def ago(at: datetime | None, now: datetime) -> str:
+    if at is None:
+        return "never"
+    minutes = int((now - at).total_seconds() // 60)
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes} min ago"
+    if minutes < 48 * 60:
+        return f"{minutes // 60} h ago"
+    return f"{minutes // (24 * 60)} days ago"
+
+
+def ai_employee(ctx: AppContext, s) -> dict:
+    """The AI Sales Employee as one colleague: on duty or not (from the scheduler's heartbeat and the automation
+    state), what it did in the last 24 hours, what waits for you, and each agent of its team with a status read from
+    its runs. Every figure is counted from the records; nothing is invented."""
+    st = ctx.settings
+    now = utcnow()
+    day = now - timedelta(hours=24)
+    cnt = lambda m, *c: s.execute(select(func.count(m.id)).where(*c)).scalar_one()  # noqa: E731
+    state = am.get_state(s)
+    duty = employee_duty(st, state)
+    did = [
+        ("companies researched", cnt(Company, Company.researched_at >= day), "/companies"),
+        ("leads scored", cnt(Lead, Lead.last_scored_at >= day), "/leads"),
+        ("emails drafted", cnt(FollowUp, FollowUp.channel == "email", FollowUp.created_at >= day), "/followups"),
+        ("emails sent", cnt(FollowUp, FollowUp.channel == "email", FollowUp.sent_at >= day), "/followups?show=all"),
+        ("replies read", cnt(InboundEmail, InboundEmail.processed_at >= day, InboundEmail.is_simulated.is_(False)), "/inbox?show=all"),
+        ("bookings received", cnt(Meeting, Meeting.created_at >= day, Meeting.is_simulated.is_(False)), "/meetings"),
+    ]
+    waiting = [
+        ("emails to approve", cnt(FollowUp, FollowUp.channel == "email", FollowUp.status == "awaiting_approval"), "/followups"),
+        ("replies to review", cnt(InboundEmail, InboundEmail.status == "needs_review"), "/inbox"),
+        ("meetings in 24 h", cnt(Meeting, Meeting.status == "scheduled", Meeting.starts_at >= now,
+                                 Meeting.starts_at <= now + timedelta(hours=24)), "/meetings"),
+    ]
+    stats = {r["agent"]: r for r in agent_stats(s, days=1)}
+    team = []
+    for agent, title, job in TEAM:
+        last = s.execute(select(AgentRun).where(AgentRun.agent == agent).order_by(AgentRun.id.desc()).limit(1)).scalars().first()
+        if agent == "publishing" and not st.publishing_enabled:
+            status, note = "BLOCKED", "publishing is off (PUBLISHING_ENABLED=false)"
+        elif agent == "inbox_monitor" and not st.imap_host:
+            status, note = "BLOCKED", "mailbox reading is off (IMAP not set)"
+        elif state in ("stopped", "emergency_stop"):
+            status, note = "PAUSED", "automation stopped"
+        elif last is None:
+            status, note = "IDLE", "has not run on this database yet"
+        elif last.status == "running" and last.started_at >= now - timedelta(minutes=30):
+            status, note = "ACTIVE", f"working since {ago(last.started_at, now)}"
+        elif last.status in ("failed", "abandoned"):
+            status, note = "FAILED", (last.error or "last run failed")[:90]
+        else:
+            status, note = "IDLE", f"last ran {ago(last.finished_at or last.started_at, now)}"
+        if agent == "sales_workflow" and status == "IDLE" and not st.outbound_email_enabled:
+            note += "; drafting only, sending off"
+        row = stats.get(agent)
+        team.append({"agent": agent, "title": title, "job": job, "status": status, "note": note,
+                     "runs": row["runs"] if row else 0, "rate": row["success_rate"] if row else None})
+    return {"employee": {"duty": duty, "did": did, "waiting": waiting, "mode": am.get_mode(s), "state": state},
+            "team": team}
+
+
+# How each kind of activity shows on the dashboard timeline: icon, tone, status word.
+ACTIVITY_LOOK = {
+    "reply": ("chat", "purple", "Analyzed"), "meeting": ("calendar-check", "blue", "Confirmed"),
+    "email_draft": ("mail", "red", "Drafted"), "outreach": ("send", "blue", "Updated"), "status": ("kanban", "green", "Updated"),
+    "research": ("building", "blue", "Researched"), "note": ("doc", "slate", "Noted"), "opportunity": ("star", "orange", "Opened"),
+    "override": ("alert", "orange", "Override"),
+}
+
+
+def change(current: int, previous: int) -> tuple[str, str]:
+    """('+12%', 'up') for the change against the previous period; a dash when nothing is comparable."""
+    if previous == 0:
+        return ("new" if current else "—"), ("up" if current else "flat")
+    pct = round(100 * (current - previous) / previous)
+    return (f"{'+' if pct > 0 else ''}{pct}%", "up" if pct > 0 else "down" if pct < 0 else "flat")
+
+
+def dashboard_view(ctx: AppContext, s, days: int) -> dict:
+    """The executive dashboard in the reference layout, all from records: KPI cards with their change against the
+    previous period and a daily trend line, the leads badge, the live activity feed, the sales-performance chart,
+    the pipeline by stage, upcoming meetings and one insight. Nothing is estimated or invented."""
+    from aime.web import charts
+
+    st = ctx.settings
+    now = utcnow()
+    start, prev = now - timedelta(days=days), now - timedelta(days=2 * days)
+    cnt = lambda m, *c: s.execute(select(func.count(m.id)).where(*c)).scalar_one()  # noqa: E731
+
+    def window(column, *where) -> tuple[int, int, list[int]]:
+        dates = s.execute(select(column).where(column >= prev, *where)).scalars().all()
+        current = sum(1 for d in dates if d >= start)
+        return current, len(dates) - current, charts.daily_counts(dates, days)
+
+    open_co = (Company.merged_into_id.is_(None),)
+    cards = []
+    for label, total, (cur, before, daily), icon, tone, href in (
+            ("Companies discovered", cnt(Company, *open_co), window(Company.created_at, *open_co), "building", "blue", "/companies"),
+            ("Verified contacts", cnt(Contact, *USABLE_EMAIL), window(Contact.discovered_at, *USABLE_EMAIL), "users", "purple",
+             "/contacts?reachable=1"),
+            ("Emails sent", cnt(FollowUp, FollowUp.channel == "email", FollowUp.status == "sent"),
+             window(FollowUp.sent_at, FollowUp.status == "sent"), "mail", "green", "/followups?show=all"),
+            ("Meetings booked", cnt(Meeting, Meeting.is_simulated.is_(False), Meeting.status != "cancelled"),
+             window(Meeting.created_at, Meeting.is_simulated.is_(False)), "calendar", "orange", "/meetings")):
+        text, trend = change(cur, before)
+        cards.append({"label": label, "value": total, "change": text, "trend": trend, "icon": icon, "tone": tone,
+                      "href": href, "period": cur, "spark": charts.sparkline(daily, tone, f"{label} per day")})
+    leads_now, leads_before, _ = window(Lead.created_at)
+    lead_change, lead_trend = change(leads_now, leads_before)
+
+    names = dict(s.execute(select(Company.id, Company.name)).all())
+    feed = []
+    for a in s.execute(select(Activity).order_by(Activity.id.desc()).limit(8)).scalars():
+        icon, tone, word = ACTIVITY_LOOK.get(a.type, ("sparkle", "slate", "Logged"))
+        if a.type == "meeting" and "cancel" in a.subject.lower():
+            word = "Cancelled"
+        feed.append({"at": a.created_at, "icon": icon, "tone": tone, "status": word, "title": a.subject,
+                     "sub": " · ".join(x for x in (names.get(a.company_id), f"by {a.actor}") if x),
+                     "href": f"/leads/{a.lead_id}" if a.lead_id else None})
+    for r in s.execute(select(AgentRun).where(AgentRun.status != "running").order_by(AgentRun.id.desc()).limit(4)).scalars():
+        feed.append({"at": r.finished_at or r.started_at, "icon": "cpu", "tone": "green" if r.status == "success" else "red",
+                     "status": "Completed" if r.status == "success" else "Failed",
+                     "title": f"{r.agent.replace('_', ' ').capitalize()} agent run",
+                     "sub": f"{r.duration_ms / 1000:.1f} s" if r.duration_ms else (r.job or ""), "href": f"/agents/runs/{r.id}"})
+    feed.sort(key=lambda row: row["at"] or datetime.min, reverse=True)
+    for row in feed:
+        row["ago"] = ago(row["at"], now)
+
+    perf_days = 7
+    day_labels = [(now.date() - timedelta(days=perf_days - 1 - i)).strftime("%a") for i in range(perf_days)]
+
+    def per_day(column, *where):
+        return charts.daily_counts(s.execute(select(column).where(column >= now - timedelta(days=perf_days), *where))
+                                   .scalars().all(), perf_days)
+
+    performance = charts.combo_chart(
+        day_labels, [("Emails", per_day(FollowUp.sent_at, FollowUp.status == "sent")), ("Leads", per_day(Lead.created_at))],
+        ("Meetings", per_day(Meeting.created_at, Meeting.is_simulated.is_(False))), "Sales performance, last 7 days",
+        "No emails, leads or meetings in the last 7 days", height=290)
+
+    contacted = s.execute(select(func.count(func.distinct(FollowUp.lead_id))).where(
+        FollowUp.kind == "outreach", FollowUp.status == "sent")).scalar_one()
+    stages_raw = [("New leads", cnt(Lead), "users", "blue", "/leads"),
+                  ("Contacted", contacted, "mail", "purple", "/followups?show=all"),
+                  ("Interested", cnt(Lead, Lead.outreach_status.in_(("interested", "meeting"))), "star", "green", "/pipeline"),
+                  ("Meeting booked", cnt(Meeting, Meeting.is_simulated.is_(False), Meeting.status != "cancelled"),
+                   "calendar", "orange", "/meetings"),
+                  ("Closed won", cnt(Opportunity, Opportunity.stage == "won"), "trophy", "green", "/pipeline")]
+    stages = []
+    for i, (label, n, icon, tone, href) in enumerate(stages_raw):
+        before = stages_raw[i - 1][1] if i else None
+        stages.append({"label": label, "value": n, "icon": icon, "tone": tone, "href": href,
+                       "rate": (f"{100 * n / before:.0f}% conversion" if before else ("" if i else "all leads"))})
+
+    meetings = []
+    for m in s.execute(select(Meeting).where(Meeting.status == "scheduled", Meeting.ends_at >= now,
+                                             Meeting.is_simulated.is_(False)).order_by(Meeting.starts_at).limit(4)).scalars():
+        local = m.starts_at.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("America/New_York"))
+        today_et = now.replace(tzinfo=ZoneInfo("UTC")).astimezone(ZoneInfo("America/New_York")).date()
+        day = "Today" if local.date() == today_et else "Tomorrow" if local.date() == today_et + timedelta(days=1) else f"{local:%b %d}"
+        meetings.append({"day": day, "time": f"{local.hour % 12 or 12}:{local:%M %p} ET",
+                         "who": (m.lead.company.name if m.lead else None) or m.invitee_name or m.invitee_email,
+                         "title": m.title, "href": f"/leads/{m.lead_id}" if m.lead_id else "/meetings"})
+
+    week = now - timedelta(days=7)
+    approvals = cnt(FollowUp, FollowUp.channel == "email", FollowUp.status == "awaiting_approval")
+    interested_week = cnt(InboundEmail, InboundEmail.category == "interested", InboundEmail.is_simulated.is_(False),
+                          InboundEmail.received_at >= week)
+    booked_week = cnt(Meeting, Meeting.is_simulated.is_(False), Meeting.status != "cancelled", Meeting.created_at >= week)
+    booked_before = cnt(Meeting, Meeting.is_simulated.is_(False), Meeting.status != "cancelled",
+                        Meeting.created_at >= week - timedelta(days=7), Meeting.created_at < week)
+    if booked_week and booked_week > booked_before:
+        insight = ("You're on a roll!", f"Your AI employee recorded {booked_week} meeting booking{'s' if booked_week != 1 else ''} "
+                   f"this week, up from {booked_before} the week before.")
+    elif interested_week:
+        insight = ("Interest is coming in", f"{interested_week} interested repl{'ies' if interested_week != 1 else 'y'} this week. "
+                   "Answer them quickly to turn them into meetings.")
+    elif approvals:
+        insight = ("Drafts are waiting", f"{approvals} email{'s' if approvals != 1 else ''} wait for your approval before "
+                   "anything goes out.")
+    else:
+        insight = ("All quiet", "No replies or bookings this week yet. Research and drafting carry on in the background.")
+
+    local_hour = datetime.now().hour
+    return dict(
+        greeting="Good morning" if local_hour < 12 else "Good afternoon" if local_hour < 17 else "Good evening",
+        period_days=days, period_label=f"{start:%b %d} – {now:%b %d, %Y}", cards=cards,
+        leads_badge={"change": lead_change, "trend": lead_trend, "count": leads_now},
+        feed=feed[:6], performance=performance, pipeline_stages=stages, upcoming_list=meetings, insight=insight,
+        calendly_url=st.calendly_url,
+    )

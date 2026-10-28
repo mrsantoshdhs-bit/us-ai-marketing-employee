@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from aime.agents.base import BaseAgent
 from aime.crm_ops import (add_signal, ensure_lead, is_suppressed, log_activity, merge_companies, upsert_company,
                           upsert_contact)
-from aime.dedupe import domain_from_email, domain_from_url
+from aime.dedupe import domain_from_email, domain_from_url, name_from_title, normalize_name
 from aime.inbound import InboundPayload, load_inbox_files, validate_inquiry
 from aime.knowledge.geo import normalize_state
 from aime.knowledge.industries import INDUSTRIES
@@ -148,6 +148,10 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             company.website_status = result.status
             company.website_checked_at = utcnow()
             company.website_title = result.title
+            better = name_from_title(result.title, company.domain)
+            if better and " " not in company.name.strip() and "." in company.name:  # still named after its domain
+                company.validation = {**(company.validation or {}), "name": f"from the homepage title: {result.title[:120]}"}
+                company.name, company.normalized_name = better, normalize_name(better)
             company.validation = {**(company.validation or {}), "website": result.note}
             if result.status == "redirected" and result.final_domain and result.final_domain != company.domain:
                 owner = session.execute(select(Company).where(

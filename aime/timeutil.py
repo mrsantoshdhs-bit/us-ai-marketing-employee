@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
+# Always zero in the app. The test suite starts the clock at the day its fixed dates describe (tests/conftest.py),
+# so the code's clock and the tests' simulated times stay on one timeline on any later date.
+CLOCK_OFFSET = timedelta(0)
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(timezone.utc).replace(tzinfo=None) + CLOCK_OFFSET
 
 
 def as_aware_utc(dt: datetime) -> datetime:

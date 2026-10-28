@@ -3,40 +3,105 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}AI Marketing Employee{% endblock %}</title>
+  <title>{% block title %}AI Sales Employee{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
-<header class="top">
-  <span class="brand">AI Marketing Employee</span>
-  <nav>
-    {% set p = request.url.path %}
-    <a href="/" class="{{ 'active' if p == '/' }}">Today</a>
-    <a href="/leads" class="{{ 'active' if p.startswith('/leads') }}">Leads</a>
-    <a href="/companies" class="{{ 'active' if p.startswith('/companies') }}">Companies</a>
-    <a href="/contacts" class="{{ 'active' if p.startswith('/contacts') }}">Decision-makers</a>
-    <a href="/pipeline" class="{{ 'active' if p.startswith('/pipeline') }}">Pipeline</a>
-    <a href="/followups" class="{{ 'active' if p.startswith('/followups') }}">Follow-ups</a>
-    <a href="/inbox" class="{{ 'active' if p.startswith('/inbox') }}">Replies</a>
-    <a href="/meetings" class="{{ 'active' if p.startswith('/meetings') }}">Meetings</a>
-    <a href="/content" class="{{ 'active' if p.startswith('/content') }}">Content</a>
-    <a href="/campaigns" class="{{ 'active' if p.startswith('/campaigns') }}">Campaigns</a>
-    <a href="/inbound" class="{{ 'active' if p.startswith('/inbound') }}">Inbound</a>
-    <a href="/agents" class="{{ 'active' if p.startswith('/agents') }}">Agents</a>
-    <a href="/jobs" class="{{ 'active' if p.startswith('/jobs') }}">Jobs</a>
-    <a href="/reports" class="{{ 'active' if p.startswith('/reports') }}">Reports</a>
-    <a href="/integrations" class="{{ 'active' if p.startswith('/integrations') }}">Integrations</a>
-    <a href="/system" class="{{ 'active' if p.startswith('/system') }}">System</a>
-  </nav>
-  {% if current_user %}<form class="inline user" method="post" action="/logout">
-    <span class="small muted">Signed in as {{ current_user.username }}</span> <button class="secondary">Sign out</button>
-  </form>{% endif %}
-</header>
+{%- from "_icons.html" import icon -%}
+{%- set nav_path = request.url.path -%}
+<body class="{{ 'bare' if nav_path == '/login' }}">
+{% if nav_path == '/login' %}
 <main>
-  {% if data_role != 'production' %}<div class="flash demo">{{ data_role|upper }} DATABASE: sample data only. Nothing here is a real prospect.</div>{% endif %}
-  {% if maintenance %}<div class="flash">Maintenance in progress until {{ maintenance.until }} (UTC): scheduled and manual jobs are paused.</div>{% endif %}
+  <div class="brand-mark"><span class="brand-logo">AI</span> AI Sales Employee</div>
   {% if msg %}<div class="flash">{{ msg }}</div>{% endif %}
-  {% block content %}{% endblock %}
+  {{ self.content() }}
 </main>
+{% else %}
+{%- set nav_s = nav_status or {} -%}
+{%- set nav_c = nav_counts or {} -%}
+<input type="checkbox" id="nav-toggle" class="nav-toggle" aria-label="Show or collapse the menu">
+<div class="shell">
+  <aside class="sidebar" aria-label="Main navigation">
+    <a class="brand" href="/"><span class="brand-logo">AI</span><span class="brand-text"><b>AI Sales Employee</b><small>Your sales &amp; marketing workforce</small></span></a>
+    <nav>
+      {%- set nav_sections = [
+        (None, [('/', 'Dashboard', 'dashboard', None, ''), ('/#command-center', 'Sales Command Center', 'sparkle', None, 'NEW')]),
+        ('Sales', [('/pipeline', 'CRM Pipeline', 'kanban', None, ''), ('/companies', 'Companies', 'building', None, ''),
+                   ('/contacts', 'Contacts', 'users', None, ''), ('/leads', 'Leads', 'target', None, '')]),
+        ('Engagement', [('/inbox', 'Conversations', 'chat', nav_c.replies, ''), ('/followups', 'Follow-ups', 'send', None, ''),
+                        ('/meetings', 'Calendly Meetings', 'calendar', None, ''), ('/inbound', 'Inbound inquiries', 'inbox', None, '')]),
+        ('Marketing', [('/campaigns', 'Campaigns', 'megaphone', None, ''), ('/content', 'LinkedIn content', 'doc', None, ''),
+                       ('/policy', 'Publishing policy', 'shield', None, '')]),
+        ('Automation', [('/automation', 'Automation Control', 'sliders', None, ''),
+                        ('/approvals', 'Approval Queue', 'check-square', nav_c.approvals, 'alert'),
+                        ('/agents', 'AI Agents', 'cpu', None, ''), ('/jobs', 'Jobs', 'clock', None, ''),
+                        ('/audit', 'Audit Logs', 'list', None, '')]),
+        ('Analytics', [('/reports', 'Sales Analytics', 'chart', None, '')]),
+        ('Settings', [('/integrations', 'Integrations', 'plug', None, ''), ('/system', 'System health', 'server', None, ''),
+                      ('/settings', 'Settings', 'gear', None, '')]),
+      ] -%}
+      {% for heading, links in nav_sections %}
+      <div class="nav-section">
+        {% if heading %}<div class="nav-heading">{{ heading }}</div>{% endif %}
+        {% for href, label, ico, count, tag in links %}
+        {%- set active = (nav_path == '/' and href == '/') or (href not in ('/', '/#command-center') and nav_path.startswith(href)) -%}
+        <a href="{{ href }}" class="nav-link{{ ' active' if active }}" title="{{ label }}"{% if active %} aria-current="page"{% endif %}>{{ icon(ico) }}<span class="nav-label">{{ label }}</span>{% if tag == 'NEW' %}<span class="tag-new">NEW</span>{% endif %}{% if count %}<span class="count{{ ' red' if tag == 'alert' }}">{{ count }}</span>{% endif %}</a>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </nav>
+    {% if nav_s.duty %}
+    <div class="side-card">
+      <img src="/static/robot.svg" alt="" width="46" height="49">
+      <div class="side-card-text"><b>{{ nav_s.duty[3] }}</b><span>{{ nav_s.duty[2] }}</span>
+        <span class="live {{ nav_s.duty[1] }}"><i></i>{{ nav_s.duty[0] }}</span></div>
+      <a class="side-card-btn" href="/agents">View activity {{ icon('arrow-right') }}</a>
+    </div>
+    {% endif %}
+    <label for="nav-toggle" class="collapse-btn" title="Collapse or expand the menu">{{ icon('chevron-left') }}<span class="nav-label">Collapse menu</span></label>
+  </aside>
+  <label for="nav-toggle" class="scrim" aria-hidden="true"></label>
+  <div class="content">
+    <header class="topbar">
+      <label for="nav-toggle" class="burger" title="Menu">{{ icon('menu') }}<span class="sr-only">Menu</span></label>
+      <form class="search" action="/search" method="get" role="search">{{ icon('search') }}
+        <input name="q" value="{{ request.query_params.get('q', '') if nav_path == '/search' else '' }}" accesskey="k" aria-label="Search"
+               placeholder="Search companies, contacts, emails, meetings…  (Alt+K)"></form>
+      <span class="spacer"></span>
+      {% if data_role != 'production' %}<span class="chip env-other hide-sm" title="Not the production database">{{ (data_role or 'unknown')|upper }}</span>{% endif %}
+      <span class="chip {{ 'ok' if sending_on else 'warn' }} hide-sm" title="OUTBOUND_EMAIL_ENABLED"><span class="dot"></span>Sending {{ 'on' if sending_on else 'off' }}</span>
+      {% if nav_s.mode %}<a class="mode-pill {{ 'ok' if nav_s.state == 'running' else 'bad' }}" href="/automation" title="Operating mode"><i></i>{{ nav_s.mode|title }} Mode</a>{% endif %}
+      {% if nav_s.state %}
+      <details class="menu-wrap auto-menu">
+        <summary class="btn-gradient">{{ icon('play' if nav_s.state != 'running' else 'activity') }}<span class="hide-sm">{{ {'running': 'Automation on', 'paused': 'Resume automation', 'stopped': 'Start automation', 'emergency_stop': 'Start automation'}[nav_s.state] }}</span>{{ icon('chevron-down') }}</summary>
+        <div class="menu">
+          <div class="menu-head">Automation is <b>{{ nav_s.state|replace('_', ' ') }}</b></div>
+          {% for action, label, ico in [('start', 'Start automation', 'play'), ('resume', 'Resume', 'play'), ('pause', 'Pause sending', 'pause'), ('stop', 'Stop jobs', 'stop'), ('emergency_stop', 'Emergency stop', 'alert')] %}
+          {% if nav_s.state in nav_s.transitions[action][0] %}<form method="post" action="/automation/state/{{ action }}"><button class="menu-item{{ ' danger' if action == 'emergency_stop' }}">{{ icon(ico) }}{{ label }}</button></form>{% endif %}
+          {% endfor %}
+          <a class="menu-item" href="/automation">{{ icon('sliders') }}Automation Control</a>
+        </div>
+      </details>
+      {% endif %}
+      <a class="bell" href="/system#alerts" title="Open alerts">{{ icon('bell') }}{% if nav_c.alerts %}<span class="badge">{{ nav_c.alerts }}</span>{% endif %}</a>
+      <details class="menu-wrap user-menu">
+        <summary><span class="avatar-sm">{{ (user_name or 'AI')[:2]|upper }}</span><span class="who hide-sm"><b>{{ user_name or 'Local preview' }}</b><small>{{ user_role }}</small></span>{{ icon('chevron-down') }}</summary>
+        <div class="menu">
+          {% if current_user %}<div class="menu-head">Signed in as {{ current_user.username }}</div>{% endif %}
+          <a class="menu-item" href="/settings">{{ icon('gear') }}Settings</a>
+          <a class="menu-item" href="/audit">{{ icon('list') }}Audit log</a>
+          {% if current_user %}<form method="post" action="/logout"><button class="menu-item">{{ icon('arrow-right') }}Sign out</button></form>{% endif %}
+        </div>
+      </details>
+    </header>
+    <main>
+      {% if data_role in ('demo', 'test') %}<div class="flash demo">{{ data_role|upper }} DATABASE: sample data only. Nothing here is a real prospect.</div>
+      {% elif data_role != 'production' %}<div class="flash demo">{{ data_role|upper }} ENVIRONMENT: a separate copy for testing. Nothing done here reaches production.</div>{% endif %}
+      {% if maintenance %}<div class="flash">Maintenance in progress until {{ maintenance.until }} (UTC): scheduled and manual jobs are paused.</div>{% endif %}
+      {% if msg %}<div class="flash">{{ msg }}</div>{% endif %}
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
+{% endif %}
 </body>
 </html>

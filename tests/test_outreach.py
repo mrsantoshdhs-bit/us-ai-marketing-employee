@@ -121,7 +121,8 @@ def test_edits_are_checked_again(make_ctx):
     SalesWorkflowAgent(ctx).run({})
     f = drafts(ctx)[0]
     client = TestClient(create_app(ctx))
-    spammy = f.body.replace("Would a 20-minute call", "Act now for a FREE call, we guarantee results. Would a 20-minute call")
+    spammy = f.body.replace("Would a 30-minute call", "Act now for a FREE call, we guarantee results. Would a 30-minute call")
+    assert spammy != f.body
     client.post(f"/followups/{f.id}/save", data={"subject": f.subject, "body": spammy}, headers=ORIGIN)
     f = drafts(ctx)[0]
     assert f.quality["qc"]["status"] == "failed" and f.status == "awaiting_approval"

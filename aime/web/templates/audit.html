@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Audit log · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Audit log</h1>
+    <p class="subtitle">Operating-mode and automation changes, campaign authorizations, and every email a campaign approved instead of a person. Append-only.</p>
+  </div>
+</div>
+<form class="filters" method="get">
+  <select name="action"><option value="">Every action</option>{% for a in actions %}<option value="{{ a }}" {{ 'selected' if a == action }}>{{ a|replace('_', ' ') }}</option>{% endfor %}</select>
+  <button>Filter</button> <a href="/audit">Reset</a>
+  <span class="muted small">latest 300</span>
+</form>
+<div class="card table-wrap"><table>
+  <tr><th>When</th><th>Who</th><th>Action</th><th>Target</th><th>Detail</th></tr>
+  {% for e in events %}
+  <tr><td class="small">{{ e.at|local }}</td><td>{{ e.actor }}</td><td>{{ e.action|replace('_', ' ') }}</td><td>{{ e.target or '' }}</td><td class="small muted">{{ e.detail or '' }}</td></tr>
+  {% else %}<tr><td colspan="5"><div class="empty-state"><b>Nothing recorded yet</b>Changes made in the Automation Control Center appear here.</div></td></tr>{% endfor %}
+</table></div>
+{% endblock %}

@@ -75,6 +75,12 @@ _TALK = r"(talk|chat|speak|meet|connect|discuss|catch up|hop on a call|jump on a
 _THING = r"(time|meeting|call|demo|chat|session|appointment|slot|conversation|walkthrough|presentation)"
 _WHEN = r"(monday|tuesday|wednesday|thursday|friday|tomorrow|today|this week|next week)"
 ASKED_WHEN = re.compile(rf"\b{_WHEN}\b", re.I)
+# What they ask for, alongside the category (their own words only): a price always goes to a person.
+PRICING = re.compile(r"\b(pric(e|es|ing)|how much|cost(s)?|quote|quotation|rates|fees|budget|estimate|ballpark)\b", re.I)
+MORE_INFO = re.compile(r"\b(more (info|information|details)|tell me more|learn more|any (info|details)|"
+                       r"send (me |us )?(some |more |a |the )?(info|information|details|deck|case stud(y|ies)|brochure|"
+                       r"materials?|examples?))\b", re.I)
+INTENT_LABELS = {"meeting_request": "Meeting request", "pricing_request": "Pricing request", "more_info": "More information"}
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday")
 MEETING = re.compile(
     rf"\b((can|could|shall|should|would|may) (we|you|i) (please )?({_TALK}|schedule|set ?up|arrange|book|organi[sz]e)"
@@ -97,6 +103,19 @@ def classify(row: InboundEmail) -> tuple[str, str, list[str]]:
         # Nothing was written above the quote: the words were found below or inside it, so a person checks first.
         return category, "medium", [*reasons, "reply written below the quoted email"]
     return category, confidence, reasons
+
+
+def intent_of(row: InboundEmail) -> str | None:
+    """meeting_request | pricing_request | more_info for a person's reply (None for notices and opt-outs)."""
+    if row.category not in ("interested", "question", "objection", "referral", "other"):
+        return None
+    text = row.new_text or own_text(row.body_text or "")
+    if PRICING.search(text):
+        return "pricing_request"
+    meeting = MEETING.search(text)
+    if meeting and not NEGATED.search(text[:meeting.start()][-40:]):
+        return "meeting_request"
+    return "more_info" if MORE_INFO.search(text) else None
 
 
 def _classify(row: InboundEmail) -> tuple[str, str, list[str]]:
@@ -247,6 +266,10 @@ def suggest(settings, category: str, row: InboundEmail, contact: Contact | None,
         body = f"Hi {name},\n\nThank you for your question.\n\n{QUESTION_PLACEHOLDER}\n\n{sign}"
     else:
         return None
+    if category in ("interested", "question") and row.intent == "pricing_request":  # never an automatic price
+        call = (f"If it helps, we can go through it on a short call: {settings.calendly_url}\n\n"
+                if settings.calendly_url else "")
+        body = f"Hi {name},\n\nThank you for asking about pricing.\n\n{QUESTION_PLACEHOLDER}\n\n{call}{sign}"
     return subject[:300], body + reply_footer(settings)
 
 
@@ -343,6 +366,9 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             row.suggested_followup_id = draft.id
             notes.append("suggested reply waiting for your approval")
         row.status = "actioned" if row.confidence == "high" and row.category in ("interested", "not_interested") else "needs_review"
+        if row.intent == "pricing_request":
+            row.status = "needs_review"
+            notes.append("asks about pricing: a person writes the answer")
     row.action_note = "; ".join(notes) or None
     row.processed_at = utcnow()
     log_activity(session, f"{label} from {row.from_email}: {row.category.replace('_', ' ')} ({row.confidence})",
@@ -354,6 +380,7 @@ def process_pending(session: Session, settings, actor: str, llm=None) -> dict:
     ai_budget = AI_PER_RUN
     for row in session.execute(select(InboundEmail).where(InboundEmail.status == "new").order_by(InboundEmail.id)).scalars().all():
         row.category, row.confidence, row.reasons = classify(row)
+        row.intent = intent_of(row)
         opinion = None
         if llm is not None and ai_budget > 0 and row.category in ("question", "other") and row.confidence != "high":
             ai_budget -= 1

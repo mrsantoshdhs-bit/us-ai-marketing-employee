@@ -87,8 +87,16 @@ def gather_evidence(session: Session, lead: Lead) -> list[Evidence]:
     return out
 
 
-def outreach_footer(settings: Settings) -> str:
-    return compliance_footer(settings, outreach=True)
+PUBLISHED_SOURCES = ("website", "sec_filing")
+GIVEN_TO_US = ("We emailed you because this address was given to us directly as a business contact; "
+               "it was not taken from your website.")
+
+
+def outreach_footer(settings: Settings, contact=None) -> str:
+    """The opt-out footer, with the true reason: a published business address, or one that was given to us (a manual
+    entry or a test contact), which must never be described as published."""
+    given = contact is not None and getattr(contact, "source", None) not in PUBLISHED_SOURCES
+    return compliance_footer(settings, outreach=True, why=GIVEN_TO_US if given else None)
 
 
 def _signature(settings: Settings) -> str:
@@ -105,6 +113,8 @@ def personal_line(ev: Evidence, company: str) -> str:
 
 
 def draft_outreach(settings: Settings, step: int, lead: Lead, contact, evidence: list[Evidence]) -> tuple[str, str]:
+    from aime.meetings import booking_minutes  # the length of the meeting the booking link offers
+
     company = lead.company.name
     topic = TOPICS.get(lead.primary_service or "", "your operations")
     inbox = contact.role_category == "inbox" or not contact.first_name
@@ -115,7 +125,7 @@ def draft_outreach(settings: Settings, step: int, lead: Lead, contact, evidence:
         line = personal_line(ev, company)
         ask = (f"Could you pass this to whoever looks after {topic}? A short call would tell us both quickly "
                "whether it is worth pursuing." if inbox else
-               f"Would a 20-minute call next week be useful to see whether this could help {company}? "
+               f"Would a {booking_minutes(settings)}-minute call next week be useful to see whether this could help {company}? "
                "If someone else looks after this, I would be grateful for a pointer.")
         subject = f"Question about {topic} at {company}"
         end = "" if line.endswith(('."', '!"', '?"')) else "."  # no doubled full stop after a quoted sentence
@@ -130,7 +140,7 @@ def draft_outreach(settings: Settings, step: int, lead: Lead, contact, evidence:
         body = (f"{greeting}\n\nThank you for taking the time to read my notes. I will not keep following up. If "
                 f"{topic} becomes a priority, just reply to this email and we can pick it up from there."
                 f"\n\n{_signature(settings)}")
-    return subject, body + outreach_footer(settings)
+    return subject, body + outreach_footer(settings, contact)
 
 
 def eligible(session: Session, settings: Settings, lead: Lead, for_send: bool = False) -> tuple[bool, str]:

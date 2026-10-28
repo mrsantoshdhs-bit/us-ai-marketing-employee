@@ -219,7 +219,8 @@ class Settings:
         if not self.database_url:
             self.database_url = f"sqlite:///{(self.data_dir / 'aime.db').as_posix()}"
         if not self.require_human_approval:
-            log.warning("REQUIRE_HUMAN_APPROVAL=false is ignored: emails and posts always need an approval record")
+            log.warning("REQUIRE_HUMAN_APPROVAL=false: in Hybrid or Automatic mode an active campaign authorization may "
+                        "approve emails at send time; posts and every other email still need a person")
 
     # ---- derived paths -------------------------------------------------
     @property

@@ -1,0 +1,41 @@
+{% extends "base.html" %}{% from "_macros.html" import qc_pill %}{% from "_icons.html" import icon %}
+{% block title %}Approval Queue · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Approval Queue</h1>
+  <p class="subtitle">Everything waiting for your decision. Approve, edit or reject each item on its own page; nothing here sends or publishes anything.</p></div>
+  <div class="head-actions"><a class="btn secondary" href="/followups">Open Follow-ups</a><a class="btn secondary" href="/content">Open LinkedIn content</a></div></div>
+
+<div class="kpi-grid">
+  <a class="kpi" href="#emails"><div class="l">Emails to approve</div><div class="v">{{ emails|selectattr('status', 'equalto', 'awaiting_approval')|list|length }}</div><div class="hint">outreach, replies and answers</div></a>
+  <a class="kpi" href="#emails"><div class="l">Outcome unknown</div><div class="v">{{ emails|selectattr('status', 'equalto', 'uncertain')|list|length }}</div><div class="hint">confirm sent or requeue</div></a>
+  <a class="kpi" href="#reconfirm"><div class="l">Confirm again</div><div class="v">{{ reconfirm|length }}</div><div class="hint">approved before sending was on</div></a>
+  <a class="kpi" href="#posts"><div class="l">Posts to approve</div><div class="v">{{ posts|length }}</div><div class="hint">LinkedIn drafts</div></a>
+</div>
+
+<h2 id="emails">{{ icon('mail') }} Emails</h2>
+<div class="card table-wrap"><table>
+  <tr><th>Email</th><th>To</th><th>Company</th><th>Checks</th><th>Due</th><th></th></tr>
+  {% for f in emails %}
+  <tr><td><b>{{ f.subject }}</b><div class="small muted">{{ (f.kind or 'reply')|replace('_', ' ') }}{% if f.status == 'uncertain' %} · <span class="pill bad">outcome unknown</span>{% endif %}
+      {% if f.contact and f.contact.email_status == 'user_provided' %} · <span class="pill warn">test contact</span>{% endif %}</div></td>
+    <td class="small">{{ f.to_email or (f.contact.email if f.contact else '—') }}</td>
+    <td class="small"><a href="/leads/{{ f.lead_id }}">{{ f.lead.company.name if f.lead and f.lead.company else '—' }}</a></td>
+    <td>{% if f.quality and f.quality.qc %}{{ qc_pill(f.quality.qc.status) }}{% else %}<span class="muted small">—</span>{% endif %}</td>
+    <td class="small">{{ f.due_at|local }}</td>
+    <td><a class="btn" href="/followups#f{{ f.id }}">Review</a></td></tr>
+  {% else %}<tr><td colspan="6"><div class="empty-state"><b>No emails waiting</b>New drafts appear here for your approval.</div></td></tr>{% endfor %}
+</table></div>
+
+{% if reconfirm %}
+<h2 id="reconfirm">{{ icon('check-square') }} Approved before sending was switched on</h2>
+<div class="card">{% for f in reconfirm %}<div class="row-item"><a href="/followups#f{{ f.id }}"><b>{{ f.subject }}</b></a> <span class="small muted">to {{ f.to_email }} · approved {{ f.approved_at|local }} by {{ f.approved_by }}</span></div>{% endfor %}</div>
+{% endif %}
+
+<h2 id="posts">{{ icon('doc') }} LinkedIn posts</h2>
+<div class="card table-wrap"><table>
+  <tr><th>Post</th><th>Checks</th><th>Planned for</th><th></th></tr>
+  {% for p in posts %}
+  <tr><td><b>{{ p.title }}</b></td><td>{{ qc_pill(p.qc_status) }}</td><td class="small">{{ p.scheduled_for|et }}</td><td><a class="btn" href="/content/{{ p.id }}">Review</a></td></tr>
+  {% else %}<tr><td colspan="4"><div class="empty-state"><b>No posts waiting</b>Drafted posts appear here for your approval.</div></td></tr>{% endfor %}
+</table></div>
+{% endblock %}
