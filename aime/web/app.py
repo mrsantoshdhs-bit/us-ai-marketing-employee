@@ -30,6 +30,7 @@ from aime.crm_ops import is_suppressed, log_activity, suppress
 from aime.db import kv_get, kv_set
 from aime.inbound import InboundPayload, record_inquiry
 from aime.integrations.email_smtp import POSTAL_PLACEHOLDER, EmailSender, compliance_problem
+from aime import mail_accounts
 from aime.integrations import oauth
 from aime.integrations.linkedin import (POST_REF_RE, LinkedInAPIError, LinkedInClient, get_auth_status, get_token,
                                         new_state, post_url)
@@ -38,7 +39,7 @@ from aime.knowledge.geo import US_REGIONS
 from aime.knowledge.industries import INDUSTRIES, industry_label
 from aime.knowledge.services import SERVICES, service_name
 from aime import automation as am
-from aime.models import (MeetingProposal, Activity, AgentRun, Alert, AuditEvent, Campaign, CampaignAuthorization, Company, Contact,
+from aime.models import (MailAccount, MeetingProposal, Activity, AgentRun, Alert, AuditEvent, Campaign, CampaignAuthorization, Company, Contact,
                          ContentItem, FollowUp, InboundEmail, InboundInquiry, Meeting,
                          JobRun, JobState, Lead, MarketingPlan, Opportunity, PolicyDecision, PublishAttempt, Report,
                          ResearchSnapshot, ResearchTopic, Signal)
@@ -167,7 +168,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         data.setdefault("sending_on", C().settings.outbound_email_enabled)
         user = data["current_user"]
         data.setdefault("user_name", (user["username"].title() if user else C().settings.sender_name or ""))
-        data.setdefault("user_role", {"admin": "Administrator", "sales_manager": "Sales Manager"}.get(
+        data.setdefault("is_super_admin", not C().settings.dashboard_auth or bool(user and user.get("role") == "super_admin"))
+        data.setdefault("user_role", {"admin": "Administrator", "sales_manager": "Sales Manager",
+                                      "super_admin": "Super Admin"}.get(
             (user or {}).get("role", ""), "Preview · no sign-in"))
         if "nav_status" not in data and request.url.path != "/login":  # the top bar and sidebar on every page
             with C().db.session() as s:
@@ -1125,7 +1128,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     # ------------------------------------------------------------------ automation control center
     def is_admin(request: Request) -> bool:
         user = getattr(request.state, "user", None)
-        return not C().settings.dashboard_auth or bool(user and user.get("role") == "admin")
+        return not C().settings.dashboard_auth or bool(user and user.get("role") in ("admin", "super_admin"))
 
     @app.get("/automation", response_class=HTMLResponse)
     def automation_page(request: Request):
@@ -1294,6 +1297,145 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return HTMLResponse(path.read_text(encoding="utf-8"))
 
     # ------------------------------------------------------------------ integrations
+    # ------------------------------------------------------------------ Super Admin: mailboxes
+    # The auth middleware lets only a Super Admin reach /admin/mailboxes and /api/mailboxes (viewing included); the
+    # same-origin check covers every change. Secrets are write-only: never rendered or returned.
+    @app.get("/admin/mailboxes", response_class=HTMLResponse)
+    def mailboxes_page(request: Request, edit: int | None = None):
+        ctx = C()
+        with ctx.db.session() as s:
+            rows = [mail_accounts.public(a) for a in s.execute(select(MailAccount).order_by(MailAccount.id)).scalars()]
+            for r in rows:
+                r["connected"] = r["auth"] == "oauth" and oauth.connected(s, "microsoft", "mail", account=r["id"]) is not None
+            ready, why = EmailSender(mail_accounts.sending_settings(s, ctx.settings)).status()
+        editing = next((r for r in rows if r["id"] == edit), None)
+        return render(request, "mailboxes.html", rows=rows, presets=mail_accounts.PRESETS, editing=editing,
+                      sending_on=ctx.settings.outbound_email_enabled, sender_status=why if not ready else "ready",
+                      redirect_uri=oauth.redirect_uri(ctx.settings))
+
+    def _mailbox_form(form) -> dict:
+        keys = ("provider", "label", "email", "username", "secret", "imap_host", "imap_port", "imap_folder",
+                "smtp_host", "smtp_port", "oauth_client_id", "oauth_client_secret", "oauth_tenant")
+        return {k: form.get(k) or "" for k in keys}
+
+    @app.post("/admin/mailboxes")
+    async def mailbox_create(request: Request):
+        form = _mailbox_form(await request.form())
+        with C().db.session() as s:
+            try:
+                a = mail_accounts.save(s, who(request), form)
+            except ValueError as exc:
+                s.rollback()
+                return back("/admin/mailboxes#add", str(exc))
+            aid = a.id
+        return back("/admin/mailboxes", f"Mailbox #{aid} saved. It is disabled: nothing is read or sent until you "
+                    "enable it (and sending also needs OUTBOUND_EMAIL_ENABLED)")
+
+    @app.post("/admin/mailboxes/{aid}/edit")
+    async def mailbox_edit(request: Request, aid: int):
+        form = _mailbox_form(await request.form())
+        with C().db.session() as s:
+            try:
+                mail_accounts.save(s, who(request), form, account_id=aid)
+            except ValueError as exc:
+                s.rollback()
+                return back(f"/admin/mailboxes?edit={aid}", str(exc))
+        return back("/admin/mailboxes", f"Mailbox #{aid} updated")
+
+    @app.post("/admin/mailboxes/{aid}/test")
+    def mailbox_test(request: Request, aid: int):
+        ctx = C()
+        with ctx.db.session() as s, ctx.http() as http:
+            a = s.get(MailAccount, aid) or _404()
+            ok, detail = mail_accounts.test_connection(s, ctx.settings, a, http, who(request))
+        return back("/admin/mailboxes", f"Test {'passed' if ok else 'failed'}: {detail}")
+
+    @app.get("/admin/mailboxes/{aid}/connect")
+    def mailbox_connect(aid: int):
+        ctx = C()
+        with ctx.db.session() as s:
+            a = s.get(MailAccount, aid) or _404()
+            if a.auth != "oauth":
+                return back("/admin/mailboxes", "This mailbox signs in with an app password: nothing to connect")
+            try:
+                url = oauth.start(s, ctx.settings, "microsoft", "mail", account=aid)
+            except oauth.OAuthError as exc:
+                return back("/admin/mailboxes", str(exc))
+        return RedirectResponse(url, status_code=302)
+
+    @app.post("/admin/mailboxes/{aid}/{action}")
+    def mailbox_action(request: Request, aid: int, action: str):
+        if action not in ("enable", "disable", "read_on", "read_off", "primary", "delete"):
+            raise HTTPException(400, "Unknown action")
+        with C().db.session() as s:
+            try:
+                a = mail_accounts.change(s, who(request), aid, action)
+            except ValueError as exc:
+                s.rollback()
+                return back("/admin/mailboxes", str(exc))
+            email = a.email
+        words = {"enable": "enabled (it still reads nothing until 'read replies' is on, and sends only as the primary "
+                           "mailbox with OUTBOUND_EMAIL_ENABLED)", "disable": "disabled: it is neither read nor used to send",
+                 "read_on": "will be read for replies (read-only)", "read_off": "is no longer read",
+                 "primary": "is now the sending mailbox (sending still needs OUTBOUND_EMAIL_ENABLED and every approval)",
+                 "delete": "deleted, with its stored secrets and tokens"}
+        return back("/admin/mailboxes", f"{email} {words[action]}")
+
+    @app.get("/api/mailboxes")
+    def api_mailboxes():
+        with C().db.session() as s:
+            return {"mailboxes": [mail_accounts.public(a) for a in s.execute(select(MailAccount).order_by(MailAccount.id)).scalars()]}
+
+    @app.post("/api/mailboxes")
+    async def api_mailbox_create(request: Request):
+        body = await request.json()
+        with C().db.session() as s:
+            try:
+                a = mail_accounts.save(s, who(request), body)
+            except ValueError as exc:
+                s.rollback()
+                return JSONResponse({"detail": str(exc)}, status_code=400)
+            return JSONResponse(mail_accounts.public(a), status_code=201)
+
+    @app.patch("/api/mailboxes/{aid}")
+    async def api_mailbox_edit(request: Request, aid: int):
+        body = await request.json()
+        with C().db.session() as s:
+            try:
+                return mail_accounts.public(mail_accounts.save(s, who(request), body, account_id=aid))
+            except ValueError as exc:
+                s.rollback()
+                return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    @app.post("/api/mailboxes/{aid}/{action}")
+    def api_mailbox_action(request: Request, aid: int, action: str):
+        ctx = C()
+        with ctx.db.session() as s:
+            if action == "test":
+                a = s.get(MailAccount, aid)
+                if a is None:
+                    return JSONResponse({"detail": "No such mailbox"}, status_code=404)
+                with ctx.http() as http:
+                    ok, detail = mail_accounts.test_connection(s, ctx.settings, a, http, who(request))
+                return {"ok": ok, "detail": detail}
+            if action not in ("enable", "disable", "read_on", "read_off", "primary"):
+                return JSONResponse({"detail": "Unknown action"}, status_code=400)
+            try:
+                return mail_accounts.public(mail_accounts.change(s, who(request), aid, action))
+            except ValueError as exc:
+                s.rollback()
+                return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    @app.delete("/api/mailboxes/{aid}")
+    def api_mailbox_delete(request: Request, aid: int):
+        with C().db.session() as s:
+            try:
+                mail_accounts.change(s, who(request), aid, "delete")
+            except ValueError as exc:
+                s.rollback()
+                return JSONResponse({"detail": str(exc)}, status_code=404)
+        return {"deleted": aid}
+
     @app.get("/integrations", response_class=HTMLResponse)
     def integrations(request: Request):
         ctx = C()
@@ -1567,7 +1709,7 @@ def operations_view(ctx: AppContext, s) -> dict:
     timeline.sort(key=lambda row: row["at"] or datetime.min, reverse=True)
     for row in timeline:
         row["ago"] = ago(row["at"], now)
-    ready, reason = EmailSender(st).status()
+    ready, reason = EmailSender(mail_accounts.sending_settings(s, st)).status()
     return dict(
         timeline=timeline[:14],
         automation={"mode": am.get_mode(s), "state": am.get_state(s), "active": len(am.active_authorizations(s, now)),
@@ -1719,7 +1861,7 @@ def manager_today(ctx: AppContext, s) -> dict:
                                                            FollowUp.sent_at.is_(None))).scalar_one()
 
     employee = ai_employee(ctx, s)
-    ready, reason = EmailSender(st).status()
+    ready, reason = EmailSender(mail_accounts.sending_settings(s, st)).status()
     counts = {
         "discovered": s.execute(select(func.count(Company.id)).where(Company.created_at >= day_start, Company.is_sample.is_(False),
                                                                      Company.merged_into_id.is_(None))).scalar_one(),
@@ -1827,7 +1969,7 @@ def system_status(ctx: AppContext, s, team: list[dict], sender: tuple[bool, str]
             + ("; every email needs a person" if st.require_human_approval else ""), "/followups")
 
     inbox = s.execute(select(JobState).where(JobState.job == "inbox")).scalars().first()
-    if not st.imap_configured:
+    if not (st.imap_configured or mail_accounts.readable(s)):
         add("Mailbox reading", "NOT CONFIGURED", "no mailbox is set up, so replies are not read; reading needs your "
             "approval (A2)", "/integrations")
     elif inbox and inbox.consecutive_failures:
@@ -1936,7 +2078,8 @@ def ai_employee(ctx: AppContext, s) -> dict:
         week_counts[agent][status] = n
     failures_by_job = {row.job: row.consecutive_failures or 0 for row in s.execute(select(JobState)).scalars()}
     blocked_by = {"publishing": None if st.publishing_enabled else "publishing is off (PUBLISHING_ENABLED is false)",
-                  "inbox_monitor": None if st.imap_configured else "mailbox reading is off (mailbox not set up)"}
+                  "inbox_monitor": None if st.imap_configured or mail_accounts.readable(s)
+                  else "mailbox reading is off (mailbox not set up)"}
     team = []
     for agent, title, job, stage, ico in TEAM:
         last = s.execute(select(AgentRun).where(AgentRun.agent == agent, AgentRun.status != "running")

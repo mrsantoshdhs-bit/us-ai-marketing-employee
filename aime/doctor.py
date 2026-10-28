@@ -100,7 +100,7 @@ def run_checks(ctx: AppContext) -> list[dict]:
     with ctx.db.session() as s:
         last, off = kv_get(s, "backup.last_verified"), kv_get(s, "backup.last_offsite")
         users = s.execute(select(func.count(User.id)).where(User.active.is_(True))).scalar_one()
-        admins = s.execute(select(func.count(User.id)).where(User.active.is_(True), User.role == "admin")).scalar_one()
+        admins = s.execute(select(func.count(User.id)).where(User.active.is_(True), User.role.in_(("admin", "super_admin")))).scalar_one()
     if not ctx.settings.dashboard_auth:
         add("Dashboard sign-in", False, "DASHBOARD_AUTH=false: anyone using this computer can open the dashboard",
             "warning")

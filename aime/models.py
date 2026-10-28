@@ -634,6 +634,37 @@ class OAuthToken(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class MailAccount(Timestamped, Base):
+    """A sales mailbox configured in the Super Admin panel (aime/mail_accounts.py). Secrets are DPAPI-encrypted
+    and never shown. New mailboxes are disabled, read nothing and are not the sending (primary) mailbox."""
+
+    __tablename__ = "mail_accounts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    label: Mapped[str] = mapped_column(String(100))
+    provider: Mapped[str] = mapped_column(String(20))  # gmail | microsoft365
+    auth: Mapped[str] = mapped_column(String(20))  # app_password | oauth
+    email: Mapped[str] = mapped_column(String(200), unique=True)
+    username: Mapped[str] = mapped_column(String(200))
+    imap_host: Mapped[str] = mapped_column(String(255))
+    imap_port: Mapped[int] = mapped_column(Integer, default=993)
+    imap_folder: Mapped[str] = mapped_column(String(100), default="INBOX")
+    smtp_host: Mapped[str] = mapped_column(String(255))
+    smtp_port: Mapped[int] = mapped_column(Integer, default=587)
+    secret: Mapped[str | None] = mapped_column(Text)  # the app password, DPAPI-protected
+    oauth_client_id: Mapped[str | None] = mapped_column(String(200))
+    oauth_client_secret: Mapped[str | None] = mapped_column(Text)  # DPAPI-protected
+    oauth_tenant: Mapped[str | None] = mapped_column(String(100))
+    active: Mapped[bool] = mapped_column(Boolean, default=False)
+    read_replies: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_test_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_test_ok: Mapped[bool | None] = mapped_column(Boolean)
+    last_test_detail: Mapped[str | None] = mapped_column(String(500))
+    created_by: Mapped[str | None] = mapped_column(String(80))
+    updated_by: Mapped[str | None] = mapped_column(String(80))
+
+
 class User(Timestamped, Base):
     """Dashboard login. Accounts are created from the command line (`aime user create`), never from the web."""
 
@@ -642,7 +673,7 @@ class User(Timestamped, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(60), unique=True)
     password_hash: Mapped[str] = mapped_column(String(200))  # scrypt$n$r$p$salt$hash
-    role: Mapped[str] = mapped_column(String(30), default="sales_manager")
+    role: Mapped[str] = mapped_column(String(30), default="sales_manager")  # sales_manager | admin | super_admin
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     session_version: Mapped[int] = mapped_column(Integer, default=1)  # bump to sign out every session
     failed_logins: Mapped[int] = mapped_column(Integer, default=0)

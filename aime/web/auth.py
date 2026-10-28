@@ -144,6 +144,15 @@ ADMIN_ONLY_PREFIXES = ("/jobs/", "/integrations/linkedin/connect", "/integration
                        "/automation/state/start", "/automation/state/resume")  # pausing and stopping: anyone signed in
 
 
+ADMIN_ROLES = ("admin", "super_admin")  # a Super Admin can do everything an admin can
+# Mailbox configuration (servers, passwords, which mailbox sends): Super Admin only, for viewing too.
+SUPER_ADMIN_PREFIXES = ("/admin/mailboxes", "/api/mailboxes")
+
+
+def super_admin_only(path: str) -> bool:
+    return path.startswith(SUPER_ADMIN_PREFIXES)
+
+
 def admin_only(method: str, path: str) -> bool:
     if path.startswith(("/integrations/linkedin/connect", "/integrations/oauth/")):
         return True  # signing in changes the connected account, even though the start and callback are GETs
@@ -173,6 +182,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if path.startswith("/api/"):
                 return JSONResponse({"detail": "Sign in required"}, status_code=401)
             return RedirectResponse(f"/login?next={quote(path)}", status_code=303)
-        if admin_only(request.method, path) and request.state.user["role"] != "admin":
+        if super_admin_only(path) and request.state.user["role"] != "super_admin":
+            return JSONResponse({"detail": "Super Admin only"}, status_code=403)
+        if admin_only(request.method, path) and request.state.user["role"] not in ADMIN_ROLES:
             return JSONResponse({"detail": "Admin only: ask an admin to do this"}, status_code=403)
         return await call_next(request)

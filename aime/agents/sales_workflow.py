@@ -76,6 +76,23 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         super().__init__(ctx)
         self.sender = sender or EmailSender(ctx.settings)
 
+    def _use_primary_mailbox(self, session: Session) -> None:
+        """A primary mailbox from the Super Admin panel sends instead of the .env mailbox. Every switch and
+        approval stays the same: OUTBOUND_EMAIL_ENABLED off still sends nothing."""
+        from aime import mail_accounts
+
+        a = mail_accounts.primary(session)
+        if a is None:
+            return
+        self.sender.settings = mail_accounts.settings_for(self.settings, a)
+        if a.auth == "oauth":
+            from aime.integrations import oauth
+
+            def token() -> str:
+                with self.ctx.http() as http:
+                    return oauth.access_token(session, self.settings, http, "microsoft", "mail", account=a.id)
+            self.sender.token = token
+
     def _connect_oauth(self, session: Session) -> None:
         """MAIL_AUTH=oauth: give the sender a way to get a fresh access token in this run (never stored on it)."""
         if self.settings.mail_auth != "oauth" or self.sender.token is not None:
@@ -88,6 +105,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         self.sender.token = token
 
     def execute(self, inp: SalesInput, session: Session) -> SalesOutput:
+        self._use_primary_mailbox(session)
         self._connect_oauth(session)
         now = inp.now or utcnow()
         cfg = self.settings.section("followup")

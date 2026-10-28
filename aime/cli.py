@@ -337,7 +337,7 @@ def cmd_user(args, ctx, prompt_fn=None) -> int:
         elif args.action == "set-role":
             # Only from the command line on this computer: the dashboard cannot change roles.
             if not getattr(args, "role", None):
-                print("--role is required (sales_manager or admin)")
+                print("--role is required (sales_manager, admin or super_admin)")
                 return 1
             old, user.role = user.role, args.role
             log_activity(s, f"Dashboard account {username}: role {old} -> {args.role}", "command line", type_="security")
@@ -634,7 +634,8 @@ def build_parser() -> argparse.ArgumentParser:
     us = sub.add_parser("user", help="Dashboard sign-in accounts (you type the password at the prompt)")
     us.add_argument("action", choices=["create", "list", "set-password", "set-role", "disable", "enable"])
     us.add_argument("--username")
-    us.add_argument("--role", choices=["sales_manager", "admin"], help="default for create: sales_manager")
+    us.add_argument("--role", choices=["sales_manager", "admin", "super_admin"],
+                    help="default for create: sales_manager; super_admin also configures mailboxes")
     us.add_argument("--data-dir", help="Use another data folder (e.g. the demo database)")
     return p
 
