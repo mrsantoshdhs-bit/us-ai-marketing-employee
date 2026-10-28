@@ -31,7 +31,7 @@ from aime.db import kv_get, kv_set
 from aime.inbound import InboundPayload, record_inquiry
 from aime.integrations.email_smtp import POSTAL_PLACEHOLDER, EmailSender, compliance_problem
 from aime import mail_accounts
-from aime.integrations import oauth
+from aime.integrations import linkedin_leads, oauth
 from aime.integrations.linkedin import (POST_REF_RE, LinkedInAPIError, LinkedInClient, get_auth_status, get_token,
                                         new_state, post_url)
 from aime.integrations.status import integration_statuses
@@ -1484,8 +1484,65 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             accounts = [{"provider": p, "label": oauth.PROVIDERS[p]["label"], "purpose": purpose,
                          "configured": oauth.configured(ctx.settings, p), "token": oauth.connected(s, p, purpose)}
                         for p in oauth.PROVIDERS for purpose in oauth.PURPOSES]
+            leads = linkedin_leads.status(ctx.settings, s)
         return render(request, "integrations.html", statuses=statuses, auth=auth, settings=ctx.settings,
-                      accounts=accounts, redirect_uri=oauth.redirect_uri(ctx.settings))
+                      accounts=accounts, redirect_uri=oauth.redirect_uri(ctx.settings), leads=leads)
+
+    # ------------------------------------------------------------------ LinkedIn leads (Super Admin)
+    @app.get("/integrations/linkedin-leads/connect")
+    def linkedin_leads_connect():
+        ctx = C()
+        with ctx.db.session() as s:
+            try:
+                url = linkedin_leads.start(s, ctx.settings)
+            except linkedin_leads.LeadSyncError as exc:
+                return back("/integrations#linkedin-leads", str(exc))
+        return RedirectResponse(url, status_code=302)
+
+    @app.get("/integrations/linkedin-leads/callback")
+    def linkedin_leads_callback(request: Request, code: str = "", state: str = "", error: str = "",
+                                error_description: str = ""):
+        ctx = C()
+        if error:
+            return back("/integrations#linkedin-leads", f"LinkedIn sign-in declined: {error_description or error}")
+        with ctx.db.session() as s, ctx.http() as http:
+            try:
+                linkedin_leads.finish(s, ctx.settings, http, state, code, who(request))
+            except linkedin_leads.LeadSyncError as exc:
+                s.commit()  # the one-time sign-in state is used up either way
+                return back("/integrations#linkedin-leads", str(exc))
+            except httpx.HTTPError as exc:
+                s.commit()
+                return back("/integrations#linkedin-leads", f"Could not reach LinkedIn ({type(exc).__name__}); try again")
+        return back("/integrations#linkedin-leads", "LinkedIn leads connected: choose which Pages and ad accounts to "
+                    "sync. Nothing is fetched until LINKEDIN_LEADS_ENABLED=true.")
+
+    @app.post("/integrations/linkedin-leads/refresh")
+    def linkedin_leads_refresh():
+        ctx = C()
+        with ctx.db.session() as s, ctx.http() as http:
+            try:
+                found = linkedin_leads.refresh_found(s, ctx.settings, http)
+            except linkedin_leads.LeadSyncError as exc:
+                return back("/integrations#linkedin-leads", str(exc))
+            except httpx.HTTPError as exc:
+                return back("/integrations#linkedin-leads", f"Could not reach LinkedIn ({type(exc).__name__}); try again")
+        return back("/integrations#linkedin-leads", f"LinkedIn lists {len(found)} Page(s) and ad account(s) for you")
+
+    @app.post("/integrations/linkedin-leads/owners")
+    async def linkedin_leads_owners(request: Request):
+        form = await request.form()
+        with C().db.session() as s:
+            chosen = linkedin_leads.choose_owners(s, list(form.getlist("owner")), who(request))
+        return back("/integrations#linkedin-leads", f"Syncing leads from {len(chosen)} Page(s) and ad account(s)"
+                    if chosen else "No Page or ad account chosen: nothing is synced")
+
+    @app.post("/integrations/linkedin-leads/disconnect")
+    def linkedin_leads_disconnect(request: Request):
+        with C().db.session() as s:
+            removed = linkedin_leads.disconnect(s, who(request))
+        return back("/integrations#linkedin-leads", "LinkedIn leads disconnected: the tokens were deleted from this "
+                    "computer" if removed else "Nothing was connected")
 
     @app.get("/integrations/linkedin/connect")
     def linkedin_connect():

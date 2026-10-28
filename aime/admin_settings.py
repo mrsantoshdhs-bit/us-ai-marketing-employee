@@ -118,7 +118,7 @@ FIELDS: list[tuple[str, str, str, Any, str]] = [
     ("meetings", "min_notice_hours", "Minimum notice (hours)", _int(0, 168), "number"),
     ("meetings", "reminder_hours", "Reminder before a meeting (hours)", _int(1, 72), "number"),
     ("meetings", "remind_prospect", "Also draft a reminder for the prospect", _bool, "bool"),
-    ("handover", "sales_manager", "Sales Manager for handovers", None, "user"),
+    ("handover", "sales_manager", "Sales Managers for handovers (new opportunities go to the least busy)", None, "users"),
 ]
 
 
@@ -159,13 +159,13 @@ def _choice_check(session: Session, kind: str, raw):
         if raw not in ("A", "B", "C"):
             raise ValueError("must be A, B or C")
         return raw
-    if kind == "user":
-        if not raw:
-            return ""
+    if kind == "users":
+        picked = [x.strip() for x in raw if x and x.strip()]
         names = set(session.execute(select(User.username).where(User.active.is_(True))).scalars())
-        if raw not in names:
-            raise ValueError("must be an active dashboard user")
-        return raw
+        unknown = [x for x in picked if x not in names]
+        if unknown:
+            raise ValueError(f"must be active dashboard users ({', '.join(unknown)} is not)")
+        return list(dict.fromkeys(picked))
     raise ValueError("unknown field")
 
 
@@ -179,9 +179,9 @@ def save(session: Session, settings, actor: str, form) -> list[str]:
     for section, key, label, check, kind in FIELDS:
         name = f"{section}.{key}"
         try:
-            if kind.startswith("multi"):
+            if kind.startswith("multi") or kind == "users":
                 value = _choice_check(session, kind, getlist(name))
-            elif kind in ("grade", "user"):
+            elif kind == "grade":
                 value = _choice_check(session, kind, (form.get(name) or "").strip())
             elif kind == "bool":
                 value = _bool(form.get(name) or "")

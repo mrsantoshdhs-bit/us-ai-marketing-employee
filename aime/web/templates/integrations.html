@@ -44,4 +44,38 @@
   </ol>
   <p class="small muted">Not implemented by design: scraping, browser bots, cookie reuse, automated connection requests or messages, CAPTCHA bypass, or artificial engagement.</p>
 </div>
+
+<h2 id="linkedin-leads">LinkedIn leads (Lead Sync API)</h2>
+<div class="card">
+  <p>{{ state_pill('READY' if leads.ready else ('NOT CONFIGURED' if not leads.configured else ('NOT CONNECTED' if not leads.connected else ('DISABLED' if leads.owners and not leads.enabled else 'BLOCKED')))) }} {{ leads.reason }}</p>
+  <p class="small">People who chose to share their details with you on LinkedIn - your Lead Gen Form ads and the registration
+    forms of events your Company Page organizes - come in as inquiries every 30 minutes, then go through the same checks,
+    qualification and approvals as any other inquiry. Nothing else is read from LinkedIn, and nothing is posted or sent there.</p>
+  {% if leads.connected %}<p class="small">Permissions {{ leads.scopes }} · connection expires {{ leads.expires_at|local if leads.expires_at else 'not stated' }}
+    {% if leads.last_sync %} · last sync {{ leads.last_sync.at[:16]|replace('T', ' ') }} UTC: {{ leads.last_sync.fetched }} fetched, {{ leads.last_sync.recorded }} new{% if leads.last_sync.test_skipped %}, {{ leads.last_sync.test_skipped }} test lead(s) skipped{% endif %}{% endif %}
+    {% if leads.test_only %} · <strong>test leads only</strong> (LINKEDIN_LEADS_TEST_ONLY=true){% endif %}</p>{% endif %}
+  {% if is_super_admin %}
+  <div class="row-actions">
+    {% if leads.configured %}<a class="btn" href="/integrations/linkedin-leads/connect">{{ 'Reconnect' if leads.connected else 'Connect' }} LinkedIn leads</a>{% endif %}
+    {% if leads.connected %}<form class="inline" method="post" action="/integrations/linkedin-leads/refresh"><button class="secondary">Refresh the list of Pages</button></form>
+    <form class="inline" method="post" action="/integrations/linkedin-leads/disconnect"><button class="danger">Disconnect</button></form>{% endif %}
+  </div>
+  {% if leads.connected %}
+  <form method="post" action="/integrations/linkedin-leads/owners" style="margin-top:12px">
+    <p class="small"><b>Sync leads from</b> (only your own company: a Page of another business you manage must stay unticked)</p>
+    {% set chosen = leads.owners|map(attribute='urn')|list %}
+    <div class="checks">{% for f in leads.found %}<label><input type="checkbox" name="owner" value="{{ f.urn }}" {{ 'checked' if f.urn in chosen }}> {{ f.name or f.urn }} <span class="muted">({{ 'ad account' if f.kind == 'ad_account' else 'Page' }}{% if f.role %}, {{ f.role|lower|replace('_', ' ') }}{% endif %})</span></label>
+      {% else %}<span class="muted">LinkedIn listed no Page or ad account where you may read leads. Ask the Page's super admin for a Page role (administrator, content administrator, lead gen forms manager, curator or analyst), then refresh the list.</span>{% endfor %}</div>
+    {% if leads.found %}<button style="margin-top:10px">Save</button>{% endif %}
+  </form>
+  {% endif %}
+  {% else %}<p class="small muted">Only a Super Admin connects LinkedIn leads and chooses which Pages are synced.</p>{% endif %}
+  <ol class="small">
+    <li>Create a <b>separate</b> developer app at linkedin.com/developers for leads, link it to your Company Page and have the Page's super admin verify it. Its name must not contain "Linked" or "In".</li>
+    <li>On its Products tab, request <em>Lead Sync API</em> with your business email (not Gmail) and the company's legal name, address and website.</li>
+    <li>Once approved, add the redirect URL <code>{{ settings.linkedin_leads_redirect_uri }}</code> to the app's Auth settings, put its client ID and secret in <code>.env</code> (LINKEDIN_LEADS_CLIENT_ID / LINKEDIN_LEADS_CLIENT_SECRET), restart the dashboard and connect here.</li>
+    <li>Tick your company's Page (and ad accounts, if you run Lead Gen Form ads and added <code>r_ads</code> to LINKEDIN_LEADS_SCOPES), then set <code>LINKEDIN_LEADS_ENABLED=true</code>.</li>
+    <li>Before approval: download leads or event registrants from LinkedIn as CSV and drop the file in the inbox folder; LinkedIn's column names are recognized.</li>
+  </ol>
+</div>
 {% endblock %}

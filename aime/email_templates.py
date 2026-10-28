@@ -12,12 +12,30 @@ def _service_phrase(service_id: str | None) -> str:
 
 
 def draft_reply(settings: Settings, step: int, first_name: str | None, service_id: str | None,
-                inquiry_excerpt: str | None) -> tuple[str, str]:
+                inquiry_excerpt: str | None, source_page: str | None = None) -> tuple[str, str]:
     name = first_name or "there"
     company = settings.company_name
     sender = settings.sender_name or f"The {company} team"
     phrase = _service_phrase(service_id)
-    if step == 1:
+    if step == 1 and (source_page or "").startswith("LinkedIn"):  # a LinkedIn lead form or event registration
+        what = source_page.split(": ", 1)[1].strip() if ": " in source_page else ""
+        if source_page.startswith("LinkedIn event:") and what:
+            subject = f"Thanks for registering: {what}"[:150]
+            opening = f"Thank you for registering for {what} on LinkedIn."
+        else:
+            subject = f"Thanks for your interest in {phrase}"
+            opening = f"Thank you for sharing your details with {company} on LinkedIn."
+        body = (
+            f"Hi {name},\n\n"
+            f"{opening}\n\n"
+            "So we can make the most of your time, could you tell me a little about:\n"
+            "• the process or system you'd like to improve,\n"
+            "• the tools your team uses today, and\n"
+            "• your ideal timeline?\n\n"
+            "If it's easier, reply with a few times that suit you for a short call.\n\n"
+            f"Best regards,\n{sender}\n{company}"
+        )
+    elif step == 1:
         subject = f"Re: your inquiry about {phrase}"
         echo = f'\n\nYou mentioned: "{inquiry_excerpt.strip()[:240]}"' if inquiry_excerpt else ""
         body = (

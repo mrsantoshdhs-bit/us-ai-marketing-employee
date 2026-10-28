@@ -38,6 +38,7 @@ class InboundPayload(BaseModel):
     timeline: str | None = None
     consent_marketing: bool = False
     source_page: str | None = None
+    external_id: str | None = None  # the record's id where it came from (e.g. "linkedin:<lead id>"): recorded once
     hp: str | None = None  # honeypot field: real people leave it empty
     is_sample: bool = False
 
@@ -95,7 +96,7 @@ def validate_inquiry(p: InboundPayload) -> str | None:
 def record_inquiry(session: Session, payload: dict, channel: str) -> tuple[InboundInquiry | None, bool]:
     """Store a raw inquiry once (deduplicated by email+company+message). Returns (row, created)."""
     p = InboundPayload.model_validate(payload)
-    fp = fingerprint(p.email, p.company, p.message)
+    fp = fingerprint("external", p.external_id) if p.external_id else fingerprint(p.email, p.company, p.message)
     existing = session.execute(select(InboundInquiry).where(InboundInquiry.fingerprint == fp)).scalars().first()
     if existing:
         return existing, False
@@ -103,6 +104,34 @@ def record_inquiry(session: Session, payload: dict, channel: str) -> tuple[Inbou
     session.add(row)
     session.flush()
     return row, True
+
+
+# Column names in the lead and attendee files LinkedIn lets you download (Campaign Manager lead export, an event's
+# registrant list), mapped to the inquiry fields.
+LINKEDIN_COLUMNS = {"first name": "first_name", "last name": "last_name", "email address": "email",
+                    "work email": "email", "company name": "company", "company": "company", "job title": "title",
+                    "country/region": "country", "country": "country", "phone number": "phone",
+                    "work phone number": "phone", "city": "city", "state/province": "state", "state": "state",
+                    "lead id": "external_id", "lead_id": "external_id"}
+
+
+def linkedin_export_row(row: dict, file_stem: str) -> dict:
+    """A row of a LinkedIn lead or registrant export (recognized by its LinkedIn column names) as an inquiry; any
+    other row is returned unchanged."""
+    if not ({"lead id", "lead_id", "country/region", "company name", "job title"} & row.keys()):
+        return row
+    out = {k: v for k, v in row.items() if k not in LINKEDIN_COLUMNS}
+    for column, key in LINKEDIN_COLUMNS.items():
+        value = (row.get(column) or "").strip()
+        if value and not out.get(key):
+            out[key] = value
+    if out.get("external_id"):
+        out["external_id"] = f"linkedin:{out['external_id']}"
+    out.setdefault("message", "")
+    if not str(out["message"]).strip():
+        out["message"] = f"LinkedIn lead from your download: {file_stem}"[:200]
+    out.setdefault("source_page", f"LinkedIn download: {file_stem}"[:200])
+    return out
 
 
 def load_inbox_files(session: Session, inbox: Path) -> tuple[int, IntakeBatch]:
@@ -125,7 +154,8 @@ def load_inbox_files(session: Session, inbox: Path) -> tuple[int, IntakeBatch]:
                 records = data if isinstance(data, list) else [data]
             else:
                 with path.open(newline="", encoding="utf-8-sig") as fh:
-                    records = [{(k or "").strip().lower(): v for k, v in row.items()} for row in csv.DictReader(fh)]
+                    records = [linkedin_export_row({(k or "").strip().lower(): v for k, v in row.items()}, path.stem)
+                               for row in csv.DictReader(fh)]
             if not all(isinstance(r, dict) for r in records):
                 raise ValueError("expected an object or a list of objects")
         except (ValueError, UnicodeDecodeError, csv.Error) as exc:

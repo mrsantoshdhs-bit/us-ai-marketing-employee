@@ -148,15 +148,16 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         log_activity(session, f"Opportunity created: {opp.name}", self.name, type_="opportunity",
                      company_id=lead.company_id, lead_id=lead.id, opportunity_id=opp.id)
 
-    def _inquiry_excerpt(self, session: Session, lead: Lead) -> str | None:
-        inq = session.execute(select(InboundInquiry).where(InboundInquiry.lead_id == lead.id)
-                              .order_by(InboundInquiry.id.desc())).scalars().first()
-        return (inq.payload.get("message") if inq else None) or None
+    def _inquiry(self, session: Session, lead: Lead) -> InboundInquiry | None:
+        return session.execute(select(InboundInquiry).where(InboundInquiry.lead_id == lead.id)
+                               .order_by(InboundInquiry.id.desc())).scalars().first()
 
     def _new_draft(self, session: Session, lead: Lead, step: int, due: datetime, out: SalesOutput,
                    in_reply_to: str | None = None) -> None:
+        inq = self._inquiry(session, lead) if step == 1 else None
         subject, body = draft_reply(self.settings, step, lead.contact.first_name, lead.primary_service,
-                                    self._inquiry_excerpt(session, lead) if step == 1 else None)
+                                    (inq.payload.get("message") or None) if inq else None,
+                                    source_page=inq.payload.get("source_page") if inq else None)
         # Every draft waits for approval: a person's, or at send time an active campaign authorization (aime/automation.py).
         session.add(FollowUp(lead_id=lead.id, contact_id=lead.contact_id, company_id=lead.company_id,
                              channel="email", step=step, due_at=due, status="awaiting_approval",

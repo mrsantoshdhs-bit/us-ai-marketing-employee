@@ -33,7 +33,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from aime.crm_ops import is_suppressed
@@ -56,7 +56,8 @@ TRANSITIONS = {"start": (("stopped", "emergency_stop"), "running"), "resume": ((
                "emergency_stop": (("running", "paused", "stopped"), "emergency_stop")}
 ADMIN_ACTIONS = ("start", "resume")
 ALWAYS_RUN_JOBS = ("monitor", "db_maintenance")  # health and housekeeping keep running while stopped
-KINDS = {"outreach": "Outreach sequence emails", "response": "Booking-link replies to interested prospects (Automatic mode)"}
+KINDS = {"outreach": "Outreach sequence emails", "response": "Booking-link replies to interested prospects (Automatic mode)",
+         "inquiry": "Replies and follow-ups to people who asked us to contact them (inquiry and LinkedIn forms)"}
 MAX_DAYS, MAX_RECIPIENTS, MAX_DAILY, MAX_TOTAL = 30, 50, 50, 500
 EMAIL = re.compile(r"^[a-z0-9.!#$&'+/=?^_`{|}~-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$")  # no * or %: no wildcards
 # Wording that always goes to a person, whatever the mode: prices, discounts and commitments.
@@ -147,7 +148,9 @@ def autonomous_authorization(session: Session, settings, lead, contact, to: str,
             return a
     return None
 ADDRESS_RULES = {"published": "a decision-maker's own address that the company publishes",
-                 "role_or_published": "the company's published mailbox (info@, hello@ ...) or a decision-maker's own"}
+                 "role_or_published": "the company's published mailbox (info@, hello@ ...) or a decision-maker's own",
+                 "asked_us": "the address of a person who asked us to contact them (inquiry forms, LinkedIn lead "
+                             "forms and event registrations)"}
 
 
 def describe_rule(rule: dict) -> str:
@@ -155,11 +158,20 @@ def describe_rule(rule: dict) -> str:
             + (", on a verified company website" if rule.get("verified_website") else ""))
 
 
+def email_kind(f: FollowUp) -> str:
+    """outreach | response | inquiry (a reply or follow-up to a person who asked us to contact them: no kind set)."""
+    return f.kind or "inquiry"
+
+
 def rule_problem(session: Session, rule: dict, f: FollowUp, to: str) -> str | None:
     """Why the email falls outside a rule-based authorization (None: the rule covers it). Outreach and its sequence
-    to a qualified, researched prospect, and (when the campaign covers answers) answers to that same prospect;
-    never replies to inquiries."""
-    if f.kind not in ("outreach", "response"):
+    to a qualified, researched prospect, and (when the campaign covers answers) answers to that same prospect. Only an
+    "asked_us" rule covers replies to people who asked us to contact them; it covers no cold outreach."""
+    kind = email_kind(f)
+    if rule.get("addresses") == "asked_us":
+        if kind not in ("inquiry", "response"):
+            return "this rule covers replies to people who asked us to contact them, not outreach"
+    elif kind not in ("outreach", "response"):
         return "a rule covers outreach and answers to its own prospects only"
     return lead_rule_problem(session, rule, f.lead, f.contact, to)
 
@@ -177,6 +189,10 @@ def lead_rule_problem(session: Session, rule: dict, lead, contact, to: str) -> s
         return "the company's website is not verified"
     if contact is None or (contact.email or "").strip().lower() != to:
         return "the address is not the lead's researched contact"
+    if rule["addresses"] == "asked_us":
+        if contact.source != "inbound" or contact.consent_status not in ("inquiry", "opt_in"):
+            return "the person did not ask us to contact them"
+        return None
     if contact.source not in ("website", "sec_filing"):
         return "the address was not published by the company"
     allowed = ("published",) if rule["addresses"] == "published" else ("published", "role_address")
@@ -200,7 +216,8 @@ def create_rule_authorization(session: Session, actor: str, name: str, min_grade
         raise ValueError(f"Limits: 1-{MAX_DAILY} a day, 1-{MAX_TOTAL} in total, valid for 1-{MAX_DAYS} days")
     now = utcnow()
     rule = {"min_grade": min_grade, "addresses": addresses, "verified_website": bool(verified_website)}
-    kinds = ["outreach", "response"] if answer_replies else ["outreach"]
+    first = "inquiry" if addresses == "asked_us" else "outreach"
+    kinds = [first, "response"] if answer_replies else [first]
     a = CampaignAuthorization(name=name.strip()[:200], status="draft", recipients=[], rule=rule, kinds=kinds,
                               daily_limit=daily_limit, total_limit=total_limit, starts_at=now,
                               expires_at=now + timedelta(days=days), notes=(notes or "").strip()[:2000] or None,
@@ -342,11 +359,10 @@ def campaign_for(session: Session, f: FollowUp, mode: str, now: datetime,
         if rule_misses:
             return None, "no active campaign rule covers it (" + "; ".join(rule_misses[:2]) + ")"
         return None, "the recipient is not on an active campaign authorization"
-    if f.kind not in ("outreach", "response"):
-        return None, "answers to people who wrote to us always go to a person"
-    camps = [a for a in camps if f.kind in (a.kinds or [])]
+    kind = email_kind(f)
+    camps = [a for a in camps if kind in (a.kinds or [])]
     if not camps:
-        return None, f"no active authorization covers {f.kind} emails to {to}"
+        return None, f"no active authorization covers {kind} emails to {to}"
     if f.kind == "response":
         if mode != "automatic":
             return None, "replies need a person in Hybrid mode"
@@ -392,7 +408,8 @@ def apply_campaign_approvals(session: Session, settings, now: datetime, actor: s
     if not active_authorizations(session, now):
         return []
     waiting = session.execute(select(FollowUp).where(
-        FollowUp.channel == "email", FollowUp.status == "awaiting_approval", FollowUp.kind.in_(("outreach", "response")),
+        FollowUp.channel == "email", FollowUp.status == "awaiting_approval",
+        or_(FollowUp.kind.in_(("outreach", "response")), FollowUp.kind.is_(None)),
         FollowUp.due_at <= now).order_by(FollowUp.due_at, FollowUp.id)).scalars().all()
     pending: dict[int, int] = {}
     approved = []
@@ -404,7 +421,7 @@ def apply_campaign_approvals(session: Session, settings, now: datetime, actor: s
         f.blocked_reason = None
         pending[a.id] = pending.get(a.id, 0) + 1
         audit(session, actor, "auto_approved", f"follow-up #{f.id}",
-              f"{f.kind} email to {recipient(f)} approved by campaign #{a.id} {a.name} "
+              f"{email_kind(f)} email to {recipient(f)} approved by campaign #{a.id} {a.name} "
               f"(authorized by {a.authorized_by}; {mode} mode)")
         approved.append(f.id)
     return approved

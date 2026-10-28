@@ -146,7 +146,7 @@ ADMIN_ONLY_PREFIXES = ("/jobs/", "/integrations/linkedin/connect", "/integration
 
 ADMIN_ROLES = ("admin", "super_admin")  # a Super Admin can do everything an admin can
 # Mailbox configuration (servers, passwords, which mailbox sends): Super Admin only, for viewing too.
-SUPER_ADMIN_PREFIXES = ("/admin/mailboxes", "/api/mailboxes", "/admin/settings")
+SUPER_ADMIN_PREFIXES = ("/admin/mailboxes", "/api/mailboxes", "/admin/settings", "/integrations/linkedin-leads")
 
 
 def super_admin_only(path: str) -> bool:

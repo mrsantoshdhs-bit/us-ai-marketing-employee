@@ -7,6 +7,7 @@ from collections import defaultdict
 from datetime import timedelta
 from typing import Literal
 
+import httpx
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -37,6 +38,8 @@ class CRMInput(BaseModel):
 
 
 class CRMOutput(BaseModel):
+    linkedin_leads_fetched: int = 0
+    linkedin_leads_recorded: int = 0
     inbound_files_loaded: int = 0
     inbound_files_rejected: list[str] = Field(default_factory=list)
     inbound_processed: int = 0
@@ -66,6 +69,8 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         out = CRMOutput()
         ops = inp.operations
         if "ingest_inbound" in ops:
+            if self.settings.linkedin_leads_enabled:
+                self._sync_linkedin_leads(session, out)
             out.inbound_files_loaded, batch = load_inbox_files(session, self.settings.inbox_dir)
             out.inbound_files_rejected = batch.rejected
             for problem in batch.rejected:
@@ -86,6 +91,34 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         return out
 
     # ------------------------------------------------------------------ inbound
+    def _sync_linkedin_leads(self, session: Session, out: CRMOutput) -> None:
+        """New LinkedIn lead form responses become inbound inquiries (aime/integrations/linkedin_leads.py)."""
+        from aime.integrations import linkedin_leads
+        from aime.monitoring import alert_once, resolve_alerts
+
+        try:
+            with self.ctx.http() as http:
+                res = linkedin_leads.sync(session, self.settings, http)
+        except linkedin_leads.LeadSyncError as exc:
+            alert_once(session, "warning", self.name, f"LinkedIn leads not synced: {exc}", self.settings,
+                       key="linkedin_leads:down")
+            return
+        except httpx.HTTPError as exc:
+            alert_once(session, "warning", self.name, f"LinkedIn leads not synced: could not reach LinkedIn "
+                       f"({type(exc).__name__})", self.settings, key="linkedin_leads:down")
+            return
+        if not res.ran:  # switched on, but not connected or no Page chosen yet
+            alert_once(session, "warning", self.name, f"LinkedIn leads not synced: {res.reason}", self.settings,
+                       key="linkedin_leads:down")
+            return
+        resolve_alerts(session, ("linkedin_leads:",), {"linkedin_leads:partial"} if res.errors else set())
+        if res.errors:
+            alert_once(session, "warning", self.name, "LinkedIn leads partly synced: " + "; ".join(res.errors[:3]),
+                       self.settings, key="linkedin_leads:partial")
+        out.linkedin_leads_fetched, out.linkedin_leads_recorded = res.fetched, res.recorded
+        if res.recorded:
+            log_activity(session, f"{res.recorded} new LinkedIn lead(s) received", self.name, type_="inbound")
+
     def _process_inbound(self, session: Session, out: CRMOutput) -> None:
         pending = session.execute(select(InboundInquiry).where(InboundInquiry.status == "pending")
                                   .order_by(InboundInquiry.id)).scalars().all()
@@ -119,7 +152,8 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             first, last = p.split_name()
             suppressed = is_suppressed(session, email, company.domain)
             consent = "opted_out" if suppressed else ("opt_in" if p.consent_marketing else "inquiry")
-            consent_src = f"Inbound inquiry #{inq.id} via {inq.channel}" + (" with marketing opt-in" if p.consent_marketing else "")
+            consent_src = (f"Inbound inquiry #{inq.id} via {inq.channel}" + (f" ({p.source_page})" if p.source_page else "")
+                           + (" with marketing opt-in" if p.consent_marketing else ""))[:200]
             contact = upsert_contact(session, company, email, first, last, p.phone, p.title, "inbound",
                                      consent, consent_src, is_sample=p.is_sample)
             add_signal(session, company, "inbound", p.message, "inbound", f"inbound:{inq.id}",

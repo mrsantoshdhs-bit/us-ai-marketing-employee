@@ -175,6 +175,51 @@ def suppress(session: Session, value: str, reason: str) -> None:
             f.blocked_reason = "Contact unsubscribed / suppressed"
 
 
+ERASED = "[erased on request]"
+
+
+def erase_person(session: Session, email: str, actor: str) -> dict[str, int]:
+    """A person asked us to delete their data (LinkedIn's API terms for lead form data; privacy laws): their contact
+    details, the inquiries and emails they sent us, our emails to them and the activity lines naming them are erased.
+    The address stays only on the suppression list, so nothing is ever sent to it again. Company records stay."""
+    from aime.automation import audit
+    from aime.models import InboundEmail, InboundInquiry
+
+    email = (email or "").strip().lower()
+    if "@" not in email:
+        raise ValueError("Give the person's email address")
+    suppress(session, email, "Erased on the person's request")
+    counts = {"contacts": 0, "inquiries": 0, "emails_received": 0, "emails_to_them": 0, "activity_lines": 0}
+    names: set[str] = set()
+    for c in session.execute(select(Contact).where(Contact.email == email)).scalars().all():
+        names |= {n for n in (c.first_name, c.last_name) if n and len(n) > 2}
+        for f in session.execute(select(FollowUp).where(FollowUp.contact_id == c.id)).scalars():
+            if f.status in ("pending", "awaiting_approval", "approved"):
+                f.status, f.blocked_reason = "cancelled", "Contact erased on request"
+            f.subject, f.body, f.to_email, f.evidence = ERASED, ERASED, None, None
+            counts["emails_to_them"] += 1
+        c.first_name = c.last_name = c.phone = c.title = c.evidence = c.evidence_url = None
+        c.email, c.email_source_url, c.email_evidence = None, None, None
+        c.consent_status, c.consent_source = "opted_out", ERASED
+        counts["contacts"] += 1
+    for inq in session.execute(select(InboundInquiry)).scalars():
+        if str((inq.payload or {}).get("email") or "").strip().lower() == email:
+            inq.payload = {"erased": True}
+            counts["inquiries"] += 1
+    for e in session.execute(select(InboundEmail).where(InboundEmail.from_email == email)).scalars():
+        e.from_email, e.subject, e.body_text, e.new_text = ERASED, ERASED, ERASED, ERASED
+        counts["emails_received"] += 1
+    for a in session.execute(select(Activity).where(or_(Activity.subject.contains(email),
+                                                        Activity.body.contains(email)))).scalars():
+        for text in (email, *names):
+            a.subject = a.subject.replace(text, "[erased]")
+            a.body = a.body.replace(text, "[erased]") if a.body else a.body
+        counts["activity_lines"] += 1
+    audit(session, actor, "person_erased", f"address #{hashlib.sha256(email.encode()).hexdigest()[:12]}",
+          ", ".join(f"{k} {v}" for k, v in counts.items()))
+    return counts
+
+
 def upsert_contact(session: Session, company: Company | None, email: str | None, first_name: str | None,
                    last_name: str | None, phone: str | None, title: str | None, source: str,
                    consent_status: str, consent_source: str, is_sample: bool = False) -> Contact:

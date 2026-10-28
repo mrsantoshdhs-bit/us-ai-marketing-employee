@@ -95,6 +95,12 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "linkedin_scopes": ("LINKEDIN_SCOPES", str),
     "linkedin_api_version": ("LINKEDIN_API_VERSION", str),
     "linkedin_author_urn": ("LINKEDIN_AUTHOR_URN", str),
+    "linkedin_leads_enabled": ("LINKEDIN_LEADS_ENABLED", bool),
+    "linkedin_leads_client_id": ("LINKEDIN_LEADS_CLIENT_ID", str),
+    "linkedin_leads_client_secret": ("LINKEDIN_LEADS_CLIENT_SECRET", str),
+    "linkedin_leads_redirect_uri": ("LINKEDIN_LEADS_REDIRECT_URI", str),
+    "linkedin_leads_scopes": ("LINKEDIN_LEADS_SCOPES", str),
+    "linkedin_leads_test_only": ("LINKEDIN_LEADS_TEST_ONLY", bool),
     "publishing_enabled": ("PUBLISHING_ENABLED", bool),
     "require_human_approval": ("REQUIRE_HUMAN_APPROVAL", bool),
     "hn_source_enabled": ("HN_SOURCE_ENABLED", bool),
@@ -174,6 +180,13 @@ class Settings:
     linkedin_scopes: str = "openid profile w_member_social"
     linkedin_api_version: str = "202609"
     linkedin_author_urn: str = ""
+    # LinkedIn Lead Sync (aime/integrations/linkedin_leads.py): its own developer app, approved for the Lead Sync API.
+    linkedin_leads_enabled: bool = False
+    linkedin_leads_client_id: str = ""
+    linkedin_leads_client_secret: str = field(default="", repr=False)
+    linkedin_leads_redirect_uri: str = "http://127.0.0.1:8765/integrations/linkedin-leads/callback"
+    linkedin_leads_scopes: str = "r_marketing_leadgen_automation r_organization_admin"
+    linkedin_leads_test_only: bool = False  # fetch only LinkedIn test leads, stored as sample data
     publishing_enabled: bool = False
     # true: every email needs a person's approval. false: in Hybrid or Automatic mode, an email covered by an active
     # campaign authorization may be approved at send time (aime/automation.py). Posts always need a person.
@@ -331,6 +344,10 @@ class Settings:
     @property
     def linkedin_configured(self) -> bool:
         return bool(self.linkedin_client_id and self.linkedin_client_secret)
+
+    @property
+    def linkedin_leads_configured(self) -> bool:
+        return bool(self.linkedin_leads_client_id and self.linkedin_leads_client_secret)
 
     @property
     def smtp_configured(self) -> bool:
