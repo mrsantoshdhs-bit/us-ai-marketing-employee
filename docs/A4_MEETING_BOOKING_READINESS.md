@@ -1,5 +1,7 @@
 # A4: Meeting booking readiness
 
+**Update (branch `sales/34-a4-meetings`):** calendar availability (Google and Microsoft 365), slot offers, book / move / cancel through the calendar with a person's approval, reminders and the time-zone label fix are now built. See [A4_IMPLEMENTATION.md](A4_IMPLEMENTATION.md).
+
 **Date:** 28 October 2026 · **Production commit:** 9ed84b0 · **Method:** code reading only. No app, test, job,
 mailbox or Calendly connection was run for this report.
 

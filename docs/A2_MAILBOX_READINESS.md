@@ -1,5 +1,7 @@
 # A2: Mailbox reading readiness
 
+**Update (branch `sales/32-a2-mailbox`):** Gmail and Microsoft 365 OAuth sign-in, fetch retries, in-run IMAP retries, unsubscribe by subject, sentiment and recommended status, and the conversation view are now built. See [A2_IMPLEMENTATION.md](A2_IMPLEMENTATION.md). This report describes production 9ed84b0.
+
 **Date:** 28 October 2026 · **Production commit:** 9ed84b0 · **Method:** code reading only. No app, test, job or
 mail connection was run for this report.
 
