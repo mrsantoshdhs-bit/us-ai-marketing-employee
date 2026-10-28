@@ -6,6 +6,9 @@ Tasks:
   With `install(..., run_when_logged_off=True)` it also runs while you are signed out and after a reboot
   before you log in: Windows asks YOU for your password in the console (`/RP *`); this app never sees,
   stores or logs it. Your Windows profile is loaded, so DPAPI-encrypted tokens keep working.
+  With `wake=True` the task may also wake the PC from sleep to run (Windows power settings must allow wake timers).
+  S4U ("do not store password") is deliberately not offered: without the password Windows cannot unlock the
+  current-user DPAPI keys that protect the LinkedIn token and the dashboard sessions (aime/secure_store.py).
 - `AIMarketingEmployee-Watchdog` (optional, interactive) runs `scripts/watchdog.py` hourly and shows a
   desktop notification if ticks have stopped or the dashboard is not running.
 - `AIMarketingEmployee-Dashboard` (optional, interactive) runs `scripts/dashboard_task.py` at logon and every
@@ -22,6 +25,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from xml.etree import ElementTree
 from xml.sax.saxutils import escape
 
 from aime.config import Settings
@@ -49,10 +53,12 @@ def current_user() -> str:
 
 def build_task_xml(python_exe: Path, script: Path, workdir: Path, interval_minutes: int, user_id: str,
                    start: datetime | None = None, logon_type: str = "InteractiveToken",
-                   task_name: str = TASK_NAME, description: str | None = None, time_limit: str = "PT1H") -> str:
+                   task_name: str = TASK_NAME, description: str | None = None, time_limit: str = "PT1H",
+                   wake_to_run: bool = False) -> str:
     """Task definition. `Password` logon adds a boot trigger; the XML never contains a password.
 
-    `time_limit` is how long one run may take (PT0S: no limit, for the long-running dashboard)."""
+    `time_limit` is how long one run may take (PT0S: no limit, for the long-running dashboard); `wake_to_run`
+    lets the task wake the PC from sleep."""
     if logon_type not in LOGON_TYPES:
         raise ValueError(f"logon_type must be one of {LOGON_TYPES}")
     start = (start or datetime.now() + timedelta(minutes=1)).replace(second=0, microsecond=0)
@@ -110,7 +116,7 @@ def build_task_xml(python_exe: Path, script: Path, workdir: Path, interval_minut
     <Enabled>true</Enabled>
     <Hidden>false</Hidden>
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
-    <WakeToRun>false</WakeToRun>
+    <WakeToRun>{"true" if wake_to_run else "false"}</WakeToRun>
     <ExecutionTimeLimit>{escape(time_limit)}</ExecutionTimeLimit>
     <Priority>7</Priority>
   </Settings>
@@ -145,12 +151,14 @@ def save_current_definition(settings: Settings, task_name: str = TASK_NAME) -> P
     return path
 
 
-def install(settings: Settings, interval_minutes: int | None = None, run_when_logged_off: bool = False) -> dict:
+def install(settings: Settings, interval_minutes: int | None = None, run_when_logged_off: bool = False,
+            wake: bool = False) -> dict:
     interval = interval_minutes or int(settings.schedule.get("tick_minutes", 15))
     script = settings.base_dir / "scripts" / "run_tick.py"
     logon = "Password" if run_when_logged_off else "InteractiveToken"
     user = current_user()
-    xml = build_task_xml(python_for_task(settings), script, settings.base_dir, interval, user, logon_type=logon)
+    xml = build_task_xml(python_for_task(settings), script, settings.base_dir, interval, user, logon_type=logon,
+                         wake_to_run=wake)
     xml_path = settings.data_dir / "scheduler_task.xml"
     xml_path.parent.mkdir(parents=True, exist_ok=True)
     xml_path.write_text(xml, encoding="utf-16")
@@ -164,7 +172,7 @@ def install(settings: Settings, interval_minutes: int | None = None, run_when_lo
         proc = _schtasks("/Create", "/TN", TASK_NAME, "/XML", str(xml_path), "/F")
         output = (proc.stdout + proc.stderr).strip()
     return {"ok": proc.returncode == 0, "output": output, "xml": str(xml_path), "interval_minutes": interval,
-            "logon_type": logon, "previous_saved": str(previous) if previous else None}
+            "logon_type": logon, "wake_to_run": wake, "previous_saved": str(previous) if previous else None}
 
 
 def restore_previous(settings: Settings) -> dict:
@@ -215,6 +223,45 @@ def uninstall(task_name: str = TASK_NAME) -> dict:
 def run_now() -> dict:
     proc = _schtasks("/Run", "/TN", TASK_NAME)
     return {"ok": proc.returncode == 0, "output": (proc.stdout + proc.stderr).strip()}
+
+
+def task_settings(xml_text: str) -> dict:
+    """What an installed task's XML says about running unattended: logon type, wake-to-run, boot trigger."""
+    ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+    body = xml_text.strip()
+    if body.startswith("<?xml"):
+        body = body[body.index("?>") + 2:]  # the declaration names UTF-16, but this text is already decoded
+    # Task Scheduler's own definition of our tasks (schtasks /Query /XML), not untrusted input
+    root = ElementTree.fromstring(body)  # noqa: S314
+    text = lambda path: (root.findtext(path, default="", namespaces=ns) or "").strip()  # noqa: E731
+    return {"logon_type": text("t:Principals/t:Principal/t:LogonType") or "InteractiveToken",
+            "wake_to_run": text("t:Settings/t:WakeToRun").lower() == "true",
+            "boot_trigger": root.find("t:Triggers/t:BootTrigger", ns) is not None}
+
+
+def unattended_readiness(xml_by_task: dict[str, str | None]) -> list[str]:
+    """Plain findings on whether work continues while the owner is signed out or the PC sleeps."""
+    findings = []
+    for name, xml_text in xml_by_task.items():
+        if xml_text is None:
+            findings.append(f"{name}: not installed.")
+            continue
+        t = task_settings(xml_text)
+        if t["logon_type"] in ("Password", "S4U"):
+            findings.append(f"{name}: runs while you are signed out ({t['logon_type']} logon)"
+                            + ("; also starts after a reboot before you log in." if t["boot_trigger"] else "."))
+        else:
+            findings.append(f"{name}: runs only while you are logged on; it stops when you sign out.")
+        findings.append(f"{name}: {'wakes the PC from sleep to run' if t['wake_to_run'] else 'does not wake the PC: nothing runs while it sleeps'}.")
+    return findings
+
+
+def installed_xml(task_name: str) -> str | None:
+    """The installed task's definition (read-only), or None."""
+    if os.name != "nt":
+        return None
+    proc = _schtasks("/Query", "/TN", task_name, "/XML")
+    return proc.stdout if proc.returncode == 0 and "<Task" in proc.stdout else None
 
 
 def query(task_name: str = TASK_NAME) -> dict:
