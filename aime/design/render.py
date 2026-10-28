@@ -89,7 +89,11 @@ def render_html(brief: VisualBrief, style: str, brand: dict, monogram: str) -> s
 def _browser_args(browser: Path, profile: Path, w: int, h: int) -> list[str]:
     args = [str(browser), "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
             "--no-default-browser-check", "--disable-extensions", "--disable-sync", f"--user-data-dir={profile}",
-            "--force-device-scale-factor=1", f"--window-size={w},{h}", "--virtual-time-budget=3000"]
+            "--force-device-scale-factor=1", f"--window-size={w},{h}", "--virtual-time-budget=3000",
+            # no crash reporter: it outlives the browser and keeps files in the throwaway profile open
+            "--disable-breakpad", "--disable-crash-reporter",
+            # Edge 156+ relaunches itself and returns at once, losing --dump-dom and racing --screenshot; Chrome ignores it
+            "--edge-skip-compat-layer-relaunch"]
     if os.name != "nt":
         args.append("--no-sandbox")  # CI containers; on Windows the sandbox stays on
     return args
@@ -152,8 +156,10 @@ def find_blank_patches(png: Path, white_boxes: list | None = None, black_boxes: 
 
 
 def render_one(browser: Path, html: str, out_png: Path, w: int, h: int, timeout: float = 60) -> dict:
-    """Measure, then screenshot. Returns the layout metrics (empty if the page could not be measured)."""
-    with tempfile.TemporaryDirectory(prefix="aime-render-") as tmp:
+    """Measure, then screenshot. Returns the layout metrics (empty if the page could not be measured).
+    The throwaway browser profile is removed afterwards; a file a browser helper still holds open is left for the
+    system's temp cleanup instead of failing the render."""
+    with tempfile.TemporaryDirectory(prefix="aime-render-", ignore_cleanup_errors=True) as tmp:
         work = Path(tmp)
         page = work / "card.html"
         page.write_text(html, encoding="utf-8")
