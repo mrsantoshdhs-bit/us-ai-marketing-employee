@@ -19,8 +19,9 @@
         <div class="checks">{% for k, item in (industries if kind == 'multi_industries' else services).items() %}<label><input type="checkbox" name="{{ name }}" value="{{ k }}" {{ 'checked' if k in (value or []) }}> {{ item.label if item.label is defined else item.name }}</label> {% endfor %}</div></fieldset>
     {% elif kind == 'grade' %}
       <label>{{ label }}<select name="{{ name }}">{% for g in ['A', 'B', 'C'] %}<option {{ 'selected' if value == g }}>{{ g }}</option>{% endfor %}</select></label>
-    {% elif kind == 'user' %}
-      <label>{{ label }}<select name="{{ name }}"><option value="">nobody assigned</option>{% for u, r in users %}<option value="{{ u }}" {{ 'selected' if value == u }}>{{ u }} ({{ r|replace('_', ' ') }})</option>{% endfor %}</select></label>
+    {% elif kind == 'users' %}{% set picked = [value] if value is string else (value or []) %}
+      <fieldset style="grid-column:1/-1"><legend class="small">{{ label }}{% if name in overridden %} <span class="pill">changed here</span>{% endif %}</legend>
+        <div class="checks">{% for u, r in users %}<label><input type="checkbox" name="{{ name }}" value="{{ u }}" {{ 'checked' if u in picked }}> {{ u }} ({{ r|replace('_', ' ') }})</label> {% else %}<span class="muted">no active dashboard users</span>{% endfor %}</div></fieldset>
     {% elif kind == 'bool' %}
       <label><span><input type="checkbox" name="{{ name }}" value="yes" {{ 'checked' if value }}> {{ label }}</span></label>
     {% else %}

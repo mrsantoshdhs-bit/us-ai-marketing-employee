@@ -50,6 +50,13 @@ def integration_statuses(ctx: AppContext, session: Session, include_scheduler: b
     rows.append({"name": "LinkedIn publishing (official API)", "state": state, "detail": li.reason,
                  "action": "Add LinkedIn app credentials to .env, then Connect LinkedIn" if not li.configured else
                  ("Connect LinkedIn on the Integrations page" if not li.connected else "")})
+    from aime.integrations import linkedin_leads
+
+    ll = linkedin_leads.status(s, session)
+    rows.append({"name": "LinkedIn leads (Lead Sync API)", "state": "READY" if ll.ready else (
+        "NOT CONFIGURED" if not ll.configured else ("NOT CONNECTED" if not ll.connected else
+                                                    ("DISABLED" if ll.owners and not ll.enabled else "BLOCKED"))),
+        "detail": ll.reason, "action": "" if ll.ready else "See LinkedIn leads on the Integrations page"})
     rows.append({"name": "Publishing master switch", "state": "ENABLED" if s.publishing_enabled else "DISABLED",
                  "detail": "PUBLISHING_ENABLED in .env (posts also need per-post approval)", "action": ""})
 

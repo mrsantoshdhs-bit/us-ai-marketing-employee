@@ -187,6 +187,24 @@ def cmd_suppress(args, ctx) -> int:
     return 0
 
 
+def cmd_erase(args, ctx) -> int:
+    """A person asked us to delete their data: erase it and keep the address only on the suppression list."""
+    from aime.crm_ops import erase_person
+
+    if not args.confirm:
+        print("This permanently erases the person's details, inquiries and emails. Run again with --confirm.")
+        return 2
+    with ctx.db.session() as s:
+        try:
+            counts = erase_person(s, args.email, "owner (command line)")
+        except ValueError as exc:
+            print(exc)
+            return 2
+    print("Erased: " + ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in counts.items())
+          + ". The address stays on the suppression list so nothing is sent to it again.")
+    return 0
+
+
 def cmd_seed_demo(args, ctx) -> int:
     """Build a separate demo database from fictional sample data (never mixed with real data)."""
     import httpx
@@ -626,6 +644,9 @@ def build_parser() -> argparse.ArgumentParser:
     su = sub.add_parser("suppress", help="Add an email or domain to the do-not-contact list")
     su.add_argument("value")
     su.add_argument("--reason", default="Requested by contact")
+    er = sub.add_parser("erase", help="A person asked us to delete their data: erase it (kept only as do-not-contact)")
+    er.add_argument("email")
+    er.add_argument("--confirm", action="store_true", help="required: the erasure cannot be undone")
     sd = sub.add_parser("seed-demo", help="Build a separate demo database from fictional sample data")
     sd.add_argument("--data-dir", default=str(BASE_DIR / "demo_data"))
     sd.add_argument("--llm", default="template", choices=["template", "auto", "ollama"])
@@ -644,6 +665,7 @@ COMMANDS = {
     "init": cmd_init, "status": cmd_status, "run": cmd_run, "tick": cmd_tick, "serve": cmd_serve,
     "email-check": cmd_email_check,
     "scheduler": cmd_scheduler, "automation": cmd_automation, "llm-check": cmd_llm_check, "inbound": cmd_inbound, "suppress": cmd_suppress,
+    "erase": cmd_erase,
     "seed-demo": cmd_seed_demo, "doctor": cmd_doctor, "backup": cmd_backup, "maintenance": cmd_maintenance,
     "refresh-graphics": cmd_refresh_graphics, "backup-verify": cmd_backup_verify, "restore-drill": cmd_restore_drill,
     "user": cmd_user, "policy": cmd_policy, "simulate-reply": cmd_simulate_reply, "research-recheck": cmd_research_recheck,
