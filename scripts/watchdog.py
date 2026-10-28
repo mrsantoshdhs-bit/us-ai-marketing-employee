@@ -8,6 +8,7 @@ helpers), so it works even when the app itself is broken. Findings are appended 
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -15,6 +16,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 DATA = Path(os.environ.get("AIME_DATA_DIR") or ROOT / "data")
 STALE_AFTER = timedelta(minutes=45)  # three missed 15-minute ticks
+# At sign-in this task and the Dashboard task both start 2 minutes after logon: give a dashboard that is still
+# starting this long to answer before reporting it as not running.
+DASHBOARD_GRACE_SECONDS = 180
+DASHBOARD_RECHECK_SECONDS = 10
 
 
 def check(data_dir: Path, now: datetime | None = None) -> list[str]:
@@ -39,18 +44,27 @@ def check(data_dir: Path, now: datetime | None = None) -> list[str]:
     return []
 
 
-def dashboard_problem(host: str = "127.0.0.1", port: int | None = None) -> str | None:
+def dashboard_problem(host: str = "127.0.0.1", port: int | None = None, wait_seconds: float = 0,
+                      sleep=time.sleep, clock=time.monotonic) -> str | None:
+    """None when the dashboard answers on its port. With `wait_seconds`, a dashboard that does not answer yet is
+    checked again every few seconds until then (it may still be starting) before it is reported."""
     import socket
 
     from dotenv import dotenv_values
 
     port = port or int(os.environ.get("DASHBOARD_PORT") or dotenv_values(ROOT / ".env").get("DASHBOARD_PORT") or 8765)
-    try:
-        with socket.create_connection((host, port), timeout=2):
-            return None
-    except OSError:
-        return (f"The dashboard is not running (nothing on port {port}). Start it with scripts/start_dashboard.ps1, "
-                "or install `python -m aime scheduler install-dashboard` so it restarts by itself.")
+    deadline = clock() + wait_seconds
+    while True:
+        try:
+            with socket.create_connection((host, port), timeout=2):
+                return None
+        except OSError:
+            if clock() >= deadline:
+                break
+            sleep(DASHBOARD_RECHECK_SECONDS)
+    waited = f" after waiting {int(wait_seconds)} s for it to start" if wait_seconds else ""
+    return (f"The dashboard is not running (nothing on port {port}{waited}). Start it with scripts/start_dashboard.ps1, "
+            "or install `python -m aime scheduler install-dashboard` so it restarts by itself.")
 
 
 def main() -> int:
@@ -58,7 +72,7 @@ def main() -> int:
 
     problems = check(DATA)
     if not maintenance.active(DATA):
-        problems += [p for p in [dashboard_problem()] if p]
+        problems += [p for p in [dashboard_problem(wait_seconds=DASHBOARD_GRACE_SECONDS)] if p]
     if problems:
         from aime.notify import TITLE, toast
 
