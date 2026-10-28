@@ -76,7 +76,19 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         super().__init__(ctx)
         self.sender = sender or EmailSender(ctx.settings)
 
+    def _connect_oauth(self, session: Session) -> None:
+        """MAIL_AUTH=oauth: give the sender a way to get a fresh access token in this run (never stored on it)."""
+        if self.settings.mail_auth != "oauth" or self.sender.token is not None:
+            return
+        from aime.integrations import oauth
+
+        def token() -> str:
+            with self.ctx.http() as http:
+                return oauth.access_token(session, self.settings, http, self.settings.mail_oauth_provider, "mail")
+        self.sender.token = token
+
     def execute(self, inp: SalesInput, session: Session) -> SalesOutput:
+        self._connect_oauth(session)
         now = inp.now or utcnow()
         cfg = self.settings.section("followup")
         out = SalesOutput()
@@ -308,6 +320,10 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                     ok, why = eligible(session, self.settings, lead, for_send=True)
                     if ok and (lead.contact_id != f.contact_id or (f.to_email or "").lower() != (contact.email or "").lower()):
                         ok, why = False, "the contact or address changed after approval; draft a new email"
+                    if not ok and why.startswith("B2B outreach is turned off"):  # a pause, not a decision about this email
+                        f.blocked_reason = f"Held: {why}; it goes out when outreach is turned on again"[:300]
+                        out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+                        continue
                 if not ok:
                     f.status, f.blocked_reason = "cancelled", f"Not sent: {why}"[:300]
                     out.cancelled += 1
@@ -348,6 +364,11 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 continue
             if not in_window:
                 f.blocked_reason = "Waiting for the business-hours send window"
+                out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+                continue
+            if limits["mailbox_sent"] >= limits["mailbox_daily"]:  # every kind of email counts for the mailbox
+                f.blocked_reason = (f"The sales mailbox has sent {limits['mailbox_daily']} emails in 24 hours "
+                                    "(its limit); it goes out when the count drops")
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
                 continue
             if test_auth is not None:  # counts against, and is checked again with, the authorization
@@ -396,6 +417,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 continue
             f.message_id = msg_id
             record_delivery(session, f, utcnow(), self.sender.recipient_for(f.to_email or contact.email)[0], self.name)
+            limits["mailbox_sent"] += 1
             if f.kind == "outreach":
                 limits["sent_today"] += 1
                 limits["run"] += 1
@@ -420,7 +442,11 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         for addr in sent:
             d = (addr or "").split("@")[-1]
             domains[d] = domains.get(d, 0) + 1
-        return {"sent_today": len(sent), "domains": domains, "run": 0,
+        mailbox_sent = session.execute(select(func.count(FollowUp.id)).where(
+            FollowUp.channel == "email", FollowUp.status.in_(COUNTS_AS_SENT),
+            func.coalesce(FollowUp.sent_at, FollowUp.send_started_at) >= now - timedelta(hours=24))).scalar_one()
+        return {"sent_today": len(sent), "domains": domains, "run": 0, "mailbox_sent": mailbox_sent,
+                "mailbox_daily": int(pol.get("mailbox_daily_limit", 50)),
                 "daily": int(pol.get("daily_send_limit", 20)), "per_domain": int(pol.get("per_domain_daily_limit", 1)),
                 "per_run": int(pol.get("sends_per_run", 5))}
 

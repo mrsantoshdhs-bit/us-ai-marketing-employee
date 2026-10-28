@@ -184,6 +184,7 @@ def record_delivery(session: Session, f: FollowUp, sent_at, delivered_to: str | 
     follow-up, the lead's last activity, and the outreach stage that lets the next step be drafted."""
     f.status, f.sent_at, f.blocked_reason = "sent", sent_at, None
     f.delivered_to = delivered_to or f.delivered_to
+    f.delivery_status = f.delivery_status if f.delivery_status in ("bounced", "replied") else "sent"
     lead = f.lead
     lead.last_activity_at = sent_at
     if f.kind == "outreach" and lead.outreach_status in (None, "drafted", "approved"):

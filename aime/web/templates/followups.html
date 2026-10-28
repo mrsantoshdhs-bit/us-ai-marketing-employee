@@ -14,7 +14,7 @@
 {% for f in rows %}
 <div class="card" id="f{{ f.id }}">
   <div class="filters" style="justify-content:space-between">
-    <div><strong>{{ f.subject }}</strong> {{ status_pill(f.status) }} <span class="pill">{{ 'outreach' if f.kind == 'outreach' else f.channel }} · step {{ f.step }}</span>
+    <div><strong>{{ f.subject }}</strong> {{ status_pill(f.status) }}{% if f.delivery_status in ('bounced', 'replied') %} <span class="pill {{ 'bad' if f.delivery_status == 'bounced' else 'ok' }}">{{ f.delivery_status }}</span>{% endif %} <span class="pill">{{ 'outreach' if f.kind == 'outreach' else f.channel }} · step {{ f.step }}</span>
       {% if f.quality and f.quality.qc %}{{ qc_pill(f.quality.qc.status) }}{% endif %}
       {% if f.contact and f.contact.email_status == 'user_provided' %}<span class="pill warn" title="An address given to us, not published by the company">test contact: goes out only with your approval and an active campaign authorization naming this exact address</span>{% endif %}
       <div class="small muted">Lead: <a href="/leads/{{ f.lead_id }}">{{ f.lead.company.name }}</a>{% if f.contact %} · to {{ f.contact.display_name }} &lt;{{ f.to_email or f.contact.email }}&gt;{% if f.kind == 'outreach' %} ({{ (f.contact.email_status or '')|replace('_', ' ') }}{% if f.contact.email_confidence %}, {{ f.contact.email_confidence }}{% endif %}, {{ ext(f.contact.email_source_url, 'where published') }}){% endif %}{% endif %} · due {{ f.due_at|local }}</div>
