@@ -72,6 +72,8 @@ class EmailSender:
             return False, "NOT CONFIGURED: SMTP_HOST / SMTP_FROM missing"
         if not s.company_postal_address:
             return False, "NOT CONFIGURED: COMPANY_POSTAL_ADDRESS required (CAN-SPAM)"
+        if s.smtp_username and not s.smtp_password:
+            return False, "NOT CONFIGURED: SMTP_PASSWORD missing (the mailbox's app password); every send would fail at sign-in"
         if s.smtp_username and not s.smtp_use_tls:
             return False, "NOT SAFE: SMTP_USE_TLS=false would send the mailbox password unencrypted; set it to true"
         if s.test_recipients:

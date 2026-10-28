@@ -270,8 +270,12 @@ def test_the_scheduler_status_follows_the_evidence(make_ctx):
 
 
 def test_sending_switched_on_without_a_password_is_blocked_not_active(make_ctx):
-    ctx = make_ctx(outbound_email_enabled=True, smtp_host="smtp.example", smtp_password="")
-    assert board(ctx)["Email sending"][0] == "BLOCKED"
+    from tests.test_outreach import SENDING
+
+    ctx = make_ctx(**{**SENDING, "smtp_username": "sales@us.example", "smtp_password": ""})
+    status, detail = board(ctx)["Email sending"]
+    assert status == "BLOCKED" and "SMTP_PASSWORD missing" in detail
+    assert board(make_ctx(**{**SENDING, "smtp_username": "sales@us.example", "smtp_password": "x" * 8}))["Email sending"][0] == "ACTIVE"
 
 
 def test_backups_are_active_only_when_a_recent_one_was_verified(make_ctx):
