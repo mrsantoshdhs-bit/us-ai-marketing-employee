@@ -219,3 +219,54 @@ def test_dashboard_task_gives_a_console_less_process_somewhere_to_write(tmp_path
     sys.stderr.write("INFO: started\n")
     sys.stdout.close()
     assert "Uvicorn running" in (tmp_path / "logs" / "dashboard.log").read_text(encoding="utf-8")
+
+
+def _watchdog():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("watchdog", Path(__file__).parent.parent / "scripts" / "watchdog.py")
+    wd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(wd)
+    return wd
+
+
+class FakeClock:
+    """time.monotonic and time.sleep without waiting; `on_sleep` runs at each pause."""
+
+    def __init__(self, on_sleep=None):
+        self.now, self.sleeps, self.on_sleep = 0.0, 0, on_sleep
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+        self.sleeps += 1
+        if self.on_sleep:
+            self.on_sleep(self.sleeps)
+
+
+def test_watchdog_gives_a_dashboard_that_is_still_starting_time_to_answer():
+    """At sign-in the Watchdog and Dashboard tasks start together; a dashboard that comes up within the grace
+    period is not reported as stopped (it used to be, two seconds after it started)."""
+    import socket
+    wd = _watchdog()
+    with socket.socket() as srv:
+        srv.bind(("127.0.0.1", 0))
+        port = srv.getsockname()[1]
+        fake = FakeClock(on_sleep=lambda n: n == 2 and srv.listen())  # starts answering after the second pause
+        assert wd.dashboard_problem(port=port, wait_seconds=wd.DASHBOARD_GRACE_SECONDS, sleep=fake.sleep,
+                                    clock=fake.clock) is None
+        assert fake.sleeps == 2
+
+
+def test_watchdog_still_reports_a_dashboard_that_never_answers():
+    import socket
+    wd = _watchdog()
+    assert wd.DASHBOARD_GRACE_SECONDS >= 120  # longer than a slow start right after sign-in
+    with socket.socket() as srv:
+        srv.bind(("127.0.0.1", 0))
+        port = srv.getsockname()[1]
+        fake = FakeClock()
+        problem = wd.dashboard_problem(port=port, wait_seconds=60, sleep=fake.sleep, clock=fake.clock)
+        assert "not running" in problem and "after waiting 60 s" in problem
+        assert fake.sleeps == 60 // wd.DASHBOARD_RECHECK_SECONDS
