@@ -89,6 +89,9 @@ def create_context(settings: Settings | None = None, http_transport: httpx.BaseT
             raise DataRoleMismatch(
                 f"Database at {settings.database_url} is a '{role}' database but settings say "
                 f"'{settings.data_role}'. Refusing to mix real and sample data.")
+    with db.session() as s:  # the Super Admin's sales settings, laid over config/business.toml
+        from aime import admin_settings
+        admin_settings.load(s, settings)
     return AppContext(settings=settings, db=db, http_transport=http_transport)
 
 

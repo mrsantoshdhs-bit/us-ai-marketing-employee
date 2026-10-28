@@ -63,6 +63,7 @@ class ResearchFocus:
 
 
 class Source(ABC):
+    countries: tuple[str, ...] = ("US",)  # where this source finds companies ("*": any, e.g. your own list)
     name: str = "source"
     title: str = "Source"
     description: str = ""

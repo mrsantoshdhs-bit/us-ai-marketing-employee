@@ -39,6 +39,17 @@ def test_website_prefers_company_domain_over_job_boards_and_media():
     assert post("etc. | Engineer | Austin, TX") is None
 
 
+def test_company_names_drop_urls_labels_and_job_fields():
+    def name(header):
+        c = parse_post({"id": 3, "author": "x", "created_at": "2026-10-01T15:00:00.000Z", "text": header})
+        return c and c.name
+
+    assert name("Quillstack https://quillstack.example | Engineer | Remote (US)") == "Quillstack"
+    assert name("Company: quillstack.example\nLocation: Austin, TX ONSITE") == "quillstack.example"
+    assert name("Role: UX/UI Designer\nAPPLY: https://quillstack.example/careers") is None
+    assert name("https://quillstack.example/jobs | Engineer | NYC") == "quillstack.example"
+
+
 def test_research_run_filters_dedupes_and_is_idempotent(ctx):
     res = USBusinessResearchAgent(ctx).run({"sources": ["hn_hiring", "sec_edgar"]})
     assert res.ok, res.error

@@ -269,9 +269,13 @@ def record_meeting(session: Session, settings, info: dict, actor: str, row: Inbo
         session.add(Alert(level="info", source="meetings", message=msg[:500]))
         notify_event(settings, msg)
         return meeting, f"meeting with {info['invitee_email']} recorded but not matched to a lead"
-    meeting.opportunity_id = _advance_opportunity(session, lead, meeting, actor).id
+    opp = _advance_opportunity(session, lead, meeting, actor)
+    meeting.opportunity_id = opp.id
     set_status(session, lead, "meeting", actor, f"{info['starts_at']:%Y-%m-%d %H:%M} UTC")
     lead.last_activity_at = utcnow()
+    if not simulated:
+        from aime.handover import handover
+        handover(session, settings, opp, f"meeting booked for {_when_label(meeting)} ({info['invitee_email']})", actor)
     closed = close_open_emails(session, lead, f"Meeting booked for {_when_label(meeting)}: not needed")
     overlap = session.execute(select(Meeting.id).where(Meeting.id != meeting.id, Meeting.status == "scheduled",
                                                        func.lower(Meeting.invitee_email) != info["invitee_email"],

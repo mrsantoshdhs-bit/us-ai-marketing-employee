@@ -34,6 +34,7 @@ class InboxOutput(BaseModel):
     categories: dict[str, int] = Field(default_factory=dict)
     needs_review: int = 0
     proposals: int = 0  # A4: meeting-time proposals drafted for approval
+    booked: int = 0  # meetings booked on their own inside an approved campaign
 
 
 class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
@@ -108,6 +109,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                                lambda: oauth.access_token(session, self.settings, http, provider, "calendar"))
             try:
                 out.proposals = booking.propose_pending(session, self.settings, cal, self.name)
+                out.booked = booking.act_on_answers(session, self.settings, cal, self.name)
             except (CalendarError, oauth.OAuthError) as exc:
                 session.add(Alert(level="warning", source=self.name, message=f"Meeting times not proposed: {exc}"))
 

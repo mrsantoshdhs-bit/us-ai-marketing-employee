@@ -1,0 +1,34 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}Sales settings · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+  <h1>{{ icon('sliders') }} Sales settings <span class="pill">Super Admin</span></h1>
+  <p class="subtitle">Who the AI employee looks for, how it qualifies them, how much it may send, the follow-up sequence, meeting hours and who gets the handovers. Changes take effect at once here and on the next scheduled run; the defaults stay in <code>config/business.toml</code>.</p>
+</div></div>
+
+<div class="send-check warn"><b>{{ icon('lock') }} These settings release no email</b>
+  <span>Sending still needs <code>OUTBOUND_EMAIL_ENABLED</code>, a primary mailbox and your approvals or an active campaign; the stop switches are on <a href="/automation">Automation Control</a>.</span>
+  <span>Discovery for {{ values['targeting.country'] }}: {% if coverage %}{{ coverage }}.{% else %}<strong>no authorized discovery source for this country yet</strong>: discovery finds nothing until one is added (your own CSV import still works).{% endif %}</span></div>
+
+<form class="card form-grid mbx-form" method="post" action="/admin/settings">
+  {% set section = namespace(name='') %}
+  {% for sec, key, label, check, kind in fields %}{% set name = sec ~ '.' ~ key %}{% set value = values[name] %}
+    {% if sec != section.name %}{% set section.name = sec %}<h3 style="grid-column:1/-1;margin:10px 0 0">{{ {'targeting': 'Targeting', 'qualification': 'Qualification', 'outreach': 'Outreach and sequence', 'followup': 'Send window', 'meetings': 'Meetings', 'handover': 'Handover'}[sec] }}</h3>{% endif %}
+    {% if kind == 'multi_industries' or kind == 'multi_services' %}
+      <fieldset style="grid-column:1/-1"><legend class="small">{{ label }}{% if name in overridden %} <span class="pill">changed here</span>{% endif %}</legend>
+        <div class="checks">{% for k, item in (industries if kind == 'multi_industries' else services).items() %}<label><input type="checkbox" name="{{ name }}" value="{{ k }}" {{ 'checked' if k in (value or []) }}> {{ item.label if item.label is defined else item.name }}</label> {% endfor %}</div></fieldset>
+    {% elif kind == 'grade' %}
+      <label>{{ label }}<select name="{{ name }}">{% for g in ['A', 'B', 'C'] %}<option {{ 'selected' if value == g }}>{{ g }}</option>{% endfor %}</select></label>
+    {% elif kind == 'user' %}
+      <label>{{ label }}<select name="{{ name }}"><option value="">nobody assigned</option>{% for u, r in users %}<option value="{{ u }}" {{ 'selected' if value == u }}>{{ u }} ({{ r|replace('_', ' ') }})</option>{% endfor %}</select></label>
+    {% elif kind == 'bool' %}
+      <label><span><input type="checkbox" name="{{ name }}" value="yes" {{ 'checked' if value }}> {{ label }}</span></label>
+    {% else %}
+      <label>{{ label }}{% if name in overridden %} <span class="pill">changed here</span>{% endif %}<input name="{{ name }}" {{ 'type=number' if kind == 'number' }} value="{{ value|join(', ') if value is iterable and value is not string else value }}"></label>
+    {% endif %}
+  {% endfor %}
+  <button style="grid-column:1/-1">Save settings</button>
+</form>
+<form method="post" action="/admin/settings/reset"><button class="secondary">Reset to the defaults in config/business.toml</button></form>
+<p class="small muted">Every change is in the <a href="/audit">audit log</a> with the old and new value. Only Super Admin accounts see this page.</p>
+{% endblock %}

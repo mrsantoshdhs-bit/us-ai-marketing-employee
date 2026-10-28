@@ -42,7 +42,7 @@ from aime import automation as am
 from aime.models import (MailAccount, MeetingProposal, Activity, AgentRun, Alert, AuditEvent, Campaign, CampaignAuthorization, Company, Contact,
                          ContentItem, FollowUp, InboundEmail, InboundInquiry, Meeting,
                          JobRun, JobState, Lead, MarketingPlan, Opportunity, PolicyDecision, PublishAttempt, Report,
-                         ResearchSnapshot, ResearchTopic, Signal)
+                         ResearchSnapshot, ResearchTopic, Signal, User)
 from aime.monitoring import agent_stats, read_heartbeat
 from aime.policy import agreement, environment_blockers, evaluate_shadow, policy_config
 from aime.qc import summary as qc_summary
@@ -1211,13 +1211,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def automation_authorize_rule(request: Request, name: str = Form(...), min_grade: str = Form("B"),
                                   addresses: str = Form("role_or_published"), verified_website: str = Form(""),
                                   daily_limit: int = Form(5), total_limit: int = Form(20), days: int = Form(7),
-                                  notes: str = Form("")):
+                                  notes: str = Form(""), answer_replies: str = Form("")):
         if not is_admin(request):
             raise HTTPException(403, "Only an administrator can authorize a campaign")
         with C().db.session() as s:
             try:
                 a = am.create_rule_authorization(s, who(request), name, min_grade, addresses, verified_website == "yes",
-                                                 daily_limit, total_limit, days, notes)
+                                                 daily_limit, total_limit, days, notes, answer_replies=answer_replies == "yes")
             except ValueError as exc:
                 return back("/automation#authorize-rule", str(exc))
             aid = a.id
@@ -1300,6 +1300,45 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     # ------------------------------------------------------------------ Super Admin: mailboxes
     # The auth middleware lets only a Super Admin reach /admin/mailboxes and /api/mailboxes (viewing included); the
     # same-origin check covers every change. Secrets are write-only: never rendered or returned.
+    # ------------------------------------------------------------------ Super Admin: sales settings
+    @app.get("/admin/settings", response_class=HTMLResponse)
+    def sales_settings_page(request: Request):
+        from aime import admin_settings
+        from aime.knowledge.industries import INDUSTRIES
+        from aime.knowledge.services import SERVICES
+        ctx = C()
+        with ctx.db.session() as s:
+            users = [(u.username, u.role) for u in s.execute(select(User).where(User.active.is_(True))
+                                                             .order_by(User.username)).scalars()]
+            overridden = {f"{sec}.{k}" for sec, keys in admin_settings.overrides(s).items() for k in keys}
+        values = admin_settings.current(ctx.settings)
+        country = str(values["targeting.country"] or "US").upper()
+        return render(request, "admin_settings.html", fields=admin_settings.FIELDS, values=values, users=users,
+                      overridden=overridden, industries=INDUSTRIES, services=SERVICES,
+                      coverage=admin_settings.COUNTRY_SOURCES.get(country))
+
+    @app.post("/admin/settings")
+    async def sales_settings_save(request: Request):
+        from aime import admin_settings
+        ctx = C()
+        form = await request.form()
+        with ctx.db.session() as s:
+            try:
+                changes = admin_settings.save(s, ctx.settings, who(request), form)
+            except ValueError as exc:
+                s.rollback()
+                return back("/admin/settings", f"Not saved: {exc}")
+        return back("/admin/settings", f"Saved: {len(changes)} change(s), in effect now and on the next scheduled run"
+                    if changes else "Nothing changed")
+
+    @app.post("/admin/settings/reset")
+    def sales_settings_reset(request: Request):
+        from aime import admin_settings
+        ctx = C()
+        with ctx.db.session() as s:
+            admin_settings.reset(s, ctx.settings, who(request))
+        return back("/admin/settings", "Back to the defaults in config/business.toml")
+
     @app.get("/admin/mailboxes", response_class=HTMLResponse)
     def mailboxes_page(request: Request, edit: int | None = None):
         ctx = C()

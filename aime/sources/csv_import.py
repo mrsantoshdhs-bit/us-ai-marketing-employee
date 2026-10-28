@@ -60,6 +60,7 @@ def read_company_csv(path: Path) -> list[CompanyCandidate]:
 
 class CSVImportSource(Source):
     name = "csv_import"
+    countries = ("*",)  # your own imported list: whatever country it holds
     title = "CSV import (your authorized lists)"
     description = "Company lists you provide in data/imports/*.csv"
 
