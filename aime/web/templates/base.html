@@ -24,7 +24,8 @@
     <a class="brand" href="/"><span class="brand-logo">AI</span><span class="brand-text"><b>AI Sales Employee</b><small>Your sales &amp; marketing workforce</small></span></a>
     <nav>
       {%- set nav_sections = [
-        (None, [('/', 'Dashboard', 'dashboard', None, ''), ('/command-center', 'Sales Command Center', 'sparkle', None, 'NEW')]),
+        (None, [('/', 'Dashboard', 'dashboard', None, ''), ('/manager', 'Manager Today', 'eye', None, ''),
+                ('/command-center', 'Sales Command Center', 'sparkle', None, 'NEW')]),
         ('Sales', [('/pipeline', 'CRM Pipeline', 'kanban', None, ''), ('/companies', 'Companies', 'building', None, ''),
                    ('/contacts', 'Contacts', 'users', None, ''), ('/leads', 'Leads', 'target', None, '')]),
         ('Engagement', [('/inbox', 'Conversations', 'chat', nav_c.replies, ''), ('/followups', 'Follow-ups', 'send', None, ''),

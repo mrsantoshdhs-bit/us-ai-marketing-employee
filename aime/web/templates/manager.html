@@ -1,0 +1,89 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}{% from "_macros.html" import tier %}
+{% block title %}Manager Today · AI Sales Employee{% endblock %}
+{% block content %}
+{% set duty_label, duty_tone, duty_note, duty_head = employee.duty %}
+<div class="page-head">
+  <div>
+    <h1>{{ icon('eye') }} Manager Today</h1>
+    <p class="subtitle">{{ day_label }}. What happened today, what needs you and why, and how the automation is doing. Routine work the AI employee handles on its own is counted, not listed.</p>
+  </div>
+  <span class="state-chip {{ duty_tone }}"><i></i>{{ duty_label }}</span>
+</div>
+
+<section class="mgr-tiles" aria-label="Today at a glance">
+  <a class="mgr-tile{{ ' hot' if needs }}" href="#needs"><b>{{ needs|length }}</b><span>need you</span></a>
+  <a class="mgr-tile" href="#qualified"><b>{{ qualified|length }}</b><span>leads qualified today</span></a>
+  <a class="mgr-tile" href="#hot"><b>{{ hot|length + opportunities|length }}</b><span>hot leads and open opportunities</span></a>
+  <a class="mgr-tile" href="#replies"><b>{{ interested|length }}</b><span>interested replies, 7 days</span></a>
+  <a class="mgr-tile" href="#replies"><b>{{ requests|length }}</b><span>meeting requests not yet booked</span></a>
+  <a class="mgr-tile" href="#meetings"><b>{{ meetings|length }}</b><span>confirmed meetings ahead</span></a>
+</section>
+
+<section class="cc-grid">
+  <div class="panel" id="needs">
+    <div class="panel-head"><h2>{{ icon('check-square') }} Needs you</h2><a class="panel-link" href="/approvals">Approval Queue {{ icon('arrow-right') }}</a></div>
+    <p class="small muted panel-sub">Only what a person has to decide, with the reason. {% if posts_waiting %}{{ posts_waiting }} LinkedIn post{{ 's' if posts_waiting != 1 }} also wait{{ 's' if posts_waiting == 1 }} for approval.{% endif %}</p>
+    {% for n in needs %}
+    <div class="row-item"><span class="pill warn">{{ n.kind }}</span> <a href="{{ n.href }}">{{ n.text[:110] }}</a> <span class="muted small">{{ n.who }}</span>
+      <div class="small muted">Why: {{ n.why }}</div></div>
+    {% else %}<div class="empty-state"><b>Nothing needs you</b>Exceptions such as pricing questions, unclear replies and unconfirmed sends appear here.</div>{% endfor %}
+    {% if held %}<div class="small muted">{{ held }} approved email{{ 's' if held != 1 }} held: {{ health.blockers[0] if health.blockers else 'waiting for the next send window' }}.</div>{% endif %}
+  </div>
+
+  <div class="panel" id="health">
+    <div class="panel-head"><h2>{{ icon('activity') }} Automation health</h2><a class="panel-link" href="/command-center">Command Center {{ icon('arrow-right') }}</a></div>
+    <div class="status-row"><span class="k">AI employee</span><span class="val">{{ duty_label }}: {{ duty_note }}</span></div>
+    <div class="status-row"><span class="k">Scheduled runs, 24 h</span><span class="val">{{ employee.live.jobs_24h }}{% if employee.live.failed_24h %}, <span class="bad-text">{{ employee.live.failed_24h }} not successful</span>{% else %}, all successful{% endif %}</span></div>
+    <div class="status-row"><span class="k">AI team</span><span class="val">{% for label, cls, n in team_counts %}<span class="st-chip st-{{ cls }}"><i></i>{{ n }} {{ label|lower }}</span> {% endfor %}</span></div>
+    <div class="status-row"><span class="k">Mode and state</span><span class="val">{{ health.mode|title }} · {{ health.state|replace('_', ' ') }} · {{ health.authorizations }} active authorization{{ 's' if health.authorizations != 1 }}</span></div>
+    <div class="status-row"><span class="k">Sending</span><span class="val">{{ 'on' if health.sending else 'off' }}</span></div>
+    <div class="status-row"><span class="k">Mailbox reading</span><span class="val">{{ 'on' if health.reading else 'off' }}</span></div>
+    <div class="status-row"><span class="k">LinkedIn publishing</span><span class="val">{{ 'on' if health.publishing else 'off' }}</span></div>
+    {% if health.blockers %}<div class="send-check warn"><b>{{ icon('lock') }} No email goes out without a person</b>{% for b in health.blockers %}<span>{{ b }}</span>{% endfor %}</div>{% endif %}
+  </div>
+</section>
+
+<section class="cc-grid">
+  <div class="panel" id="qualified">
+    <div class="panel-head"><h2>{{ icon('target') }} Qualified today</h2><a class="panel-link" href="/leads?status=qualified">All qualified {{ icon('arrow-right') }}</a></div>
+    {% for q in qualified %}
+    <div class="row-item">{{ tier(q.lead) }} <a href="/leads/{{ q.lead.id }}">{{ q.company }}</a> <span class="muted small">grade {{ q.lead.grade or '-' }}, score {{ q.lead.score }} · {{ q.at|local(None, '%H:%M') }}</span>
+      <div class="small {{ 'muted' if q.reachable else 'warn-text' }}">{{ 'a usable email is on file' if q.reachable else 'no usable email yet: research continues' }}</div></div>
+    {% else %}<div class="empty-state"><b>No leads qualified today</b>Leads appear here when research and scoring qualify them.</div>{% endfor %}
+  </div>
+  <div class="panel" id="hot">
+    <div class="panel-head"><h2>{{ icon('star') }} Hot leads and open opportunities</h2><a class="panel-link" href="/pipeline">Pipeline {{ icon('arrow-right') }}</a></div>
+    {% for o in opportunities %}
+    <div class="row-item"><span class="pill ok">{{ o.stage|title }}</span> <a href="/pipeline">{{ o.name }}</a> <span class="muted small">{{ o.next_step or '' }}</span></div>
+    {% endfor %}
+    {% for h in hot %}
+    <div class="row-item">{{ tier(h.lead) }} <a href="/leads/{{ h.lead.id }}">{{ h.company }}</a> <span class="muted small">{{ h.why }}</span></div>
+    {% endfor %}
+    {% if not opportunities and not hot %}<div class="empty-state"><b>No hot leads or open opportunities</b>An interested reply or a booked meeting makes a lead hot.</div>{% endif %}
+  </div>
+</section>
+
+<section class="cc-grid three-up">
+  <div class="panel" id="replies">
+    <div class="panel-head"><h2>{{ icon('chat') }} Interested replies</h2><a class="panel-link" href="/inbox?show=all">Conversations {{ icon('arrow-right') }}</a></div>
+    {% for r in interested %}<div class="row-item"><a href="/inbox?show=all">{{ r.subject or '(no subject)' }}</a> <span class="muted small">{{ r.from_email }} · {{ r.received_at|local(None, '%a %H:%M') }}</span></div>
+    {% else %}<div class="empty-state"><b>No interested replies in 7 days</b>{% if not health.reading %}Mailbox reading is off, so replies are not read.{% endif %}</div>{% endfor %}
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h2>{{ icon('calendar') }} Meeting requests</h2></div>
+    {% for r in requests %}<div class="row-item"><a href="/inbox?show=all">{{ r.subject or '(no subject)' }}</a> <span class="muted small">{{ r.from_email }}</span><div class="small muted">not booked yet: the reply offers the booking link</div></div>
+    {% else %}<div class="empty-state"><b>No open meeting requests</b>Replies asking for a call appear here until they book.</div>{% endfor %}
+  </div>
+  <div class="panel" id="meetings">
+    <div class="panel-head"><h2>{{ icon('calendar-check') }} Confirmed meetings</h2><a class="panel-link" href="/meetings">Meetings {{ icon('arrow-right') }}</a></div>
+    {% for m in meetings %}<div class="row-item"><b>{{ m.starts_at|et }}</b> {{ m.invitee_name or m.invitee_email }}{% if m.lead %} · <a href="/leads/{{ m.lead_id }}">{{ m.lead.company.name }}</a>{% endif %}</div>
+    {% else %}<div class="empty-state"><b>No meetings booked</b>Calendly bookings appear here{% if not health.reading %} once mailbox reading is on{% endif %}.</div>{% endfor %}
+  </div>
+</section>
+
+<section class="panel" id="failures">
+  <div class="panel-head"><h2>{{ icon('alert') }} Failures and alerts</h2><a class="panel-link" href="/command-center#issues">Details {{ icon('arrow-right') }}</a></div>
+  {% for p in failures %}<div class="row-item"><span class="st-chip st-failed"><i></i>{{ p.what }}</span> {% if p.href %}<a href="{{ p.href }}">{{ p.why }}</a>{% else %}{{ p.why }}{% endif %} <span class="muted small">{{ p.at|local(None, '%a %H:%M') }}</span></div>
+  {% else %}<div class="empty-state"><b>No failures in the last 24 hours</b>and no open alerts.</div>{% endfor %}
+</section>
+{% endblock %}

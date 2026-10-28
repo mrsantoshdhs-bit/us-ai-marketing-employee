@@ -727,3 +727,14 @@ a.agent-card:hover { color: var(--text); text-decoration: none; transform: trans
   .hero-copy > p { max-width: 60%; }
   .hero-robot, .hero-panel.wide .hero-robot { width: 38%; right: -12px; top: 16px; }
 }
+
+/* Manager Today: six counts that link to their sections */
+.mgr-tiles { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 16px; margin-bottom: 22px; }
+.mgr-tile { display: flex; flex-direction: column; gap: 2px; padding: 16px 18px; border-radius: var(--radius-lg); background: rgba(255, 255, 255, .92);
+            border: 1px solid rgba(255, 255, 255, .9); box-shadow: var(--shadow); color: var(--text); }
+.mgr-tile:hover { text-decoration: none; color: var(--text); box-shadow: var(--shadow-hover); }
+.mgr-tile b { font-family: var(--font-display); font-size: 30px; font-weight: 780; letter-spacing: -.02em; line-height: 1.1; }
+.mgr-tile span { color: var(--text-2); font-size: 13.5px; }
+.mgr-tile.hot { background: linear-gradient(180deg, #fff4e5, #fff); } .mgr-tile.hot b { color: var(--warn); }
+@media (max-width: 1360px) { .mgr-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .mgr-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

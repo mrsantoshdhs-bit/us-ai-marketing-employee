@@ -54,7 +54,7 @@ from aime.reply_intel import act as act_on_reply
 from aime.meetings import check_double_bookings, record_meeting, reopen_after_cancel
 from aime.scheduler.runner import ABANDON_AFTER, due_jobs, load_job_specs, next_run, run_job
 from aime.scoring import lead_tier, tier_reason
-from aime.timeutil import fmt_et, fmt_local, local_tz, utcnow
+from aime.timeutil import as_aware_utc, fmt_et, fmt_local, local_tz, to_naive_utc, utcnow
 from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username,
                            make_cookie, safe_next, session_secret, user_count)
 
@@ -223,6 +223,14 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         with ctx.db.session() as s:
             view = {**ai_employee(ctx, s), **dashboard_view(ctx, s, days)}
         return render(request, "today.html", **view)
+
+    # ------------------------------------------------------------------ Sales Manager: today and exceptions
+    @app.get("/manager", response_class=HTMLResponse)
+    def manager_page(request: Request):
+        ctx = C()
+        with ctx.db.session() as s:
+            view = manager_today(ctx, s)
+        return render(request, "manager.html", **view)
 
     # ------------------------------------------------------------------ Sales Command Center (how the work runs)
     @app.get("/command-center", response_class=HTMLResponse)
@@ -1500,6 +1508,89 @@ def run_summary(output: dict | None, limit: int = 6) -> str:
             continue
         parts.append(f"{key.replace('_', ' ')} {value}")
     return " · ".join(parts[:limit]) or "no figures recorded"
+
+
+def manager_today(ctx: AppContext, s) -> dict:
+    """The Sales Manager's day, read from the records: what happened today (leads newly qualified, interested
+    replies, meeting requests, confirmed meetings), the hot opportunities, the exceptions that need a person with
+    the reason each one does, the failures, and the automation's health. Routine work the AI employee handles on
+    its own is counted, not listed. "Today" starts at local midnight."""
+    st = ctx.settings
+    now = utcnow()
+    tz = local_tz(st.schedule.get("timezone"))
+    day_start = to_naive_utc(as_aware_utc(now).astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0))
+    week = now - timedelta(days=7)
+    real = InboundEmail.is_simulated.is_(False)
+    reachable = lambda company_id: bool(s.execute(select(Contact.id).where(  # noqa: E731
+        Contact.company_id == company_id, *USABLE_EMAIL)).first())
+
+    qualified, seen = [], set()
+    for a in s.execute(select(Activity).where(Activity.type == "status_change", Activity.subject.like("%→ qualified%"),
+                                              Activity.created_at >= day_start).order_by(Activity.id.desc())).scalars():
+        lead = s.get(Lead, a.lead_id) if a.lead_id else None
+        if lead is None or lead.id in seen or lead.status != "qualified":
+            continue
+        seen.add(lead.id)
+        qualified.append({"lead": lead, "company": lead.company.name, "at": a.created_at, "reachable": reachable(lead.company_id)})
+
+    hot = [{"lead": lead, "company": lead.company.name, "why": tier_reason(lead), "reachable": reachable(lead.company_id)}
+           for lead in s.execute(select(Lead).where(Lead.status != "disqualified")).scalars() if lead_tier(lead) == "HOT"]
+    opportunities = s.execute(select(Opportunity).where(Opportunity.stage.not_in(("won", "lost")))
+                              .order_by(Opportunity.updated_at.desc()).limit(10)).scalars().all()
+    interested = s.execute(select(InboundEmail).where(real, InboundEmail.category == "interested",
+                                                      InboundEmail.received_at >= week)
+                           .order_by(InboundEmail.received_at.desc()).limit(10)).scalars().all()
+    booked = {m.lead_id for m in s.execute(select(Meeting).where(Meeting.status == "scheduled", Meeting.ends_at >= now)).scalars()}
+    requests = [r for r in s.execute(select(InboundEmail).where(real, InboundEmail.intent == "meeting_request",
+                                                                InboundEmail.received_at >= week)
+                                     .order_by(InboundEmail.received_at.desc()).limit(10)).scalars()
+                if r.lead_id not in booked]
+    meetings = s.execute(select(Meeting).where(Meeting.status == "scheduled", Meeting.ends_at >= now,
+                                               Meeting.is_simulated.is_(False)).order_by(Meeting.starts_at).limit(10)).scalars().all()
+
+    # exceptions: only what a person has to decide, each with the reason
+    mode = am.get_mode(s)
+    needs = []
+    for r in s.execute(select(InboundEmail).where(InboundEmail.status == "needs_review")
+                       .order_by(InboundEmail.received_at.desc()).limit(10)).scalars():
+        why = ("a pricing question: prices always need a person" if r.intent == "pricing_request"
+               else "the AI is not sure what it means" if r.confidence != "high" else "the reply needs a person's answer")
+        needs.append({"kind": "Reply", "text": r.subject or "(no subject)", "who": r.from_email, "why": why, "href": "/inbox"})
+    for f in s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "awaiting_approval")
+                       .order_by(FollowUp.due_at).limit(15)).scalars():
+        if st.require_human_approval:
+            why = "every email needs a person while REQUIRE_HUMAN_APPROVAL=true"
+        elif mode == "approval":
+            why = "Approval mode: every email needs a person"
+        else:
+            covered, why = am.campaign_for(s, f, mode, now)
+            if covered is not None:
+                continue  # it goes out at send time under its authorization: routine work, not an exception
+        needs.append({"kind": "Email", "text": f.subject, "who": am.recipient(f), "why": why, "href": f"/followups#f{f.id}"})
+    for f in s.execute(select(FollowUp).where(FollowUp.status == "uncertain")).scalars():
+        needs.append({"kind": "Email outcome", "text": f.subject, "who": am.recipient(f),
+                      "why": "the mail server did not confirm delivery: check the Sent folder", "href": "/followups?show=all"})
+    for p in s.execute(select(ContentItem).where(ContentItem.status == "uncertain")).scalars():
+        needs.append({"kind": "Post outcome", "text": p.title, "who": "LinkedIn", "why": "LinkedIn did not confirm the post",
+                      "href": f"/content/{p.id}"})
+    posts_waiting = s.execute(select(func.count(ContentItem.id)).where(ContentItem.status == "awaiting_approval")).scalar_one()
+    held = s.execute(select(func.count(FollowUp.id)).where(FollowUp.channel == "email", FollowUp.status == "approved",
+                                                           FollowUp.sent_at.is_(None))).scalar_one()
+
+    employee = ai_employee(ctx, s)
+    ready, reason = EmailSender(st).status()
+    failures = employee["employee"]["live"]["problems"] + [
+        {"what": f"{a.level} alert", "why": a.message[:160], "at": a.created_at, "href": "/system#alerts"}
+        for a in s.execute(select(Alert).where(Alert.acknowledged.is_(False), Alert.level.in_(("error", "warning")))
+                           .order_by(Alert.id.desc()).limit(6)).scalars()]
+    return dict(
+        day_label=f"{as_aware_utc(now).astimezone(tz):%A %d %B %Y}", qualified=qualified, hot=hot, opportunities=opportunities,
+        interested=interested, requests=requests, meetings=meetings, needs=needs, posts_waiting=posts_waiting,
+        held=held, failures=failures, employee=employee["employee"], team_counts=employee["team_counts"],
+        health={"mode": mode, "state": am.get_state(s), "sending": st.outbound_email_enabled, "reading": bool(st.imap_host),
+                "publishing": st.publishing_enabled, "blockers": am.blockers(s, st, ready, reason),
+                "authorizations": len(am.active_authorizations(s, now))},
+    )
 
 
 def job_schedule(ctx: AppContext, s, now: datetime) -> list[dict]:
