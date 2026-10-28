@@ -87,7 +87,8 @@
       </form>{% endif %}
     </header>
     <main>
-      {% if data_role != 'production' %}<div class="flash demo">{{ data_role|upper }} DATABASE: sample data only. Nothing here is a real prospect.</div>{% endif %}
+      {% if data_role in ('demo', 'test') %}<div class="flash demo">{{ data_role|upper }} DATABASE: sample data only. Nothing here is a real prospect.</div>
+      {% elif data_role != 'production' %}<div class="flash demo">{{ data_role|upper }} ENVIRONMENT: a separate copy for testing. Nothing done here reaches production.</div>{% endif %}
       {% if maintenance %}<div class="flash">Maintenance in progress until {{ maintenance.until }} (UTC): scheduled and manual jobs are paused.</div>{% endif %}
       {% if msg %}<div class="flash">{{ msg }}</div>{% endif %}
       {% block content %}{% endblock %}

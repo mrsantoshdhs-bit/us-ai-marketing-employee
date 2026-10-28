@@ -274,7 +274,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             policy_now = {"would_publish": sum(r["decision"] == "would_publish" for r in pending),
                           "would_hold": sum(r["decision"] == "would_hold" for r in pending), **policy["counts"]}
             post_decisions = {r["content_id"]: r["decision"] for r in policy["rows"]}
-            center = command_center(ctx, s)
+            center = {**command_center(ctx, s), **ai_employee(ctx, s)}
         return render(request, "today.html", posts=posts, emails=emails, tasks=tasks, task_total=task_total,
                       exceptions=exceptions, alerts=alerts, funnel=funnel, stages=stages, health=health,
                       policy=policy_now, post_decisions=post_decisions, replies=replies, upcoming=upcoming, **center)
@@ -1335,3 +1335,96 @@ def command_center(ctx: AppContext, s) -> dict:
                   "last_notice": s.execute(select(func.max(InboundEmail.received_at)).where(
                       InboundEmail.category == "calendly")).scalar_one()},
     )
+
+
+# The AI employee's team as the Command Center shows it: the agent, what it does, and how its state is read.
+TEAM = [
+    ("research", "Company discovery", "Finds US companies from approved sources"),
+    ("company_research", "Company research", "Reads company websites and SEC filings; finds decision-makers"),
+    ("qualification", "Lead qualification", "Scores and tiers every lead, with its reasons"),
+    ("sales_workflow", "Outreach & follow-ups", "Drafts emails for approval; sends approved ones"),
+    ("inbox_monitor", "Reply intelligence", "Reads replies, classifies intent, updates the CRM"),
+    ("crm", "CRM upkeep", "Verifies websites, merges duplicates, keeps records clean"),
+    ("marketing_manager", "Marketing planner", "Plans LinkedIn themes and campaigns"),
+    ("linkedin_content", "Content writer", "Drafts LinkedIn posts with quality checks"),
+    ("publishing", "Publishing", "Publishes approved posts"),
+    ("analytics", "Analytics", "Daily and weekly sales reports"),
+]
+
+
+def ago(at: datetime | None, now: datetime) -> str:
+    if at is None:
+        return "never"
+    minutes = int((now - at).total_seconds() // 60)
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes} min ago"
+    if minutes < 48 * 60:
+        return f"{minutes // 60} h ago"
+    return f"{minutes // (24 * 60)} days ago"
+
+
+def ai_employee(ctx: AppContext, s) -> dict:
+    """The AI Sales Employee as one colleague: on duty or not (from the scheduler's heartbeat and the automation
+    state), what it did in the last 24 hours, what waits for you, and each agent of its team with a status read from
+    its runs. Every figure is counted from the records; nothing is invented."""
+    st = ctx.settings
+    now = utcnow()
+    day = now - timedelta(hours=24)
+    cnt = lambda m, *c: s.execute(select(func.count(m.id)).where(*c)).scalar_one()  # noqa: E731
+    state = am.get_state(s)
+    hb = read_heartbeat(st)
+    if state in ("stopped", "emergency_stop"):
+        duty = ("Stopped", "bad", "automation is stopped in the Control Center")
+    elif hb is None:
+        duty = ("Off duty", "warn", "no scheduled run recorded for this database")
+    else:
+        beat = datetime.fromisoformat(hb["at"].rstrip("Z"))
+        if hb.get("state") == "running":
+            duty = ("Working now", "ok", "running its scheduled jobs")
+        elif now - beat <= timedelta(minutes=35):
+            duty = ("On duty", "ok", f"last check-in {ago(beat, now)}; it checks in every 15 minutes")
+        else:
+            duty = ("Off duty", "warn", f"last check-in {ago(beat, now)}: the PC may be asleep or the scheduler stopped")
+    if state == "paused":
+        duty = (duty[0], "warn", duty[2] + "; sending paused")
+    did = [
+        ("companies researched", cnt(Company, Company.researched_at >= day), "/companies"),
+        ("leads scored", cnt(Lead, Lead.last_scored_at >= day), "/leads"),
+        ("emails drafted", cnt(FollowUp, FollowUp.channel == "email", FollowUp.created_at >= day), "/followups"),
+        ("emails sent", cnt(FollowUp, FollowUp.channel == "email", FollowUp.sent_at >= day), "/followups?show=all"),
+        ("replies read", cnt(InboundEmail, InboundEmail.processed_at >= day, InboundEmail.is_simulated.is_(False)), "/inbox?show=all"),
+        ("meetings booked", cnt(Meeting, Meeting.created_at >= day, Meeting.is_simulated.is_(False)), "/meetings"),
+    ]
+    waiting = [
+        ("emails to approve", cnt(FollowUp, FollowUp.channel == "email", FollowUp.status == "awaiting_approval"), "/followups"),
+        ("replies to review", cnt(InboundEmail, InboundEmail.status == "needs_review"), "/inbox"),
+        ("meetings in 24 h", cnt(Meeting, Meeting.status == "scheduled", Meeting.starts_at >= now,
+                                 Meeting.starts_at <= now + timedelta(hours=24)), "/meetings"),
+    ]
+    stats = {r["agent"]: r for r in agent_stats(s, days=1)}
+    team = []
+    for agent, title, job in TEAM:
+        last = s.execute(select(AgentRun).where(AgentRun.agent == agent).order_by(AgentRun.id.desc()).limit(1)).scalars().first()
+        if agent == "publishing" and not st.publishing_enabled:
+            status, note = "BLOCKED", "publishing is off (PUBLISHING_ENABLED=false)"
+        elif agent == "inbox_monitor" and not st.imap_host:
+            status, note = "BLOCKED", "mailbox reading is off (IMAP not set)"
+        elif state in ("stopped", "emergency_stop"):
+            status, note = "PAUSED", "automation stopped"
+        elif last is None:
+            status, note = "IDLE", "has not run on this database yet"
+        elif last.status == "running" and last.started_at >= now - timedelta(minutes=30):
+            status, note = "ACTIVE", f"working since {ago(last.started_at, now)}"
+        elif last.status in ("failed", "abandoned"):
+            status, note = "FAILED", (last.error or "last run failed")[:90]
+        else:
+            status, note = "IDLE", f"last ran {ago(last.finished_at or last.started_at, now)}"
+        if agent == "sales_workflow" and status == "IDLE" and not st.outbound_email_enabled:
+            note += "; drafting only, sending off"
+        row = stats.get(agent)
+        team.append({"agent": agent, "title": title, "job": job, "status": status, "note": note,
+                     "runs": row["runs"] if row else 0, "rate": row["success_rate"] if row else None})
+    return {"employee": {"duty": duty, "did": did, "waiting": waiting, "mode": am.get_mode(s), "state": state},
+            "team": team}

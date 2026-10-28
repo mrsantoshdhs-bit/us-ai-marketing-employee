@@ -1,28 +1,57 @@
 {% extends "base.html" %}{% from "_macros.html" import status_pill, qc_pill %}
 {% block title %}Command Center · AI Sales Employee{% endblock %}
 {% block content %}
-<div class="page-head">
-  <div>
-    <h1>Sales Command Center</h1>
-    <p class="subtitle">{{ company_name }} · every number below is counted from your records; nothing is estimated</p>
+{% set duty_label, duty_tone, duty_note = employee.duty %}
+<section class="hero" aria-label="Your AI Sales Employee">
+  <div class="hero-id">
+    <div class="avatar" aria-hidden="true"><span>AI</span><i class="presence {{ duty_tone }}"></i></div>
+    <div>
+      <div class="eyebrow">Your AI Sales Employee · {{ company_name }}</div>
+      <h1>Sales Command Center</h1>
+      <div class="duty"><span class="pill {{ duty_tone }}">{{ duty_label }}</span> <span class="small muted">{{ duty_note }}</span></div>
+      <div class="small muted hero-note">{{ employee.mode|title }} mode · every number on this page is counted from your records; nothing is estimated</div>
+    </div>
   </div>
-  <div class="head-actions">
-    <a class="btn secondary" href="/automation">{{ automation.mode|title }} mode · {{ automation.state|replace('_', ' ') }}</a>
-    <a class="btn" href="/followups">Review approvals</a>
+  <div class="hero-col">
+    <div class="eyebrow">Last 24 hours</div>
+    <div class="did-grid">
+      {% for label, n, href in employee.did %}<a href="{{ href }}" class="did{{ ' zero' if not n }}"><b>{{ n }}</b><span>{{ label }}</span></a>{% endfor %}
+    </div>
   </div>
-</div>
+  <div class="hero-col">
+    <div class="eyebrow">Waiting for you</div>
+    {% for label, n, href in employee.waiting %}<a class="wait-row" href="{{ href }}"><span>{{ label }}</span><b class="{{ 'hot' if n }}">{{ n }}</b></a>{% endfor %}
+    <div class="row-actions hero-actions"><a class="btn" href="/followups">Review approvals</a><a class="btn secondary" href="/automation">Automation</a></div>
+  </div>
+</section>
 
-<div class="health">
-  {% for label, state, detail in health %}
-  <div class="h {{ state }}"><b>{{ label }}</b><span>{{ detail }}</span></div>
-  {% endfor %}
-</div>
+{% set ns = namespace(issues=0) %}{% for _l, st_, _d in health %}{% if st_ != 'ok' %}{% set ns.issues = ns.issues + 1 %}{% endif %}{% endfor %}
+<details class="health-panel">
+  <summary><span class="dots">{% for _l, st_, _d in health %}<i class="{{ st_ }}"></i>{% endfor %}</span>
+    System health · {{ ns.issues ~ ' need attention' if ns.issues else 'all good' }} <span class="muted small">(show)</span></summary>
+  <div class="health">
+    {% for label, state, detail in health %}
+    <div class="h {{ state }}"><b>{{ label }}</b><span>{{ detail }}</span></div>
+    {% endfor %}
+  </div>
+</details>
 
 <section aria-label="Key figures" class="kpi-grid">
   {% for label, value, href, hint in kpis %}
   <a class="kpi" href="{{ href }}"><div class="l">{{ label }}</div><div class="v">{{ value }}</div><div class="hint">{{ hint }}</div></a>
   {% endfor %}
 </section>
+
+<div class="section-title"><h2>Your AI team <span class="muted small">{{ team|selectattr('status', 'equalto', 'ACTIVE')|list|length }} working now · status read from each agent's runs</span></h2><a class="small" href="/agents">All agent runs →</a></div>
+<div class="team">
+  {% for a in team %}
+  <div class="agent {{ a.status|lower }}">
+    <div class="agent-head"><span class="agent-dot"></span><b>{{ a.title }}</b><span class="status">{{ a.status }}</span></div>
+    <div class="small muted">{{ a.job }}</div>
+    <div class="agent-foot">{{ a.note }}{% if a.runs %} · {{ a.runs }} run{{ 's' if a.runs != 1 }} in 24 h, {{ a.rate }}% ok{% endif %}</div>
+  </div>
+  {% endfor %}
+</div>
 
 <div class="section-title"><h2>Performance</h2><span class="muted small">last 8 weeks, by week</span></div>
 <div class="three">
