@@ -252,8 +252,9 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
             return
         # Hybrid/Automatic mode: an active campaign authorization may approve waiting emails, at send time only
+        # only inside the send window: an approval that has to wait would still count against the campaign's limits
         by_campaign = (ready and not self.settings.require_human_approval and automation.get_mode(session) != "approval"
-                       and bool(automation.active_authorizations(session, now)))
+                       and self._in_send_window(now, cfg) and bool(automation.active_authorizations(session, now)))
         if not by_campaign and not session.execute(due.limit(1)).first():
             return
         from aime.scheduler.runner import FileLock  # here, not at import time: the runner imports the agents
@@ -282,7 +283,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             contact = f.contact
             lead = f.lead
             test_auth = None  # the authorization a given test contact's email goes out under
-            gone = automation.campaign_approval_problem(session, f, now)  # a campaign's approval holds while it does
+            gone = automation.campaign_approval_problem(session, f, now, self.settings)  # holds while the campaign does
             if gone:
                 automation.return_to_person(f, gone)
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))

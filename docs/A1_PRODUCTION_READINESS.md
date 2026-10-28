@@ -13,10 +13,10 @@ Supporting documents:
 
 ## Proposed production changes, in order
 
-Each step needs the owner's separate go-ahead. None has been given. Commands run in the production folder, in the owner's own terminal:
+Each step needs the owner's separate go-ahead. None has been given. Commands run in the production folder, in the owner's own PowerShell terminal:
 
 ```
-cd %USERPROFILE%\Documents\us-ai-marketing-employee
+cd $env:USERPROFILE\Documents\us-ai-marketing-employee
 ```
 
 ### Step 1: merge and deploy the A1 branch (code only)
@@ -46,7 +46,7 @@ There is no database migration and no task change.
 ### Step 2: preflight (read-only, safe at any time after step 1)
 
 ```
-.venv\Scripts\python.exe -m aime scheduler preflight
+.\.venv\Scripts\python.exe -m aime scheduler preflight
 ```
 
 **Expected on this PC today:**
@@ -59,7 +59,7 @@ There is no database migration and no task change.
 ### Step 3: isolated test (creates a temporary task, then deletes it)
 
 ```
-.venv\Scripts\python.exe -m aime scheduler test-unattended
+.\.venv\Scripts\python.exe -m aime scheduler test-unattended
 ```
 
 **What happens:**
@@ -77,7 +77,7 @@ There is no database migration and no task change.
 ### Step 4: switch the Tick task to run while signed out (the A1 change)
 
 ```
-.venv\Scripts\python.exe -m aime scheduler install --run-when-logged-off
+.\.venv\Scripts\python.exe -m aime scheduler install --run-when-logged-off
 ```
 
 Add `--wake` to also let it wake the PC from sleep (on mains power only on this PC; see the power notes below).
@@ -110,7 +110,7 @@ Add `--wake` to also let it wake the PC from sleep (on mains power only on this 
 ### Rollback of step 4
 
 ```
-.venv\Scripts\python.exe -m aime scheduler restore-previous
+.\.venv\Scripts\python.exe -m aime scheduler restore-previous
 ```
 
 This re-registers the saved interactive definition (no password needed), immediately. Data is unaffected.

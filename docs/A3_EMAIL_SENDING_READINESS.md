@@ -12,7 +12,7 @@ servers. In production nothing can be sent today, for two reasons: `OUTBOUND_EMA
 out by themselves: once sending is switched on, each waits until a person presses **Confirm again**. Two conditions
 come before any live send. First, mailbox reading (A2) should be on, so that opt-outs and bounces are acted on.
 Second, reachability is the real limit: only 5 of 42 qualified leads have a usable address, and all 5 are company
-role mailboxes. Sending **without a person** (rule-based authorization) should wait until defect 2 below is fixed.
+role mailboxes. Sending **without a person** (rule-based authorization) should wait until defect 2 below is fixed (fix on branch `sales/30-campaign-limits`, pending merge).
 
 ## What exists
 
@@ -27,7 +27,7 @@ role mailboxes. Sending **without a person** (rule-based authorization) should w
 | "Confirm again" for approvals given while sending was off | Exists | `aime/automation.py` `observe_sending`, `needs_reconfirmation`, `reconfirm`; checked in `_send_locked`; shown on Follow-ups and Approvals | Switching sending on never releases a backlog. Depends on a stored "sending was off" record (see Risks) |
 | Authorization by address | Exists | `automation.py` `create_authorization`, `parse_recipients`, `change_authorization` | Exact addresses only, no wildcards. Limits: 50 recipients, 50 a day, 500 in total, 30 days. Saved as a draft until an administrator activates it |
 | Authorization by rule | Exists | `create_rule_authorization`, `rule_problem`, `describe_rule` | Outreach only. Grade A, or B and better. Choice of a decision-maker's published address only, or also company role mailboxes. Optional verified-website condition |
-| Send-time decision | Exists, defect | `campaign_for`, `apply_campaign_approvals`, `campaign_approval_problem` | Needs `REQUIRE_HUMAN_APPROVAL=false`, Hybrid or Automatic mode, state running and an active authorization. Pricing, legal and commitment words always go to a person (`SENSITIVE`), as do held or failed checks. See defect 2 |
+| Send-time decision | Exists (defect 2 fixed on `sales/30-campaign-limits`) | `campaign_for`, `apply_campaign_approvals`, `campaign_approval_problem` | Needs `REQUIRE_HUMAN_APPROVAL=false`, Hybrid or Automatic mode, state running and an active authorization. Pricing, legal and commitment words always go to a person (`SENSITIVE`), as do held or failed checks. See defect 2 |
 | Personalized drafting | Exists | `aime/outreach.py` `gather_evidence`, `draft_outreach`, `personal_line` | Quotes the company's own words verbatim and keeps the source link on the draft. With no evidence, the lead gets a review task instead of an email |
 | Quality checks | Exists | `aime/qc/email_checks.py` `run_email_checks` | Length 40–160 words. Subject: 70 characters or fewer, no fake "Re:", no shouting. Also checks spam words, unsupported claims, numbers, that quotes match the evidence, no links in the email, the footer, the recipient, spelling, grammar and clichés. A held or failed result needs an explicit "I reviewed" tick. Checks run again after edits |
 | Re-check at send time | Exists | `outreach.py` `eligible(for_send=True)` in `_send_locked` | Cancels the email if the lead, address or consent changed |
@@ -57,8 +57,11 @@ role mailboxes. Sending **without a person** (rule-based authorization) should w
    So the next run can approve more, and a campaign's daily or total limit can be exceeded. The global 20/day,
    5/run and 1/domain limits still hold. Also, `campaign_approval_problem` does not re-check
    `REQUIRE_HUMAN_APPROVAL`: setting it back to `true` does not hold emails a campaign has already approved. Pausing
-   or stopping the authorization, Pause, or Approval mode does. No test covers this. It is not active today (0
-   authorizations).
+   or stopping the authorization, Pause, or Approval mode does. It is not active today (0 authorizations).
+   **Fixed on branch `sales/30-campaign-limits`:** limits count approvals still waiting to go out
+   (`committed_counts`); campaigns approve only inside the send window; just before sending, a campaign approval
+   is re-checked against the campaign's limits and `REQUIRE_HUMAN_APPROVAL`, and goes back to a person if either
+   fails (`tests/test_campaign_limits.py`, 5 tests that fail on the old code).
 3. `docs/SALES_SETUP.md` §5 and `docs/HANDOVER.md` describe `[outreach] b2b_enabled = false` as only stopping new
    drafts. In the code, `eligible()` then fails at send time, so approved outreach emails, the five drafts
    included, are **cancelled** at the next run. `_ensure_outreach` also never drafts again for a lead that already
@@ -87,7 +90,7 @@ role mailboxes. Sending **without a person** (rule-based authorization) should w
 9. **For each draft:** re-read it, then **Confirm again** or **Reject**. A confirmed email goes out on the next run
    inside the window and the limits.
 10. **Later, and optional:** routine outreach without a person. Set `REQUIRE_HUMAN_APPROVAL=false`, keep Hybrid mode,
-    and have an administrator create **and activate** a rule. Do this only after defect 2 is fixed.
+    and have an administrator create **and activate** a rule. Do this only after the defect 2 fix is merged and deployed.
 
 ## What happens once enabled
 
