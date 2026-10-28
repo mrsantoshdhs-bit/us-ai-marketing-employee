@@ -740,3 +740,5 @@ a.agent-card:hover { color: var(--text); text-decoration: none; transform: trans
 .mgr-tile.hot { background: linear-gradient(180deg, #fff4e5, #fff); } .mgr-tile.hot b { color: var(--warn); }
 @media (max-width: 1360px) { .mgr-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .mgr-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.mbx-form label { display: flex; flex-direction: column; gap: 4px; }
+.mbx-form details label { margin-top: 6px; }

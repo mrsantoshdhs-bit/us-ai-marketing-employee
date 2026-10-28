@@ -56,8 +56,8 @@ class OAuthError(RuntimeError):
     """Sign-in or token problem, in words for the owner (never contains a token)."""
 
 
-def token_key(provider: str, purpose: str) -> str:
-    return f"{provider}:{purpose}"
+def token_key(provider: str, purpose: str, account: int | None = None) -> str:
+    return f"{provider}:{purpose}" if account is None else f"mailbox:{account}"
 
 
 def credentials(settings, provider: str) -> tuple[str, str]:
@@ -66,6 +66,21 @@ def credentials(settings, provider: str) -> tuple[str, str]:
     if provider == "microsoft":
         return settings.microsoft_client_id, settings.microsoft_client_secret
     raise OAuthError(f"Unknown sign-in provider {provider!r}")
+
+
+def _client(session: Session, settings, provider: str, account: int | None) -> tuple[str, str, str]:
+    """(client id, client secret, tenant): from .env, or from a mailbox configured in the Super Admin panel, which
+    carries its organisation's own app registration (the secret stored encrypted)."""
+    if account is None:
+        client_id, secret = credentials(settings, provider)
+        return client_id, secret, settings.microsoft_tenant or "common"
+    from aime.models import MailAccount
+
+    row = session.get(MailAccount, account)
+    if row is None:
+        raise OAuthError("That mailbox no longer exists")
+    return (row.oauth_client_id or "", unprotect(row.oauth_client_secret) if row.oauth_client_secret else "",
+            row.oauth_tenant or "common")
 
 
 def configured(settings, provider: str) -> bool:
@@ -77,25 +92,26 @@ def redirect_uri(settings) -> str:
     return f"http://127.0.0.1:{settings.dashboard_port}/integrations/oauth/callback"
 
 
-def _endpoint(settings, provider: str, name: str) -> str:
-    return PROVIDERS[provider][name].format(tenant=settings.microsoft_tenant or "common")
+def _endpoint(tenant: str, provider: str, name: str) -> str:
+    return PROVIDERS[provider][name].format(tenant=tenant or "common")
 
 
-def start(session: Session, settings, provider: str, purpose: str) -> str:
+def start(session: Session, settings, provider: str, purpose: str, account: int | None = None) -> str:
     """The provider's sign-in page for this purpose; remembers a one-time state and the PKCE verifier."""
     if provider not in PROVIDERS or purpose not in PURPOSES:
         raise OAuthError("Unknown provider or purpose")
-    client_id, _secret = credentials(settings, provider)
+    client_id, _secret, tenant = _client(session, settings, provider, account)
     if not client_id:
-        raise OAuthError(f"Set {provider.upper()}_CLIENT_ID and {provider.upper()}_CLIENT_SECRET in .env first")
+        raise OAuthError(f"Set {provider.upper()}_CLIENT_ID and {provider.upper()}_CLIENT_SECRET in .env first"
+                         if account is None else "Give the mailbox's app registration client ID first")
     state, verifier = secrets.token_urlsafe(24), secrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     kv_set(session, "oauth.pending", {"state": state, "verifier": protect(verifier), "provider": provider,
-                                      "purpose": purpose, "at": utcnow().isoformat()})
+                                      "purpose": purpose, "account": account, "at": utcnow().isoformat()})
     params = {"client_id": client_id, "redirect_uri": redirect_uri(settings), "response_type": "code",
               "scope": PROVIDERS[provider]["scopes"][purpose], "state": state, "code_challenge": challenge,
               "code_challenge_method": "S256", **PROVIDERS[provider]["extra"]}
-    return f"{_endpoint(settings, provider, 'auth')}?{urlencode(params)}"
+    return f"{_endpoint(tenant, provider, 'auth')}?{urlencode(params)}"
 
 
 def finish(session: Session, settings, http: httpx.Client, state: str, code: str, actor: str = "admin") -> OAuthToken:
@@ -105,13 +121,13 @@ def finish(session: Session, settings, http: httpx.Client, state: str, code: str
     fresh = pending.get("at") and utcnow() - datetime.fromisoformat(pending["at"]) < STATE_TTL
     if not state or not code or state != pending.get("state") or not fresh:
         raise OAuthError("Invalid or expired sign-in; please start again")
-    provider, purpose = pending["provider"], pending["purpose"]
-    client_id, secret = credentials(settings, provider)
+    provider, purpose, account = pending["provider"], pending["purpose"], pending.get("account")
+    client_id, secret, tenant = _client(session, settings, provider, account)
     data = {"grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri(settings),
             "client_id": client_id, "code_verifier": unprotect(pending["verifier"])}
     if secret:
         data["client_secret"] = secret
-    row = store(session, provider, purpose, _token_request(http, _endpoint(settings, provider, "token"), data))
+    row = store(session, provider, purpose, _token_request(http, _endpoint(tenant, provider, "token"), data), account)
     from aime.automation import audit
     audit(session, actor, "account_connected", row.provider, "OAuth sign-in completed; tokens stored encrypted")
     return row
@@ -128,8 +144,8 @@ def _token_request(http: httpx.Client, url: str, data: dict) -> dict:
     return body
 
 
-def store(session: Session, provider: str, purpose: str, body: dict) -> OAuthToken:
-    key = token_key(provider, purpose)
+def store(session: Session, provider: str, purpose: str, body: dict, account: int | None = None) -> OAuthToken:
+    key = token_key(provider, purpose, account)
     row = session.execute(select(OAuthToken).where(OAuthToken.provider == key)).scalars().first()
     if row is None:
         row = OAuthToken(provider=key, access_token="")
@@ -144,34 +160,35 @@ def store(session: Session, provider: str, purpose: str, body: dict) -> OAuthTok
     return row
 
 
-def connected(session: Session, provider: str, purpose: str) -> OAuthToken | None:
-    return session.execute(select(OAuthToken).where(OAuthToken.provider == token_key(provider, purpose))).scalars().first()
+def connected(session: Session, provider: str, purpose: str, account: int | None = None) -> OAuthToken | None:
+    key = token_key(provider, purpose, account)
+    return session.execute(select(OAuthToken).where(OAuthToken.provider == key)).scalars().first()
 
 
 def access_token(session: Session, settings, http: httpx.Client, provider: str, purpose: str,
-                 now: datetime | None = None) -> str:
+                 now: datetime | None = None, account: int | None = None) -> str:
     """A valid access token, refreshed shortly before it expires. Raises OAuthError when not connected."""
-    row = connected(session, provider, purpose)
+    row = connected(session, provider, purpose, account)
     if row is None:
         raise OAuthError(f"The {PROVIDERS[provider]['label']} account is not connected for {purpose} "
-                         "(Integrations page)")
+                         + ("(Integrations page)" if account is None else "(Mailboxes page: Connect)"))
     now = now or utcnow()
     if row.expires_at and row.expires_at - REFRESH_MARGIN > now:
         return unprotect(row.access_token)
     if not row.refresh_token:
         raise OAuthError("The sign-in has expired and cannot be renewed: connect the account again")
-    client_id, secret = credentials(settings, provider)
+    client_id, secret, tenant = _client(session, settings, provider, account)
     data = {"grant_type": "refresh_token", "refresh_token": unprotect(row.refresh_token), "client_id": client_id}
     if secret:
         data["client_secret"] = secret
     if provider == "microsoft":
         data["scope"] = PROVIDERS[provider]["scopes"][purpose]
-    return unprotect(store(session, provider, purpose, _token_request(http, _endpoint(settings, provider, "token"),
-                                                                      data)).access_token)
+    return unprotect(store(session, provider, purpose, _token_request(http, _endpoint(tenant, provider, "token"), data),
+                           account).access_token)
 
 
-def disconnect(session: Session, provider: str, purpose: str) -> bool:
-    row = connected(session, provider, purpose)
+def disconnect(session: Session, provider: str, purpose: str, account: int | None = None) -> bool:
+    row = connected(session, provider, purpose, account)
     if row is not None:
         session.delete(row)
     return row is not None

@@ -1,0 +1,61 @@
+{% extends "base.html" %}{% from "_macros.html" import state_pill %}{% from "_icons.html" import icon %}
+{% block title %}Mailboxes · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+  <h1>{{ icon('mail') }} Mailboxes <span class="pill">Super Admin</span></h1>
+  <p class="subtitle">The sales mailboxes: Gmail or Google Workspace with an app password, Microsoft 365 with OAuth. Passwords and secrets are stored encrypted on this PC and never shown again.</p>
+</div></div>
+
+<div class="send-check warn"><b>{{ icon('lock') }} Nothing is read or sent from here by itself</b>
+  <span>A new mailbox is <strong>disabled</strong>. Enable it, then turn on <strong>Read replies</strong> to read it (read-only), or make it <strong>Primary</strong> to send from it.</span>
+  <span>Sending also needs <code>OUTBOUND_EMAIL_ENABLED</code> ({{ 'on' if sending_on else 'off' }}) and every approval: sending status now: {{ sender_status }}.</span>
+  <span><strong>Test connection</strong> signs in to IMAP (read-only) and SMTP and sends nothing.</span></div>
+
+<div class="card table-wrap"><table>
+  <tr><th>Mailbox</th><th>Sign-in</th><th>State</th><th>Last test</th><th>Actions</th></tr>
+  {% for m in rows %}<tr>
+    <td><b>{{ m.label }}</b><br><span class="small">{{ m.email }}</span><br><span class="small muted">{{ m.imap_host }}:{{ m.imap_port }} · {{ m.smtp_host }}:{{ m.smtp_port }} · {{ m.imap_folder }}</span></td>
+    <td class="small">{{ presets[m.provider].label }}<br>
+      {% if m.auth == 'oauth' %}{{ state_pill('CONNECTED' if m.connected else 'NOT CONNECTED') }}{% if not m.has_oauth_secret %} <span class="muted">public client</span>{% endif %}
+      {% else %}{{ 'app password stored' if m.has_secret else 'no app password' }}{% endif %}</td>
+    <td>{{ state_pill('ACTIVE' if m.active else 'DISABLED') }}{% if m.is_primary %} <span class="pill ok">PRIMARY · sends</span>{% endif %}{% if m.read_replies %} <span class="pill">reads replies</span>{% endif %}</td>
+    <td class="small">{% if m.last_test_at %}<span class="pill {{ 'ok' if m.last_test_ok else 'bad' }}">{{ 'passed' if m.last_test_ok else 'failed' }}</span> {{ m.last_test_at[:16]|replace('T', ' ') }} UTC<br><span class="muted">{{ m.last_test_detail }}</span>{% else %}<span class="muted">never tested</span>{% endif %}</td>
+    <td class="row-actions">
+      <form class="inline" method="post" action="/admin/mailboxes/{{ m.id }}/test"><button class="secondary">Test connection</button></form>
+      {% if m.auth == 'oauth' %}<a class="btn secondary" href="/admin/mailboxes/{{ m.id }}/connect">{{ 'Reconnect' if m.connected else 'Connect' }} Microsoft 365</a>{% endif %}
+      <a class="btn secondary" href="/admin/mailboxes?edit={{ m.id }}#edit">Edit</a>
+      {% if m.active %}<form class="inline" method="post" action="/admin/mailboxes/{{ m.id }}/disable"><button class="secondary">Disable</button></form>
+        <form class="inline" method="post" action="/admin/mailboxes/{{ m.id }}/{{ 'read_off' if m.read_replies else 'read_on' }}"><button class="secondary">{{ 'Stop reading' if m.read_replies else 'Read replies' }}</button></form>
+        {% if not m.is_primary %}<form class="inline" method="post" action="/admin/mailboxes/{{ m.id }}/primary"><button class="secondary">Make primary</button></form>{% endif %}
+      {% else %}<form class="inline" method="post" action="/admin/mailboxes/{{ m.id }}/enable"><button class="secondary">Enable</button></form>{% endif %}
+      <form class="inline" method="post" action="/admin/mailboxes/{{ m.id }}/delete"><button class="danger">Delete</button></form>
+    </td></tr>
+  {% else %}<tr><td colspan="5" class="muted">No mailbox configured here: the .env mail settings are used, as before.</td></tr>{% endfor %}
+</table></div>
+
+{% macro fields(m) %}
+  <label>Type <select name="provider">{% for key, p in presets.items() %}<option value="{{ key }}" {{ 'selected' if m and m.provider == key }}>{{ p.label }}</option>{% endfor %}</select></label>
+  <label>Name <input name="label" value="{{ m.label if m else '' }}" placeholder="e.g. Sales (Gmail)"></label>
+  <label>Email address <input name="email" type="email" value="{{ m.email if m else '' }}" required></label>
+  <label>Sign-in user <input name="username" value="{{ m.username if m else '' }}" placeholder="defaults to the email address"></label>
+  <label>App password (Gmail / Workspace) <input name="secret" type="password" autocomplete="new-password" placeholder="{{ 'stored: leave empty to keep it' if m and m.has_secret else '16-character app password' }}"></label>
+  <details class="small"><summary>Servers (filled in from the type; change only if needed)</summary>
+    <label>IMAP host <input name="imap_host" value="{{ m.imap_host if m else '' }}"></label> <label>IMAP port <input name="imap_port" value="{{ m.imap_port if m else '' }}"></label>
+    <label>Folder <input name="imap_folder" value="{{ m.imap_folder if m else 'INBOX' }}"></label>
+    <label>SMTP host <input name="smtp_host" value="{{ m.smtp_host if m else '' }}"></label> <label>SMTP port <input name="smtp_port" value="{{ m.smtp_port if m else '' }}"></label>
+  </details>
+  <details class="small"><summary>Microsoft 365 app registration (OAuth)</summary>
+    <label>Client ID <input name="oauth_client_id" value="{{ m.oauth_client_id if m and m.oauth_client_id else '' }}"></label>
+    <label>Client secret <input name="oauth_client_secret" type="password" autocomplete="new-password" placeholder="{{ 'stored: leave empty to keep it' if m and m.has_oauth_secret else 'optional (public client)' }}"></label>
+    <label>Tenant <input name="oauth_tenant" value="{{ m.oauth_tenant if m and m.oauth_tenant else 'common' }}"></label>
+    <p class="muted">Redirect URL to register: <code>{{ redirect_uri }}</code>. Permissions: IMAP.AccessAsUser.All, SMTP.Send, offline_access. After saving, click <b>Connect Microsoft 365</b>.</p>
+  </details>
+{% endmacro %}
+
+{% if editing %}<h2 id="edit">Edit {{ editing.email }}</h2>
+<form class="card form-grid mbx-form" method="post" action="/admin/mailboxes/{{ editing.id }}/edit">{{ fields(editing) }}<button>Save changes</button> <a class="btn secondary" href="/admin/mailboxes">Cancel</a></form>{% endif %}
+
+<h2 id="add">Add a mailbox</h2>
+<form class="card form-grid mbx-form" method="post" action="/admin/mailboxes">{{ fields(None) }}<button>Save (disabled)</button></form>
+<p class="small muted">Every change is in the <a href="/audit">audit log</a>. Only Super Admin accounts see this page; an account becomes Super Admin from the command line on this PC: <code>python -m aime user set-role &lt;name&gt; --role super_admin</code>.</p>
+{% endblock %}

@@ -38,7 +38,8 @@
                         ('/audit', 'Audit Logs', 'list', None, '')]),
         ('Analytics', [('/reports', 'Sales Analytics', 'chart', None, '')]),
         ('Settings', [('/integrations', 'Integrations', 'plug', None, ''), ('/system', 'System health', 'server', None, ''),
-                      ('/settings', 'Settings', 'gear', None, '')]),
+                      ('/settings', 'Settings', 'gear', None, '')]
+                     + ([('/admin/mailboxes', 'Mailboxes', 'mail', None, '')] if is_super_admin else [])),
       ] -%}
       {% for heading, links in nav_sections %}
       <div class="nav-section">

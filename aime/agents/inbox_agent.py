@@ -50,9 +50,34 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
     # a dropped connection or a server hiccup (socket, TLS or IMAP protocol error) is retried once in the run
     retry_policy = RetryPolicy(max_attempts=2, retry_on=(*RetryPolicy().retry_on, OSError, imaplib.IMAP4.error))
 
-    def __init__(self, ctx, mailbox: Mailbox | None = None):
+    def __init__(self, ctx, mailbox: Mailbox | None = None, imap_factory=None):
         super().__init__(ctx)
+        self.injected = mailbox is not None
+        self.imap_factory = imap_factory or imaplib.IMAP4_SSL  # for panel mailboxes (tests pass a fake server)
         self.mailbox = mailbox or (Mailbox(ctx.settings) if ctx.settings.imap_configured else None)
+
+    def _sources(self, session: Session) -> list[tuple[str, Mailbox, str, object]]:
+        """(name, mailbox, state key, token) for each mailbox to read: the .env one (or one a test injects) and every
+        enabled Super Admin panel mailbox with "read replies" on. Each keeps its own position."""
+        out = []
+        if self.mailbox is not None:
+            out.append((f"{self.settings.imap_host} / {self.settings.imap_folder}", self.mailbox, "inbox.state",
+                        self._oauth_token(session)))
+        if self.injected:
+            return out
+        from aime import mail_accounts
+        from aime.integrations import oauth
+
+        for a in mail_accounts.readable(session):
+            token = None
+            if a.auth == "oauth":
+                def token(account=a.id) -> str:
+                    with self.ctx.http() as http:
+                        return oauth.access_token(session, self.settings, http, "microsoft", "mail", account=account)
+            out.append((f"{a.email} / {a.imap_folder}", Mailbox(mail_accounts.settings_for(self.settings, a),
+                                                                  imap_factory=self.imap_factory),
+                        f"inbox.state.mailbox{a.id}", token))
+        return out
 
     def _oauth_token(self, session: Session):
         """With MAIL_AUTH=oauth: a callable giving a fresh access token for the connected account."""
@@ -88,12 +113,16 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
 
     def execute(self, inp: InboxInput, session: Session) -> InboxOutput:
         out = InboxOutput()
+        from aime.models import MailAccount
         own = {a.lower() for a in (self.settings.smtp_from, self.settings.imap_credentials[0],
                                     self.settings.unsubscribe_email) if a}
-        if self.mailbox is not None and self.settings.network_enabled:
-            out.mailbox = f"{self.settings.imap_host} / {self.settings.imap_folder} (read-only)"
-            raws, state = self.mailbox.fetch_new(kv_get(session, "inbox.state"), token=self._oauth_token(session))
-            out.fetched = len(raws)
+        own |= {e.lower() for e in session.execute(select(MailAccount.email)).scalars()}  # our own mail is not a reply
+        sources = self._sources(session) if self.settings.network_enabled else []
+        if sources:
+            out.mailbox = "; ".join(name for name, *_ in sources) + " (read-only)"
+        for _name, box, state_key, token in sources:
+            raws, state = box.fetch_new(kv_get(session, state_key), token=token)
+            out.fetched += len(raws)
             for key, raw in raws:
                 p = parse_message(raw, own)
                 if p.from_email in own:
@@ -112,7 +141,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                     subject=p.subject, received_at=p.received_at, body_text=p.body_text, new_text=new_text(p.body_text),
                     auto_submitted=p.auto_submitted, bounced_addresses=p.bounced_addresses, status="new"))
                 out.stored += 1
-            kv_set(session, "inbox.state", state)
+            kv_set(session, state_key, state)
             session.commit()
         out.categories = process_pending(session, self.settings, self.name, llm=self.ctx.llm)
         check_double_bookings(session, self.settings)  # after the whole batch: a reschedule's two notices are one change
