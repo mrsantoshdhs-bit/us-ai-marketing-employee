@@ -102,6 +102,11 @@ min_notice_hours = 24
 reminder_hours = 24               # an alert for the Sales Manager this long before each meeting
 remind_prospect = false           # also draft a reminder email for the prospect (it waits for approval)
 
+[handover]
+# The dashboard user (username) interested prospects and booked meetings are handed over to. Set by the Super Admin
+# in Settings › Sales settings; empty = unassigned (the dashboard still shows every handover).
+sales_manager = ""
+
 [pipeline]
 # Open opportunities with nothing logged for this long get a "decide the next step" task.
 stalled_days = 10

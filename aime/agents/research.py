@@ -63,7 +63,13 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         transport_failures, configured_count = 0, 0
         file_sources = []  # sources whose files are archived only after this run commits
 
+        country = str(self.settings.section("targeting").get("country") or "US").upper()
         for src in get_sources(self.ctx, inp.sources):
+            covers = getattr(src, "countries", ("US",))
+            if country not in covers and "*" not in covers:  # discovery follows the configured target country
+                out.sources.append(SourceReport(name=src.name, configured=False, ok=False,
+                                                message=f"no {country} coverage: this source finds {', '.join(covers)} companies"))
+                continue
             ok, msg = src.configured()
             if not ok:
                 out.sources.append(SourceReport(name=src.name, configured=False, ok=False, message=msg))

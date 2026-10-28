@@ -202,6 +202,7 @@ class Opportunity(Timestamped, Base):
     est_value: Mapped[float | None] = mapped_column(Float)  # only when a human enters it
     probability: Mapped[int] = mapped_column(Integer, default=10)
     next_step: Mapped[str | None] = mapped_column(String(300))
+    owner: Mapped[str | None] = mapped_column(String(80))  # the Sales Manager it is handed over to (username)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime)
     lost_reason: Mapped[str | None] = mapped_column(String(200))
 
@@ -253,6 +254,9 @@ class FollowUp(Timestamped, Base):
     # the campaign authorization that approved it at send time instead of a person (aime.automation)
     authorization_id: Mapped[int | None] = mapped_column(Integer)
     delivery_status: Mapped[str | None] = mapped_column(String(20))  # sent | bounced | replied (from the mailbox)
+    # what an answer is for: booking_link | meeting_offer | meeting_confirmation | meeting_move | meeting_cancel |
+    # meeting_reminder (aime.automation decides which may go out under a campaign)
+    purpose: Mapped[str | None] = mapped_column(String(30))
 
     lead: Mapped[Lead] = relationship()
     contact: Mapped[Contact | None] = relationship()
@@ -616,6 +620,7 @@ class MeetingProposal(Timestamped, Base):
     meeting_id: Mapped[int | None] = mapped_column(Integer)
     provider: Mapped[str | None] = mapped_column(String(20))
     approved_by: Mapped[str | None] = mapped_column(String(80))
+    answer_email_id: Mapped[int | None] = mapped_column(Integer)  # the prospect's reply already acted on
 
     lead: Mapped["Lead"] = relationship()
 

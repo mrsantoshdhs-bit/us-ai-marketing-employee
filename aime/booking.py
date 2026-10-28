@@ -12,6 +12,7 @@ account is connected; the booking-link path (Calendly) keeps working as before.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -20,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from aime import automation as am
 from aime.crm_ops import log_activity
-from aime.models import Alert, Contact, FollowUp, InboundEmail, Lead, Meeting, MeetingProposal
+from aime.models import Alert, Contact, FollowUp, InboundEmail, Lead, Meeting, MeetingProposal, Opportunity
 from aime.outreach import set_status
 from aime.reply_intel import _signature, reply_footer
 from aime.timeutil import as_aware_utc, to_naive_utc, utcnow
@@ -116,13 +117,13 @@ def _thread(session: Session, lead_id: int, email: str) -> str | None:
 
 
 def _draft(session: Session, settings, lead: Lead, to: str, subject: str, text: str, in_reply_to: str | None,
-           contact_id: int | None) -> FollowUp:
+           contact_id: int | None, purpose: str | None = None) -> FollowUp:
     name = (to.split("@")[0].split(".")[0] or "there").capitalize()
     body = f"Hi {name},\n\n{text}\n\n{_signature(settings)}{reply_footer(settings)}"
     in_reply_to = in_reply_to or _thread(session, lead.id, to)
     draft = FollowUp(lead_id=lead.id, contact_id=contact_id, company_id=lead.company_id, channel="email",
                      kind="response", step=1, due_at=utcnow(), status="awaiting_approval", subject=subject[:300],
-                     body=body, to_email=to, in_reply_to=in_reply_to)
+                     body=body, to_email=to, in_reply_to=in_reply_to, purpose=purpose)
     session.add(draft)
     session.flush()
     return draft
@@ -153,10 +154,11 @@ def propose(session: Session, settings, calendar, row: InboundEmail, actor: str,
     if existing is not None and existing.status == "awaiting_approval":  # one reply to them, not two
         existing.body = (f"Hi {(row.from_email.split('@')[0].split('.')[0] or 'there').capitalize()},\n\n{text}\n\n"
                          f"{_signature(settings)}{reply_footer(settings)}")
-        existing.blocked_reason = None
+        existing.blocked_reason, existing.purpose = None, "meeting_offer"
         offer = existing
     else:
-        offer = _draft(session, settings, lead, row.from_email, subject, text, row.message_id, row.contact_id)
+        offer = _draft(session, settings, lead, row.from_email, subject, text, row.message_id, row.contact_id,
+                       purpose="meeting_offer")
         row.suggested_followup_id = offer.id
     p = MeetingProposal(lead_id=lead.id, contact_id=row.contact_id, inbound_email_id=row.id,
                         prospect_email=row.from_email, prospect_tz=tz, minutes=c["minutes"],
@@ -196,6 +198,99 @@ def propose_pending(session: Session, settings, calendar, actor: str, now: datet
             continue
         done += propose(session, settings, calendar, row, actor, now).startswith("proposal")
     return done
+
+
+ORDINALS = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2, "fourth": 3, "4th": 3}
+NUMBERED = re.compile(r"\b(?:option|slot|number|no\.?|#)\s*([1-9])\b|#([1-9])\b", re.I)
+WEEKDAYS = {"monday": 0, "mon": 0, "tuesday": 1, "tue": 1, "tues": 1, "wednesday": 2, "wed": 2, "thursday": 3,
+            "thu": 3, "thurs": 3, "friday": 4, "fri": 4}
+CLOCK = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)", re.I)
+DECLINE = re.compile(r"\b(none of (these|those|them)|neither|(can'?t|cannot|won'?t) (make|do)|(doesn'?t|don'?t|do not|does not)"
+                     r" work|not available|unavailable|busy then|another time|different time)\b", re.I)
+
+
+def chosen_slot(text: str, slots: list[datetime], tz: str) -> tuple[int | None, str]:
+    """Which of the offered times the prospect chose, from their own words ("the second one", "Thursday works",
+    "10am is fine"). Every clue they give must point to the same single time; anything else is for a person."""
+    words = (text or "").lower()
+    if not words.strip():
+        return None, "no text of their own"
+    if DECLINE.search(words):
+        return None, "they asked for another time"
+    local = [as_aware_utc(s).astimezone(ZoneInfo(tz)) for s in slots]
+    candidates = set(range(len(slots)))
+    clues = 0
+    picked = {i for w, i in ORDINALS.items() if re.search(rf"\b{w}\b", words)}
+    picked |= {int(a or b) - 1 for a, b in NUMBERED.findall(words)}
+    if picked:
+        clues += 1
+        candidates &= picked
+    days = {d for w, d in WEEKDAYS.items() if re.search(rf"\b{w}\b", words)}
+    if days:
+        clues += 1
+        candidates &= {i for i, at in enumerate(local) if at.weekday() in days}
+    times = set()
+    for hour, minute, half in CLOCK.findall(words):
+        h = int(hour) % 12 + (12 if half.startswith("p") else 0)
+        times.add((h, int(minute or 0)))
+    if times:
+        clues += 1
+        candidates &= {i for i, at in enumerate(local) if (at.hour, at.minute) in times}
+    if not clues:
+        return None, "the reply does not name one of the offered times"
+    if len(candidates) != 1:
+        return None, "the reply's clues do not point to exactly one offered time"
+    return candidates.pop(), "named in the reply"
+
+
+def act_on_answers(session: Session, settings, calendar, actor: str, now: datetime | None = None) -> int:
+    """For each offered proposal, the prospect's latest reply to the offer: book the time they chose on its own
+    when an approved campaign lets the AI employee act for them (Automatic mode; aime.automation.
+    autonomous_authorization); otherwise, or when the reply is unclear, a person is asked, with the reason."""
+    from aime.automation import autonomous_authorization
+
+    now = now or utcnow()
+    booked = 0
+    for p in session.execute(select(MeetingProposal).where(MeetingProposal.status == "offered")).scalars().all():
+        reply = session.execute(select(InboundEmail).where(
+            InboundEmail.followup_id == p.offer_followup_id, InboundEmail.is_simulated.is_(False),
+            InboundEmail.category.not_in(("bounce", "out_of_office", "calendly")))
+            .order_by(InboundEmail.id.desc())).scalars().first()
+        if reply is None or reply.id == p.answer_email_id:
+            continue
+        p.answer_email_id = reply.id
+        slots = [datetime.fromisoformat(s) for s in p.slots or []]
+        index, why = chosen_slot(reply.new_text or reply.body_text or "", slots, p.prospect_tz)
+        lead = session.get(Lead, p.lead_id)
+        contact = session.get(Contact, p.contact_id) if p.contact_id else None
+        auth = autonomous_authorization(session, settings, lead, contact, p.prospect_email, now)
+        # Only a plain choice is acted on alone: written above the quote, and nothing else in it to answer (no
+        # question, price or information request, objection, opt-out or referral). Booking would cancel the draft
+        # that answers it, so those go to a person.
+        own = reply.new_text or ""
+        plain = (bool(own.strip()) and "?" not in own and reply.category in ("interested", "other")
+                 and reply.intent not in ("pricing_request", "more_info"))
+        if index is not None and auth is not None and plain:
+            try:
+                book(session, settings, calendar, p, index, f"AI employee (campaign #{auth.id})", now)
+            except ValueError as exc:
+                reply.status, reply.action_note = "needs_review", f"Could not book on its own: {exc}"[:500]
+                continue
+            reply.status = "actioned"
+            reply.action_note = f"Booked on its own: option {index + 1} ({label(slots[index], p.prospect_tz)})"
+            booked += 1
+        else:
+            reply.status = "needs_review"
+            if index is None:
+                reply.action_note = f"Which time? {why}"[:500]
+            else:
+                chose = f"They chose option {index + 1} ({label(slots[index], p.prospect_tz)})"
+                reply.action_note = (f"{chose} and wrote more that needs an answer: answer it, then book it on the "
+                                     "Meetings page" if auth is not None and not plain
+                                     else f"{chose}: book it on the Meetings page")[:500]
+            session.add(Alert(level="info", source="meetings", message=f"Meeting time to confirm with "
+                              f"{p.prospect_email}: {reply.action_note}"[:500]))
+    return booked
 
 
 def book(session: Session, settings, calendar, p: MeetingProposal, index: int, actor: str,
@@ -239,7 +334,11 @@ def book(session: Session, settings, calendar, p: MeetingProposal, index: int, a
     p.status, p.chosen_slot, p.meeting_id, p.approved_by = "booked", start, existing.id, actor
     _draft(session, settings, lead, p.prospect_email, f"Confirmed: our call on {label(start, p.prospect_tz)}",
            f"Thank you, our call is confirmed for {label(start, p.prospect_tz)} ({p.minutes} minutes).",
-           None, p.contact_id)
+           None, p.contact_id, purpose="meeting_confirmation")
+    from aime.handover import handover
+    opp = session.get(Opportunity, existing.opportunity_id)
+    if opp is not None:
+        handover(session, settings, opp, f"meeting booked for {label(start, p.prospect_tz)} ({p.prospect_email})", actor)
     log_activity(session, f"Meeting booked for {label(start, p.prospect_tz)} by {actor}; the confirmation waits for "
                  "your approval", actor, type_="meeting", company_id=lead.company_id, lead_id=lead.id,
                  opportunity_id=existing.opportunity_id)
@@ -269,7 +368,7 @@ def move(session: Session, settings, calendar, m: Meeting, start: datetime, acto
     if lead is not None:
         _draft(session, settings, lead, m.invitee_email, f"New time for our call: {label(start, m.timezone or 'UTC')}",
                f"Our call has moved to {label(start, m.timezone or 'UTC')}. I hope that still suits you.",
-               None, m.contact_id)
+               None, m.contact_id, purpose="meeting_move")
         log_activity(session, f"Meeting moved to {label(start, m.timezone or 'UTC')} by {actor}", actor,
                      type_="meeting", company_id=m.company_id, lead_id=m.lead_id, opportunity_id=m.opportunity_id)
     am.audit(session, actor, "meeting_moved", f"meeting #{m.id}", f"to {start:%Y-%m-%d %H:%M} UTC")
@@ -284,7 +383,7 @@ def cancel_event(session: Session, settings, calendar, m: Meeting, actor: str) -
     if lead is not None:
         _draft(session, settings, lead, m.invitee_email, f"Our call on {label(m.starts_at, m.timezone or 'UTC')}",
                f"I am sorry, I have to cancel our call on {label(m.starts_at, m.timezone or 'UTC')}. "
-               "Could we find another time?", None, m.contact_id)
+               "Could we find another time?", None, m.contact_id, purpose="meeting_cancel")
     am.audit(session, actor, "meeting_cancelled", f"meeting #{m.id}", "calendar event cancelled")
 
 
@@ -305,6 +404,6 @@ def reminders(session: Session, settings, now: datetime | None = None) -> int:
         if c["remind_prospect"] and lead is not None:
             _draft(session, settings, lead, m.invitee_email, f"Reminder: our call on {label(m.starts_at, m.timezone or 'UTC')}",
                    f"A short reminder of our call on {label(m.starts_at, m.timezone or 'UTC')}. Talk soon.",
-                   None, m.contact_id)
+                   None, m.contact_id, purpose="meeting_reminder")
         m.reminded_at = now
     return len(due)

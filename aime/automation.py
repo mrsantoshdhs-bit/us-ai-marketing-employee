@@ -124,6 +124,28 @@ def parse_recipients(text: str) -> tuple[list[str], list[str]]:
 
 
 GRADE_RANK = {"A": 4, "B": 3, "C": 2, "D": 1}
+# Answers about a meeting that is already booked: they may go out under a campaign in Automatic mode.
+MEETING_NOTES = ("meeting_confirmation", "meeting_move", "meeting_cancel", "meeting_reminder")
+
+
+def autonomous_authorization(session: Session, settings, lead, contact, to: str,
+                             now: datetime | None = None) -> CampaignAuthorization | None:
+    """The active campaign that lets the AI employee act for this prospect on its own (answer and book a meeting):
+    Automatic mode, running, REQUIRE_HUMAN_APPROVAL=false, and an authorization covering answers ("response") to
+    this exact address or by a rule this lead meets. None: a person decides."""
+    now = now or utcnow()
+    if settings.require_human_approval or get_mode(session) != "automatic" or get_state(session) != "running":
+        return None
+    to = (to or "").strip().lower()
+    for a in active_authorizations(session, now):
+        if "response" not in (a.kinds or []):
+            continue
+        if a.rule:
+            if lead_rule_problem(session, a.rule, lead, contact, to) is None:
+                return a
+        elif to in (a.recipients or []):
+            return a
+    return None
 ADDRESS_RULES = {"published": "a decision-maker's own address that the company publishes",
                  "role_or_published": "the company's published mailbox (info@, hello@ ...) or a decision-maker's own"}
 
@@ -134,11 +156,16 @@ def describe_rule(rule: dict) -> str:
 
 
 def rule_problem(session: Session, rule: dict, f: FollowUp, to: str) -> str | None:
-    """Why the email falls outside a rule-based authorization (None: the rule covers it). Only first-touch and
-    sequence outreach to a qualified, researched US prospect; never inquiry replies or answers to a prospect."""
-    if f.kind != "outreach":
-        return "a rule covers outreach emails only"
-    lead = f.lead
+    """Why the email falls outside a rule-based authorization (None: the rule covers it). Outreach and its sequence
+    to a qualified, researched prospect, and (when the campaign covers answers) answers to that same prospect;
+    never replies to inquiries."""
+    if f.kind not in ("outreach", "response"):
+        return "a rule covers outreach and answers to its own prospects only"
+    return lead_rule_problem(session, rule, f.lead, f.contact, to)
+
+
+def lead_rule_problem(session: Session, rule: dict, lead, contact, to: str) -> str | None:
+    """The lead, company and address conditions of a rule (see rule_problem)."""
     if lead is None or lead.status != "qualified":
         return "the lead is not qualified"
     if GRADE_RANK.get(lead.grade or "", 0) < GRADE_RANK[rule["min_grade"]]:
@@ -148,7 +175,6 @@ def rule_problem(session: Session, rule: dict, f: FollowUp, to: str) -> str | No
         return "the company is a sample or a flagged competitor"
     if rule.get("verified_website") and company.website_status != "verified":
         return "the company's website is not verified"
-    contact = f.contact
     if contact is None or (contact.email or "").strip().lower() != to:
         return "the address is not the lead's researched contact"
     if contact.source not in ("website", "sec_filing"):
@@ -161,7 +187,7 @@ def rule_problem(session: Session, rule: dict, f: FollowUp, to: str) -> str | No
 
 def create_rule_authorization(session: Session, actor: str, name: str, min_grade: str, addresses: str,
                               verified_website: bool, daily_limit: int, total_limit: int, days: int,
-                              notes: str = "") -> CampaignAuthorization:
+                              notes: str = "", answer_replies: bool = False) -> CampaignAuthorization:
     """A draft rule-based authorization for outreach: qualified leads that meet the rule, within the limits. It lets
     nothing out until an administrator activates it, and every send-time gate still applies."""
     if not name.strip():
@@ -174,14 +200,17 @@ def create_rule_authorization(session: Session, actor: str, name: str, min_grade
         raise ValueError(f"Limits: 1-{MAX_DAILY} a day, 1-{MAX_TOTAL} in total, valid for 1-{MAX_DAYS} days")
     now = utcnow()
     rule = {"min_grade": min_grade, "addresses": addresses, "verified_website": bool(verified_website)}
-    a = CampaignAuthorization(name=name.strip()[:200], status="draft", recipients=[], rule=rule, kinds=["outreach"],
+    kinds = ["outreach", "response"] if answer_replies else ["outreach"]
+    a = CampaignAuthorization(name=name.strip()[:200], status="draft", recipients=[], rule=rule, kinds=kinds,
                               daily_limit=daily_limit, total_limit=total_limit, starts_at=now,
                               expires_at=now + timedelta(days=days), notes=(notes or "").strip()[:2000] or None,
                               created_by=actor)
     session.add(a)
     session.flush()
     audit(session, actor, "authorization_created", f"#{a.id} {a.name}",
-          f"rule: {describe_rule(rule)}; covers outreach; {daily_limit} a day, {total_limit} in total; "
+          f"rule: {describe_rule(rule)}; covers {' and '.join(kinds)}"
+          + ("" if not answer_replies else " (in Automatic mode: meeting offers, booking and meeting notes)")
+          + f"; {daily_limit} a day, {total_limit} in total; "
           f"until {a.expires_at:%Y-%m-%d %H:%M} UTC")
     return a
 
@@ -321,11 +350,14 @@ def campaign_for(session: Session, f: FollowUp, mode: str, now: datetime,
     if f.kind == "response":
         if mode != "automatic":
             return None, "replies need a person in Hybrid mode"
-        row = session.execute(select(InboundEmail).where(InboundEmail.suggested_followup_id == f.id)).scalars().first()
-        if row is None or row.category != "interested" or row.confidence != "high" or row.intent == "pricing_request":
-            return None, "the reply it answers is not a clear interested reply"
-        if "calendly.com/" not in (f.body or "").lower():
-            return None, "only booking-link replies go out on their own"
+        if f.purpose in MEETING_NOTES:
+            pass  # about a meeting already booked (by a person or the campaign): no question answered, no commitment
+        else:
+            row = session.execute(select(InboundEmail).where(InboundEmail.suggested_followup_id == f.id)).scalars().first()
+            if row is None or row.category != "interested" or row.confidence != "high" or row.intent == "pricing_request":
+                return None, "the reply it answers is not a clear interested reply"
+            if f.purpose != "meeting_offer" and "calendly.com/" not in (f.body or "").lower():
+                return None, "only booking-link replies, meeting-time offers and meeting notes go out on their own"
     if is_given_test_contact(f.contact):
         return None, "an address given to us for testing always needs a person's approval"
     text = f"{f.subject or ''}\n{f.body or ''}"

@@ -377,6 +377,10 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         if row.category == "interested":
             opp = ensure_opportunity(session, lead, actor)
             notes.append(f"opportunity {opp.stage}")
+            if not row.is_simulated:
+                from aime.handover import handover
+                handover(session, settings, opp, f"interested reply from {row.from_email}"
+                         + (" asking for a meeting" if row.intent == "meeting_request" else ""), actor)
             msg = f"{'SIMULATED: ' if row.is_simulated else ''}Interested reply from {row.from_email} ({lead.company.name})"
             session.add(Alert(level="info", source="inbox", message=msg[:500]))
             notify_event(settings, msg)
@@ -398,6 +402,8 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             session.add(draft)
             session.flush()
             row.suggested_followup_id = draft.id
+            if "calendly.com/" in body.lower():
+                draft.purpose = "booking_link"
             notes.append("suggested reply waiting for your approval")
         row.status = "actioned" if row.confidence == "high" and row.category in ("interested", "not_interested") else "needs_review"
         if row.intent == "pricing_request":

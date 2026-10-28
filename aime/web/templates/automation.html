@@ -108,7 +108,8 @@
       <label class="field">Emails in total<input name="total_limit" type="number" min="1" max="{{ limits_max.total }}" value="20"></label>
       <label class="field">Valid for (days)<input name="days" type="number" min="1" max="{{ limits_max.days }}" value="7"></label>
     </div>
-    <div class="checks" style="margin-top:12px"><label><input type="checkbox" name="verified_website" value="yes" checked> Only companies whose website is verified</label></div>
+    <div class="checks" style="margin-top:12px"><label><input type="checkbox" name="verified_website" value="yes" checked> Only companies whose website is verified</label>
+      <label><input type="checkbox" name="answer_replies" value="yes"> Also answer these prospects on its own in Automatic mode: offer meeting times, book the time they choose, confirm it. Prices, questions, unclear or sensitive replies still go to a person</label></div>
     <label class="field" style="margin-top:12px">Notes <span class="help">why this rule is authorized, who agreed</span><input name="notes" maxlength="2000"></label>
     <div style="margin-top:14px"><button>Save as draft</button></div>
   </form>

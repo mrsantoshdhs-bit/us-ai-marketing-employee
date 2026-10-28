@@ -635,7 +635,7 @@ def build_parser() -> argparse.ArgumentParser:
     us.add_argument("action", choices=["create", "list", "set-password", "set-role", "disable", "enable"])
     us.add_argument("--username")
     us.add_argument("--role", choices=["sales_manager", "admin", "super_admin"],
-                    help="default for create: sales_manager; super_admin also configures mailboxes")
+                    help="default for create: sales_manager; super_admin also configures mailboxes and sales settings")
     us.add_argument("--data-dir", help="Use another data folder (e.g. the demo database)")
     return p
 

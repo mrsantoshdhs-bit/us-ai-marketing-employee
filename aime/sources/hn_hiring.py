@@ -66,8 +66,15 @@ def parse_post(item: dict) -> CompanyCandidate | None:
     segments = [s.strip() for s in _SPLIT_RE.split(header) if s.strip()]
     if not segments:
         return None
-    name = re.sub(r"\s*\(.*?\)\s*", " ", segments[0]).strip(" -:")
-    name = re.sub(r"^https?://", "", name).split("/")[0] if name.startswith("http") else name
+    first = segments[0].splitlines()[0]
+    if re.match(r"(role|position|title|location|apply)\s*:", first, re.I):
+        return None  # a job field, not the company
+    name = re.sub(r"^(company|employer)\s*:\s*", "", first, flags=re.I)
+    name = re.sub(r"\s*\(.*?\)\s*", " ", name).strip(" -:")
+    if name.startswith("http"):
+        name = re.sub(r"^https?://", "", name).split("/")[0]
+    else:
+        name = re.sub(r"\s+https?://\S+", "", name).strip()  # "WorkHero https://workhero.pro" -> "WorkHero"
     if not name or len(name) > 80 or len(name.split()) > 8:
         return None
     if not re.search(r"[A-Za-z]{2}", name) or name.lower().strip(" .") in _NOT_NAMES:

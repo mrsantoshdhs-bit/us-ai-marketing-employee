@@ -103,7 +103,7 @@ def test_us_time_zone_labels_no_longer_swallow_other_zones():
 
 # --------------------------------------------------------------------------- the offer
 
-def test_a_meeting_request_gets_free_times_in_a_reply_that_waits_for_a_person(make_ctx):
+def test_a_times_offer_waits_for_a_person_unless_a_campaign_covers_answers(make_ctx):
     ctx, sender, sent, cal = booking_ctx(make_ctx)
     r = meeting_request(ctx, sent)
     p = proposal(ctx)
@@ -115,14 +115,20 @@ def test_a_meeting_request_gets_free_times_in_a_reply_that_waits_for_a_person(ma
         drafts = s.execute(select(FollowUp).where(FollowUp.kind == "response", FollowUp.lead_id == p.lead_id)).scalars().all()
         assert len(drafts) == 1
     assert [c[0] for c in cal.calls] == ["POST"] and cal.calls[0][1].endswith("/freeBusy") and cal.events == {}
-    # even Automatic mode with an authorization never sends a times offer on its own
+    # Hybrid mode, or a campaign that does not cover answers: the offer waits for a person
     ctx.settings.require_human_approval = False
-    authorize(ctx, kinds=("outreach", "response"))
+    authorize(ctx, kinds=("outreach",))
+    run(ctx, sender, utcnow() + timedelta(days=1))
+    with ctx.db.session() as s:
+        assert s.get(FollowUp, p.offer_followup_id).status == "awaiting_approval"
+    # Automatic mode with a campaign that covers answers: the offer to a clear meeting request goes out on its own
+    aid = authorize(ctx, kinds=("outreach", "response"))
     with ctx.db.session() as s:
         am.set_mode(s, "automatic", "admin")
     run(ctx, sender, utcnow() + timedelta(days=1))
     with ctx.db.session() as s:
-        assert s.get(FollowUp, p.offer_followup_id).status == "awaiting_approval"
+        offer = s.get(FollowUp, p.offer_followup_id)
+        assert offer.status == "sent" and offer.approved_by == f"campaign #{aid}" and offer.purpose == "meeting_offer"
 
 
 @pytest.mark.parametrize("change", ["disabled", "not_connected", "paused"])
