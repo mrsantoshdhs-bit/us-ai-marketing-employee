@@ -489,7 +489,7 @@ code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size:
 h2 > svg.i, h1 > svg.i { vertical-align: -3px; margin-right: 6px; color: var(--accent); width: 20px; height: 20px; }
 .who b, .who small { white-space: nowrap; }
 .perf-panel { display: flex; flex-direction: column; }
-.perf-panel .chart { margin-top: auto; }
+.perf-panel .chart { margin: auto 0; }
 
 /* a slim environment notice, so the dashboard keeps the reference's proportions */
 .flash.demo { padding: 7px 14px; font-size: 12.5px; margin-bottom: 14px; border-radius: 10px; }
