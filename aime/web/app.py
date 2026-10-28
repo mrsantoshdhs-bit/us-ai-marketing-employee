@@ -1724,7 +1724,10 @@ def dashboard_view(ctx: AppContext, s, days: int) -> dict:
                                    .scalars().all(), days)
 
     real_replies = (InboundEmail.is_simulated.is_(False),)
-    tasks_done = per_day(FollowUp.updated_at, FollowUp.channel == "task", FollowUp.status == "done")
+    # follow-up work a person or the pipeline completed (rebook, record the outcome, chase a stale lead); a
+    # "Review <company>" research task closes on its own when the first email is drafted, so it is not counted
+    tasks_done = per_day(FollowUp.updated_at, FollowUp.channel == "task", FollowUp.status == "done",
+                         FollowUp.subject.not_like("Review %"))
     followups_sent = per_day(FollowUp.sent_at, FollowUp.channel == "email", FollowUp.status == "sent", FollowUp.step > 1)
     span = f"the last {days} days"
     views = [

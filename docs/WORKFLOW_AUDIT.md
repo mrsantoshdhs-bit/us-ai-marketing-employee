@@ -35,6 +35,7 @@ Nothing was sent, published or authorized during the audit.
 3. **"Waiting for you" count:** upcoming meetings were counted as approvals. They are now excluded. Tested in `test_live_workspace_reports_failures_blocks_and_approvals`.
 4. **Chart period:** Sales Performance always showed 7 days, even with the 30-day range selected. It now follows the range. Tested in `test_sales_performance_has_ten_real_series_and_honest_empty_views`.
 5. **Missing expiry test:** nothing proved that an expired campaign authorization approves nothing. Added `test_an_expired_authorization_approves_nothing`.
+6. **Inflated follow-up count:** the first version of "Follow-ups completed" counted the "Review <company>" research tasks, which close automatically when a draft is written. On production data that copied the drafts line exactly (2, 1 and 3 a day). Those tasks are now excluded, so production correctly shows 0 follow-ups completed. Tested in `test_research_reviews_closed_by_a_draft_are_not_follow_ups`.
 
 ## Gaps and external blockers
 - **Local AI model:** Ollama is not running on this PC, so the content writer falls back to its templates. The monitor reports it.

@@ -105,6 +105,26 @@ def test_sales_performance_has_ten_real_series_and_honest_empty_views(make_ctx):
     assert "Prospecting, the last 30 days" in page and 'id="perf-outreach"' in page
 
 
+def test_research_reviews_closed_by_a_draft_are_not_follow_ups(make_ctx):
+    ctx = make_ctx()
+    now = utcnow()
+    with ctx.db.session() as s:
+        from aime.models import Company, Lead
+        co = Company(name="Acme", normalized_name="acme", domain="acme.example", source="test")
+        s.add(co)
+        s.flush()
+        lead = Lead(company_id=co.id, source="research", status="qualified")
+        s.add(lead)
+        s.flush()
+        s.add_all([FollowUp(lead_id=lead.id, channel="task", status="done", subject="Review Acme", updated_at=now),
+                   FollowUp(lead_id=lead.id, channel="task", status="done", subject="Rebook the meeting with Ann",
+                            updated_at=now)])
+    with ctx.db.session() as s:
+        view = dashboard_view(ctx, s, 7)
+    totals = {name: total for v in view["performance"] for name, total, _ in v["series"]}
+    assert totals["Follow-ups completed"] == 1
+
+
 def test_small_previous_periods_show_plain_differences_not_percentages():
     assert change(3, 1) == ("+2", "up") and change(1, 3) == ("-2", "down") and change(2, 2) == ("no change", "flat")
     assert change(12, 10) == ("+20%", "up") and change(4, 0) == ("new", "up") and change(0, 0) == ("—", "flat")
