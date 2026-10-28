@@ -7,9 +7,9 @@
 </div></div>
 
 <div class="send-check warn"><b>{{ icon('lock') }} Nothing is read or sent from here by itself</b>
-  <span>A new mailbox is <b>disabled</b>. Enable it, then turn on <b>Read replies</b> to read it (read-only), or make it <b>Primary</b> to send from it.</span>
+  <span>A new mailbox is <strong>disabled</strong>. Enable it, then turn on <strong>Read replies</strong> to read it (read-only), or make it <strong>Primary</strong> to send from it.</span>
   <span>Sending also needs <code>OUTBOUND_EMAIL_ENABLED</code> ({{ 'on' if sending_on else 'off' }}) and every approval: sending status now: {{ sender_status }}.</span>
-  <span><b>Test connection</b> signs in to IMAP (read-only) and SMTP and sends nothing.</span></div>
+  <span><strong>Test connection</strong> signs in to IMAP (read-only) and SMTP and sends nothing.</span></div>
 
 <div class="card table-wrap"><table>
   <tr><th>Mailbox</th><th>Sign-in</th><th>State</th><th>Last test</th><th>Actions</th></tr>
@@ -53,9 +53,9 @@
 {% endmacro %}
 
 {% if editing %}<h2 id="edit">Edit {{ editing.email }}</h2>
-<form class="card form-grid" method="post" action="/admin/mailboxes/{{ editing.id }}/edit">{{ fields(editing) }}<button>Save changes</button> <a class="btn secondary" href="/admin/mailboxes">Cancel</a></form>{% endif %}
+<form class="card form-grid mbx-form" method="post" action="/admin/mailboxes/{{ editing.id }}/edit">{{ fields(editing) }}<button>Save changes</button> <a class="btn secondary" href="/admin/mailboxes">Cancel</a></form>{% endif %}
 
 <h2 id="add">Add a mailbox</h2>
-<form class="card form-grid" method="post" action="/admin/mailboxes">{{ fields(None) }}<button>Save (disabled)</button></form>
+<form class="card form-grid mbx-form" method="post" action="/admin/mailboxes">{{ fields(None) }}<button>Save (disabled)</button></form>
 <p class="small muted">Every change is in the <a href="/audit">audit log</a>. Only Super Admin accounts see this page; an account becomes Super Admin from the command line on this PC: <code>python -m aime user set-role &lt;name&gt; --role super_admin</code>.</p>
 {% endblock %}
