@@ -93,6 +93,10 @@ def grade_for(total: int, thresholds: dict) -> str:
     return "D"
 
 
+# Hiring evidence counts in full for 60 days, half until 120 days, then not at all.
+FRESH_DAYS, STALE_DAYS = 60, 120
+
+
 def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
     thresholds = thresholds or {}
     now = f.now or utcnow()
@@ -166,9 +170,16 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
             intent = 20
             reasons.append("+5 intent: stated timeline or budget")
     elif any(s.signal_type == "hiring" and s.matched_services for s in f.signals):
-        intent = 6
-        reasons.append("+6 intent: public hiring post mentions a related need (signal, not buying intent)")
-        if f.seeks_external_help:
+        age = (f.now - max(s.observed_at for s in f.signals if s.signal_type == "hiring" and s.matched_services)).days
+        if age <= FRESH_DAYS:
+            intent = 6
+            reasons.append(f"+6 intent: public hiring post ({age} days old) mentions a related need (signal, not buying intent)")
+        elif age <= STALE_DAYS:
+            intent = 3
+            reasons.append(f"+3 intent: the newest related hiring post is {age} days old, so it counts for less")
+        else:
+            reasons.append(f"+0 intent: the newest related hiring post is {age} days old, too old to count")
+        if f.seeks_external_help and intent:
             intent += 3
             reasons.append("+3 intent: their post asks for contractors, freelancers, or partners")
     else:

@@ -57,6 +57,8 @@ cache_hours = 12
 hn_threads = 2
 # Company homepages verified per run (one polite request each)
 website_checks_per_run = 25
+# A few more checks in every 30-minute intake run, so new companies are checked within hours (0 turns it off)
+website_checks_per_inbound_run = 5
 
 [qualification]
 grade_a = 75

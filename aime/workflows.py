@@ -105,7 +105,9 @@ def job_content(ctx: AppContext, job: str = "content") -> JobOutcome:
 
 def job_inbound(ctx: AppContext, job: str = "inbound") -> JobOutcome:
     out = JobOutcome()
-    crm = out.add(CRMManagementAgent(ctx).run({"operations": ["ingest_inbound"]}, job=job))
+    batch = int(ctx.settings.section("research").get("website_checks_per_inbound_run", 5))
+    crm = out.add(CRMManagementAgent(ctx).run({"operations": ["ingest_inbound", "verify_websites"] if batch else ["ingest_inbound"],
+                                               "website_check_limit": batch or None}, job=job))
     if crm.ok and crm.output.inbound_lead_ids:
         out.add(LeadQualificationAgent(ctx).run({"lead_ids": crm.output.inbound_lead_ids}, job=job))
         out.add(SalesWorkflowAgent(ctx).run({"lead_ids": crm.output.inbound_lead_ids}, job=job))

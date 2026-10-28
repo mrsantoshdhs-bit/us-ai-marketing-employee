@@ -36,6 +36,7 @@ class Company(Timestamped, Base):
     city: Mapped[str | None] = mapped_column(String(100))
     country: Mapped[str] = mapped_column(String(2), default="US")
     location_text: Mapped[str | None] = mapped_column(String(300))
+    location_evidence: Mapped[str | None] = mapped_column(String(300))  # why we know it is a US company
     employee_range: Mapped[str | None] = mapped_column(String(40))
     description: Mapped[str | None] = mapped_column(Text)
     phone: Mapped[str | None] = mapped_column(String(40))  # only from official filings / the company itself
