@@ -48,7 +48,11 @@ def test_sending_signs_in_with_xoauth2_when_the_account_is_connected(make_ctx):
     assert sender.status()[0] is True
     run(ctx, sender)
     assert followup(ctx, fid).status == "sent" and [m["To"] for m in FakeSMTP.sent] == [DAVID]
-    assert OAuthSMTP.auths == [("XOAUTH2", f"user={ctx.settings.smtp_username}\x01auth=Bearer at-1\x01\x01")]
+    from aime.integrations import oauth
+    from aime.secure_store import unprotect
+    with ctx.db.session() as s:
+        token = unprotect(oauth.connected(s, "google", "mail").access_token)
+    assert OAuthSMTP.auths == [("XOAUTH2", f"user={ctx.settings.smtp_username}\x01auth=Bearer {token}\x01\x01")]
 
 
 def test_without_a_connected_account_nothing_is_sent_and_it_waits(make_ctx):
