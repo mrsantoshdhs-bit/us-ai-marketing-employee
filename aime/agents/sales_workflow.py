@@ -127,7 +127,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                    in_reply_to: str | None = None) -> None:
         subject, body = draft_reply(self.settings, step, lead.contact.first_name, lead.primary_service,
                                     self._inquiry_excerpt(session, lead) if step == 1 else None)
-        # Every email waits for a person to approve it; there is no setting that skips this.
+        # Every draft waits for approval: a person's, or at send time an active campaign authorization (aime/automation.py).
         session.add(FollowUp(lead_id=lead.id, contact_id=lead.contact_id, company_id=lead.company_id,
                              channel="email", step=step, due_at=due, status="awaiting_approval",
                              subject=subject, body=body, in_reply_to=in_reply_to))
@@ -157,7 +157,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         subject, body = draft_outreach(self.settings, step, lead, contact, evidence)
         suppressed = is_suppressed(session, contact.email, lead.company.domain)
         qc = run_email_checks(subject, body, evidence_dicts, contact, suppressed, step=step)
-        # Every email waits for a person to approve it; there is no setting that skips this.
+        # Every draft waits for approval: a person's, or at send time an active campaign authorization (aime/automation.py).
         session.add(FollowUp(lead_id=lead.id, contact_id=contact.id, company_id=lead.company_id, channel="email",
                              kind="outreach", step=step, due_at=due, status="awaiting_approval", subject=subject,
                              body=body, to_email=contact.email, evidence=evidence_dicts, quality={"qc": qc},

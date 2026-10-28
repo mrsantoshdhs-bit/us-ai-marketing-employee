@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from aime import automation
 from aime.agents.base import BaseAgent, RetryPolicy
 from aime.agents.contracts import BlockedItem
 from aime.calendar_slots import free_slots
@@ -102,12 +103,14 @@ class AuthorizedPublishingAgent(BaseAgent[PublishInput, PublishOutput]):
             ContentItem.scheduled_for <= now).order_by(ContentItem.scheduled_for)).scalars().all()
         out.due = len(due)
 
-        if not auth.can_publish:
+        paused = automation.get_state(session) == "paused"
+        if paused or not auth.can_publish:
+            reason = "Automation is paused: nothing is published until it resumes" if paused else auth.reason
             for item in due:
-                item.publish_blocked_reason = auth.reason
-                out.blocked.append(BlockedItem(id=item.id, reason=auth.reason))
+                item.publish_blocked_reason = reason
+                out.blocked.append(BlockedItem(id=item.id, reason=reason))
             if due:
-                self._alert_once(session, f"{len(due)} approved post(s) are due but cannot be published: {auth.reason}")
+                self._alert_once(session, f"{len(due)} approved post(s) are due but cannot be published: {reason}")
             session.commit()
             return out
 

@@ -122,6 +122,7 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "dashboard_port": ("DASHBOARD_PORT", int),
     "dashboard_auth": ("DASHBOARD_AUTH", bool),
     "inbound_api_token": ("INBOUND_API_TOKEN", str),
+    "network_enabled": ("NETWORK_ENABLED", bool),
     "allowed_hosts": ("ALLOWED_HOSTS", str),
     "backup_offsite_dir": ("BACKUP_OFFSITE_DIR", str),
     "backup_passphrase": ("BACKUP_PASSPHRASE", str),
@@ -164,7 +165,8 @@ class Settings:
     linkedin_api_version: str = "202609"
     linkedin_author_urn: str = ""
     publishing_enabled: bool = False
-    # Read for compatibility only: emails and posts always need an approval record before they go out.
+    # true: every email needs a person's approval. false: in Hybrid or Automatic mode, an email covered by an active
+    # campaign authorization may be approved at send time (aime/automation.py). Posts always need a person.
     require_human_approval: bool = True
 
     hn_source_enabled: bool = True

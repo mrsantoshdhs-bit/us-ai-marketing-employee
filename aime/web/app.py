@@ -688,6 +688,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 raise HTTPException(400, "Action not allowed in the current state")
             log_activity(s, f"Follow-up #{f.id} {action}", who(request), type_="followup", company_id=f.company_id,
                          lead_id=f.lead_id)
+            if f.channel == "email" and action in ("approve", "reject", "mark_sent", "requeue"):
+                am.audit(s, who(request), f"email_{action}", f"follow-up #{f.id}",
+                         f"{f.kind or 'email'} to {am.recipient(f) or 'no address'}: {(f.subject or '')[:120]}")
         return back("/followups", msg)
 
     # ------------------------------------------------------------------ content
@@ -805,6 +808,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             else:
                 raise HTTPException(400, "Action not allowed in the current state")
             log_activity(s, f"Post #{item.id} {action}", who(request), type_="content")
+            if action in ("approve", "reject"):
+                am.audit(s, who(request), f"post_{action}", f"post #{item.id}", (item.title or "")[:120])
         return back(f"/content/{cid}", msg)
 
     @app.get("/assets/{name}")

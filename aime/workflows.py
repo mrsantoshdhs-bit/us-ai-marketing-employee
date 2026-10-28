@@ -136,7 +136,7 @@ def job_enrich(ctx: AppContext, job: str = "enrich") -> JobOutcome:
 
 
 def job_inbox(ctx: AppContext, job: str = "inbox") -> JobOutcome:
-    """Read the sales mailbox (read-only), handle replies, then send anything newly approved."""
+    """Read the sales mailbox (read-only) and handle replies; approved emails are sent by the followups job."""
     out = JobOutcome()
     out.add(InboxAgent(ctx).run({}, job=job))
     return out
