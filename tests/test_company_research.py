@@ -225,7 +225,7 @@ def test_dashboard_shows_decision_makers(research_ctx):
     assert "David Chen" in page and "Chief Operating Officer" in page and "own website" in page
     lead = client.get("/leads/1").text
     assert "Website research" in lead and "In its own words" in lead and "primary" in lead
-    assert "Companies with a decision-maker" in client.get("/").text
+    assert "Companies with a decision-maker" in client.get("/reports").text
 
 
 def test_homepage_testimonials_and_people_from_other_companies_are_not_decision_makers():

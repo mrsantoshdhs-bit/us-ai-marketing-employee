@@ -252,13 +252,14 @@ def test_admin_only_routes_cover_permission_changes_but_not_stopping():
         assert not admin_only("POST", path), path
 
 
-def test_command_center_shows_real_counts_and_honest_empty_charts(make_ctx):
+def test_command_center_shows_how_the_work_runs_and_analytics_the_honest_empty_charts(make_ctx):
     ctx = make_ctx()
-    page = TestClient(create_app(ctx)).get("/").text
-    assert "Sales Command Center" in page and "No leads created in the last 8 weeks" in page
-    assert "Needs you" in page and "Upcoming meetings" in page and "Automation status" in page
-    for text in ('href="/automation"', 'href="/audit"', 'class="sidebar"'):
-        assert text in page
+    client = TestClient(create_app(ctx))
+    page = client.get("/command-center").text
+    for text in ("Sales Command Center", "Needs you", "Operating mode", "AI team workflow", "Live execution",
+                 "Email &amp; Calendly", 'href="/automation"', 'href="/audit"', 'class="sidebar"'):
+        assert text in page, text
+    assert "No leads created in the last 8 weeks" in client.get("/reports").text
 
 
 # --------------------------------------------------------------------------- intents, tiers, charts

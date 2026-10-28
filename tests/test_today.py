@@ -37,9 +37,9 @@ def test_today_shows_sales_manager_view(ctx):
         assert run_job(ctx, job)["status"] == "success"
     with ctx.db.session() as s:
         titles = s.execute(select(ContentItem.title).where(ContentItem.status == "awaiting_approval")).scalars().all()
-    html = _client(ctx).get("/").text
-    assert "Needs you" in html and "Companies to review" in html
-    assert "Companies with a decision-maker" in html and "not built yet" not in html
+    html = _client(ctx).get("/command-center").text
+    assert "Needs you" in html and "Companies to review" in html and "not built yet" not in html
+    assert "Companies with a decision-maker" in _client(ctx).get("/reports").text
     assert "off: nothing is posted" in html
     assert titles and all(t.replace("&", "&amp;").replace("'", "&#39;") in html for t in titles[:3])
 
@@ -49,7 +49,7 @@ def test_today_lists_exceptions(ctx):
     with ctx.db.session() as s:
         post = s.execute(select(ContentItem)).scalars().first()
         post.status = "uncertain"
-    assert "Post outcome unknown" in _client(ctx).get("/").text
+    assert "Post outcome unknown" in _client(ctx).get("/command-center").text
 
 
 def test_system_page_keeps_technical_details(ctx):

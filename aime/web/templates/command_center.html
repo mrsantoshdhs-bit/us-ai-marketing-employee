@@ -1,0 +1,159 @@
+{% extends "base.html" %}{% from "_macros.html" import qc_pill %}{% from "_icons.html" import icon %}
+{% block title %}Sales Command Center · AI Sales Employee{% endblock %}
+{% block content %}
+{% set duty_label, duty_tone, duty_note, duty_head = employee.duty %}
+{% set live = employee.live %}
+{% set ns = namespace(issues=0) %}{% for _l, st_, _d in health %}{% if st_ != 'ok' %}{% set ns.issues = ns.issues + 1 %}{% endif %}{% endfor %}
+<div class="page-head">
+  <div>
+    <h1>{{ icon('sparkle') }} Sales Command Center</h1>
+    <p class="subtitle">How your AI employee and its team are working right now. Every status is read from the runs; nothing is estimated. Business figures are on the <a href="/">dashboard</a>.</p>
+  </div>
+  <details class="health-panel">
+    <summary><span class="dots">{% for _l, st_, _d in health %}<i class="{{ st_ }}"></i>{% endfor %}</span>
+      System health · {{ ns.issues ~ ' need attention' if ns.issues else 'all good' }} <span class="muted small">(show)</span></summary>
+    <div class="health">{% for label, state, detail in health %}<div class="h {{ state }}"><b>{{ label }}</b><span>{{ detail }}</span></div>{% endfor %}</div>
+  </details>
+</div>
+
+<section class="cc-top">
+  <div class="panel hero-panel wide" aria-label="Your AI Sales Employee">
+    <div class="hero-copy">
+      <div class="hero-tags"><span class="robot-chip">AI Employee · {{ company_name }}</span><span class="state-chip {{ duty_tone }}"><i></i>{{ duty_label }}</span></div>
+      <h2>{{ {'Working now': 'Working for your growth', 'On duty': 'On duty and ready', 'Off duty': 'Waiting for its next shift', 'Stopped': 'Stopped by you'}.get(duty_label, duty_label) }}</h2>
+      <p>{{ duty_note|capitalize }}.</p>
+      <dl class="workspace">
+        <div><dt>{{ icon('zap') }}Running now</dt><dd>{% if live.running %}<b class="run">{{ live.running|join(', ') }}</b>{% else %}nothing at this moment{% endif %}</dd></div>
+        <div><dt>{{ icon('check-circle') }}Last finished</dt><dd>{% if live.last %}{{ live.last.title }} <span class="{{ 'ok' if live.last.ok else 'bad' }}">{{ 'completed' if live.last.ok else 'failed' }}</span> {{ live.last.ago }}{% if live.last.took %} · {{ live.last.took }}{% endif %}{% else %}no runs yet{% endif %}</dd></div>
+        <div><dt>{{ icon('clock') }}Next check-in</dt><dd>{% if live.next_checkin %}about {{ live.next_checkin|local(None, '%H:%M') }}{% else %}not scheduled from here{% endif %}</dd></div>
+        <div><dt>{{ icon('refresh') }}Scheduled jobs, 24 h</dt><dd>{{ live.jobs_24h }} run{{ 's' if live.jobs_24h != 1 }}{% if live.failed_24h %}, <span class="bad">{{ live.failed_24h }} not successful</span>{% else %}, all successful{% endif %}</dd></div>
+      </dl>
+      <div class="did-strip" aria-label="Last 24 hours">{% for label, n, href in employee.did %}<a href="{{ href }}" class="did{{ ' zero' if not n }}"><b>{{ n }}</b><span>{{ label }}</span></a>{% endfor %}</div>
+    </div>
+    <img class="hero-robot" src="/static/robot.svg" alt="" width="420" height="520">
+  </div>
+
+  <div class="panel control-panel" id="modes">
+    <div class="panel-head"><h2>{{ icon('sliders') }} Operating mode</h2><a class="panel-link" href="/automation">Authorizations {{ icon('arrow-right') }}</a></div>
+    <form method="post" action="/automation/mode" class="mode-switch" aria-label="Operating mode">
+      <input type="hidden" name="next" value="/command-center#modes">
+      {% for key, text in modes.items() %}
+      <button name="mode" value="{{ key }}" class="{{ 'current' if key == automation.mode }}" {{ 'disabled' if not is_admin }} aria-pressed="{{ 'true' if key == automation.mode else 'false' }}">
+        <b>{{ key|title }}</b><span>{{ text }}</span></button>
+      {% endfor %}
+    </form>
+    {% if not is_admin %}<p class="small muted">Only an administrator can change the mode.</p>{% endif %}
+    <div class="state-row">
+      <span class="state-chip {{ 'ok' if automation.state == 'running' else 'bad' }}"><i></i>{{ automation.state|replace('_', ' ')|title }}</span>
+      {% for action, label, ico in [('start', 'Start', 'play'), ('resume', 'Resume', 'play'), ('pause', 'Pause sending', 'pause'), ('stop', 'Stop jobs', 'stop'), ('emergency_stop', 'Emergency stop', 'alert')] %}
+      {% if automation.state in nav_status.transitions[action][0] and (is_admin or action not in ('start', 'resume')) %}
+      <form class="inline" method="post" action="/automation/state/{{ action }}"><input type="hidden" name="next" value="/command-center#modes">
+        <button class="{{ 'danger' if action == 'emergency_stop' else 'secondary' }}">{{ icon(ico) }}{{ label }}</button></form>
+      {% endif %}{% endfor %}
+    </div>
+    <div class="send-check {{ 'warn' if automation.blockers else 'ok' }}">
+      <b>{% if automation.blockers %}{{ icon('lock') }} No email can go out without a person{% else %}{{ icon('check-circle') }} Emails within authorizations can go out{% endif %}</b>
+      {% for b in automation.blockers %}<span>{{ b }}</span>{% endfor %}
+    </div>
+  </div>
+</section>
+
+<section class="panel workflow-board" id="team" aria-label="AI team workflow">
+  <div class="panel-head">
+    <h2>{{ icon('cpu') }} AI team workflow</h2>
+    <div class="status-sum">{% for label, cls, n in team_counts %}<span class="st-chip st-{{ cls }}"><i></i>{{ n }} {{ label|lower }}</span>{% endfor %}</div>
+    <a href="/agents" class="panel-link">All agent runs {{ icon('arrow-right') }}</a>
+  </div>
+  <div class="board-flow">
+    {% for stage, note, agents in workflow %}
+    <div class="board-stage">
+      <div class="board-stage-head"><span class="step">{{ loop.index }}</span><div><b>{{ stage }}</b><small>{{ note }}</small></div></div>
+      {% for a in agents %}
+      <div class="agent-card st-{{ a.status|lower }}">
+        <div class="agent-card-head"><span class="node-icon">{{ icon(a.icon) }}<i></i></span><b>{{ a.title }}</b></div>
+        <span class="st-chip st-{{ a.status|lower }}"><i></i>{{ a.label }}</span>
+        <p>{{ a.job }}</p>
+        <div class="agent-meta">{{ a.note }}{% if a.runs %} · {{ a.runs }} run{{ 's' if a.runs != 1 }} in 24 h, {{ a.rate|round|int }}% ok{% endif %}</div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="cc-grid">
+  <div class="panel" id="timeline">
+    <div class="panel-head"><h2>{{ icon('activity') }} Live execution <span class="live-dot">Live</span></h2><a href="/jobs" class="panel-link">Job history {{ icon('arrow-right') }}</a></div>
+    {% if timeline %}
+    <ul class="exec">
+      {% for t in timeline %}
+      <li class="st-{{ t.status }}"><span class="exec-dot"></span>
+        <span class="exec-main">{% if t.href %}<a href="{{ t.href }}">{{ t.text[:110] }}</a>{% else %}{{ t.text[:110] }}{% endif %}<small>{{ t.kind }} · {{ t.sub }}</small></span>
+        <span class="exec-side"><span class="st-chip st-{{ t.status }}"><i></i>{{ t.status|title }}</span><small>{{ t.ago }}</small></span></li>
+      {% endfor %}
+    </ul>
+    {% else %}<div class="empty-state"><b>Nothing has run yet</b>Agent runs, CRM changes and control actions appear here.</div>{% endif %}
+  </div>
+
+  <div class="panel" id="needs-you">
+    <div class="panel-head"><h2>{{ icon('check-square') }} Needs you</h2><a href="/approvals" class="panel-link">Approval Queue {{ icon('arrow-right') }}</a></div>
+    <p class="small muted panel-sub">Sales Manager action center: approvals and exceptions</p>
+    <div class="wait-chips">{% for label, n, href in employee.waiting %}<a href="{{ href }}" class="wait-chip{{ ' hot' if n }}"><b>{{ n }}</b>{{ label }}</a>{% endfor %}</div>
+    <div class="needs-list">
+      {% for kind, href, text in exceptions %}
+      <div class="row-item"><span class="pill bad">{{ kind }}</span> <a href="{{ href }}">{{ text[:140] }}</a></div>
+      {% endfor %}
+      {% for r in replies %}
+      <div class="row-item"><span class="pill warn">{{ 'SIMULATED ' if r.is_simulated }}reply: {{ (r.category or '')|replace('_', ' ') }}</span>
+        {% if r.intent %}<span class="pill {{ 'warn' if r.intent == 'pricing_request' else 'ok' }}">{{ r.intent|intent_label }}</span>{% endif %}
+        <a href="/inbox">{{ r.subject }}</a> <span class="muted small">{{ r.from_email }}</span></div>
+      {% endfor %}
+      {% for f in emails %}
+      <div class="row-item"><span class="pill warn">{{ 'outreach' if f.kind == 'outreach' else 'reply draft' }}</span> <a href="/followups#f{{ f.id }}">{{ f.subject }}</a>
+        <span class="muted small">{{ f.lead.company.name if f.lead and f.lead.company else '' }}</span></div>
+      {% endfor %}
+      {% for p in posts %}
+      <div class="row-item">{{ qc_pill(p.qc_status) }} <a href="/content/{{ p.id }}">{{ p.title }}</a>
+        <span class="muted small">post · {{ p.scheduled_for|et }}{% if post_decisions.get(p.id) %} · policy: {{ post_decisions[p.id]|replace('_', ' ') }}{% endif %}</span></div>
+      {% endfor %}
+      {% if not exceptions and not posts and not emails and not replies %}<div class="empty-state"><b>Nothing waiting for you</b>New approvals, unclear replies and exceptions appear here.</div>{% endif %}
+    </div>
+  </div>
+</section>
+
+<section class="cc-grid three-up">
+  <div class="panel" id="alerts">
+    <div class="panel-head"><h2>{{ icon('bell') }} Alerts</h2><a href="/system" class="panel-link">System {{ icon('arrow-right') }}</a></div>
+    {% for a in alerts %}
+    <div class="row-item"><span class="pill {{ 'bad' if a.level == 'error' else 'warn' }}">{{ a.level }}</span>
+      <span class="small">{{ a.message }}</span>
+      <form class="inline" method="post" action="/alerts/{{ a.id }}/ack"><button class="secondary">Acknowledge</button></form></div>
+    {% else %}<div class="empty-state"><b>No open alerts</b>Problems the monitor finds appear here.</div>{% endfor %}
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h2>{{ icon('mail') }} Email &amp; Calendly</h2><a href="/integrations" class="panel-link">Integrations {{ icon('arrow-right') }}</a></div>
+    <div class="status-row"><span class="k">Sending (OUTBOUND_EMAIL_ENABLED)</span><span class="val">{% if gmail.sending %}<span class="pill ok">on</span>{% else %}<span class="pill warn">off</span>{% endif %}</span></div>
+    <div class="status-row"><span class="k">Mail server</span><span class="val">{% if gmail.ready %}<span class="pill ok">ready</span>{% else %}<span class="small muted">{{ gmail.reason }}</span>{% endif %}</span></div>
+    <div class="status-row"><span class="k">Sender</span><span class="val">{{ gmail.sender or '—' }}</span></div>
+    <div class="status-row"><span class="k">Reply monitoring</span><span class="val">{{ 'reading the mailbox' if gmail.reading else 'off (IMAP not set)' }}</span></div>
+    <div class="status-row"><span class="k">Booking link</span><span class="val">{% if calendly.url %}<a href="{{ calendly.url|safe_url }}" target="_blank" rel="noopener noreferrer">{{ calendly.url|replace('https://', '') }}</a>{% else %}<span class="pill warn">not set</span>{% endif %}</span></div>
+    <div class="status-row"><span class="k">Last Calendly notice read</span><span class="val">{{ calendly.last_notice|local if calendly.last_notice else 'none yet' }}</span></div>
+    <div class="status-row"><span class="k">Active campaign authorizations</span><span class="val">{{ automation.active }}</span></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h2>{{ icon('shield') }} Auto-publish policy <span class="pill warn">shadow</span></h2><a href="/policy" class="panel-link">Details {{ icon('arrow-right') }}</a></div>
+    <p class="small">Of the posts waiting: <b>{{ policy.would_publish }}</b> would publish, <b>{{ policy.would_hold }}</b> would hold.
+      {% if policy.agreement_rate is not none %}Agreed with you on {{ policy.agreement_rate }}% of your decisions
+      ({{ policy.too_permissive }} too permissive, {{ policy.too_strict }} too strict).{% else %}No decisions of yours to compare yet.{% endif %}</p>
+    <p class="small muted">Records only: it never approves or publishes.</p>
+    <h3 class="sub-head">Companies to review <span class="muted small">{{ task_total }} open</span></h3>
+    {% for t in tasks %}
+    <div class="row-item"><a href="/leads/{{ t.lead_id }}">{{ t.lead.company.name if t.lead and t.lead.company else t.subject }}</a>
+      <span class="muted small">{{ t.subject }}</span></div>
+    {% else %}<span class="muted small">No review tasks.</span>{% endfor %}
+    {% if task_total > tasks|length %}<div class="small"><a href="/followups">All {{ task_total }} tasks →</a></div>{% endif %}
+  </div>
+</section>
+{% endblock %}

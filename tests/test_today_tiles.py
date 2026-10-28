@@ -12,7 +12,7 @@ def test_today_separates_posts_waiting_for_approval_from_scheduled_ones(make_ctx
     with ctx.db.session() as s:
         s.add(ContentItem(service="bpa", industry="logistics", title="Draft", body="Text", status="awaiting_approval",
                           generator="template", fingerprint="tile-test"))
-    page = TestClient(create_app(ctx)).get("/").text
+    page = TestClient(create_app(ctx)).get("/reports").text
     assert "Posts awaiting approval" in page and "Posts scheduled" in page and "Emails awaiting approval" in page
 
 
@@ -48,7 +48,7 @@ def test_usable_emails_and_qualified_companies_count_what_can_really_be_used(mak
                     source="manual", status="cancelled"),
         ])
     client = TestClient(create_app(ctx))
-    page = client.get("/").text
+    page = client.get("/reports").text
     assert _tile(page, "Companies with a usable email") == 1
     assert _tile(page, "Qualified companies") == 1
     reachable = client.get("/contacts?reachable=1").text

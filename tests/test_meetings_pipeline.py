@@ -146,8 +146,10 @@ def test_today_shows_meetings_and_sales_funnel(make_ctx):
     ctx, _, _ = contacted(make_ctx)
     FakeIMAP.messages = {1: calendly()}
     run_inbox(ctx)
-    page = TestClient(create_app(ctx)).get("/").text
-    assert "Upcoming meetings" in page and "Meetings booked" in page and "Outreach emails sent" in page
+    client = TestClient(create_app(ctx))
+    page = client.get("/").text
+    assert "Upcoming Meetings" in page and "Meetings booked" in page and "No upcoming meetings" not in page
+    assert "Outreach emails sent" in client.get("/reports").text
     with ctx.db.session() as s:
         assert s.execute(select(Lead)).scalar_one().outreach_status == "meeting"
 

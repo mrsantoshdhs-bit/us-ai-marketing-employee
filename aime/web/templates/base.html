@@ -24,7 +24,7 @@
     <a class="brand" href="/"><span class="brand-logo">AI</span><span class="brand-text"><b>AI Sales Employee</b><small>Your sales &amp; marketing workforce</small></span></a>
     <nav>
       {%- set nav_sections = [
-        (None, [('/', 'Dashboard', 'dashboard', None, ''), ('/#command-center', 'Sales Command Center', 'sparkle', None, 'NEW')]),
+        (None, [('/', 'Dashboard', 'dashboard', None, ''), ('/command-center', 'Sales Command Center', 'sparkle', None, 'NEW')]),
         ('Sales', [('/pipeline', 'CRM Pipeline', 'kanban', None, ''), ('/companies', 'Companies', 'building', None, ''),
                    ('/contacts', 'Contacts', 'users', None, ''), ('/leads', 'Leads', 'target', None, '')]),
         ('Engagement', [('/inbox', 'Conversations', 'chat', nav_c.replies, ''), ('/followups', 'Follow-ups', 'send', None, ''),
@@ -43,7 +43,7 @@
       <div class="nav-section">
         {% if heading %}<div class="nav-heading">{{ heading }}</div>{% endif %}
         {% for href, label, ico, count, tag in links %}
-        {%- set active = (nav_path == '/' and href == '/') or (href not in ('/', '/#command-center') and nav_path.startswith(href)) -%}
+        {%- set active = (nav_path == '/' and href == '/') or (href != '/' and nav_path.startswith(href)) -%}
         <a href="{{ href }}" class="nav-link{{ ' active' if active }}" title="{{ label }}"{% if active %} aria-current="page"{% endif %}>{{ icon(ico) }}<span class="nav-label">{{ label }}</span>{% if tag == 'NEW' %}<span class="tag-new">NEW</span>{% endif %}{% if count %}<span class="count{{ ' red' if tag == 'alert' }}">{{ count }}</span>{% endif %}</a>
         {% endfor %}
       </div>
@@ -54,7 +54,7 @@
       <img src="/static/robot.svg" alt="" width="46" height="49">
       <div class="side-card-text"><b>{{ nav_s.duty[3] }}</b><span>{{ nav_s.duty[2] }}</span>
         <span class="live {{ nav_s.duty[1] }}"><i></i>{{ nav_s.duty[0] }}</span></div>
-      <a class="side-card-btn" href="/agents">View activity {{ icon('arrow-right') }}</a>
+      <a class="side-card-btn" href="/command-center">View activity {{ icon('arrow-right') }}</a>
     </div>
     {% endif %}
     <label for="nav-toggle" class="collapse-btn" title="Collapse or expand the menu">{{ icon('chevron-left') }}<span class="nav-label">Collapse menu</span></label>
@@ -69,14 +69,27 @@
       <span class="spacer"></span>
       {% if data_role != 'production' %}<span class="chip env-other hide-sm" title="Not the production database">{{ (data_role or 'unknown')|upper }}</span>{% endif %}
       <span class="chip {{ 'ok' if sending_on else 'warn' }} hide-sm" title="OUTBOUND_EMAIL_ENABLED"><span class="dot"></span>Sending {{ 'on' if sending_on else 'off' }}</span>
-      {% if nav_s.mode %}<a class="mode-pill {{ 'ok' if nav_s.state == 'running' else 'bad' }}" href="/automation" title="Operating mode"><i></i>{{ nav_s.mode|title }} Mode</a>{% endif %}
+      {% if nav_s.mode %}
+      <details class="menu-wrap mode-menu">
+        <summary class="mode-pill {{ 'ok' if nav_s.state == 'running' else 'bad' }}" title="Operating mode"><i></i>{{ nav_s.mode|title }} Mode{{ icon('chevron-down') }}</summary>
+        <form class="menu mode-options" method="post" action="/automation/mode">
+          <input type="hidden" name="next" value="{{ nav_s.here }}">
+          <div class="menu-head">Operating mode{% if not nav_s.admin %} · only an administrator can change it{% endif %}</div>
+          {% for key, text in nav_s.modes.items() %}
+          <button class="menu-item mode-option{{ ' on' if key == nav_s.mode }}" name="mode" value="{{ key }}" {{ 'disabled' if not nav_s.admin or key == nav_s.mode }}>
+            <span class="mode-dot"></span><span><b>{{ key|title }}</b><small>{{ text }}</small></span></button>
+          {% endfor %}
+          <a class="menu-item" href="/automation">{{ icon('sliders') }}Authorizations and limits</a>
+        </form>
+      </details>
+      {% endif %}
       {% if nav_s.state %}
       <details class="menu-wrap auto-menu">
         <summary class="btn-gradient">{{ icon('play' if nav_s.state != 'running' else 'activity') }}<span class="hide-sm">{{ {'running': 'Automation on', 'paused': 'Resume automation', 'stopped': 'Start automation', 'emergency_stop': 'Start automation'}[nav_s.state] }}</span>{{ icon('chevron-down') }}</summary>
         <div class="menu">
           <div class="menu-head">Automation is <b>{{ nav_s.state|replace('_', ' ') }}</b></div>
           {% for action, label, ico in [('start', 'Start automation', 'play'), ('resume', 'Resume', 'play'), ('pause', 'Pause sending', 'pause'), ('stop', 'Stop jobs', 'stop'), ('emergency_stop', 'Emergency stop', 'alert')] %}
-          {% if nav_s.state in nav_s.transitions[action][0] %}<form method="post" action="/automation/state/{{ action }}"><button class="menu-item{{ ' danger' if action == 'emergency_stop' }}">{{ icon(ico) }}{{ label }}</button></form>{% endif %}
+          {% if nav_s.state in nav_s.transitions[action][0] %}<form method="post" action="/automation/state/{{ action }}"><input type="hidden" name="next" value="{{ nav_s.here }}"><button class="menu-item{{ ' danger' if action == 'emergency_stop' }}">{{ icon(ico) }}{{ label }}</button></form>{% endif %}
           {% endfor %}
           <a class="menu-item" href="/automation">{{ icon('sliders') }}Automation Control</a>
         </div>

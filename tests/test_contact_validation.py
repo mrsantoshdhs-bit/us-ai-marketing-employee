@@ -140,7 +140,7 @@ def test_dashboard_shows_emails_and_reachability(run_research):
     page = client.get("/contacts?reachable=1").text
     assert f"david.chen@{SITE}" in page and "published" in page and "Company inbox" in page
     assert "Maria Lopez" not in page  # no usable email
-    assert "Companies with a usable email" in client.get("/").text
+    assert "Companies with a usable email" in client.get("/reports").text
 
 
 

@@ -222,7 +222,7 @@ def test_simulated_reply_is_labelled_and_reclassifying_applies_actions(make_ctx,
     r = latest_reply(ctx)
     assert r.is_simulated and r.status == "needs_review"
     client = TestClient(create_app(ctx))
-    assert "SIMULATED" in client.get("/inbox").text and "SIMULATED" in client.get("/").text
+    assert "SIMULATED" in client.get("/inbox").text and "SIMULATED" in client.get("/command-center").text
     client.post(f"/inbox/{r.id}/reclassify", data={"category": "interested"}, headers=ORIGIN)
     with ctx.db.session() as s:
         assert s.execute(select(Opportunity)).scalar_one()
