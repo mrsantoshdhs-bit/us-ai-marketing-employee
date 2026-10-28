@@ -296,3 +296,47 @@ def test_each_agent_shows_its_pending_retries(make_ctx):
     page = TestClient(create_app(ctx)).get("/command-center/agents/research").text
     assert "Retries pending" in page and "2 failed attempts in a row" in page
     assert board(ctx)["AI agents"][0] == "FAILED"
+
+
+# --------------------------------------------------------------------------- no overlap, retries, deliberate stops
+
+def test_a_second_tick_never_overlaps_a_running_one_and_a_dead_ones_lock_is_recovered(make_ctx):
+    from aime.scheduler.runner import tick
+
+    ctx = make_ctx()
+    lock = ctx.settings.locks_dir / "tick.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(f"{os.getpid()} now")  # a live owner: this process
+    assert tick(ctx) == {"status": "skipped", "reason": "another tick is running", "ran": []}
+    lock.write_text("999999999 long-gone")  # an owner that no longer exists (crash, sleep, kill)
+    with ctx.db.session() as s:
+        am.change_state(s, "stop", "admin")  # keep the recovered tick from running real jobs
+    assert tick(ctx)["status"] == "ok" and not lock.exists()
+
+
+def test_failed_daily_jobs_retry_with_a_growing_wait_then_stop_until_the_next_slot():
+    from datetime import time as dtime
+    from zoneinfo import ZoneInfo
+
+    from aime.scheduler.runner import MAX_DAILY_RETRIES, JobSpec, is_due, retry_backoff
+
+    spec = JobSpec("research", None, dtime(7, 0), "Research")
+    now = datetime(2026, 10, 28, 9, 0)  # 09:00 UTC, after the 07:00 UTC slot
+    state = JobState(job="research", enabled=True, last_attempt_at=now - timedelta(minutes=1), consecutive_failures=1)
+    assert is_due(spec, state, now, ZoneInfo("UTC"))[1].startswith("retry backoff")
+    state.last_attempt_at = now - retry_backoff(1) - timedelta(minutes=1)
+    assert is_due(spec, state, now, ZoneInfo("UTC"))[0] is True
+    assert retry_backoff(2) == 2 * retry_backoff(1)
+    state.consecutive_failures = MAX_DAILY_RETRIES
+    assert is_due(spec, state, now, ZoneInfo("UTC")) == (False, "failed repeatedly; waiting for the next slot")
+
+
+def test_a_deliberate_stop_survives_a_restart_and_only_an_administrator_starts_again(make_ctx):
+    from aime.scheduler.runner import run_job
+
+    ctx = make_ctx()
+    with ctx.db.session() as s:
+        am.change_state(s, "emergency_stop", "admin", "test")
+    assert run_job(ctx, "followups")["status"] == "skipped"  # a start-up or catch-up run does not undo the stop
+    with ctx.db.session() as s:
+        assert am.get_state(s) == "emergency_stop" and "start" in am.ADMIN_ACTIONS
