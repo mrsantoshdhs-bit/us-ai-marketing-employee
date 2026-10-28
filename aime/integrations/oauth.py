@@ -98,7 +98,7 @@ def start(session: Session, settings, provider: str, purpose: str) -> str:
     return f"{_endpoint(settings, provider, 'auth')}?{urlencode(params)}"
 
 
-def finish(session: Session, settings, http: httpx.Client, state: str, code: str) -> OAuthToken:
+def finish(session: Session, settings, http: httpx.Client, state: str, code: str, actor: str = "admin") -> OAuthToken:
     """Exchange the code from the sign-in page for tokens and store them encrypted. The state is used once."""
     pending = kv_get(session, "oauth.pending") or {}
     kv_set(session, "oauth.pending", None)
@@ -111,7 +111,10 @@ def finish(session: Session, settings, http: httpx.Client, state: str, code: str
             "client_id": client_id, "code_verifier": unprotect(pending["verifier"])}
     if secret:
         data["client_secret"] = secret
-    return store(session, provider, purpose, _token_request(http, _endpoint(settings, provider, "token"), data))
+    row = store(session, provider, purpose, _token_request(http, _endpoint(settings, provider, "token"), data))
+    from aime.automation import audit
+    audit(session, actor, "account_connected", row.provider, "OAuth sign-in completed; tokens stored encrypted")
+    return row
 
 
 def _token_request(http: httpx.Client, url: str, data: dict) -> dict:

@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from aime import automation as am
@@ -106,10 +106,20 @@ def label(at_utc: datetime, tz: str) -> str:
     return f"{local:%A %d %B, %I:%M %p} {local.tzname()}".replace(" 0", " ")
 
 
+def _thread(session: Session, lead_id: int, email: str) -> str | None:
+    """The prospect's latest email to us on this lead: booking emails answer it, so they stay in their thread (and a
+    response may only ever answer an email we received)."""
+    return session.execute(select(InboundEmail.message_id).where(
+        InboundEmail.lead_id == lead_id, func.lower(InboundEmail.from_email) == (email or "").lower(),
+        InboundEmail.message_id.is_not(None)).order_by(InboundEmail.received_at.desc(), InboundEmail.id.desc())
+    ).scalars().first()
+
+
 def _draft(session: Session, settings, lead: Lead, to: str, subject: str, text: str, in_reply_to: str | None,
            contact_id: int | None) -> FollowUp:
     name = (to.split("@")[0].split(".")[0] or "there").capitalize()
     body = f"Hi {name},\n\n{text}\n\n{_signature(settings)}{reply_footer(settings)}"
+    in_reply_to = in_reply_to or _thread(session, lead.id, to)
     draft = FollowUp(lead_id=lead.id, contact_id=contact_id, company_id=lead.company_id, channel="email",
                      kind="response", step=1, due_at=utcnow(), status="awaiting_approval", subject=subject[:300],
                      body=body, to_email=to, in_reply_to=in_reply_to)
@@ -158,6 +168,20 @@ def propose(session: Session, settings, calendar, row: InboundEmail, actor: str,
                  type_="meeting", company_id=lead.company_id, lead_id=lead.id)
     am.audit(session, actor, "meeting_proposed", f"proposal #{p.id}", f"{len(slots)} free slots for {row.from_email}")
     return f"proposal #{p.id}"
+
+
+def sync_offered(session: Session) -> int:
+    """Proposals whose offer email has gone out are "offered" (the prospect has the times)."""
+    moved = 0
+    for p in session.execute(select(MeetingProposal).where(MeetingProposal.status == "draft",
+                                                           MeetingProposal.offer_followup_id.is_not(None))).scalars():
+        offer = session.get(FollowUp, p.offer_followup_id)
+        if offer is not None and offer.status == "sent":
+            p.status = "offered"
+            moved += 1
+        elif offer is not None and offer.status in ("cancelled", "rejected"):
+            p.status = "cancelled"  # the offer was withdrawn or never approved: nothing to book against
+    return moved
 
 
 def propose_pending(session: Session, settings, calendar, actor: str, now: datetime | None = None) -> int:

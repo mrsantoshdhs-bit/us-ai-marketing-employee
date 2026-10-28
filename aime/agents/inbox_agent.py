@@ -70,6 +70,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         from aime import booking
 
         booking.reminders(session, self.settings)
+        booking.sync_offered(session)
         ok, _why = booking.ready(session, self.settings)
         if not ok:
             return

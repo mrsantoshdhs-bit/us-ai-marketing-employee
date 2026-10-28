@@ -1355,12 +1355,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             return back("/integrations#accounts", f"Sign-in declined: {error_description or error}")
         with ctx.db.session() as s, ctx.http() as http:
             try:
-                row = oauth.finish(s, ctx.settings, http, state, code)
+                row = oauth.finish(s, ctx.settings, http, state, code, actor=who(request))
             except oauth.OAuthError as exc:
                 return back("/integrations#accounts", str(exc))
             key = row.provider
-        with ctx.db.session() as s:
-            am.audit(s, who(request), "account_connected", key, "OAuth sign-in completed; tokens stored encrypted")
         return back("/integrations#accounts", f"{key.replace(':', ' ')} connected. Nothing is read, sent or booked "
                     "until its own switch is turned on.")
 
