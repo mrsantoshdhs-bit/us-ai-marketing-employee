@@ -165,7 +165,7 @@ def test_policy_pages(ctx):
     page = client.get("/policy").text
     assert "shadow mode" in page and "would publish" in page
     assert "Auto-publish policy" in client.get(f"/content/{cid}").text
-    assert "Auto-publish policy" in client.get("/").text
+    assert "Auto-publish policy" in client.get("/command-center").text
 
 
 def test_failed_content_job_stays_failed(ctx, monkeypatch):

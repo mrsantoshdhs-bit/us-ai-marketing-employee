@@ -1,0 +1,44 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}{{ a.title }} · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="small"><a href="/command-center#team">{{ icon('chevron-left') }}AI team workflow</a></p>
+    <h1><span class="st-{{ a.status|lower }}"><span class="node-icon big">{{ icon(a.icon) }}<i></i></span></span> {{ a.title }}</h1>
+    <p class="subtitle">{{ a.job }}. Stage: {{ a.stage }}. Everything below is read from this agent's own run records.</p>
+  </div>
+  <span class="st-chip st-{{ a.status|lower }} big-chip"><i></i>{{ a.label }}</span>
+</div>
+
+<section class="detail-grid">
+  <div class="panel">
+    <div class="panel-head"><h2>{{ icon('activity') }} Status</h2></div>
+    <div class="status-row"><span class="k">Current status</span><span class="val">{{ a.label }}: {{ a.note }}</span></div>
+    <div class="status-row"><span class="k">Current task</span><span class="val">{% if a.current %}{{ a.current.job|replace('_', ' ') }} job, started {{ a.current.since|local }}{% else %}none: not running now{% endif %}</span></div>
+    <div class="status-row"><span class="k">Blocked reason</span><span class="val">{{ a.blocked or 'not blocked' }}</span></div>
+    <div class="status-row"><span class="k">Last run</span><span class="val">{{ a.last_run|local if a.last_run else 'never' }}{% if a.last_result %} ({{ a.last_result }}){% endif %}</span></div>
+    <div class="status-row"><span class="k">Last successful run</span><span class="val">{{ a.last_success|local if a.last_success else 'never' }}</span></div>
+    <div class="status-row"><span class="k">Last 7 days</span><span class="val">{{ a.ok_7d }} completed, {{ a.failed_7d }} failed</span></div>
+    <div class="status-row"><span class="k">All time</span><span class="val">{% for st, n in totals|dictsort %}{{ n }} {{ st }}{% if not loop.last %} · {% endif %}{% else %}no runs{% endfor %}</span></div>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h2>{{ icon('clock') }} Schedule</h2><a class="panel-link" href="/jobs">Jobs {{ icon('arrow-right') }}</a></div>
+    {% for j in jobs %}
+    <div class="status-row"><span class="k"><b>{{ j.job|replace('_', ' ')|capitalize }}</b> · {{ j.label }}<br><span class="small">{{ j.description }}</span></span>
+      <span class="val">{% if j.next %}{% if j.next <= now %}next check-in{% else %}{{ j.next|local(None, '%a %H:%M') }}{% endif %}{% else %}disabled{% endif %}</span></div>
+    {% else %}<div class="empty-state"><b>No scheduled job ran this agent in the last 14 days</b>It runs when a job or a person starts it.</div>{% endfor %}
+  </div>
+</section>
+
+<div class="section-title"><h2>Recent runs <span class="muted small">latest 25</span></h2><a class="small" href="/agents?agent={{ a.agent }}">All runs →</a></div>
+<div class="card table-wrap"><table>
+  <tr><th>Status</th><th>Job</th><th>Started</th><th class="n">Took</th><th>Result</th></tr>
+  {% for r in runs %}
+  {% set cls = {'success': 'completed', 'running': 'running'}.get(r.status, 'failed') %}
+  <tr><td><span class="st-chip st-{{ cls }}"><i></i>{{ r.status }}</span></td><td>{{ (r.job or 'manual')|replace('_', ' ') }}</td>
+      <td class="small"><a href="/agents/runs/{{ r.id }}">{{ r.started_at|local }}</a></td>
+      <td class="n small">{{ '%.1f s'|format(r.duration_ms / 1000) if r.duration_ms else '—' }}</td>
+      <td class="small">{% if r.error %}<span class="bad-text">{{ r.error[:140] }}</span>{% else %}{{ r.output_summary|run_summary }}{% endif %}</td></tr>
+  {% else %}<tr><td colspan="5" class="muted">This agent has not run on this database yet.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

@@ -116,6 +116,24 @@ def is_due(spec: JobSpec, state: JobState | None, now: datetime, tz, tick_minute
     return True, f"slot {last_slot:%Y-%m-%d %H:%M} pending"
 
 
+def next_run(spec: JobSpec, state: JobState | None, now: datetime, tz) -> datetime | None:
+    """When the scheduler will next run this job (naive UTC), read from the same rules as `is_due`: a time at or
+    before `now` means it runs at the next check-in. None when the job is disabled."""
+    if not spec.enabled or (state is not None and not state.enabled):
+        return None
+    if spec.every_minutes:
+        if state is None or state.last_attempt_at is None:
+            return now
+        return state.last_attempt_at + timedelta(minutes=spec.every_minutes)
+    last_slot = _last_slot(spec, as_aware_utc(now).astimezone(tz), tz)
+    if state and state.last_success_at and state.last_success_at >= to_naive_utc(last_slot):
+        following = last_slot + timedelta(days=1)
+        while spec.weekdays and following.weekday() not in spec.weekdays:
+            following += timedelta(days=1)
+        return to_naive_utc(following)
+    return now
+
+
 def pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False

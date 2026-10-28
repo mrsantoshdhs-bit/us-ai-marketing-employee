@@ -211,7 +211,7 @@ def test_approving_or_requeueing_a_post_clears_old_blocked_reasons(client, seede
     with seeded.db.session() as s:
         item = s.get(ContentItem, 1)
         assert item.status == "approved" and item.publish_blocked_reason is None
-    assert "Approved post blocked" not in client.get("/").text
+    assert "Approved post blocked" not in client.get("/command-center").text
 
 
 def test_expired_linkedin_token_shows_reconnect_not_connected(make_ctx):
@@ -223,7 +223,7 @@ def test_expired_linkedin_token_shows_reconnect_not_connected(make_ctx):
     with ctx.db.session() as s:
         s.add(OAuthToken(provider="linkedin", access_token=protect("AT"), scope="openid profile w_member_social",
                          subject="abc", subject_name="Owner", expires_at=utcnow() - timedelta(days=3)))
-    page = TestClient(create_app(ctx)).get("/").text
+    page = TestClient(create_app(ctx)).get("/command-center").text
     strip = page[page.find("LinkedIn connection"):][:200]
     assert "expired" in strip and "days left" not in strip
 

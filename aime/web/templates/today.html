@@ -1,7 +1,8 @@
-{% extends "base.html" %}{% from "_macros.html" import status_pill, qc_pill %}{% from "_icons.html" import icon %}
+{% extends "base.html" %}{% from "_icons.html" import icon %}
 {% block title %}Dashboard · AI Sales Employee{% endblock %}
 {% block content %}
 {% set duty_label, duty_tone, duty_note, duty_head = employee.duty %}
+{% set live = employee.live %}
 <div class="dash-head">
   <div>
     <h1 class="greet">{{ greeting }}{% if user_name %}, {{ user_name }}{% endif %}! <span class="wave" aria-hidden="true">👋</span></h1>
@@ -23,57 +24,74 @@
   {% for c in cards %}
   <a class="kpi-card" href="{{ c.href }}">
     <span class="kpi-icon {{ c.tone }}">{{ icon(c.icon) }}</span>
-    <span class="kpi-body"><span class="kpi-label">{{ c.label }}</span>
-      <span class="kpi-row"><b class="kpi-value">{{ c.value }}</b><span class="delta {{ c.trend }}" title="{{ c.period }} in the last {{ period_days }} days, against the {{ period_days }} days before">{% if c.trend == 'up' %}↑{% elif c.trend == 'down' %}↓{% endif %} {{ c.change }}</span></span>
-    </span>
+    <span class="kpi-body"><span class="kpi-label">{{ c.label }}</span><b class="kpi-value">{{ '{:,}'.format(c.value) }}</b></span>
+    <span class="delta {{ c.trend }}" title="{{ c.period }} in the last {{ period_days }} days, against the {{ period_days }} days before">{% if c.trend == 'up' %}↑{% elif c.trend == 'down' %}↓{% endif %} {{ c.change }}</span>
     {{ c.spark }}
   </a>
   {% endfor %}
 </section>
 
-<section class="dash-row">
+<section class="dash-main">
   <div class="panel activity-panel">
-    <div class="panel-head"><h2>{{ icon('activity') }} AI Activity <span class="live-dot">Live</span></h2><a href="/agents" class="panel-link">View all activity {{ icon('arrow-right') }}</a></div>
+    <div class="panel-head"><h2>{{ icon('activity') }} AI Activity <span class="live-dot">Live</span></h2><a href="/command-center#timeline" class="panel-link">View all<span class="more"> activity</span> {{ icon('arrow-right') }}</a></div>
     {% if feed %}
     <ul class="feed">
       {% for f in feed %}
       <li><span class="feed-time">{{ f.ago }}</span><span class="feed-icon {{ f.tone }}">{{ icon(f.icon) }}</span>
-        <span class="feed-text">{% if f.href %}<a href="{{ f.href }}">{{ f.title[:90] }}</a>{% else %}{{ f.title[:90] }}{% endif %}<small>{{ f.sub }}</small></span>
+        <span class="feed-text">{% if f.href %}<a href="{{ f.href }}">{{ f.title[:90] }}</a>{% else %}{{ f.title[:90] }}{% endif %}<small><span class="ago-inline">{{ f.ago }} · </span>{{ f.sub }}</small></span>
         <span class="feed-status {{ f.tone }}">{{ f.status }}</span></li>
       {% endfor %}
     </ul>
     {% else %}<div class="empty-state"><b>No activity yet</b>Agent runs and CRM changes appear here as the scheduled jobs work.</div>{% endif %}
   </div>
 
-  <div class="panel robot-panel">
-    <div class="robot-copy">
-      <span class="robot-chip">AI Employee</span>
+  <div class="panel hero-panel" aria-label="Your AI Sales Employee">
+    <div class="hero-copy">
+      <div class="hero-tags"><span class="robot-chip">AI Employee</span><span class="state-chip {{ duty_tone }}"><i></i>{{ duty_label }}</span></div>
       <h2>{{ {'Working now': 'Working for your growth', 'On duty': 'Working for your growth', 'Off duty': 'Waiting for its next shift', 'Stopped': 'Stopped by you'}.get(duty_label, duty_label) }}</h2>
       <p>Finding leads, drafting outreach, reading replies and booking meetings{% if employee.mode == 'approval' %}, with every email approved by you{% else %}, within the limits you authorize{% endif %}.</p>
-      <div class="robot-status"><span class="live {{ duty_tone }}"><i></i>{{ duty_label }}</span> <span>{{ duty_note }}</span></div>
-      <a class="btn-gradient" href="/agents">View live progress {{ icon('arrow-right') }}</a>
+      {% set issues = live.problems|length + live.blocked|length %}
+      <dl class="workspace" aria-label="Live workspace">
+        <div><dt>{{ icon('zap') }}Now</dt><dd>{% if live.running %}{% for r in live.running %}<span class="st-chip st-running"><i></i>Running</span> {{ r.agent }} · {{ r.job }} job, since {{ r.since|local(None, '%H:%M') }}{% if not loop.last %}<br>{% endif %}{% endfor %}{% else %}<span class="st-chip st-idle"><i></i>Idle</span> no job running{% if live.last_job %}; last: {{ live.last_job.job }} {{ live.last_job.status }} {{ live.last_job.ago }}{% endif %}{% endif %}</dd></div>
+        <div><dt>{{ icon('clock') }}Next scheduled</dt><dd>{% if live.next_task %}{{ live.next_task.job|capitalize }} · {% if live.next_task.due %}due at the next check-in{% else %}{{ live.next_task.at|local(None, '%a %H:%M') }}{% endif %}{% else %}nothing scheduled{% endif %}</dd></div>
+        <div><dt>{{ icon('check-square') }}Waiting for you</dt><dd><a href="/approvals">{{ live.approvals }} approval{{ 's' if live.approvals != 1 }} and review{{ 's' if live.approvals != 1 }}</a></dd></div>
+        <div><dt>{{ icon('alert') }}Needs attention</dt><dd>{% if live.problems %}<a class="bad" href="/command-center#issues">{{ live.problems|length }} failed in 24 h</a>{% if live.blocked %} · {% endif %}{% endif %}{% if live.blocked %}<a class="warn-text" href="/command-center#issues">{{ live.blocked|length }} blocked by a switch</a>{% endif %}{% if not issues %}<span class="ok">nothing failed or blocked</span>{% endif %}</dd></div>
+      </dl>
+      <a class="btn-gradient" href="/command-center">View live progress {{ icon('arrow-right') }}</a>
     </div>
-    <img class="robot-art" src="/static/robot.svg" alt="The AI Sales Employee" width="230" height="244">
+    <img class="hero-robot" src="/static/robot.svg" alt="" width="420" height="520">
   </div>
 
   <div class="panel perf-panel">
-    <div class="panel-head"><h2>{{ icon('chart') }} Sales Performance</h2><span class="panel-pill">Last 7 days</span></div>
-    <div class="legend"><span class="legend-item"><i class="swatch s0"></i>Emails</span><span class="legend-item"><i class="swatch line"></i>Meetings</span><span class="legend-item"><i class="swatch s1"></i>Leads</span></div>
-    {{ performance }}
+    <div class="panel-head"><h2>{{ icon('chart') }} Sales Performance</h2>
+      <a class="panel-pill" href="/?range={{ 7 if period_days == 30 else 30 }}" title="Switch to the last {{ 7 if period_days == 30 else 30 }} days"><span class="more">Last </span>{{ period_days }} days</a></div>
+    {% for view in performance %}<input type="radio" name="perf-view" id="perf-{{ view.key }}" class="perf-radio" {{ 'checked' if loop.first }}>{% endfor %}
+    <div class="perf-tabs" role="group" aria-label="Choose what the chart shows">
+      {% for view in performance %}<label for="perf-{{ view.key }}">{{ view.label }}</label>{% endfor %}
+    </div>
+    {% for view in performance %}
+    <div class="perf-view v-{{ view.key }}">
+      <div class="legend">{% for name, total, cls in view.series %}<span class="legend-item"><i class="swatch {{ cls }}"></i>{{ name }}</span>{% endfor %}</div>
+      {{ view.chart }}
+    </div>
+    {% endfor %}
+    <p class="chart-hint">Counts per day from your records, {{ period_label }}. Hover a day to see its numbers.</p>
   </div>
 </section>
 
-<section class="dash-row bottom">
+<section class="dash-bottom">
   <div class="panel pipeline-panel">
     <div class="panel-head"><h2>{{ icon('kanban') }} Sales Pipeline</h2><a href="/pipeline" class="panel-link">View pipeline {{ icon('arrow-right') }}</a></div>
     <div class="stages">
       {% for stg in pipeline_stages %}
       {% if not loop.first %}<span class="stage-arrow" aria-hidden="true">{{ icon('arrow-right') }}</span>{% endif %}
       <a class="stage {{ stg.tone }}" href="{{ stg.href }}"><span class="stage-icon">{{ icon(stg.icon) }}</span><span class="stage-label">{{ stg.label }}</span>
-        <b>{{ stg.value }}</b><small>{{ stg.rate }}</small></a>
+        <b>{{ '{:,}'.format(stg.value) }}</b>{% if stg.rate %}<small>{{ stg.rate }}</small>{% else %}<small class="none"></small>{% endif %}</a>
       {% endfor %}
     </div>
-    <svg class="stage-wave" viewBox="0 0 600 30" preserveAspectRatio="none" aria-hidden="true"><path d="M0 22 C120 2 220 30 320 14 S500 4 600 18"/></svg>
+    <svg class="stage-wave" viewBox="0 0 600 34" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id="wave" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#2f6bff"/><stop offset=".35" stop-color="#7c4dff"/><stop offset=".7" stop-color="#f79009"/><stop offset="1" stop-color="#12b76a"/></linearGradient></defs>
+      <path d="M0 24 C90 6 170 32 260 18 S430 4 600 20"/></svg>
   </div>
 
   <div class="panel meetings-panel">
@@ -81,151 +99,38 @@
     {% for m in upcoming_list %}
     <div class="meet-row"><i class="meet-dot"></i><span class="meet-when"><b>{{ m.day }}</b><small>{{ m.time }}</small></span>
       <span class="meet-who"><b>{{ m.who }}</b><small>{{ m.title }}</small></span><a class="meet-btn" href="{{ m.href }}">{{ icon('video') }}Open</a></div>
-    {% else %}<div class="empty-state"><b>No upcoming meetings</b>They appear here when a prospect books{% if calendly_url %} through <a href="{{ calendly_url|safe_url }}" target="_blank" rel="noopener noreferrer">your Calendly link</a>{% endif %}.</div>{% endfor %}
+    {% else %}<div class="empty-state">{{ icon('calendar-check') }}<b>No upcoming meetings</b>They appear here when a prospect books{% if calendly_url %} through <a href="{{ calendly_url|safe_url }}" target="_blank" rel="noopener noreferrer">your Calendly link</a>{% endif %}.</div>{% endfor %}
   </div>
 
   <div class="panel insight-panel">
     <div class="panel-head"><h2>{{ icon('sparkle') }} AI Insights</h2></div>
     <h3>{{ insight[0] }}</h3>
     <p>{{ insight[1] }}</p>
-    <a class="insight-btn" href="/reports">View details {{ icon('arrow-right') }}</a>
+    <a class="insight-btn" href="/approvals">View details {{ icon('arrow-right') }}</a>
     <svg class="insight-bars" viewBox="0 0 60 40" aria-hidden="true"><rect x="2" y="26" width="8" height="14" rx="2"/><rect x="16" y="18" width="8" height="22" rx="2"/><rect x="30" y="10" width="8" height="30" rx="2"/><rect x="44" y="2" width="8" height="38" rx="2"/></svg>
   </div>
 </section>
 
-<div id="command-center" class="cc-head">
-  <div><h2 class="cc-title">{{ icon('sparkle') }} Sales Command Center</h2>
-    <p class="muted small">{{ employee.mode|title }} mode · every number below is counted from your records; nothing is estimated</p></div>
-  {% set ns = namespace(issues=0) %}{% for _l, st_, _d in health %}{% if st_ != 'ok' %}{% set ns.issues = ns.issues + 1 %}{% endif %}{% endfor %}
-  <details class="health-panel">
-    <summary><span class="dots">{% for _l, st_, _d in health %}<i class="{{ st_ }}"></i>{% endfor %}</span>
-      System health · {{ ns.issues ~ ' need attention' if ns.issues else 'all good' }} <span class="muted small">(show)</span></summary>
-    <div class="health">{% for label, state, detail in health %}<div class="h {{ state }}"><b>{{ label }}</b><span>{{ detail }}</span></div>{% endfor %}</div>
-  </details>
-</div>
-
-<section class="hero" aria-label="Your AI Sales Employee">
-  <div class="hero-id">
-    <div class="avatar" aria-hidden="true"><span>AI</span><i class="presence {{ duty_tone }}"></i></div>
-    <div><div class="eyebrow">Your AI Sales Employee · {{ company_name }}</div>
-      <div class="duty"><span class="pill {{ duty_tone }}">{{ duty_label }}</span> <span class="small muted">{{ duty_note }}</span></div></div>
+<section class="panel team-strip" aria-label="Your AI team">
+  <div class="panel-head">
+    <h2>{{ icon('cpu') }} Your AI team at work</h2>
+    <div class="status-sum">{% for label, cls, n in team_counts %}<span class="st-chip st-{{ cls }}"><i></i>{{ n }} {{ label|lower }}</span>{% endfor %}</div>
+    <a href="/command-center#team" class="panel-link">Open Command Center {{ icon('arrow-right') }}</a>
   </div>
-  <div class="hero-col"><div class="eyebrow">Last 24 hours</div>
-    <div class="did-grid">{% for label, n, href in employee.did %}<a href="{{ href }}" class="did{{ ' zero' if not n }}"><b>{{ n }}</b><span>{{ label }}</span></a>{% endfor %}</div></div>
-  <div class="hero-col"><div class="eyebrow">Waiting for you</div>
-    {% for label, n, href in employee.waiting %}<a class="wait-row" href="{{ href }}"><span>{{ label }}</span><b class="{{ 'hot' if n }}">{{ n }}</b></a>{% endfor %}</div>
+  <ol class="flow">
+    {% for stage, note, agents in workflow %}
+    <li class="flow-stage">
+      <div class="flow-head"><b>{{ stage }}</b><small>{{ note }}</small></div>
+      <div class="flow-agents">
+        {% for a in agents %}
+        <a class="agent-node st-{{ a.status|lower }}" href="/command-center/agents/{{ a.agent }}" title="{{ a.title }}: {{ a.label }}, {{ a.note }}">
+          <span class="node-icon">{{ icon(a.icon) }}<i></i></span>
+          <span class="node-text"><b>{{ a.title }}</b><span class="st-word">{{ a.label }}</span></span>
+        </a>
+        {% endfor %}
+      </div>
+    </li>
+    {% endfor %}
+  </ol>
 </section>
-
-<section aria-label="All key figures" class="kpi-grid">
-  {% for label, value, href, hint in kpis %}
-  <a class="kpi" href="{{ href }}"><div class="l">{{ label }}</div><div class="v">{{ value }}</div><div class="hint">{{ hint }}</div></a>
-  {% endfor %}
-</section>
-
-<div class="section-title"><h2>Your AI team <span class="muted small">{{ team|selectattr('status', 'equalto', 'ACTIVE')|list|length }} working now · status read from each agent's runs</span></h2><a class="small" href="/agents">All agent runs →</a></div>
-<div class="team">
-  {% for a in team %}
-  <div class="agent {{ a.status|lower }}">
-    <div class="agent-head"><span class="agent-dot"></span><b>{{ a.title }}</b><span class="status">{{ a.status }}</span></div>
-    <div class="small muted">{{ a.job }}</div>
-    <div class="agent-foot">{{ a.note }}{% if a.runs %} · {{ a.runs }} run{{ 's' if a.runs != 1 }} in 24 h, {{ a.rate }}% ok{% endif %}</div>
-  </div>
-  {% endfor %}
-</div>
-
-<div class="section-title"><h2>Performance</h2><span class="muted small">last 8 weeks, by week</span></div>
-<div class="three">
-  <div class="card"><div class="card-head"><h3>Lead generation</h3><span class="meta">leads created</span></div>{{ chart_leads }}</div>
-  <div class="card"><div class="card-head"><h3>Email performance</h3><span class="meta">sent and replies</span></div>{{ chart_email }}</div>
-  <div class="card"><div class="card-head"><h3>Meetings</h3><span class="meta">real bookings received, incl. later cancelled</span></div>{{ chart_meetings }}</div>
-  <div class="card"><div class="card-head"><h3>Sales funnel</h3><span class="meta">all time</span></div>{{ chart_funnel }}</div>
-  <div class="card"><div class="card-head"><h3>Pipeline by stage</h3><span class="meta">opportunities</span></div>{{ chart_pipeline }}</div>
-  <div class="card">
-    <div class="card-head"><h3>Automation status</h3><a class="meta" href="/automation">Control Center →</a></div>
-    <div class="status-row"><span class="k">Operating mode</span><span class="val">{{ automation.mode|title }}</span></div>
-    <div class="status-row"><span class="k">State</span><span class="val">{{ automation.state|replace('_', ' ')|title }}</span></div>
-    <div class="status-row"><span class="k">Active campaign authorizations</span><span class="val">{{ automation.active }}</span></div>
-    <div class="status-row"><span class="k">Emails without a person</span>
-      <span class="val">{% if automation.blockers %}<span class="pill warn">not possible now</span>{% else %}<span class="pill ok">within authorizations</span>{% endif %}</span></div>
-    {% if automation.blockers %}<div class="small muted" style="margin-top:6px">{{ automation.blockers[0] }}{% if automation.blockers|length > 1 %} (+{{ automation.blockers|length - 1 }} more){% endif %}</div>{% endif %}
-  </div>
-</div>
-
-<div class="main-side">
-  <div>
-    <div class="section-title"><h2>Needs you <span class="muted small">Sales Manager action center: approvals and exceptions</span></h2></div>
-    <div class="card">
-      {% for kind, href, text in exceptions %}
-      <div class="row-item"><span class="pill bad">{{ kind }}</span> <a href="{{ href }}">{{ text[:140] }}</a></div>
-      {% endfor %}
-      {% for r in replies %}
-      <div class="row-item"><span class="pill warn">{{ 'SIMULATED ' if r.is_simulated }}reply: {{ (r.category or '')|replace('_', ' ') }}</span>
-        {% if r.intent %}<span class="pill {{ 'warn' if r.intent == 'pricing_request' else 'ok' }}">{{ r.intent|intent_label }}</span>{% endif %}
-        <a href="/inbox">{{ r.subject }}</a> <span class="muted small">{{ r.from_email }}</span></div>
-      {% endfor %}
-      {% for f in emails %}
-      <div class="row-item"><span class="pill warn">{{ 'outreach' if f.kind == 'outreach' else 'reply draft' }}</span> <a href="/followups#f{{ f.id }}">{{ f.subject }}</a>
-        <span class="muted small">{{ f.lead.company.name if f.lead and f.lead.company else '' }}</span></div>
-      {% endfor %}
-      {% for p in posts %}
-      <div class="row-item">{{ qc_pill(p.qc_status) }} <a href="/content/{{ p.id }}">{{ p.title }}</a>
-        <span class="muted small">post · {{ p.scheduled_for|et }}{% if post_decisions.get(p.id) %} · policy: {{ post_decisions[p.id]|replace('_', ' ') }}{% endif %}</span></div>
-      {% endfor %}
-      {% if not exceptions and not posts and not emails and not replies %}<div class="empty-state"><b>Nothing waiting for you</b>New approvals, unclear replies and exceptions appear here.</div>{% endif %}
-    </div>
-
-    <h2 id="alerts">Alerts</h2>
-    <div class="card">
-      {% for a in alerts %}
-      <div class="row-item"><span class="pill {{ 'bad' if a.level == 'error' else 'warn' }}">{{ a.level }}</span>
-        <span class="small">{{ a.message }}</span>
-        <form class="inline" method="post" action="/alerts/{{ a.id }}/ack"><button class="secondary">Acknowledge</button></form></div>
-      {% else %}<span class="muted">No open alerts.</span>{% endfor %}
-    </div>
-
-    <h2>Pipeline <span class="muted small">every stage, with links to the records</span></h2>
-    <div class="grid">
-      {% for label, value, href, note in funnel %}
-      {% if href %}<a class="kpi" href="{{ href }}"><div class="v">{{ value }}</div><div class="l">{{ label }}</div></a>
-      {% else %}<div class="kpi muted"><div class="v">–</div><div class="l">{{ label }}<br><span class="small">{{ note }}</span></div></div>{% endif %}
-      {% endfor %}
-    </div>
-  </div>
-
-  <div>
-    <div class="section-title"><h2>Email &amp; Calendly</h2></div>
-    <div class="card">
-      <div class="status-row"><span class="k">Sending (OUTBOUND_EMAIL_ENABLED)</span><span class="val">{% if gmail.sending %}<span class="pill ok">on</span>{% else %}<span class="pill warn">off</span>{% endif %}</span></div>
-      <div class="status-row"><span class="k">Mail server</span><span class="val">{% if gmail.ready %}<span class="pill ok">ready</span>{% else %}<span class="small muted">{{ gmail.reason }}</span>{% endif %}</span></div>
-      <div class="status-row"><span class="k">Sender</span><span class="val">{{ gmail.sender or '—' }}</span></div>
-      <div class="status-row"><span class="k">Reply monitoring</span><span class="val">{{ 'reading the mailbox' if gmail.reading else 'off (IMAP not set)' }}</span></div>
-      <div class="status-row"><span class="k">Booking link</span><span class="val">{% if calendly.url %}<a href="{{ calendly.url|safe_url }}" target="_blank" rel="noopener noreferrer">{{ calendly.url|replace('https://', '') }}</a>{% else %}<span class="pill warn">not set</span>{% endif %}</span></div>
-      <div class="status-row"><span class="k">Last Calendly notice read</span><span class="val">{{ calendly.last_notice|local if calendly.last_notice else 'none yet' }}</span></div>
-    </div>
-
-    <h2>Upcoming meetings</h2>
-    <div class="card small">
-      {% for m in upcoming %}<div class="row-item">{% if m.is_simulated %}<span class="pill bad">SIMULATED</span> {% endif %}<b>{{ m.starts_at|et }}</b>
-        {{ m.invitee_name or m.invitee_email }}{% if m.lead %} · <a href="/leads/{{ m.lead_id }}">{{ m.lead.company.name }}</a>{% endif %}</div>
-      {% else %}<span class="muted">No meetings booked.</span>{% endfor %}
-    </div>
-
-    <h2>Auto-publish policy <span class="pill warn">shadow</span></h2>
-    <div class="card small">
-      Of the posts waiting: <b>{{ policy.would_publish }}</b> would publish, <b>{{ policy.would_hold }}</b> would hold.
-      {% if policy.agreement_rate is not none %}Agreed with you on {{ policy.agreement_rate }}% of your decisions
-      ({{ policy.too_permissive }} too permissive, {{ policy.too_strict }} too strict).{% else %}No decisions of yours to compare yet.{% endif %}
-      <a href="/policy">Details →</a><br><span class="muted">Records only: it never approves or publishes.</span>
-    </div>
-
-    <h2>Companies to review <span class="muted small">{{ task_total }} open</span></h2>
-    <div class="card">
-      {% for t in tasks %}
-      <div class="row-item"><a href="/leads/{{ t.lead_id }}">{{ t.lead.company.name if t.lead and t.lead.company else t.subject }}</a>
-        <span class="muted small">{{ t.subject }}</span></div>
-      {% else %}<span class="muted">No review tasks.</span>{% endfor %}
-      {% if task_total > tasks|length %}<div class="small"><a href="/followups">All {{ task_total }} tasks →</a></div>{% endif %}
-    </div>
-  </div>
-</div>
 {% endblock %}

@@ -1,7 +1,29 @@
-{% extends "base.html" %}
-{% block title %}Reports · AI Sales Employee{% endblock %}
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}Sales Analytics · AI Sales Employee{% endblock %}
 {% block content %}
-<h1>Reports</h1>
+<div class="page-head">
+  <div>
+    <h1>{{ icon('chart') }} Sales Analytics</h1>
+    <p class="subtitle">Eight weeks of trends and every step of the funnel, counted from your records, plus the daily and weekly reports.</p>
+  </div>
+</div>
+
+<section class="analytics-grid">
+  <div class="panel"><div class="panel-head"><h2>Lead generation</h2><span class="meta">leads created per week</span></div>{{ chart_leads }}</div>
+  <div class="panel"><div class="panel-head"><h2>Email performance</h2><span class="meta">sent and replies per week</span></div>{{ chart_email }}</div>
+  <div class="panel"><div class="panel-head"><h2>Meetings</h2><span class="meta">real bookings received, incl. later cancelled</span></div>{{ chart_meetings }}</div>
+  <div class="panel"><div class="panel-head"><h2>Sales funnel</h2><span class="meta">all time</span></div>{{ chart_funnel }}</div>
+  <div class="panel"><div class="panel-head"><h2>Pipeline by stage</h2><span class="meta">opportunities</span></div>{{ chart_pipeline }}</div>
+</section>
+
+<div class="section-title"><h2>Funnel detail <span class="muted small">every step, with links to the records</span></h2></div>
+<div class="grid funnel-tiles">
+  {% for label, value, href in funnel_tiles %}
+  <a class="kpi" href="{{ href }}"><div class="v">{{ value }}</div><div class="l">{{ label }}</div></a>
+  {% endfor %}
+</div>
+
+<div class="section-title"><h2>Reports <span class="muted small">written every evening, and weekly on Mondays</span></h2></div>
 <div class="card table-wrap"><table>
   <tr><th>Date</th><th>Type</th><th>Generated</th><th>Highlights</th><th>Blockers</th></tr>
   {% for r in rows %}{% set k = r.summary.get('kpis', {}) %}
