@@ -86,6 +86,9 @@ include_company_inboxes = true
 daily_send_limit = 20
 per_domain_daily_limit = 1
 sends_per_run = 5
+# Every email from the sales mailbox (outreach, follow-ups, answers) in a rolling 24 hours: protects the mailbox's
+# reputation whatever the mix. Emails over it wait, they are not cancelled.
+mailbox_daily_limit = 50
 
 [pipeline]
 # Open opportunities with nothing logged for this long get a "decide the next step" task.

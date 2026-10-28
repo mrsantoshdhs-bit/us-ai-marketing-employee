@@ -327,6 +327,8 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
     row.contact_id, row.lead_id = (contact.id if contact else None), (lead.id if lead else None)
     row.company_id = lead.company_id if lead else (contact.company_id if contact else None)
     notes = []
+    if f is not None and row.category not in ("bounce", "calendly", "out_of_office") and f.status == "sent":
+        f.delivery_status = "replied"  # delivery tracking: it arrived and the person answered
     if row.category == "bounce":
         # Only a permanent failure suppresses. A person who reclassifies a report as a bounce (confidence high)
         # confirms the failed email's address.
@@ -336,6 +338,8 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
                 c.email_status = "bounced"
             suppress(session, addr, "Bounced (delivery failure report)")
             notes.append(f"{addr} bounced: marked bounced and suppressed")
+        if failed and f is not None and (f.to_email or "").lower() in {a.lower() for a in failed}:
+            f.delivery_status = "bounced"  # delivery tracking: this email did not arrive
         if failed and lead and lead.outreach_status:
             stop_sequence(session, lead, "bounced", "Email bounced", actor)
         if not failed:

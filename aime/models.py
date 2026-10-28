@@ -252,6 +252,7 @@ class FollowUp(Timestamped, Base):
     quality: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict)  # email quality-check report
     # the campaign authorization that approved it at send time instead of a person (aime.automation)
     authorization_id: Mapped[int | None] = mapped_column(Integer)
+    delivery_status: Mapped[str | None] = mapped_column(String(20))  # sent | bounced | replied (from the mailbox)
 
     lead: Mapped[Lead] = relationship()
     contact: Mapped[Contact | None] = relationship()

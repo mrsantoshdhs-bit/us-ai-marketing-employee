@@ -136,6 +136,24 @@ def cmd_scheduler(args, ctx) -> int:
     return 0 if res.get("ok", res.get("installed", False)) else 1
 
 
+def cmd_automation(args, ctx) -> int:
+    """Stop switches from the command line, for when the dashboard is not running. Starting and resuming stay on
+    the dashboard, for an administrator."""
+    from aime import automation as am
+
+    with ctx.db.session() as s:
+        if args.action != "status":
+            action = {"pause": "pause", "stop": "stop", "emergency-stop": "emergency_stop"}[args.action]
+            try:
+                am.change_state(s, action, "command line", args.reason)
+            except ValueError as exc:
+                print(exc)
+                return 1
+        print(f"Automation: {am.STATES[am.get_state(s)]} · mode {am.get_mode(s)} · "
+              f"{len(am.active_authorizations(s))} active campaign authorization(s)")
+    return 0
+
+
 def cmd_llm_check(args, ctx) -> int:
     from aime.content import write_post
 
@@ -585,6 +603,9 @@ def build_parser() -> argparse.ArgumentParser:
     sr.add_argument("--from-email", help="Default: the address of the lead's latest email")
     pl = sub.add_parser("policy", help="Shadow-mode auto-publishing policy (records decisions; never publishes)")
     pl.add_argument("action", choices=["show", "evaluate"], nargs="?", default="show")
+    au = sub.add_parser("automation", help="Pause, stop or emergency-stop the automation (works without the dashboard)")
+    au.add_argument("action", choices=["status", "pause", "stop", "emergency-stop"])
+    au.add_argument("--reason", default="from the command line")
     mt = sub.add_parser("maintenance", help="Pause scheduled ticks for upgrades (always expires)")
     mt.add_argument("action", choices=["on", "off", "status"])
     mt.add_argument("--hours", type=float, default=2.0)
@@ -621,7 +642,7 @@ def build_parser() -> argparse.ArgumentParser:
 COMMANDS = {
     "init": cmd_init, "status": cmd_status, "run": cmd_run, "tick": cmd_tick, "serve": cmd_serve,
     "email-check": cmd_email_check,
-    "scheduler": cmd_scheduler, "llm-check": cmd_llm_check, "inbound": cmd_inbound, "suppress": cmd_suppress,
+    "scheduler": cmd_scheduler, "automation": cmd_automation, "llm-check": cmd_llm_check, "inbound": cmd_inbound, "suppress": cmd_suppress,
     "seed-demo": cmd_seed_demo, "doctor": cmd_doctor, "backup": cmd_backup, "maintenance": cmd_maintenance,
     "refresh-graphics": cmd_refresh_graphics, "backup-verify": cmd_backup_verify, "restore-drill": cmd_restore_drill,
     "user": cmd_user, "policy": cmd_policy, "simulate-reply": cmd_simulate_reply, "research-recheck": cmd_research_recheck,

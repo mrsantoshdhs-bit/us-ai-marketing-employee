@@ -60,9 +60,11 @@ def new_message_id(settings: Settings) -> str:
 
 
 class EmailSender:
-    def __init__(self, settings: Settings, smtp_factory: Callable[..., smtplib.SMTP] = smtplib.SMTP):
+    def __init__(self, settings: Settings, smtp_factory: Callable[..., smtplib.SMTP] = smtplib.SMTP,
+                 token: Callable[[], str] | None = None):
         self.settings = settings
         self.smtp_factory = smtp_factory
+        self.token = token  # MAIL_AUTH=oauth: a fresh access token for the connected account (aime/integrations/oauth)
 
     def status(self) -> tuple[bool, str]:
         s = self.settings
@@ -72,7 +74,11 @@ class EmailSender:
             return False, "NOT CONFIGURED: SMTP_HOST / SMTP_FROM missing"
         if not s.company_postal_address:
             return False, "NOT CONFIGURED: COMPANY_POSTAL_ADDRESS required (CAN-SPAM)"
-        if s.smtp_username and not s.smtp_password:
+        if s.mail_auth == "oauth":
+            client = s.google_client_id if s.mail_oauth_provider == "google" else s.microsoft_client_id
+            if not client:
+                return False, "NOT CONFIGURED: MAIL_AUTH=oauth needs the OAuth client in .env and the account connected"
+        elif s.smtp_username and not s.smtp_password:
             return False, "NOT CONFIGURED: SMTP_PASSWORD missing (the mailbox's app password); every send would fail at sign-in"
         if s.smtp_username and not s.smtp_use_tls:
             return False, "NOT SAFE: SMTP_USE_TLS=false would send the mailbox password unencrypted; set it to true"
@@ -116,10 +122,25 @@ class EmailSender:
             msg["In-Reply-To"] = in_reply_to
             msg["References"] = references or in_reply_to
         msg.set_content(body)
+        bearer = ""
+        if s.mail_auth == "oauth":  # before connecting: without a token nothing is sent, and it is safe to retry
+            from aime.integrations.oauth import OAuthError
+
+            try:
+                bearer = self.token() if self.token else ""
+            except OAuthError as exc:
+                raise EmailNotReady(f"OAuth sign-in unavailable: {exc}") from exc
+            if not bearer:
+                raise EmailNotReady("MAIL_AUTH=oauth needs the account connected on the Integrations page")
         with self.smtp_factory(s.smtp_host, s.smtp_port, timeout=MAIL_TIMEOUT) as smtp:
             if s.smtp_use_tls:
                 smtp.starttls(context=tls_context())
-            if s.smtp_username:
+            if s.mail_auth == "oauth":
+                from aime.integrations.oauth import xoauth2
+
+                smtp.ehlo()
+                smtp.auth("XOAUTH2", lambda challenge=None: xoauth2(s.smtp_username, bearer))
+            elif s.smtp_username:
                 smtp.login(s.smtp_username, s.smtp_password)
             smtp.send_message(msg)
         return msg_id
