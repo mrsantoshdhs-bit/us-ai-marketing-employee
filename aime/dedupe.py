@@ -40,6 +40,14 @@ HOSTED_PLATFORMS = {"myshopify.com", "wixsite.com", "github.io", "squarespace.co
                     "firebaseapp.com", "glitch.me", "replit.app", "bubbleapps.io", "softr.app", "notion.site"}
 
 
+def clean_company_name(name: str) -> str:
+    """The name without a web address pasted into it ("Snout https://snout.com/" -> "Snout"); unchanged when nothing
+    else is left."""
+    cleaned = re.sub(r"\s*[(\[]?\s*(?:https?://|www\.)\S*", " ", name)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -|,;:([")
+    return cleaned or name.strip()
+
+
 def normalize_name(name: str) -> str:
     n = name.lower().strip()
     n = re.sub(r"\(.*?\)", " ", n)

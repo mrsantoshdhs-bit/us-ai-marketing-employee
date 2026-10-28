@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from aime.agents.base import BaseAgent
 from aime.crm_ops import (add_signal, ensure_lead, is_suppressed, log_activity, merge_companies, upsert_company,
                           upsert_contact, us_location_evidence)
-from aime.dedupe import domain_from_email, domain_from_url, name_from_title, normalize_name
+from aime.dedupe import clean_company_name, domain_from_email, domain_from_url, name_from_title, normalize_name
 from aime.inbound import InboundPayload, load_inbox_files, validate_inquiry
 from aime.knowledge.geo import normalize_state
 from aime.knowledge.industries import INDUSTRIES
@@ -205,14 +205,20 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
 
     def _hygiene(self, session: Session) -> dict[str, int]:
         active = session.execute(select(Company).where(Company.merged_into_id.is_(None))).scalars().all()
-        filled = 0
+        filled = renamed = 0
         for c in active:
+            name = clean_company_name(c.name)
+            if name != c.name:
+                c.validation = {**(c.validation or {}), "name": f"web address removed from the name: {c.name[:120]}"}
+                c.name, c.normalized_name = name, normalize_name(name)
+                renamed += 1
             if not c.location_evidence:
                 c.location_evidence = us_location_evidence(c.source, c.state, c.location_text)
                 filled += bool(c.location_evidence)
         session.commit()
         return {
             "location_evidence_filled": filled,
+            "names_cleaned": renamed,
             "companies": len(active),
             "missing_state": sum(1 for c in active if not c.state),
             "missing_industry": sum(1 for c in active if not c.industry),

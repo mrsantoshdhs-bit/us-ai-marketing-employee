@@ -8,7 +8,7 @@ from datetime import datetime
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from aime.dedupe import domain_from_email, find_duplicate, normalize_name
+from aime.dedupe import clean_company_name, domain_from_email, find_duplicate, normalize_name
 from aime.matching import detect_competitor, match_services
 from aime.models import Activity, Company, Contact, FollowUp, Lead, Opportunity, Signal, Suppression
 from aime.sources.base import CompanyCandidate
@@ -63,8 +63,8 @@ def upsert_company(session: Session, cand: CompanyCandidate) -> tuple[Company, b
             existing.is_competitor = True
         return existing, False
     company = Company(
-        name=cand.name.strip()[:200],
-        normalized_name=normalize_name(cand.name),
+        name=clean_company_name(cand.name)[:200],
+        normalized_name=normalize_name(clean_company_name(cand.name)),
         domain=cand.domain,
         website=cand.website,
         industry=cand.industry,

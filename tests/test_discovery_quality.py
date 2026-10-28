@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from aime.agents.crm import CRMManagementAgent
 from aime.crm_ops import upsert_company
+from aime.dedupe import clean_company_name
 from aime.models import Company
 from aime.scoring import SignalFact, score_lead
 from aime.sources.base import CompanyCandidate
@@ -59,3 +60,20 @@ def test_the_intake_job_checks_a_small_batch_of_websites(make_ctx, monkeypatch):
             s.add(Company(name=f"Co {i}", normalized_name=f"co {i}", domain=f"co{i}.example", source="test", country="US"))
     job_inbound(ctx)
     assert len(checked) == 5  # research.website_checks_per_inbound_run
+
+
+def test_company_names_never_carry_a_pasted_web_address(make_ctx):
+    assert clean_company_name("Snout https://snout.com/") == "Snout"
+    assert clean_company_name("Acme (https://acme.example)") == "Acme"
+    assert clean_company_name("https://only.example") == "https://only.example"  # nothing else to keep
+    ctx = make_ctx()
+    with ctx.db.session() as s:
+        new, _ = upsert_company(s, CompanyCandidate(name="Fresh Labs https://fresh.example/", source="hn_hiring",
+                                                    source_url="https://hn.example/3", domain="fresh.example"))
+        assert (new.name, new.normalized_name) == ("Fresh Labs", "fresh labs")
+        s.add(Company(name="Old Labs www.old.example", normalized_name="old labs www old example", domain="old.example",
+                      source="hn_hiring"))
+    CRMManagementAgent(ctx).run({"operations": ["hygiene"]})
+    with ctx.db.session() as s:
+        old = s.execute(select(Company).where(Company.domain == "old.example")).scalar_one()
+        assert (old.name, old.normalized_name) == ("Old Labs", "old labs") and "web address removed" in old.validation["name"]

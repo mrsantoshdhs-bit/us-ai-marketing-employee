@@ -170,7 +170,7 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
             intent = 20
             reasons.append("+5 intent: stated timeline or budget")
     elif any(s.signal_type == "hiring" and s.matched_services for s in f.signals):
-        age = (f.now - max(s.observed_at for s in f.signals if s.signal_type == "hiring" and s.matched_services)).days
+        age = (now - max(s.observed_at for s in f.signals if s.signal_type == "hiring" and s.matched_services)).days
         if age <= FRESH_DAYS:
             intent = 6
             reasons.append(f"+6 intent: public hiring post ({age} days old) mentions a related need (signal, not buying intent)")
