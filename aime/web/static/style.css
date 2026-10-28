@@ -79,7 +79,8 @@ svg.i { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none;
 .collapse-btn svg.i { transition: transform .2s; }
 
 .content { min-width: 0; display: flex; flex-direction: column;
-           background: radial-gradient(1100px 380px at 82% -60px, rgba(124, 77, 255, .16), transparent 70%),
+           background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 900 320' fill='none'%3E%3Cpath d='M0 220C180 120 320 260 520 170S820 60 900 120' stroke='%237c4dff' stroke-opacity='.2' stroke-width='2'/%3E%3Cpath d='M0 250C200 150 340 280 540 200S830 90 900 150' stroke='%232f6bff' stroke-opacity='.15' stroke-width='2'/%3E%3Cpath d='M60 280C240 190 380 300 580 230S850 130 900 180' stroke='%237c4dff' stroke-opacity='.12' stroke-width='2'/%3E%3C/svg%3E") no-repeat right -60px top 40px / 980px 330px,
+                       radial-gradient(1100px 380px at 82% -60px, rgba(124, 77, 255, .16), transparent 70%),
                        radial-gradient(900px 340px at 52% -120px, rgba(47, 107, 255, .12), transparent 70%), var(--bg); }
 .topbar { position: sticky; top: 0; z-index: 30; min-height: var(--topbar); display: flex; align-items: center; gap: 12px; padding: 10px 28px;
           background: rgba(255, 255, 255, .92); backdrop-filter: saturate(1.5) blur(10px); border-bottom: 1px solid var(--border); }
@@ -222,8 +223,9 @@ main { padding: 26px 30px 56px; width: 100%; max-width: 1560px; margin: 0 auto; 
 .feed-status.red { background: var(--t-red-bg); color: var(--bad); } .feed-status.slate { background: var(--t-slate-bg); color: var(--t-slate); }
 
 .robot-panel { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); align-items: center; padding: 26px 0 0 26px;
-               background: radial-gradient(420px 260px at 85% 40%, rgba(124, 77, 255, .28), transparent 70%),
-                           linear-gradient(135deg, #f2f4ff 0%, #e6eaff 45%, #d9dcff 100%); border-color: #dfe3fb; }
+               background: radial-gradient(360px 260px at 80% 38%, rgba(99, 102, 241, .42), transparent 70%),
+                           radial-gradient(300px 220px at 100% 100%, rgba(124, 77, 255, .35), transparent 70%),
+                           linear-gradient(135deg, #f1f3ff 0%, #e2e6ff 42%, #cfd3fd 100%); border-color: #d9ddfa; }
 .robot-copy { align-self: start; padding-bottom: 24px; position: relative; z-index: 1; }
 .robot-chip { display: inline-block; font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 8px; background: var(--grad); color: #fff; }
 .robot-panel h2 { font-size: 26px; line-height: 1.15; margin: 14px 0 10px; letter-spacing: -.02em; }
@@ -488,3 +490,6 @@ h2 > svg.i, h1 > svg.i { vertical-align: -3px; margin-right: 6px; color: var(--a
 .who b, .who small { white-space: nowrap; }
 .perf-panel { display: flex; flex-direction: column; }
 .perf-panel .chart { margin-top: auto; }
+
+/* a slim environment notice, so the dashboard keeps the reference's proportions */
+.flash.demo { padding: 7px 14px; font-size: 12.5px; margin-bottom: 14px; border-radius: 10px; }
