@@ -22,11 +22,14 @@
       <div class="hero-tags"><span class="robot-chip">AI Employee · {{ company_name }}</span><span class="state-chip {{ duty_tone }}"><i></i>{{ duty_label }}</span></div>
       <h2>{{ {'Working now': 'Working for your growth', 'On duty': 'On duty and ready', 'Off duty': 'Waiting for its next shift', 'Stopped': 'Stopped by you'}.get(duty_label, duty_label) }}</h2>
       <p>{{ duty_note|capitalize }}.</p>
-      <dl class="workspace">
-        <div><dt>{{ icon('zap') }}Running now</dt><dd>{% if live.running %}<b class="run">{{ live.running|join(', ') }}</b>{% else %}nothing at this moment{% endif %}</dd></div>
-        <div><dt>{{ icon('check-circle') }}Last finished</dt><dd>{% if live.last %}{{ live.last.title }} <span class="{{ 'ok' if live.last.ok else 'bad' }}">{{ 'completed' if live.last.ok else 'failed' }}</span> {{ live.last.ago }}{% if live.last.took %} · {{ live.last.took }}{% endif %}{% else %}no runs yet{% endif %}</dd></div>
-        <div><dt>{{ icon('clock') }}Next check-in</dt><dd>{% if live.next_checkin %}about {{ live.next_checkin|local(None, '%H:%M') }}{% else %}not scheduled from here{% endif %}</dd></div>
-        <div><dt>{{ icon('refresh') }}Scheduled jobs, 24 h</dt><dd>{{ live.jobs_24h }} run{{ 's' if live.jobs_24h != 1 }}{% if live.failed_24h %}, <span class="bad">{{ live.failed_24h }} not successful</span>{% else %}, all successful{% endif %}</dd></div>
+      <dl class="workspace full">
+        <div class="wide-row"><dt>{{ icon('zap') }}Current task</dt><dd>{% if live.running %}{% for r in live.running %}<span class="st-chip st-running"><i></i>Running</span> <b>{{ r.agent }}</b> · {{ r.job }} job · started {{ r.since|local(None, '%H:%M') }} ({{ r.ago }}){% if not loop.last %}<br>{% endif %}{% endfor %}{% else %}<span class="st-chip st-idle"><i></i>Idle</span> no job is running right now{% endif %}</dd></div>
+        <div><dt>{{ icon('check-circle') }}Latest completed task</dt><dd>{% if live.last_job %}{{ live.last_job.job|capitalize }} job <span class="{{ 'ok' if live.last_job.status == 'success' else 'bad' }}">{{ live.last_job.status }}</span> {{ live.last_job.ago }}{% if live.last_job.took %} · {{ live.last_job.took }}{% endif %}{% else %}no job has run yet{% endif %}</dd></div>
+        <div><dt>{{ icon('cpu') }}Last successful AI run</dt><dd>{% if live.last_ok %}{{ live.last_ok.agent }} · {{ live.last_ok.job }} job, {{ live.last_ok.ago }}{% else %}none yet{% endif %}</dd></div>
+        <div><dt>{{ icon('activity') }}Last successful action</dt><dd>{% if live.last_action %}{% if live.last_action.href %}<a href="{{ live.last_action.href }}">{{ live.last_action.text[:70] }}</a>{% else %}{{ live.last_action.text[:70] }}{% endif %} · {{ live.last_action.agent }}, {{ live.last_action.ago }}{% else %}none recorded{% endif %}</dd></div>
+        <div><dt>{{ icon('clock') }}Next scheduled task</dt><dd>{% if live.next_task %}{{ live.next_task.job|capitalize }} ({{ live.next_task.description }}) · {% if live.next_task.due %}due at the next check-in{% else %}{{ live.next_task.at|local(None, '%a %H:%M') }}{% endif %}{% else %}nothing scheduled{% endif %}</dd></div>
+        <div><dt>{{ icon('refresh') }}Next scheduler check-in</dt><dd>{% if live.next_checkin %}about {{ live.next_checkin|local(None, '%H:%M') }}{% else %}not known: {{ duty_note }}{% endif %}</dd></div>
+        <div><dt>{{ icon('check-square') }}Pending human approvals</dt><dd><a href="/approvals">{{ live.approvals }} waiting</a> · {{ live.jobs_24h }} scheduled run{{ 's' if live.jobs_24h != 1 }} in 24 h{% if live.failed_24h %}, <span class="bad">{{ live.failed_24h }} not successful</span>{% endif %}</dd></div>
       </dl>
       <div class="did-strip" aria-label="Last 24 hours">{% for label, n, href in employee.did %}<a href="{{ href }}" class="did{{ ' zero' if not n }}"><b>{{ n }}</b><span>{{ label }}</span></a>{% endfor %}</div>
     </div>
@@ -69,12 +72,19 @@
     <div class="board-stage">
       <div class="board-stage-head"><span class="step">{{ loop.index }}</span><div><b>{{ stage }}</b><small>{{ note }}</small></div></div>
       {% for a in agents %}
-      <div class="agent-card st-{{ a.status|lower }}">
+      <a class="agent-card st-{{ a.status|lower }}" href="/command-center/agents/{{ a.agent }}">
         <div class="agent-card-head"><span class="node-icon">{{ icon(a.icon) }}<i></i></span><b>{{ a.title }}</b></div>
         <span class="st-chip st-{{ a.status|lower }}"><i></i>{{ a.label }}</span>
         <p>{{ a.job }}</p>
-        <div class="agent-meta">{{ a.note }}{% if a.runs %} · {{ a.runs }} run{{ 's' if a.runs != 1 }} in 24 h, {{ a.rate|round|int }}% ok{% endif %}</div>
-      </div>
+        <dl class="agent-facts">
+          {% if a.current %}<div><dt>Now</dt><dd>{{ a.current.job|replace('_', ' ') }} job since {{ a.current.since|local(None, '%H:%M') }}</dd></div>{% endif %}
+          {% if a.blocked %}<div><dt>Blocked</dt><dd class="warn-text">{{ a.blocked }}</dd></div>{% elif a.status == 'FAILED' %}<div><dt>Failed</dt><dd class="bad-text">{{ a.note }}</dd></div>{% endif %}
+          <div><dt>Last run</dt><dd>{{ a.last_run|local(None, '%a %H:%M') if a.last_run else 'never' }}{% if a.last_result %} · {{ a.last_result }}{% endif %}</dd></div>
+          <div><dt>Last success</dt><dd>{{ a.last_success|local(None, '%a %H:%M') if a.last_success else 'never' }}</dd></div>
+          <div><dt>7 days</dt><dd>{{ a.ok_7d }} completed · {% if a.failed_7d %}<span class="bad-text">{{ a.failed_7d }} failed</span>{% else %}0 failed{% endif %}</dd></div>
+          <div><dt>Next run</dt><dd>{% if a.next_at %}{% if a.next_at <= now %}at the next check-in{% else %}{{ a.next_at|local(None, '%a %H:%M') }}{% endif %}{% else %}not scheduled{% endif %}</dd></div>
+        </dl>
+      </a>
       {% endfor %}
     </div>
     {% endfor %}
@@ -122,8 +132,17 @@
 </section>
 
 <section class="cc-grid three-up">
-  <div class="panel" id="alerts">
-    <div class="panel-head"><h2>{{ icon('bell') }} Alerts</h2><a href="/system" class="panel-link">System {{ icon('arrow-right') }}</a></div>
+  <div class="panel" id="issues">
+    <div class="panel-head"><h2>{{ icon('alert') }} Failed and blocked</h2><a href="/system" class="panel-link">System {{ icon('arrow-right') }}</a></div>
+    {% for p in live.problems %}
+    <div class="row-item"><span class="st-chip st-failed"><i></i>Failed</span> <a href="{{ p.href }}">{{ p.what }}</a>
+      <span class="muted small">{{ p.at|local(None, '%a %H:%M') }}</span><div class="small muted">{{ p.why }}</div></div>
+    {% endfor %}
+    {% for b in live.blocked %}
+    <div class="row-item"><span class="st-chip st-blocked"><i></i>Blocked</span> {{ b.what }}<div class="small muted">{{ b.why }}</div></div>
+    {% endfor %}
+    {% if not live.problems and not live.blocked %}<div class="empty-state"><b>Nothing failed or blocked</b>in the last 24 hours.</div>{% endif %}
+    <h3 class="sub-head" id="alerts">Alerts</h3>
     {% for a in alerts %}
     <div class="row-item"><span class="pill {{ 'bad' if a.level == 'error' else 'warn' }}">{{ a.level }}</span>
       <span class="small">{{ a.message }}</span>

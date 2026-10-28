@@ -149,20 +149,24 @@ def bar_path(x: float, y: float, w: float, h: float, r: float = 6) -> str:
             f"Q{x + w:.1f},{y:.1f} {x + w:.1f},{y + r:.1f}V{y + h:.1f}Z")
 
 
-def combo_chart(labels: list[str], bars: list[tuple[str, list[int]]], line: tuple[str, list[int]], title: str,
-                empty_text: str, height: int = 300, uid: str = "combo") -> Markup:
-    """Grouped bars per day for one or two series (e.g. emails, leads) and a smooth line with markers for another
-    (e.g. meetings), on round-number gridlines. Hovering a day highlights it and shows its values (CSS only)."""
-    if not labels or (sum(sum(v) for _, v in bars) + sum(line[1])) == 0:
+def combo_chart(labels: list[str], bars: list[tuple[str, list[int]]],
+                line: tuple[str, list[int]] | list[tuple[str, list[int]]], title: str, empty_text: str,
+                height: int = 300, uid: str = "combo") -> Markup:
+    """Grouped bars per day for one or two series (e.g. emails, leads) and one or two smooth lines with markers for
+    others (e.g. meetings, opportunities), on round-number gridlines. Hovering a day highlights it and shows every
+    value for that day (CSS only); each day also carries a text title with all its numbers."""
+    lines = [line] if isinstance(line, tuple) else list(line)
+    series = [*bars, *lines]
+    if not labels or sum(sum(v) for _, v in series) == 0:
         return EMPTY.format(empty_text)
     width, left, right, bottom, top = 400, 38, 8, 30, 18
     plot = height - bottom - top
     base = top + plot
-    ticks = nice_ticks(max([max(v) for _, v in bars] + [max(line[1])]))
+    ticks = nice_ticks(max(max(v) for _, v in series))
     top_value = ticks[-1]
     step = (width - left - right) / len(labels)
     bar = min(24.0, step * .58 / max(1, len(bars)))
-    totals = "; ".join(f"{name} {sum(v)}" for name, v in [*bars, line])
+    totals = "; ".join(f"{name} {sum(v)}" for name, v in series)
     parts = [Markup('<svg class="chart combo" viewBox="0 0 {} {}" role="img" aria-label="{}"><title>{}</title><desc>{}</desc>'
                     '<defs><linearGradient id="{}-s0" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6a9bff"/>'
                     '<stop offset="1" stop-color="#2f6bff"/></linearGradient>'
@@ -177,11 +181,11 @@ def combo_chart(labels: list[str], bars: list[tuple[str, list[int]]], line: tupl
                             '<text class="axis" x="{}" y="{:.1f}" text-anchor="end">{}</text>').format(
             " base" if t == 0 else "", left, width - right, y, y, left - 10, y + 4, f"{t:,}"))
     every = math.ceil(len(labels) / 10)
-    name, values = line
-    pts = [(left + step * i + step / 2, base - plot * v / top_value) for i, v in enumerate(values)]
+    points = [[(left + step * i + step / 2, base - plot * v / top_value) for i, v in enumerate(values)]
+              for _, values in lines]
     for i, label in enumerate(labels):
         x0 = left + step * i + (step - bar * len(bars)) / 2
-        summary = " · ".join(f"{n} {v[i]}" for n, v in [*bars, line])
+        summary = " · ".join(f"{n} {v[i]}" for n, v in series)
         parts.append(Markup('<g class="col"><title>{}: {}</title><rect class="col-hit" x="{:.1f}" y="{}" width="{:.1f}" '
                             'height="{}" rx="10"/>').format(label, summary, left + step * i + 2, top - 6, step - 4, plot + 6))
         for j, (_series, vals) in enumerate(bars):
@@ -191,18 +195,22 @@ def combo_chart(labels: list[str], bars: list[tuple[str, list[int]]], line: tupl
                                     '<text class="val" x="{:.1f}" y="{:.1f}" text-anchor="middle">{}</text>').format(
                     j, bar_path(x0 + j * bar + 1.5, base - h, bar - 3, h), uid, j, x0 + j * bar + bar / 2, base - h - 7,
                     vals[i]))
-        if values[i]:
-            parts.append(Markup('<text class="val line-val" x="{:.1f}" y="{:.1f}" text-anchor="middle">{}</text>').format(
-                pts[i][0], pts[i][1] - 12, values[i]))
+        for k, (_name, values) in enumerate(lines):
+            if values[i]:
+                parts.append(Markup('<text class="val line-val l{}" x="{:.1f}" y="{:.1f}" text-anchor="middle">{}</text>').format(
+                    k, points[k][i][0], points[k][i][1] - 12 - 12 * k, values[i]))
         parts.append(Markup("</g>"))
         if i % every == 0:
             parts.append(Markup('<text class="axis" x="{:.1f}" y="{}" text-anchor="middle">{}</text>').format(
                 left + step * i + step / 2, height - 10, label))
-    curve = smooth_path(pts, base, top)
-    parts.append(Markup('<path class="trend-area" d="{} L{:.1f},{} L{:.1f},{} Z" fill="url(#{}-area)"/>'
-                        '<path class="trend" d="{}"/>').format(curve, pts[-1][0], base, pts[0][0], base, uid, curve))
-    for (x, y), v, label in zip(pts, values, labels, strict=False):
-        parts.append(Markup('<circle class="trend-dot" cx="{:.1f}" cy="{:.1f}" r="5"><title>{}, {}: {}</title></circle>').format(
-            x, y, name, label, v))
+    for k, ((name, values), pts) in enumerate(zip(lines, points, strict=True)):
+        curve = smooth_path(pts, base, top)
+        if k == 0:
+            parts.append(Markup('<path class="trend-area" d="{} L{:.1f},{} L{:.1f},{} Z" fill="url(#{}-area)"/>').format(
+                curve, pts[-1][0], base, pts[0][0], base, uid))
+        parts.append(Markup('<path class="trend l{}" d="{}"/>').format(k, curve))
+        for (x, y), v, label in zip(pts, values, labels, strict=False):
+            parts.append(Markup('<circle class="trend-dot l{}" cx="{:.1f}" cy="{:.1f}" r="4.5"><title>{}, {}: {}</title></circle>').format(
+                k, x, y, name, label, v))
     parts.append(Markup("</svg>"))
     return Markup("").join(parts)

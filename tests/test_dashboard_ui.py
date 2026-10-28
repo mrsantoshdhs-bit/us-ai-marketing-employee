@@ -44,7 +44,7 @@ def test_agents_show_one_clear_status_each(make_ctx):
     for stage in ("Find", "Qualify", "Engage", "Market", "Report"):
         assert f"<b>{stage}</b>" in page
     # publishing is switched off in tests and the mailbox is not set: blocked, with the reason, never "running"
-    assert "st-blocked" in page and "publishing is off (PUBLISHING_ENABLED=false)" in page
+    assert "st-blocked" in page and "publishing is off (PUBLISHING_ENABLED is false)" in page
     assert "mailbox reading is off (IMAP not set)" in page
     assert "st-completed" in page  # research ran in the fixture
 
@@ -84,7 +84,7 @@ def test_search_approvals_and_settings(make_ctx):
 
 
 def test_change_against_the_previous_period():
-    assert change(12, 10) == ("+20%", "up") and change(5, 10) == ("-50%", "down") and change(3, 3) == ("0%", "flat")
+    assert change(12, 10) == ("+20%", "up") and change(5, 10) == ("-50%", "down") and change(8, 8) == ("0%", "flat")
     assert change(4, 0) == ("new", "up") and change(0, 0) == ("—", "flat")
 
 

@@ -3,7 +3,6 @@
 {% block content %}
 {% set duty_label, duty_tone, duty_note, duty_head = employee.duty %}
 {% set live = employee.live %}
-{% set waiting_total = employee.waiting|sum(attribute=1) %}
 <div class="dash-head">
   <div>
     <h1 class="greet">{{ greeting }}{% if user_name %}, {{ user_name }}{% endif %}! <span class="wave" aria-hidden="true">👋</span></h1>
@@ -51,11 +50,12 @@
       <div class="hero-tags"><span class="robot-chip">AI Employee</span><span class="state-chip {{ duty_tone }}"><i></i>{{ duty_label }}</span></div>
       <h2>{{ {'Working now': 'Working for your growth', 'On duty': 'Working for your growth', 'Off duty': 'Waiting for its next shift', 'Stopped': 'Stopped by you'}.get(duty_label, duty_label) }}</h2>
       <p>Finding leads, drafting outreach, reading replies and booking meetings{% if employee.mode == 'approval' %}, with every email approved by you{% else %}, within the limits you authorize{% endif %}.</p>
+      {% set issues = live.problems|length + live.blocked|length %}
       <dl class="workspace" aria-label="Live workspace">
-        <div><dt>{{ icon('zap') }}Now</dt><dd>{% if live.running %}<b class="run">Running</b> {{ live.running|join(', ') }}{% elif live.last %}{{ live.last.title }} <span class="{{ 'ok' if live.last.ok else 'bad' }}">{{ 'completed' if live.last.ok else 'failed' }}</span> {{ live.last.ago }}{% else %}No agent has run yet{% endif %}</dd></div>
-        <div><dt>{{ icon('clock') }}Next check-in</dt><dd>{% if live.next_checkin %}about {{ live.next_checkin|local(None, '%H:%M') }}{% else %}{{ duty_note }}{% endif %}</dd></div>
-        <div><dt>{{ icon('sliders') }}Mode</dt><dd>{{ employee.mode|title }} · {{ employee.state|replace('_', ' ') }}</dd></div>
-        <div><dt>{{ icon('check-square') }}Waiting for you</dt><dd><a href="/approvals">{{ waiting_total }} item{{ 's' if waiting_total != 1 }}</a></dd></div>
+        <div><dt>{{ icon('zap') }}Now</dt><dd>{% if live.running %}{% for r in live.running %}<span class="st-chip st-running"><i></i>Running</span> {{ r.agent }} · {{ r.job }} job, since {{ r.since|local(None, '%H:%M') }}{% if not loop.last %}<br>{% endif %}{% endfor %}{% else %}<span class="st-chip st-idle"><i></i>Idle</span> no job running{% if live.last_job %}; last: {{ live.last_job.job }} {{ live.last_job.status }} {{ live.last_job.ago }}{% endif %}{% endif %}</dd></div>
+        <div><dt>{{ icon('clock') }}Next scheduled</dt><dd>{% if live.next_task %}{{ live.next_task.job|capitalize }} · {% if live.next_task.due %}due at the next check-in{% else %}{{ live.next_task.at|local(None, '%a %H:%M') }}{% endif %}{% else %}nothing scheduled{% endif %}</dd></div>
+        <div><dt>{{ icon('check-square') }}Waiting for you</dt><dd><a href="/approvals">{{ live.approvals }} approval{{ 's' if live.approvals != 1 }} and review{{ 's' if live.approvals != 1 }}</a></dd></div>
+        <div><dt>{{ icon('alert') }}Needs attention</dt><dd>{% if live.problems %}<a class="bad" href="/command-center#issues">{{ live.problems|length }} failed in 24 h</a>{% if live.blocked %} · {% endif %}{% endif %}{% if live.blocked %}<a class="warn-text" href="/command-center#issues">{{ live.blocked|length }} blocked by a switch</a>{% endif %}{% if not issues %}<span class="ok">nothing failed or blocked</span>{% endif %}</dd></div>
       </dl>
       <a class="btn-gradient" href="/command-center">View live progress {{ icon('arrow-right') }}</a>
     </div>
@@ -63,10 +63,19 @@
   </div>
 
   <div class="panel perf-panel">
-    <div class="panel-head"><h2>{{ icon('chart') }} Sales Performance</h2><span class="panel-pill"><span class="more">Last </span>7 days</span></div>
-    <div class="legend"><span class="legend-item"><i class="swatch s0"></i>Emails</span><span class="legend-item"><i class="swatch line"></i>Meetings</span><span class="legend-item"><i class="swatch s1"></i>Leads</span></div>
-    {{ performance }}
-    <p class="chart-hint">Hover a day to see its numbers.</p>
+    <div class="panel-head"><h2>{{ icon('chart') }} Sales Performance</h2>
+      <a class="panel-pill" href="/?range={{ 7 if period_days == 30 else 30 }}" title="Switch to the last {{ 7 if period_days == 30 else 30 }} days"><span class="more">Last </span>{{ period_days }} days</a></div>
+    {% for view in performance %}<input type="radio" name="perf-view" id="perf-{{ view.key }}" class="perf-radio" {{ 'checked' if loop.first }}>{% endfor %}
+    <div class="perf-tabs" role="group" aria-label="Choose what the chart shows">
+      {% for view in performance %}<label for="perf-{{ view.key }}">{{ view.label }}</label>{% endfor %}
+    </div>
+    {% for view in performance %}
+    <div class="perf-view v-{{ view.key }}">
+      <div class="legend">{% for name, total, cls in view.series %}<span class="legend-item"><i class="swatch {{ cls }}"></i>{{ name }}</span>{% endfor %}</div>
+      {{ view.chart }}
+    </div>
+    {% endfor %}
+    <p class="chart-hint">Counts per day from your records, {{ period_label }}. Hover a day to see its numbers.</p>
   </div>
 </section>
 
@@ -114,7 +123,7 @@
       <div class="flow-head"><b>{{ stage }}</b><small>{{ note }}</small></div>
       <div class="flow-agents">
         {% for a in agents %}
-        <a class="agent-node st-{{ a.status|lower }}" href="/command-center#team" title="{{ a.title }}: {{ a.label }}, {{ a.note }}">
+        <a class="agent-node st-{{ a.status|lower }}" href="/command-center/agents/{{ a.agent }}" title="{{ a.title }}: {{ a.label }}, {{ a.note }}">
           <span class="node-icon">{{ icon(a.icon) }}<i></i></span>
           <span class="node-text"><b>{{ a.title }}</b><span class="st-word">{{ a.label }}</span></span>
         </a>

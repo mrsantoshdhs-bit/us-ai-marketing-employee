@@ -52,9 +52,9 @@ from aime.qc.email_checks import run_email_checks
 from aime.reply_intel import INTENT_LABELS, QUESTION_PLACEHOLDER
 from aime.reply_intel import act as act_on_reply
 from aime.meetings import check_double_bookings, record_meeting, reopen_after_cancel
-from aime.scheduler.runner import due_jobs, run_job
+from aime.scheduler.runner import ABANDON_AFTER, due_jobs, load_job_specs, next_run, run_job
 from aime.scoring import lead_tier, tier_reason
-from aime.timeutil import fmt_et, fmt_local, utcnow
+from aime.timeutil import fmt_et, fmt_local, local_tz, utcnow
 from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username,
                            make_cookie, safe_next, session_secret, user_count)
 
@@ -150,7 +150,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     templates = Jinja2Templates(directory=WEB_DIR / "templates")
     env = templates.env
     env.filters.update(local=fmt_local, et=fmt_et, service=service_name, industry=industry_label, safe_url=safe_url,
-                       tier=lead_tier, tier_reason=tier_reason, intent_label=lambda i: INTENT_LABELS.get(i or "", ""))
+                       tier=lead_tier, tier_reason=tier_reason, run_summary=run_summary, intent_label=lambda i: INTENT_LABELS.get(i or "", ""))
     env.globals.update(SERVICES=SERVICES, INDUSTRIES=INDUSTRIES, STATES=US_REGIONS, STAGES=STAGES,
                        LEAD_STATUSES=LEAD_STATUSES)
 
@@ -261,7 +261,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             view = {**operations_view(ctx, s), **ai_employee(ctx, s)}
         return render(request, "command_center.html", posts=posts, emails=emails, tasks=tasks, task_total=task_total,
                       exceptions=exceptions, alerts=alerts, health=health, policy=policy_now, post_decisions=post_decisions,
-                      replies=replies, modes=am.MODES, is_admin=is_admin(request), **view)
+                      replies=replies, modes=am.MODES, is_admin=is_admin(request), now=utcnow(), **view)
 
     # ------------------------------------------------------------------ replies (sales mailbox)
     @app.get("/inbox", response_class=HTMLResponse)
@@ -916,6 +916,20 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         team = [cls.describe() for cls in AGENTS.values()]
         return render(request, "agents.html", team=team, stats=stats, runs=runs, agent=agent)
 
+    @app.get("/command-center/agents/{agent}", response_class=HTMLResponse)
+    def agent_detail(request: Request, agent: str):
+        if agent not in TEAM_TITLES:
+            raise HTTPException(404, "No such agent")
+        ctx = C()
+        with ctx.db.session() as s:
+            view = ai_employee(ctx, s)
+            runs = s.execute(select(AgentRun).where(AgentRun.agent == agent).order_by(AgentRun.id.desc()).limit(25)).scalars().all()
+            totals = dict(s.execute(select(AgentRun.status, func.count(AgentRun.id)).where(AgentRun.agent == agent)
+                                    .group_by(AgentRun.status)).all())
+        member = next(a for a in view["team"] if a["agent"] == agent)
+        jobs = [row for row in view["schedule"] if row["job"] in member["jobs"]]
+        return render(request, "agent_detail.html", a=member, runs=runs, totals=totals, jobs=jobs, now=utcnow())
+
     @app.get("/agents/runs/{run_pk}", response_class=HTMLResponse)
     def agent_run(request: Request, run_pk: int):
         with C().db.session() as s:
@@ -1379,9 +1393,10 @@ def operations_view(ctx: AppContext, s) -> dict:
     st = ctx.settings
     now = utcnow()
     timeline = []
+    open_runs = {r.id for r in running_agent_runs(s, now)}
     for r in s.execute(select(AgentRun).order_by(AgentRun.id.desc()).limit(14)).scalars():
-        if r.status == "running" and r.started_at < now - timedelta(minutes=30):
-            continue  # an old unfinished run is reported by the monitor, not shown as running
+        if r.status == "running" and r.id not in open_runs:
+            continue  # a leftover row of a finished or abandoned job: the monitor reports it; it is not running
         status = {"success": "completed", "running": "running"}.get(r.status, "failed")
         took = f" · {r.duration_ms / 1000:.1f} s" if r.duration_ms else ""
         timeline.append({"at": r.finished_at or r.started_at, "kind": "Agent run", "icon": "cpu", "status": status,
@@ -1469,14 +1484,52 @@ def ago(at: datetime | None, now: datetime) -> str:
     return f"{minutes // (24 * 60)} days ago"
 
 
+def run_summary(output: dict | None, limit: int = 6) -> str:
+    """A run's result in its own words and numbers ("fetched 0 · mailbox not configured"); lists and nested data
+    are left to the run's detail page."""
+    parts = []
+    for key, value in (output or {}).items():
+        if isinstance(value, bool) or value is None or isinstance(value, (list, dict)):
+            continue
+        if isinstance(value, str) and len(value) > 40:
+            continue
+        parts.append(f"{key.replace('_', ' ')} {value}")
+    return " · ".join(parts[:limit]) or "no figures recorded"
+
+
+def job_schedule(ctx: AppContext, s, now: datetime) -> list[dict]:
+    """Every scheduled job with its schedule, last result and next run, read from the job state with the scheduler's
+    own rules (aime.scheduler.runner.next_run); a next run at or before now means "at the next check-in"."""
+    tz = local_tz(ctx.settings.schedule.get("timezone"))
+    states = {row.job: row for row in s.execute(select(JobState)).scalars()}
+    rows = []
+    for spec in load_job_specs(ctx.settings):
+        state = states.get(spec.name)
+        rows.append({"job": spec.name, "label": spec.schedule_label, "description": spec.description.split(":")[0],
+                     "next": next_run(spec, state, now, tz), "last_status": state.last_status if state else None,
+                     "last_success": state.last_success_at if state else None})
+    return rows
+
+
+def running_agent_runs(s, now: datetime) -> list[AgentRun]:
+    """Agent runs that are really running: still open, started inside the scheduler's abandon window and, when a job
+    started them, belonging to a job run that is itself still open. A finished job's leftover row never counts."""
+    rows = s.execute(select(AgentRun).where(AgentRun.status == "running", AgentRun.started_at >= now - ABANDON_AFTER)
+                     .order_by(AgentRun.id)).scalars().all()
+    open_jobs = set(s.execute(select(JobRun.id).where(JobRun.status == "running")).scalars())
+    return [r for r in rows if (r.job_run_id in open_jobs if r.job_run_id else r.started_at >= now - timedelta(minutes=30))]
+
+
 def ai_employee(ctx: AppContext, s) -> dict:
-    """The AI Sales Employee as one colleague: on duty or not (from the scheduler's heartbeat and the automation
-    state), its live workspace (what runs now, what finished last, the next check-in), what it did in the last 24
-    hours, what waits for you, and each agent of its team in workflow order with a status read from its runs:
-    running, completed (in the last 24 hours), idle, blocked by a switch, failed or paused. Nothing is invented."""
+    """The AI Sales Employee as one colleague, all read from the records and run logs: on duty or not (scheduler
+    heartbeat and automation state), its live workspace (the task running now, the latest completed task, the last
+    successful run and action, the next scheduled task and check-in, approvals waiting, failed and blocked work),
+    what it did in the last 24 hours, and each agent of its team in workflow order with one status: running (only
+    while its job is still open), completed (a successful run in the last 24 hours), idle, blocked by a switch,
+    failed or paused. A past completion is never shown as running, and nothing is invented."""
     st = ctx.settings
     now = utcnow()
-    day = now - timedelta(hours=24)
+    day, week = now - timedelta(hours=24), now - timedelta(days=7)
     cnt = lambda m, *c: s.execute(select(func.count(m.id)).where(*c)).scalar_one()  # noqa: E731
     state = am.get_state(s)
     duty = employee_duty(st, state)
@@ -1495,51 +1548,99 @@ def ai_employee(ctx: AppContext, s) -> dict:
         ("meetings in 24 h", cnt(Meeting, Meeting.status == "scheduled", Meeting.starts_at >= now,
                                  Meeting.starts_at <= now + timedelta(hours=24)), "/meetings"),
     ]
-    stats = {r["agent"]: r for r in agent_stats(s, days=1)}
+    schedule = job_schedule(ctx, s, now)
+    by_job = {row["job"]: row for row in schedule}
+    agent_jobs: dict[str, set[str]] = defaultdict(set)
+    for agent, job in s.execute(select(AgentRun.agent, AgentRun.job).where(
+            AgentRun.started_at >= now - timedelta(days=14), AgentRun.job.is_not(None)).distinct()).all():
+        if job in by_job:
+            agent_jobs[agent].add(job)
+    running = {r.agent: r for r in running_agent_runs(s, now)}
+    week_counts: dict[str, Counter] = defaultdict(Counter)
+    for agent, status, n in s.execute(select(AgentRun.agent, AgentRun.status, func.count(AgentRun.id)).where(
+            AgentRun.started_at >= week, AgentRun.status != "running").group_by(AgentRun.agent, AgentRun.status)).all():
+        week_counts[agent][status] = n
+    blocked_by = {"publishing": None if st.publishing_enabled else "publishing is off (PUBLISHING_ENABLED is false)",
+                  "inbox_monitor": None if st.imap_host else "mailbox reading is off (IMAP not set)"}
     team = []
     for agent, title, job, stage, ico in TEAM:
-        last = s.execute(select(AgentRun).where(AgentRun.agent == agent).order_by(AgentRun.id.desc()).limit(1)).scalars().first()
+        last = s.execute(select(AgentRun).where(AgentRun.agent == agent, AgentRun.status != "running")
+                         .order_by(AgentRun.id.desc()).limit(1)).scalars().first()
         ended = (last.finished_at or last.started_at) if last else None
-        if agent == "publishing" and not st.publishing_enabled:
-            status, note = "BLOCKED", "publishing is off (PUBLISHING_ENABLED=false)"
-        elif agent == "inbox_monitor" and not st.imap_host:
-            status, note = "BLOCKED", "mailbox reading is off (IMAP not set)"
+        last_ok = s.execute(select(func.max(AgentRun.finished_at)).where(AgentRun.agent == agent,
+                                                                         AgentRun.status == "success")).scalar_one()
+        now_run = running.get(agent)
+        nexts = [by_job[j]["next"] for j in agent_jobs[agent] if by_job[j]["next"]]
+        blocked = blocked_by.get(agent)
+        if blocked:
+            status, note = "BLOCKED", blocked
         elif state in ("stopped", "emergency_stop"):
-            status, note = "PAUSED", "automation stopped"
+            status, note = "PAUSED", "automation is stopped"
+        elif now_run:
+            status, note = "RUNNING", f"running the {now_run.job or 'manual'} job since {ago(now_run.started_at, now)}"
         elif last is None:
             status, note = "IDLE", "has not run on this database yet"
-        elif last.status == "running" and last.started_at >= now - timedelta(minutes=30):
-            status, note = "RUNNING", f"working since {ago(last.started_at, now)}"
         elif last.status in ("failed", "abandoned"):
-            status, note = "FAILED", (last.error or "last run failed")[:90]
+            status, note = "FAILED", (last.error or f"last run {last.status}")[:120]
         elif last.status == "success" and ended >= day:
-            status, note = "COMPLETED", f"completed {ago(ended, now)}"
+            status, note = "COMPLETED", f"last run completed {ago(ended, now)}"
         else:
             status, note = "IDLE", f"last ran {ago(ended, now)}"
         if agent == "sales_workflow" and status in ("COMPLETED", "IDLE") and not st.outbound_email_enabled:
             note += "; drafting only, sending off"
-        row = stats.get(agent)
         team.append({"agent": agent, "title": title, "job": job, "stage": stage, "icon": ico, "status": status,
-                     "label": AGENT_STATUS[status], "note": note, "runs": row["runs"] if row else 0,
-                     "rate": row["success_rate"] if row else None})
+                     "label": AGENT_STATUS[status], "note": note, "blocked": blocked,
+                     "current": {"job": now_run.job or "manual", "since": now_run.started_at} if now_run else None,
+                     "last_run": ended, "last_result": last.status if last else None, "last_success": last_ok,
+                     "ok_7d": week_counts[agent]["success"],
+                     "failed_7d": week_counts[agent]["failed"] + week_counts[agent]["abandoned"],
+                     "next_at": min(nexts) if nexts else None, "jobs": sorted(agent_jobs[agent])})
     counts = Counter(a["status"] for a in team)
-    running = [TEAM_TITLES.get(r.agent, r.agent.replace("_", " ").capitalize()) for r in s.execute(
-        select(AgentRun).where(AgentRun.status == "running", AgentRun.started_at >= now - timedelta(minutes=30))).scalars()]
-    last_run = s.execute(select(AgentRun).where(AgentRun.status != "running").order_by(AgentRun.id.desc()).limit(1)).scalars().first()
-    next_checkin = None
+
+    # the live workspace
+    title_of = lambda agent: TEAM_TITLES.get(agent, agent.replace("_", " ").capitalize())  # noqa: E731
+    last_job = s.execute(select(JobRun).where(JobRun.status != "running").order_by(JobRun.id.desc()).limit(1)).scalars().first()
+    last_ok = s.execute(select(AgentRun).where(AgentRun.status == "success").order_by(AgentRun.id.desc()).limit(1)).scalars().first()
+    last_action = s.execute(select(Activity).where(Activity.actor.in_(list(TEAM_TITLES)))
+                            .order_by(Activity.id.desc()).limit(1)).scalars().first()
+    upcoming = sorted((row for row in schedule if row["next"]), key=lambda row: row["next"])
     beat = read_heartbeat(st)
+    next_checkin = None
     if beat and duty[0] in ("On duty", "Working now"):
-        next_checkin = datetime.fromisoformat(beat["at"].rstrip("Z")) + timedelta(minutes=15)
+        next_checkin = datetime.fromisoformat(beat["at"].rstrip("Z")) + timedelta(minutes=int(st.schedule.get("tick_minutes", 15)))
         next_checkin = next_checkin if next_checkin > now else None
-    live = {"running": running, "next_checkin": next_checkin,
-            "last": {"title": TEAM_TITLES.get(last_run.agent, last_run.agent.replace("_", " ").capitalize()),
-                     "ok": last_run.status == "success", "ago": ago(last_run.finished_at or last_run.started_at, now),
-                     "took": f"{last_run.duration_ms / 1000:.1f} s" if last_run.duration_ms else ""} if last_run else None,
-            "jobs_24h": cnt(JobRun, JobRun.trigger == "scheduler", JobRun.started_at >= day),
-            "failed_24h": cnt(JobRun, JobRun.status.in_(("failed", "partial")), JobRun.started_at >= day)}
+    problems = [{"what": f"{r.job.replace('_', ' ')} job {r.status}", "why": (r.error or "no error recorded")[:160],
+                 "at": r.finished_at or r.started_at, "href": f"/jobs/runs/{r.id}"}
+                for r in s.execute(select(JobRun).where(JobRun.status.in_(("failed", "partial", "abandoned")),
+                                                        JobRun.started_at >= day).order_by(JobRun.id.desc()).limit(5)).scalars()]
+    problems += [{"what": f"{title_of(r.agent)} run {r.status}", "why": (r.error or "no error recorded")[:160],
+                  "at": r.finished_at or r.started_at, "href": f"/agents/runs/{r.id}"}
+                 for r in s.execute(select(AgentRun).where(AgentRun.status.in_(("failed", "abandoned")),
+                                                           AgentRun.started_at >= day).order_by(AgentRun.id.desc()).limit(5)).scalars()]
+    blocked_list = [{"what": f"{a['title']} blocked", "why": a["blocked"]} for a in team if a["blocked"]]
+    live = {
+        "running": [{"agent": title_of(r.agent), "job": (r.job or "manual").replace("_", " "), "since": r.started_at,
+                     "ago": ago(r.started_at, now)} for r in running.values()],
+        "last_job": {"job": last_job.job.replace("_", " "), "status": last_job.status, "ago": ago(last_job.finished_at or last_job.started_at, now),
+                     "at": last_job.finished_at or last_job.started_at,
+                     "took": f"{last_job.duration_ms / 1000:.1f} s" if last_job.duration_ms else ""} if last_job else None,
+        "last_ok": {"agent": title_of(last_ok.agent), "job": (last_ok.job or "manual").replace("_", " "),
+                    "ago": ago(last_ok.finished_at or last_ok.started_at, now), "at": last_ok.finished_at or last_ok.started_at,
+                    "took": f"{last_ok.duration_ms / 1000:.1f} s" if last_ok.duration_ms else ""} if last_ok else None,
+        "last_action": {"text": last_action.subject, "agent": title_of(last_action.actor), "ago": ago(last_action.created_at, now),
+                        "href": f"/leads/{last_action.lead_id}" if last_action.lead_id else None} if last_action else None,
+        "next_task": ({"job": upcoming[0]["job"].replace("_", " "), "description": upcoming[0]["description"],
+                       "at": upcoming[0]["next"], "due": upcoming[0]["next"] <= now} if upcoming else None),
+        "next_checkin": next_checkin,
+        "approvals": sum(n for label, n, _ in waiting if "approve" in label or "review" in label),
+        "problems": problems, "blocked": blocked_list,
+        "jobs_24h": cnt(JobRun, JobRun.trigger == "scheduler", JobRun.started_at >= day),
+        "failed_24h": cnt(JobRun, JobRun.status.in_(("failed", "partial", "abandoned")), JobRun.started_at >= day),
+    }
     return {"employee": {"duty": duty, "did": did, "waiting": waiting, "mode": am.get_mode(s), "state": state, "live": live},
             "team": team, "team_counts": [(AGENT_STATUS[k], k.lower(), counts[k]) for k in AGENT_STATUS if counts[k]],
-            "workflow": [(stage, note, [a for a in team if a["stage"] == stage]) for stage, note in WORKFLOW]}
+            "workflow": [(stage, note, [a for a in team if a["stage"] == stage]) for stage, note in WORKFLOW],
+            "schedule": schedule}
 
 
 # How each kind of activity shows on the dashboard timeline: icon, tone, status word.
@@ -1552,11 +1653,17 @@ ACTIVITY_LOOK = {
 
 
 def change(current: int, previous: int) -> tuple[str, str]:
-    """('+12%', 'up') for the change against the previous period; a dash when nothing is comparable."""
+    """('+12%', 'up') for the change against the previous period. With fewer than 5 in the previous period a
+    percentage would mislead (1 to 3 is "+200%"), so the plain difference is shown instead; a dash when there is
+    nothing in either period."""
     if previous == 0:
         return ("new" if current else "—"), ("up" if current else "flat")
+    trend = "up" if current > previous else "down" if current < previous else "flat"
+    if previous < 5:
+        diff = current - previous
+        return (f"{'+' if diff > 0 else ''}{diff}" if diff else "no change"), trend
     pct = round(100 * (current - previous) / previous)
-    return (f"{'+' if pct > 0 else ''}{pct}%", "up" if pct > 0 else "down" if pct < 0 else "flat")
+    return (f"{'+' if pct > 0 else ''}{pct}%", trend)
 
 
 def dashboard_view(ctx: AppContext, s, days: int) -> dict:
@@ -1609,17 +1716,41 @@ def dashboard_view(ctx: AppContext, s, days: int) -> dict:
     for row in feed:
         row["ago"] = ago(row["at"], now)
 
-    perf_days = 7
-    day_labels = [(now.date() - timedelta(days=perf_days - 1 - i)).strftime("%a") for i in range(perf_days)]
+    # Sales performance: ten real series in three views, per day over the chosen period
+    day_labels = [(now.date() - timedelta(days=days - 1 - i)).strftime("%a" if days <= 7 else "%b %d") for i in range(days)]
 
     def per_day(column, *where):
-        return charts.daily_counts(s.execute(select(column).where(column >= now - timedelta(days=perf_days), *where))
-                                   .scalars().all(), perf_days)
+        return charts.daily_counts(s.execute(select(column).where(column >= now - timedelta(days=days), *where))
+                                   .scalars().all(), days)
 
-    performance = charts.combo_chart(
-        day_labels, [("Emails", per_day(FollowUp.sent_at, FollowUp.status == "sent")), ("Leads", per_day(Lead.created_at))],
-        ("Meetings", per_day(Meeting.created_at, Meeting.is_simulated.is_(False))), "Sales performance, last 7 days",
-        "No emails, leads or meetings in the last 7 days", height=300, uid="perf")
+    real_replies = (InboundEmail.is_simulated.is_(False),)
+    tasks_done = per_day(FollowUp.updated_at, FollowUp.channel == "task", FollowUp.status == "done")
+    followups_sent = per_day(FollowUp.sent_at, FollowUp.channel == "email", FollowUp.status == "sent", FollowUp.step > 1)
+    span = f"the last {days} days"
+    views = [
+        ("prospecting", "Prospecting",
+         [("Companies discovered", per_day(Company.created_at, Company.merged_into_id.is_(None))),
+          ("Leads generated", per_day(Lead.created_at))],
+         [("Verified contacts", per_day(Contact.discovered_at, *USABLE_EMAIL))],
+         f"No companies, leads or verified contacts recorded in {span}."),
+        ("outreach", "Outreach",
+         [("Outreach drafts created", per_day(FollowUp.created_at, FollowUp.kind == "outreach")),
+          ("Emails sent", per_day(FollowUp.sent_at, FollowUp.channel == "email", FollowUp.status == "sent"))],
+         [("Follow-ups completed", [a + b for a, b in zip(tasks_done, followups_sent, strict=True)])],
+         f"No outreach activity recorded in {span}."),
+        ("responses", "Responses",
+         [("Replies received", per_day(InboundEmail.received_at, *real_replies, InboundEmail.category.in_(HUMAN_REPLIES))),
+          ("Positive replies", per_day(InboundEmail.received_at, *real_replies, InboundEmail.category == "interested"))],
+         [("Meetings booked", per_day(Meeting.created_at, Meeting.is_simulated.is_(False), Meeting.status != "cancelled")),
+          ("Qualified opportunities", per_day(Opportunity.created_at))],
+         f"No replies, meetings or opportunities recorded in {span}."),
+    ]
+    performance = [{"key": key, "label": label,
+                    "series": [(name, sum(v), f"s{i}") for i, (name, v) in enumerate(bars)]
+                    + [(name, sum(v), f"l{i}") for i, (name, v) in enumerate(lines)],
+                    "chart": charts.combo_chart(day_labels, bars, lines, f"{label}, {span}", empty, height=300,
+                                                uid=f"perf-{key}")}
+                   for key, label, bars, lines, empty in views]
 
     contacted = s.execute(select(func.count(func.distinct(FollowUp.lead_id))).where(
         FollowUp.kind == "outreach", FollowUp.status == "sent")).scalar_one()
