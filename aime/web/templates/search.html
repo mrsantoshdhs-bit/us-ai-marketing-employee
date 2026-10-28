@@ -1,0 +1,17 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}Search · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Search</h1>
+  <p class="subtitle">{% if q|length >= 2 %}{{ found }} result{{ 's' if found != 1 }} for “{{ q }}” across companies, contacts, emails, conversations and meetings{% else %}Type at least two letters in the search bar above.{% endif %}</p></div></div>
+{% if q|length >= 2 %}
+<div class="two">
+  {% for title, ico, rows in groups %}
+  <div class="card result-group">
+    <h2 style="margin-top:0">{{ icon(ico) }} {{ title }} <span class="muted small">{{ rows|length }}</span></h2>
+    {% for label, href, detail in rows %}<div class="row-item"><a href="{{ href }}"><b>{{ label }}</b></a><div class="small muted">{{ detail }}</div></div>
+    {% else %}<span class="muted small">No {{ title|lower }} match.</span>{% endfor %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}
