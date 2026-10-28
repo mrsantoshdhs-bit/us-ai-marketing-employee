@@ -1263,7 +1263,7 @@ def command_center(ctx: AppContext, s) -> dict:
          "/contacts", "named on company sites or SEC filings"),
         ("Verified business contacts", cnt(Contact, *USABLE_EMAIL), "/contacts?reachable=1", "address the company published"),
         ("Qualified leads", cnt(Lead, Lead.status == "qualified"), "/leads?status=qualified",
-         f"{tiers['HOT']} hot · {tiers['WARM']} warm · {tiers['COLD']} cold"),
+         f"all leads: {tiers['HOT']} hot · {tiers['WARM']} warm · {tiers['COLD']} cold"),
         ("Open opportunities", cnt(Opportunity, *open_opps), "/pipeline",
          f"pipeline value {money(value)}" if value else "no deal values entered yet"),
         ("Emails sent", cnt(FollowUp, FollowUp.channel == "email", FollowUp.status == "sent"), "/followups?show=all",
@@ -1395,7 +1395,7 @@ def ai_employee(ctx: AppContext, s) -> dict:
         ("emails drafted", cnt(FollowUp, FollowUp.channel == "email", FollowUp.created_at >= day), "/followups"),
         ("emails sent", cnt(FollowUp, FollowUp.channel == "email", FollowUp.sent_at >= day), "/followups?show=all"),
         ("replies read", cnt(InboundEmail, InboundEmail.processed_at >= day, InboundEmail.is_simulated.is_(False)), "/inbox?show=all"),
-        ("meetings booked", cnt(Meeting, Meeting.created_at >= day, Meeting.is_simulated.is_(False)), "/meetings"),
+        ("bookings received", cnt(Meeting, Meeting.created_at >= day, Meeting.is_simulated.is_(False)), "/meetings"),
     ]
     waiting = [
         ("emails to approve", cnt(FollowUp, FollowUp.channel == "email", FollowUp.status == "awaiting_approval"), "/followups"),
