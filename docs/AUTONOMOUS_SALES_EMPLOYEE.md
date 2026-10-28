@@ -84,7 +84,7 @@ The Super Admin page in row 12 sets:
 | New: `tests/test_autonomous_sales.py` | 19 passed |
 | New name-parsing test in `tests/test_research.py` | passed |
 | Changed: the A4 offer test, which now also proves the campaign path | passed |
-| Full regression (`tests/`, 50+ files) | FULL_RESULT |
+| Full regression (`tests/`, 50+ files) | 643 passed, 0 failed |
 | `ruff check aime tests scripts` | clean |
 
 `test_autonomous_sales.py` covers:
