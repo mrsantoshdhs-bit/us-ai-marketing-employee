@@ -151,7 +151,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     env = templates.env
     env.filters.update(local=fmt_local, et=fmt_et, service=service_name, industry=industry_label, safe_url=safe_url,
                        tier=lead_tier, tier_reason=tier_reason, run_summary=run_summary, intent_label=lambda i: INTENT_LABELS.get(i or "", ""))
-    env.globals.update(SERVICES=SERVICES, INDUSTRIES=INDUSTRIES, STATES=US_REGIONS, STAGES=STAGES,
+    env.globals.update(describe_rule=am.describe_rule, ADDRESS_RULES=am.ADDRESS_RULES, SERVICES=SERVICES, INDUSTRIES=INDUSTRIES, STATES=US_REGIONS, STAGES=STAGES,
                        LEAD_STATUSES=LEAD_STATUSES)
 
     def C() -> AppContext:
@@ -1115,6 +1115,22 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 return back("/automation#authorize", str(exc))
             aid = a.id
         return back("/automation#authorizations", f"Campaign authorization #{aid} saved as a draft: activate it to use it")
+
+    @app.post("/automation/authorizations/rule")
+    def automation_authorize_rule(request: Request, name: str = Form(...), min_grade: str = Form("B"),
+                                  addresses: str = Form("role_or_published"), verified_website: str = Form(""),
+                                  daily_limit: int = Form(5), total_limit: int = Form(20), days: int = Form(7),
+                                  notes: str = Form("")):
+        if not is_admin(request):
+            raise HTTPException(403, "Only an administrator can authorize a campaign")
+        with C().db.session() as s:
+            try:
+                a = am.create_rule_authorization(s, who(request), name, min_grade, addresses, verified_website == "yes",
+                                                 daily_limit, total_limit, days, notes)
+            except ValueError as exc:
+                return back("/automation#authorize-rule", str(exc))
+            aid = a.id
+        return back("/automation#authorizations", f"Rule-based authorization #{aid} saved as a draft: activate it to use it")
 
     @app.post("/automation/authorizations/{aid}/{action}")
     def automation_authorization_action(request: Request, aid: int, action: str):

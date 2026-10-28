@@ -123,6 +123,69 @@ def parse_recipients(text: str) -> tuple[list[str], list[str]]:
     return valid, rejected
 
 
+GRADE_RANK = {"A": 4, "B": 3, "C": 2, "D": 1}
+ADDRESS_RULES = {"published": "a decision-maker's own address that the company publishes",
+                 "role_or_published": "the company's published mailbox (info@, hello@ ...) or a decision-maker's own"}
+
+
+def describe_rule(rule: dict) -> str:
+    return (f"qualified leads graded {rule['min_grade']} or better, emailed at {ADDRESS_RULES[rule['addresses']]}"
+            + (", on a verified company website" if rule.get("verified_website") else ""))
+
+
+def rule_problem(session: Session, rule: dict, f: FollowUp, to: str) -> str | None:
+    """Why the email falls outside a rule-based authorization (None: the rule covers it). Only first-touch and
+    sequence outreach to a qualified, researched US prospect; never inquiry replies or answers to a prospect."""
+    if f.kind != "outreach":
+        return "a rule covers outreach emails only"
+    lead = f.lead
+    if lead is None or lead.status != "qualified":
+        return "the lead is not qualified"
+    if GRADE_RANK.get(lead.grade or "", 0) < GRADE_RANK[rule["min_grade"]]:
+        return f"the lead is graded {lead.grade or '-'}, below {rule['min_grade']}"
+    company = lead.company
+    if company is None or company.is_sample or (company.is_competitor and not company.competitor_cleared_by):
+        return "the company is a sample or a flagged competitor"
+    if rule.get("verified_website") and company.website_status != "verified":
+        return "the company's website is not verified"
+    contact = f.contact
+    if contact is None or (contact.email or "").strip().lower() != to:
+        return "the address is not the lead's researched contact"
+    if contact.source not in ("website", "sec_filing"):
+        return "the address was not published by the company"
+    allowed = ("published",) if rule["addresses"] == "published" else ("published", "role_address")
+    if contact.email_status not in allowed:
+        return "the address is not one the rule allows"
+    return None
+
+
+def create_rule_authorization(session: Session, actor: str, name: str, min_grade: str, addresses: str,
+                              verified_website: bool, daily_limit: int, total_limit: int, days: int,
+                              notes: str = "") -> CampaignAuthorization:
+    """A draft rule-based authorization for outreach: qualified leads that meet the rule, within the limits. It lets
+    nothing out until an administrator activates it, and every send-time gate still applies."""
+    if not name.strip():
+        raise ValueError("Give the campaign a name")
+    if min_grade not in ("A", "B"):
+        raise ValueError("A rule covers grade A, or grade B and better")
+    if addresses not in ADDRESS_RULES:
+        raise ValueError("Choose which addresses the rule covers")
+    if not (1 <= daily_limit <= MAX_DAILY and 1 <= total_limit <= MAX_TOTAL and 1 <= days <= MAX_DAYS):
+        raise ValueError(f"Limits: 1-{MAX_DAILY} a day, 1-{MAX_TOTAL} in total, valid for 1-{MAX_DAYS} days")
+    now = utcnow()
+    rule = {"min_grade": min_grade, "addresses": addresses, "verified_website": bool(verified_website)}
+    a = CampaignAuthorization(name=name.strip()[:200], status="draft", recipients=[], rule=rule, kinds=["outreach"],
+                              daily_limit=daily_limit, total_limit=total_limit, starts_at=now,
+                              expires_at=now + timedelta(days=days), notes=(notes or "").strip()[:2000] or None,
+                              created_by=actor)
+    session.add(a)
+    session.flush()
+    audit(session, actor, "authorization_created", f"#{a.id} {a.name}",
+          f"rule: {describe_rule(rule)}; covers outreach; {daily_limit} a day, {total_limit} in total; "
+          f"until {a.expires_at:%Y-%m-%d %H:%M} UTC")
+    return a
+
+
 def create_authorization(session: Session, actor: str, name: str, recipients: str, kinds: list[str],
                          daily_limit: int, total_limit: int, days: int, notes: str = "") -> CampaignAuthorization:
     """A draft authorization; it lets nothing out until an administrator activates it."""
@@ -226,8 +289,19 @@ def campaign_for(session: Session, f: FollowUp, mode: str, now: datetime,
     from aime.reply_intel import QUESTION_PLACEHOLDER
 
     to = recipient(f)
-    camps = [a for a in active_authorizations(session, now) if to in (a.recipients or [])]
+    active = active_authorizations(session, now)
+    camps = [a for a in active if to in (a.recipients or [])]
+    rule_misses = []
+    for a in active:
+        if a.rule:
+            miss = rule_problem(session, a.rule, f, to)
+            if miss is None:
+                camps.append(a)
+            else:
+                rule_misses.append(f"campaign #{a.id}: {miss}")
     if not camps:
+        if rule_misses:
+            return None, "no active campaign rule covers it (" + "; ".join(rule_misses[:2]) + ")"
         return None, "the recipient is not on an active campaign authorization"
     if f.kind not in ("outreach", "response"):
         return None, "answers to people who wrote to us always go to a person"
@@ -299,7 +373,11 @@ def campaign_approval_problem(session: Session, f: FollowUp, now: datetime) -> s
     a = session.get(CampaignAuthorization, f.authorization_id)
     if a is None or a.status != "active" or not (a.starts_at <= now < a.expires_at):
         return "its campaign authorization is no longer active"
-    if recipient(f) not in (a.recipients or []):
+    if a.rule:
+        miss = rule_problem(session, a.rule, f, recipient(f))
+        if miss:
+            return f"its campaign rule no longer covers it: {miss}"
+    elif recipient(f) not in (a.recipients or []):
         return "the recipient is no longer on its campaign authorization"
     if (f.approved_by or "").startswith("campaign") and (get_state(session) != "running" or get_mode(session) == "approval"):
         return "automation is not running in Hybrid or Automatic mode"

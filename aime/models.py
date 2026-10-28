@@ -630,7 +630,8 @@ class KeyValue(Base):
 
 class CampaignAuthorization(Timestamped, Base):
     """An administrator's permission for emails to go out without a per-email approval: the exact recipient
-    addresses, which kinds of email, dates and limits. Used only in Hybrid and Automatic mode, at send time."""
+    addresses, or a rule (aime.automation.RULE_FIELDS) that qualified leads must meet; which kinds of email, dates
+    and limits. Used only in Hybrid and Automatic mode, at send time."""
 
     __tablename__ = "campaign_authorizations"
 
@@ -638,6 +639,7 @@ class CampaignAuthorization(Timestamped, Base):
     name: Mapped[str] = mapped_column(String(200))
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)  # draft | active | paused | stopped | expired
     recipients: Mapped[list[Any]] = mapped_column(JSON, default=list)  # exact addresses, lower case
+    rule: Mapped[dict[str, Any] | None] = mapped_column(JSON)  # instead of recipients: aime.automation.rule_problem
     kinds: Mapped[list[Any]] = mapped_column(JSON, default=list)  # outreach | response
     daily_limit: Mapped[int] = mapped_column(Integer, default=5)
     total_limit: Mapped[int] = mapped_column(Integer, default=20)
