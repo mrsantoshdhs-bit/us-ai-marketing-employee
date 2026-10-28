@@ -17,7 +17,7 @@ from aime.agents.base import BaseAgent, RetryPolicy
 from aime.db import kv_get, kv_set
 from aime.inbox import Mailbox, ParsedEmail, new_text, parse_message
 from aime.meetings import check_double_bookings
-from aime.models import Company, Contact, FollowUp, InboundEmail, Lead
+from aime.models import Alert, Company, Contact, FollowUp, InboundEmail, Lead
 from aime.reply_intel import CALENDLY_NOTICE, process_pending
 
 
@@ -33,6 +33,7 @@ class InboxOutput(BaseModel):
     skipped_unrelated: int = 0  # INBOX_SCOPE=related: not sales mail, so not stored
     categories: dict[str, int] = Field(default_factory=dict)
     needs_review: int = 0
+    proposals: int = 0  # A4: meeting-time proposals drafted for approval
 
 
 class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
@@ -64,6 +65,27 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                 return oauth.access_token(session, self.settings, http, self.settings.mail_oauth_provider, "mail")
         return token
 
+    def _meetings(self, session: Session, out) -> None:
+        """A4: offer free slots for new meeting requests and raise reminders, when booking is switched on."""
+        from aime import booking
+
+        booking.reminders(session, self.settings)
+        booking.sync_offered(session)
+        ok, _why = booking.ready(session, self.settings)
+        if not ok:
+            return
+        from aime.integrations import oauth
+        from aime.integrations.calendar import CalendarError, calendar_for
+
+        with self.ctx.http() as http:
+            provider = self.settings.calendar_provider.lower()
+            cal = calendar_for(self.settings, http,
+                               lambda: oauth.access_token(session, self.settings, http, provider, "calendar"))
+            try:
+                out.proposals = booking.propose_pending(session, self.settings, cal, self.name)
+            except (CalendarError, oauth.OAuthError) as exc:
+                session.add(Alert(level="warning", source=self.name, message=f"Meeting times not proposed: {exc}"))
+
     def execute(self, inp: InboxInput, session: Session) -> InboxOutput:
         out = InboxOutput()
         own = {a.lower() for a in (self.settings.smtp_from, self.settings.imap_credentials[0],
@@ -94,6 +116,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
             session.commit()
         out.categories = process_pending(session, self.settings, self.name, llm=self.ctx.llm)
         check_double_bookings(session, self.settings)  # after the whole batch: a reschedule's two notices are one change
+        self._meetings(session, out)
         out.needs_review = len(session.execute(select(InboundEmail.id).where(InboundEmail.status == "needs_review")).all())
         return out
 

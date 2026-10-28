@@ -7,6 +7,20 @@
   Times are US Eastern. After a meeting, mark it held or no-show; the opportunity's next step updates and the
   "record the outcome" task closes. Simulated bookings (testing only) are marked SIMULATED.
 </div>
+<h2 id="proposals">Meeting times offered</h2>
+<div class="card small">{% if booking_ready %}Free times come from your calendar. The email offering them waits for your approval; when the prospect answers, book the time they chose: it is checked against the calendar again, then one event is created.{% else %}Booking from your calendar is off: {{ booking_why }}. The booking link in replies works as before.{% endif %}</div>
+{% for p in proposals %}
+<div class="card">
+  <strong>{{ p.lead.company.name }}</strong> · {{ p.prospect_email }} · <span class="pill">{{ p.status }}</span>
+  <span class="muted small">their time zone {{ p.prospect_tz }} · {{ p.minutes }} min · proposal #{{ p.id }}</span>
+  <ol class="small">{% for s in slots_of(p) %}<li>{{ slot_label(s, p.prospect_tz) }} <span class="muted">(you: {{ s|local(None, '%a %d %b %H:%M') }})</span>
+    {% if p.status in ['draft', 'offered'] and booking_ready %}<form class="inline" method="post" action="/meetings/proposals/{{ p.id }}/book"><input type="hidden" name="slot" value="{{ loop.index0 }}"><button class="secondary">Book this time</button></form>{% endif %}</li>{% endfor %}</ol>
+  {% if p.status in ['draft', 'offered'] %}<form class="inline" method="post" action="/meetings/proposals/{{ p.id }}/decline"><button class="secondary">Close without booking</button></form>{% endif %}
+</div>
+{% else %}<div class="card muted small">No times offered yet.</div>{% endfor %}
+{% if requests and booking_ready %}<div class="card small"><strong>Meeting requests without offered times</strong>
+  {% for r in requests %}<div>{{ r.from_email }} · {{ r.subject }} <form class="inline" method="post" action="/meetings/requests/{{ r.id }}/propose"><button class="secondary">Propose times</button></form></div>{% endfor %}</div>{% endif %}
+
 <h2>Upcoming</h2>
 {% for m in upcoming %}
 <div class="card">
@@ -14,6 +28,9 @@
   · {{ m.invitee_name or '' }} &lt;{{ m.invitee_email }}&gt;
   {% if m.lead %} · <a href="/leads/{{ m.lead_id }}">{{ m.lead.company.name }}</a>{% else %} · <span class="pill warn">not matched to a lead</span>{% endif %}
   <span class="muted small">({{ m.source|replace('_', ' ') }}{% if m.rescheduled_from %}; moved from {{ m.rescheduled_from|et }}{% endif %})</span>
+  {% if m.event_id %}<form class="filters" method="post" action="/meetings/{{ m.id }}/move" style="margin-top:6px">
+    <label class="small">New time ({{ m.timezone }}) <input name="start_local" type="datetime-local" required></label>
+    <button class="secondary">Move in the calendar</button></form>{% endif %}
   {% if not m.lead %}<form class="filters" method="post" action="/meetings/{{ m.id }}/link" style="margin-top:6px">
     <input name="lead_id" type="number" min="1" placeholder="Lead # (from the lead's page address)" required>
     <button class="secondary">Link to lead</button></form>{% endif %}

@@ -123,6 +123,9 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "microsoft_client_id": ("MICROSOFT_CLIENT_ID", str),
     "microsoft_client_secret": ("MICROSOFT_CLIENT_SECRET", str),
     "microsoft_tenant": ("MICROSOFT_TENANT", str),
+    "calendar_provider": ("CALENDAR_PROVIDER", str),
+    "meeting_booking_enabled": ("MEETING_BOOKING_ENABLED", bool),
+    "calendar_send_invites": ("CALENDAR_SEND_INVITES", bool),
     "inbox_scope": ("INBOX_SCOPE", str),
     "calendly_url": ("CALENDLY_URL", str),
     "dashboard_host": ("DASHBOARD_HOST", str),
@@ -208,6 +211,11 @@ class Settings:
     microsoft_client_id: str = ""
     microsoft_client_secret: str = field(default="", repr=False)
     microsoft_tenant: str = "common"
+    # A4 meeting booking (aime/booking.py): the owner's calendar ("google" or "microsoft", connected on the
+    # Integrations page). Off by default; every outbound step still waits for a person.
+    calendar_provider: str = ""
+    meeting_booking_enabled: bool = False
+    calendar_send_invites: bool = False  # let Google/Microsoft email the invitation (default: our approved email only)
     # related: keep only sales mail (replies to our emails, bounces, Calendly, known contacts and lead companies),
     # so a mailbox you also use for other work is not copied into the CRM. all: keep every email (a dedicated
     # sales mailbox, where new inquiries by email should show up too).

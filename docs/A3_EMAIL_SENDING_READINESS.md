@@ -1,5 +1,7 @@
 # A3: Email sending readiness
 
+**Update (branch `sales/33-a3-sending`):** OAuth SMTP, a per-mailbox daily limit, delivery tracking (bounced / replied), the B2B switch holding instead of cancelling, and a command-line stop are now built; defect 2 was fixed by PR #48 (deployed). See [A3_IMPLEMENTATION.md](A3_IMPLEMENTATION.md).
+
 **Date:** 28 October 2026 · **Production commit:** 9ed84b0 · **Method:** code reading only. No app, test, job or
 mail connection was run for this report.
 
