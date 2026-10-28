@@ -4,6 +4,8 @@
 
 **Sources:** this compares that objective with what exists today, from [CURRENT_SYSTEM_AUDIT.md](CURRENT_SYSTEM_AUDIT.md) and [LEAD_DATA_AUDIT.md](LEAD_DATA_AUDIT.md). It supersedes the 26 October [SALES_EMPLOYEE_GAP_ANALYSIS.md](SALES_EMPLOYEE_GAP_ANALYSIS.md) for this objective.
 
+**Snapshot date:** this table describes the system before the safe-build items on this branch. What those items changed is in [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md). What still needs the owner is in [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md).
+
 **Legend:**
 - **Exists:** built and running in production.
 - **Built, inactive:** built and tested, but switched off in production.

@@ -43,8 +43,8 @@ from aime.timeutil import utcnow
 
 MODES = {
     "approval": "Every external email needs a person's approval.",
-    "hybrid": "Routine outreach to recipients on an active campaign authorization goes out on its own; replies, "
-              "pricing, commitments and anything uncertain need a person.",
+    "hybrid": "Routine outreach that an active campaign authorization covers (by address or by rule) goes out on its own; "
+              "replies, pricing, commitments and anything uncertain need a person.",
     "automatic": "As Hybrid, plus booking-link answers to clearly interested replies from authorized recipients.",
 }
 DEFAULT_MODE = "hybrid"
