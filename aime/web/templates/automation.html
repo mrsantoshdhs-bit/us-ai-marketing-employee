@@ -52,14 +52,14 @@
   </div>
 </div>
 
-<div class="section-title" id="authorizations"><h2>Campaign authorizations</h2><span class="muted small">exact recipient addresses, dates and limits; used only in Hybrid and Automatic mode</span></div>
+<div class="section-title" id="authorizations"><h2>Campaign authorizations</h2><span class="muted small">exact recipient addresses or a rule, dates and limits; used only in Hybrid and Automatic mode</span></div>
 <div class="card table-wrap"><table>
   <tr><th>#</th><th>Campaign</th><th>Status</th><th>Recipients</th><th>Covers</th><th class="n">Sent 24 h</th><th class="n">Sent total</th><th>Valid</th><th>Authorized</th><th></th></tr>
   {% for a in auths %}
   <tr>
     <td>{{ a.id }}</td><td><b>{{ a.name }}</b>{% if a.notes %}<div class="small muted">{{ a.notes[:160] }}</div>{% endif %}</td>
     <td>{{ status_pill(a.status) }}</td>
-    <td class="small">{{ a.recipients[:5]|join(', ') }}{% if a.recipients|length > 5 %} +{{ a.recipients|length - 5 }} more{% endif %}</td>
+    <td class="small">{% if a.rule %}<span class="pill">rule</span> {{ describe_rule(a.rule) }}{% else %}{{ a.recipients[:5]|join(', ') }}{% if a.recipients|length > 5 %} +{{ a.recipients|length - 5 }} more{% endif %}{% endif %}</td>
     <td class="small">{{ a.kinds|join(', ') }}</td>
     <td class="n">{{ counts[a.id][0] }} / {{ a.daily_limit }}</td><td class="n">{{ counts[a.id][1] }} / {{ a.total_limit }}</td>
     <td class="small">{{ a.starts_at|local }} → {{ a.expires_at|local }}</td>
@@ -90,6 +90,26 @@
     <div class="field" style="margin-top:12px">Covers
       <div class="checks">{% for k, label in kinds.items() %}<label><input type="checkbox" name="kinds" value="{{ k }}" {{ 'checked' if k == 'outreach' }}> {{ label }}</label>{% endfor %}</div></div>
     <label class="field" style="margin-top:12px">Notes <span class="help">why this campaign is authorized, who agreed</span><input name="notes" maxlength="2000"></label>
+    <div style="margin-top:14px"><button>Save as draft</button></div>
+  </form>
+</div>
+
+<div class="card" id="authorize-rule">
+  <div class="card-head"><h3>New rule-based authorization</h3><span class="meta">outreach to qualified leads that meet the rule, within the limits; saved as a draft</span></div>
+  <p class="small muted" style="margin:0 0 12px">It never covers replies, answers to people who wrote to us, addresses given for testing, prices or
+    commitments, held quality checks, opted-out or suppressed addresses. Nothing goes out unless sending is on,
+    REQUIRE_HUMAN_APPROVAL=false, the mode is Hybrid or Automatic, automation is running and you activate it.</p>
+  <form method="post" action="/automation/authorizations/rule">
+    <div class="form-grid">
+      <label class="field">Campaign name<input name="name" required maxlength="200" placeholder="e.g. Qualified grade-B outreach, November"></label>
+      <label class="field">Lowest grade<select name="min_grade"><option value="B" selected>B or better</option><option value="A">A only</option></select></label>
+      <label class="field">Addresses<select name="addresses">{% for key, text in ADDRESS_RULES.items() %}<option value="{{ key }}" {{ 'selected' if key == 'role_or_published' }}>{{ text }}</option>{% endfor %}</select></label>
+      <label class="field">Emails per day<input name="daily_limit" type="number" min="1" max="{{ limits_max.daily }}" value="5"></label>
+      <label class="field">Emails in total<input name="total_limit" type="number" min="1" max="{{ limits_max.total }}" value="20"></label>
+      <label class="field">Valid for (days)<input name="days" type="number" min="1" max="{{ limits_max.days }}" value="7"></label>
+    </div>
+    <div class="checks" style="margin-top:12px"><label><input type="checkbox" name="verified_website" value="yes" checked> Only companies whose website is verified</label></div>
+    <label class="field" style="margin-top:12px">Notes <span class="help">why this rule is authorized, who agreed</span><input name="notes" maxlength="2000"></label>
     <div style="margin-top:14px"><button>Save as draft</button></div>
   </form>
 </div>

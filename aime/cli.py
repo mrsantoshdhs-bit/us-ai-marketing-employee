@@ -106,7 +106,7 @@ def cmd_scheduler(args, ctx) -> int:
     if args.action == "verify":
         return cmd_scheduler_verify(ctx)
     if args.action == "install":
-        res = windows.install(ctx.settings, args.interval, run_when_logged_off=args.run_when_logged_off)
+        res = windows.install(ctx.settings, args.interval, run_when_logged_off=args.run_when_logged_off, wake=args.wake)
     elif args.action == "restore-previous":
         res = windows.restore_previous(ctx.settings)
     elif args.action == "install-watchdog":
@@ -504,6 +504,11 @@ def cmd_scheduler_verify(ctx) -> int:
         if task.get("Logon Mode", "").lower().startswith("interactive only"):
             print("NOTE: the task runs only while you are logged on. To keep it running when you sign out:"
                   " `python -m aime scheduler install --run-when-logged-off` (Windows asks for your password).")
+    print("While you are signed out or the PC sleeps:")
+    for line in windows.unattended_readiness({name: windows.installed_xml(name) for name in
+                                              (windows.TASK_NAME, windows.WATCHDOG_TASK, windows.DASHBOARD_TASK)}):
+        print("  " + line)
+    print("  The dashboard and the watchdog need a signed-in desktop; scheduled jobs do not need the dashboard.")
     if not windows.query(windows.WATCHDOG_TASK).get("installed"):
         print("NOTE: no watchdog task. Install it with `python -m aime scheduler install-watchdog`.")
     if not windows.query(windows.DASHBOARD_TASK).get("installed"):
@@ -553,6 +558,7 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--interval", type=int)
     sc.add_argument("--run-when-logged-off", action="store_true",
                     help="Keep running while signed out and after reboot (Windows prompts for your password)")
+    sc.add_argument("--wake", action="store_true", help="Let the tick task wake the PC from sleep to run")
     sub.add_parser("doctor", help="Integrity, isolation, compliance and scheduler self-checks")
     bk = sub.add_parser("backup", help="Write and verify an online backup of the database")
     bk.add_argument("--label", default="manual")

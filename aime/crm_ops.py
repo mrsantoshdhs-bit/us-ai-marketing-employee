@@ -8,7 +8,7 @@ from datetime import datetime
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from aime.dedupe import domain_from_email, find_duplicate, normalize_name
+from aime.dedupe import clean_company_name, domain_from_email, find_duplicate, normalize_name
 from aime.matching import detect_competitor, match_services
 from aime.models import Activity, Company, Contact, FollowUp, Lead, Opportunity, Signal, Suppression
 from aime.sources.base import CompanyCandidate
@@ -30,6 +30,20 @@ def fingerprint(*parts: str | None) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
 
 
+SOURCE_LABELS = {"hn_hiring": "Hacker News hiring post", "sec_edgar": "SEC filing business address",
+                 "csv_import": "your imported list", "inbound": "the inquiry form", "manual": "entered by hand"}
+
+
+def us_location_evidence(source: str | None, state: str | None, location_text: str | None) -> str | None:
+    """Why the company counts as a US company, in words: the US state, or the location text that names the US."""
+    label = SOURCE_LABELS.get(source or "", source or "source")
+    if state:
+        return f"US state {state} ({label})"[:300]
+    if location_text:
+        return f'{label}: "{location_text.strip()[:200]}"'[:300]
+    return None
+
+
 def upsert_company(session: Session, cand: CompanyCandidate) -> tuple[Company, bool]:
     existing = find_duplicate(session, cand.name, cand.domain, cand.state, cand.source_record_id, cand.source)
     if existing:
@@ -43,12 +57,14 @@ def upsert_company(session: Session, cand: CompanyCandidate) -> tuple[Company, b
                 existing.phone = cand.phone
         if cand.description and not existing.description:
             existing.description = cand.description
+        if not existing.location_evidence:
+            existing.location_evidence = us_location_evidence(existing.source, existing.state, existing.location_text)
         if detect_competitor(cand.signal_text or cand.description) and not existing.competitor_cleared_by:
             existing.is_competitor = True
         return existing, False
     company = Company(
-        name=cand.name.strip()[:200],
-        normalized_name=normalize_name(cand.name),
+        name=clean_company_name(cand.name)[:200],
+        normalized_name=normalize_name(clean_company_name(cand.name)),
         domain=cand.domain,
         website=cand.website,
         industry=cand.industry,
@@ -56,6 +72,7 @@ def upsert_company(session: Session, cand: CompanyCandidate) -> tuple[Company, b
         city=cand.city,
         country="US",
         location_text=cand.location_text,
+        location_evidence=us_location_evidence(cand.source, cand.state, cand.location_text),
         employee_range=cand.employee_range,
         description=cand.description,
         phone=cand.phone if cand.verified else None,
