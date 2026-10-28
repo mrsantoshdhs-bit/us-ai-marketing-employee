@@ -309,6 +309,8 @@ class InboundEmail(Base):
     confidence: Mapped[str | None] = mapped_column(String(10))  # high | medium | low
     # what they ask for, alongside the category: meeting_request | pricing_request | more_info | None
     intent: Mapped[str | None] = mapped_column(String(30))
+    sentiment: Mapped[str | None] = mapped_column(String(10))  # positive | neutral | negative
+    recommended_status: Mapped[str | None] = mapped_column(String(120))  # what the lead should become, in words
     reasons: Mapped[list[Any] | None] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(20), default="new", index=True)  # new | actioned | needs_review | reviewed | ignored
     company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"))
@@ -596,6 +598,7 @@ class OAuthToken(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     provider: Mapped[str] = mapped_column(String(30), unique=True)
     access_token: Mapped[str] = mapped_column(Text)
+    refresh_token: Mapped[str | None] = mapped_column(Text)  # DPAPI-protected, like access_token
     expires_at: Mapped[datetime | None] = mapped_column(DateTime)
     scope: Mapped[str] = mapped_column(String(300), default="")
     subject: Mapped[str | None] = mapped_column(String(120))  # e.g. LinkedIn member id
