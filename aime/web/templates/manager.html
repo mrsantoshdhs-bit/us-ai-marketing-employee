@@ -17,6 +17,10 @@
   <a class="mgr-tile" href="#replies"><b>{{ interested|length }}</b><span>interested replies, 7 days</span></a>
   <a class="mgr-tile" href="#replies"><b>{{ requests|length }}</b><span>meeting requests not yet booked</span></a>
   <a class="mgr-tile" href="#meetings"><b>{{ meetings|length }}</b><span>confirmed meetings ahead</span></a>
+  <a class="mgr-tile" href="/companies"><b>{{ counts.discovered }}</b><span>companies discovered today</span></a>
+  <a class="mgr-tile" href="/contacts"><b>{{ counts.verified_contacts }}</b><span>contacts with a usable email</span></a>
+  <a class="mgr-tile" href="/leads?status=qualified"><b>{{ counts.outreach_ready }}</b><span>qualified leads ready for outreach</span></a>
+  <a class="mgr-tile" href="/followups"><b>{{ counts.followups }}</b><span>follow-ups scheduled</span></a>
 </section>
 
 <section class="cc-grid">
@@ -32,13 +36,12 @@
 
   <div class="panel" id="health">
     <div class="panel-head"><h2>{{ icon('activity') }} Automation health</h2><a class="panel-link" href="/command-center">Command Center {{ icon('arrow-right') }}</a></div>
-    <div class="status-row"><span class="k">AI employee</span><span class="val">{{ duty_label }}: {{ duty_note }}</span></div>
     <div class="status-row"><span class="k">Scheduled runs, 24 h</span><span class="val">{{ employee.live.jobs_24h }}{% if employee.live.failed_24h %}, <span class="bad-text">{{ employee.live.failed_24h }} not successful</span>{% else %}, all successful{% endif %}</span></div>
-    <div class="status-row"><span class="k">AI team</span><span class="val">{% for label, cls, n in team_counts %}<span class="st-chip st-{{ cls }}"><i></i>{{ n }} {{ label|lower }}</span> {% endfor %}</span></div>
+    <div class="status-row"><span class="k">Last successful scheduled run</span><span class="val">{% if scheduler.last_success %}{{ scheduler.last_success_job }} · {{ scheduler.last_success|local(None, '%a %H:%M') }}{% else %}none recorded{% endif %}</span></div>
+    <div class="status-row"><span class="k">Next scheduled check-in</span><span class="val">{% if scheduler.next_checkin %}about {{ scheduler.next_checkin|local(None, '%H:%M') }}{% elif scheduler.overdue %}<span class="bad-text">overdue: last check-in {{ scheduler.last_checkin|local(None, '%a %H:%M') }}</span>{% elif scheduler.last_checkin %}due now{% else %}unknown: no check-in recorded{% endif %}</span></div>
     <div class="status-row"><span class="k">Mode and state</span><span class="val">{{ health.mode|title }} · {{ health.state|replace('_', ' ') }} · {{ health.authorizations }} active authorization{{ 's' if health.authorizations != 1 }}</span></div>
-    <div class="status-row"><span class="k">Sending</span><span class="val">{{ 'on' if health.sending else 'off' }}</span></div>
-    <div class="status-row"><span class="k">Mailbox reading</span><span class="val">{{ 'on' if health.reading else 'off' }}</span></div>
-    <div class="status-row"><span class="k">LinkedIn publishing</span><span class="val">{{ 'on' if health.publishing else 'off' }}</span></div>
+    {% for b in board %}<div class="status-row board-row"><span class="k"><a href="{{ b.href }}">{{ b.name }}</a></span><span class="val"><span class="pill {{ b.tone }}">{{ b.status }}</span><span class="small muted">{{ b.detail }}</span></span></div>
+    {% endfor %}
     {% if health.blockers %}<div class="send-check warn"><b>{{ icon('lock') }} No email goes out without a person</b>{% for b in health.blockers %}<span>{{ b }}</span>{% endfor %}</div>{% endif %}
   </div>
 </section>

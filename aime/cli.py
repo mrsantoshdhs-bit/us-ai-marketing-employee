@@ -105,6 +105,15 @@ def cmd_scheduler(args, ctx) -> int:
 
     if args.action == "verify":
         return cmd_scheduler_verify(ctx)
+    if args.action == "preflight":
+        findings = windows.preflight(ctx.settings)
+        for level, text in findings:
+            print(f"[{level}] {text}")
+        return 1 if any(level == "FAIL" for level, _ in findings) else 0
+    if args.action == "test-unattended":
+        res = windows.test_unattended(ctx.settings)
+        _print(res)
+        return 0 if res.get("ok") else 1
     if args.action == "install":
         res = windows.install(ctx.settings, args.interval, run_when_logged_off=args.run_when_logged_off, wake=args.wake)
     elif args.action == "restore-previous":
@@ -552,7 +561,8 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--port", type=int)
     sv.add_argument("--data-dir", help="Serve another data folder (e.g. the demo database)")
     sc = sub.add_parser("scheduler", help="Manage the Windows Task Scheduler task")
-    sc.add_argument("action", choices=["install", "uninstall", "status", "run", "verify", "restore-previous",
+    sc.add_argument("action", choices=["install", "uninstall", "status", "run", "verify", "preflight", "test-unattended",
+                                       "restore-previous",
                                        "install-watchdog", "uninstall-watchdog", "install-dashboard",
                                        "uninstall-dashboard"])
     sc.add_argument("--interval", type=int)

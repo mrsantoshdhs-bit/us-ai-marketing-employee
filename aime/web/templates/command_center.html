@@ -82,6 +82,7 @@
           <div><dt>Last run</dt><dd>{{ a.last_run|local(None, '%a %H:%M') if a.last_run else 'never' }}{% if a.last_result %} · {{ a.last_result }}{% endif %}</dd></div>
           <div><dt>Last success</dt><dd>{{ a.last_success|local(None, '%a %H:%M') if a.last_success else 'never' }}</dd></div>
           <div><dt>7 days</dt><dd>{{ a.ok_7d }} completed · {% if a.failed_7d %}<span class="bad-text">{{ a.failed_7d }} failed</span>{% else %}0 failed{% endif %}</dd></div>
+          {% if a.retries %}<div><dt>Retries</dt><dd class="warn-text">{{ a.retries }} in a row, retrying with backoff</dd></div>{% endif %}
           <div><dt>Next run</dt><dd>{% if a.next_at %}{% if a.next_at <= now %}at the next check-in{% else %}{{ a.next_at|local(None, '%a %H:%M') }}{% endif %}{% else %}not scheduled{% endif %}</dd></div>
         </dl>
       </a>

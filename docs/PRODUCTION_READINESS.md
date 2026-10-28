@@ -85,14 +85,14 @@ The Windows password is typed at the `schtasks` prompt by the owner. The app nev
 **What the owner does:**
 1. Creates a Gmail app password.
 2. Types it into `.env` as `IMAP_PASSWORD` (with `IMAP_HOST` and `IMAP_USERNAME`).
-3. Runs `python -m aime doctor`.
+3. Runs `python -m aime email-check --connect` (signs in read-only; sends nothing). `doctor` looks at the mailbox only when sending is on, so it is not the check for A2.
 
 **What reading means:**
 - Reading is read-only: the mailbox is opened with `readonly=True`.
 - Replies are classified and suppressions applied. Interested replies open opportunities and get a drafted answer, which waits for a person.
 - Calendly notices become meetings.
 
-**Not built:** the AI second opinion on replies needs the local model (Ollama), which is not running.
+**Needs the local model:** the AI second opinion on replies is built, but it only runs while the local model (Ollama) runs; otherwise rule-based classification alone decides.
 
 ### A3: send email
 
@@ -109,7 +109,7 @@ This takes several steps. Each one is the owner's.
 
 ### A4: meeting booking
 
-**What exists:** the emails carry the owner's Calendly link, and booking notices are read from the mailbox (with A2).
+**What exists:** drafted answers to interested replies carry the owner's Calendly link (first-touch outreach carries no links: the quality checks reject them), and booking notices are read from the mailbox (with A2).
 
 **What is missing:** no API acts on a calendar. Building one needs the owner to choose the calendar and give an API token. Every booking would stay consent-based: the prospect picks the time.
 

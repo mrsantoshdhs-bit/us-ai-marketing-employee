@@ -12,6 +12,7 @@ import subprocess
 from html import escape
 
 from aime.redact import redact
+from aime.session_info import has_desktop
 
 APP_ID = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
 TITLE = "AI Marketing Employee"
@@ -35,8 +36,9 @@ def toast_script(title: str, message: str) -> str:
 
 
 def toast(title: str, message: str, popen=subprocess.Popen) -> bool:
-    """Show a Windows toast without blocking. Returns False where toasts are unavailable."""
-    if os.name != "nt":
+    """Show a Windows toast without blocking. Returns False where toasts are unavailable, including the background
+    session (signed out): nobody can see it there, and the alert is on the dashboard anyway."""
+    if os.name != "nt" or not has_desktop():
         return False
     text = (redact(message) or "")[:240]
     try:

@@ -18,9 +18,18 @@ try:
 
     window = maintenance.active(DATA)
     if window:
-        (DATA / "heartbeat.json").write_text(json.dumps({
-            "at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
-            "trigger": "scheduler", "pid": os.getpid(), "state": "maintenance", "maintenance": window,
+        from aime.session_info import session_kind
+
+        beat = DATA / "heartbeat.json"
+        try:
+            previous = json.loads(beat.read_text(encoding="utf-8")).get("last_background_at")
+        except (OSError, ValueError):
+            previous = None
+        at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
+        session = session_kind()
+        beat.write_text(json.dumps({
+            "at": at, "session": session, "trigger": "scheduler", "pid": os.getpid(), "state": "maintenance",
+            "maintenance": window, "last_background_at": at if session == "background" else previous,
         }), encoding="utf-8")
         sys.exit(0)
 

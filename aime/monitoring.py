@@ -17,6 +17,7 @@ from aime.db import kv_get, kv_set
 from aime.llm.ollama import OllamaProvider
 from aime.models import AgentRun, Alert, JobState
 from aime.notify import notify_alert
+from aime.session_info import session_kind
 from aime.timeutil import utcnow
 
 
@@ -184,8 +185,12 @@ def heartbeat_path(settings: Settings) -> Path:
 
 
 def write_heartbeat(settings: Settings, info: dict) -> None:
+    """Record a check-in, with the Windows session it ran in. `last_background_at` is carried from check-in to
+    check-in: the last time a run happened in the background session (scheduled to run while signed out)."""
     path = heartbeat_path(settings)
-    payload = {"at": utcnow().isoformat() + "Z", **info}
+    payload = {"at": utcnow().isoformat() + "Z", "session": session_kind(), **info}
+    previous = (read_heartbeat(settings) or {}).get("last_background_at")
+    payload["last_background_at"] = payload["at"] if payload["session"] == "background" else previous
     path.write_text(json.dumps(payload, default=str, indent=2), encoding="utf-8")
 
 
