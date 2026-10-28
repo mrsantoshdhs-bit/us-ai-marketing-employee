@@ -6,6 +6,7 @@ call: nothing reaches LinkedIn, nothing is sent."""
 
 import csv
 import json
+import os
 from datetime import timedelta, timezone
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -21,7 +22,7 @@ from aime.integrations.email_smtp import EmailSender
 from aime.integrations.status import integration_statuses
 from aime.models import (Alert, AuditEvent, Company, Contact, FollowUp, InboundEmail, InboundInquiry, Lead, OAuthToken,
                          Opportunity, Suppression)
-from aime.secure_store import is_protected
+from aime.secure_store import is_protected, unprotect
 from aime.timeutil import utcnow
 from aime.web.app import create_app
 from aime.workflows import job_inbound
@@ -165,7 +166,9 @@ def test_connecting_stores_an_encrypted_token_and_lists_only_pages_that_may_read
     ctx = leads_ctx(make_ctx, FakeLinkedIn(), owners=())
     with ctx.db.session() as s:
         tok = s.execute(select(OAuthToken).where(OAuthToken.provider == ll.TOKEN_KEY)).scalar_one()
-        assert is_protected(tok.access_token) and "tok-" not in tok.access_token
+        if os.name == "nt":  # DPAPI is Windows-only; elsewhere secure_store keeps its marked "plain:" fallback
+            assert is_protected(tok.access_token) and "tok-" not in tok.access_token
+        assert unprotect(tok.access_token).startswith("tok-")
         found = ll.status(ctx.settings, s).found
         assert [(f["urn"], f["name"]) for f in found] == [(OURS, "Our Company"), (OTHER, "Another Business")]
         assert s.execute(select(AuditEvent).where(AuditEvent.action == "account_connected")).scalar_one().target == ll.TOKEN_KEY
