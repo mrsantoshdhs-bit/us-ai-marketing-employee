@@ -6,6 +6,7 @@ tested; real mailbox reading starts once IMAP_HOST and the credentials are set.
 
 from __future__ import annotations
 
+import imaplib
 import re
 
 from pydantic import BaseModel, Field
@@ -45,11 +46,23 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
     ]
     input_model = InboxInput
     output_model = InboxOutput
-    retry_policy = RetryPolicy(max_attempts=2)  # a dropped IMAP connection is retried once
+    # a dropped connection or a server hiccup (socket, TLS or IMAP protocol error) is retried once in the run
+    retry_policy = RetryPolicy(max_attempts=2, retry_on=(*RetryPolicy().retry_on, OSError, imaplib.IMAP4.error))
 
     def __init__(self, ctx, mailbox: Mailbox | None = None):
         super().__init__(ctx)
         self.mailbox = mailbox or (Mailbox(ctx.settings) if ctx.settings.imap_configured else None)
+
+    def _oauth_token(self, session: Session):
+        """With MAIL_AUTH=oauth: a callable giving a fresh access token for the connected account."""
+        if self.settings.mail_auth != "oauth":
+            return None
+        from aime.integrations import oauth
+
+        def token() -> str:
+            with self.ctx.http() as http:
+                return oauth.access_token(session, self.settings, http, self.settings.mail_oauth_provider, "mail")
+        return token
 
     def execute(self, inp: InboxInput, session: Session) -> InboxOutput:
         out = InboxOutput()
@@ -57,7 +70,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                                     self.settings.unsubscribe_email) if a}
         if self.mailbox is not None and self.settings.network_enabled:
             out.mailbox = f"{self.settings.imap_host} / {self.settings.imap_folder} (read-only)"
-            raws, state = self.mailbox.fetch_new(kv_get(session, "inbox.state"))
+            raws, state = self.mailbox.fetch_new(kv_get(session, "inbox.state"), token=self._oauth_token(session))
             out.fetched = len(raws)
             for key, raw in raws:
                 p = parse_message(raw, own)

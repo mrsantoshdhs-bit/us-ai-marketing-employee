@@ -116,6 +116,13 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "imap_username": ("IMAP_USERNAME", str),
     "imap_password": ("IMAP_PASSWORD", str),
     "imap_folder": ("IMAP_FOLDER", str),
+    "mail_auth": ("MAIL_AUTH", str),
+    "mail_oauth_provider": ("MAIL_OAUTH_PROVIDER", str),
+    "google_client_id": ("GOOGLE_CLIENT_ID", str),
+    "google_client_secret": ("GOOGLE_CLIENT_SECRET", str),
+    "microsoft_client_id": ("MICROSOFT_CLIENT_ID", str),
+    "microsoft_client_secret": ("MICROSOFT_CLIENT_SECRET", str),
+    "microsoft_tenant": ("MICROSOFT_TENANT", str),
     "inbox_scope": ("INBOX_SCOPE", str),
     "calendly_url": ("CALENDLY_URL", str),
     "dashboard_host": ("DASHBOARD_HOST", str),
@@ -192,6 +199,15 @@ class Settings:
     imap_username: str = ""  # defaults to SMTP_USERNAME
     imap_password: str = field(default="", repr=False)  # defaults to SMTP_PASSWORD
     imap_folder: str = "INBOX"
+    # How the mailbox signs in: "password" (an app password, the default) or "oauth" (the owner connects the
+    # Google or Microsoft 365 account on the Integrations page; aime/integrations/oauth.py).
+    mail_auth: str = "password"
+    mail_oauth_provider: str = "google"  # google | microsoft
+    google_client_id: str = ""
+    google_client_secret: str = field(default="", repr=False)
+    microsoft_client_id: str = ""
+    microsoft_client_secret: str = field(default="", repr=False)
+    microsoft_tenant: str = "common"
     # related: keep only sales mail (replies to our emails, bounces, Calendly, known contacts and lead companies),
     # so a mailbox you also use for other work is not copied into the CRM. all: keep every email (a dedicated
     # sales mailbox, where new inquiries by email should show up too).
@@ -296,7 +312,12 @@ class Settings:
 
     @property
     def imap_configured(self) -> bool:
+        """Host, user and a way to sign in: the password, or (MAIL_AUTH=oauth) a registered OAuth client. The
+        account itself is connected on the Integrations page; until then a run reports that plainly."""
         user, password = self.imap_credentials
+        if self.mail_auth == "oauth":
+            client = self.google_client_id if self.mail_oauth_provider == "google" else self.microsoft_client_id
+            return bool(self.imap_host and user and client)
         return bool(self.imap_host and user and password)
 
     @property

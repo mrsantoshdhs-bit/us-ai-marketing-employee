@@ -174,8 +174,12 @@ def own_text(body: str) -> str:
     return "\n".join(keep).strip()[:5000]
 
 
+FETCH_TRIES = 3  # a message that cannot be fetched is tried again on this many runs, then skipped
+
+
 class Mailbox:
-    """Read-only IMAP access. `fetch_new(state)` returns ([(uid_key, raw bytes)], new_state)."""
+    """Read-only IMAP access. `fetch_new(state)` returns ([(uid_key, raw bytes)], new_state). With MAIL_AUTH=oauth
+    it signs in with XOAUTH2 using `token()`, an access token from aime/integrations/oauth.py."""
 
     def __init__(self, settings, imap_factory=imaplib.IMAP4_SSL, first_run_days: int = 14, batch: int = 50):
         self.settings = settings
@@ -183,12 +187,20 @@ class Mailbox:
         self.first_run_days = first_run_days
         self.batch = batch
 
-    def fetch_new(self, state: dict | None) -> tuple[list[tuple[str, bytes]], dict]:
+    def fetch_new(self, state: dict | None, token=None) -> tuple[list[tuple[str, bytes]], dict]:
         s = self.settings
         user, password = s.imap_credentials
         conn = self.imap_factory(s.imap_host, s.imap_port, ssl_context=tls_context(), timeout=MAIL_TIMEOUT)
         try:
-            conn.login(user, password)
+            if s.mail_auth == "oauth":
+                from aime.integrations.oauth import xoauth2
+
+                if token is None:
+                    raise RuntimeError("MAIL_AUTH=oauth needs the account connected on the Integrations page")
+                bearer = token()
+                conn.authenticate("XOAUTH2", lambda _challenge: xoauth2(user, bearer).encode())
+            else:
+                conn.login(user, password)
             typ, data = conn.select(f'"{s.imap_folder}"', readonly=True)  # EXAMINE: never changes the mailbox
             if typ != "OK":
                 raise RuntimeError(f"cannot open mailbox folder {s.imap_folder}")
@@ -202,12 +214,22 @@ class Mailbox:
                 typ, data = conn.uid("SEARCH", None, f"UID {int(state['last_uid']) + 1}:*")
             uids = sorted(int(u) for u in (data[0] or b"").split() if int(u) > int(state.get("last_uid", 0)))[: self.batch]
             out = []
+            failed = dict(state.get("failed") or {})
             for uid in uids:
                 typ, parts = conn.uid("FETCH", str(uid), "(BODY.PEEK[])")
                 raw = next((p[1] for p in parts or [] if isinstance(p, tuple) and len(p) > 1), None)
                 if typ == "OK" and raw:
                     out.append((f"{validity}:{uid}", raw))
+                    failed.pop(str(uid), None)
+                else:
+                    tries = failed.get(str(uid), 0) + 1
+                    if tries < FETCH_TRIES:  # stop here: this message (and the ones after it) are fetched next run
+                        failed[str(uid)] = tries
+                        break
+                    failed.pop(str(uid), None)
+                    state["skipped_uids"] = (list(state.get("skipped_uids") or []) + [uid])[-20:]
                 state["last_uid"] = uid
+            state["failed"] = failed
             return out, state
         finally:
             try:

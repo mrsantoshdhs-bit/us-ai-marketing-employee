@@ -30,6 +30,7 @@ from aime.crm_ops import is_suppressed, log_activity, suppress
 from aime.db import kv_get, kv_set
 from aime.inbound import InboundPayload, record_inquiry
 from aime.integrations.email_smtp import POSTAL_PLACEHOLDER, EmailSender, compliance_problem
+from aime.integrations import oauth
 from aime.integrations.linkedin import (POST_REF_RE, LinkedInAPIError, LinkedInClient, get_auth_status, get_token,
                                         new_state, post_url)
 from aime.integrations.status import integration_statuses
@@ -380,8 +381,15 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             research = s.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == lead.company_id)
                                  .order_by(ResearchSnapshot.id.desc())).scalars().first()
             meetings = s.execute(select(Meeting).where(Meeting.lead_id == lead.id).order_by(Meeting.starts_at.desc())).scalars().all()
+            replies = s.execute(select(InboundEmail).where(InboundEmail.lead_id == lead.id)).scalars().all()
+            # both directions in time order: what we sent (or may have sent) and what they wrote back
+            thread = sorted([{"at": f.sent_at, "dir": "out", "subject": f.subject, "who": f.to_email, "text": f.body,
+                              "status": f.status} for f in fups if f.channel == "email" and f.sent_at]
+                            + [{"at": r.received_at, "dir": "in", "subject": r.subject, "who": r.from_email,
+                                "text": r.new_text or r.body_text, "status": (r.category or "new").replace("_", " "),
+                                "sentiment": r.sentiment} for r in replies], key=lambda m: m["at"])
         return render(request, "lead_detail.html", lead=lead, signals=signals, acts=acts, fups=fups, opps=opps,
-                      people=people, research=research, meetings=meetings, withdrawn=withdrawn)
+                      people=people, research=research, meetings=meetings, withdrawn=withdrawn, thread=thread)
 
     @app.get("/contacts", response_class=HTMLResponse)
     def contacts_page(request: Request, confidence: str = "", role: str = "", reachable: str = ""):
@@ -1212,7 +1220,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         with ctx.db.session() as s:
             statuses = integration_statuses(ctx, s)
             auth = get_auth_status(ctx.settings, s)
-        return render(request, "integrations.html", statuses=statuses, auth=auth, settings=ctx.settings)
+            accounts = [{"provider": p, "label": oauth.PROVIDERS[p]["label"], "purpose": purpose,
+                         "configured": oauth.configured(ctx.settings, p), "token": oauth.connected(s, p, purpose)}
+                        for p in oauth.PROVIDERS for purpose in oauth.PURPOSES]
+        return render(request, "integrations.html", statuses=statuses, auth=auth, settings=ctx.settings,
+                      accounts=accounts, redirect_uri=oauth.redirect_uri(ctx.settings))
 
     @app.get("/integrations/linkedin/connect")
     def linkedin_connect():
@@ -1245,6 +1257,41 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 return back("/integrations", f"Could not reach LinkedIn ({type(exc).__name__}); please try again")
             client.store_token(s, tok, info)
         return back("/integrations", "LinkedIn connected")
+
+    @app.get("/integrations/oauth/{provider}/{purpose}/connect")
+    def oauth_connect(provider: str, purpose: str):
+        ctx = C()
+        with ctx.db.session() as s:
+            try:
+                url = oauth.start(s, ctx.settings, provider, purpose)
+            except oauth.OAuthError as exc:
+                return back("/integrations#accounts", str(exc))
+        return RedirectResponse(url, status_code=302)
+
+    @app.get("/integrations/oauth/callback")
+    def oauth_callback(request: Request, code: str = "", state: str = "", error: str = "", error_description: str = ""):
+        ctx = C()
+        if error:
+            return back("/integrations#accounts", f"Sign-in declined: {error_description or error}")
+        with ctx.db.session() as s, ctx.http() as http:
+            try:
+                row = oauth.finish(s, ctx.settings, http, state, code)
+            except oauth.OAuthError as exc:
+                return back("/integrations#accounts", str(exc))
+            key = row.provider
+        with ctx.db.session() as s:
+            am.audit(s, who(request), "account_connected", key, "OAuth sign-in completed; tokens stored encrypted")
+        return back("/integrations#accounts", f"{key.replace(':', ' ')} connected. Nothing is read, sent or booked "
+                    "until its own switch is turned on.")
+
+    @app.post("/integrations/oauth/{provider}/{purpose}/disconnect")
+    def oauth_disconnect(request: Request, provider: str, purpose: str):
+        with C().db.session() as s:
+            removed = oauth.disconnect(s, provider, purpose)
+            if removed:
+                am.audit(s, who(request), "account_disconnected", oauth.token_key(provider, purpose), "tokens deleted")
+        return back("/integrations#accounts", "Disconnected: the tokens were deleted from this computer" if removed
+                    else "Nothing was connected")
 
     @app.post("/integrations/linkedin/disconnect")
     def linkedin_disconnect():
@@ -1448,7 +1495,7 @@ def operations_view(ctx: AppContext, s) -> dict:
         automation={"mode": am.get_mode(s), "state": am.get_state(s), "active": len(am.active_authorizations(s, now)),
                     "blockers": am.blockers(s, st, ready, reason)},
         gmail={"sending": st.outbound_email_enabled, "ready": ready, "reason": reason, "sender": st.smtp_from,
-               "reading": bool(st.imap_host), "test_mode": len(st.test_recipients)},
+               "reading": st.imap_configured, "test_mode": len(st.test_recipients)},
         calendly={"url": st.calendly_url,
                   "last_notice": s.execute(select(func.max(InboundEmail.received_at)).where(
                       InboundEmail.category == "calendly")).scalar_one()},
@@ -1614,7 +1661,7 @@ def manager_today(ctx: AppContext, s) -> dict:
         interested=interested, requests=requests, meetings=meetings, needs=needs, posts_waiting=posts_waiting,
         held=held, failures=failures, employee=employee["employee"], team_counts=employee["team_counts"], counts=counts,
         board=system_status(ctx, s, employee["team"], (ready, reason), now), scheduler=scheduler_times(ctx, s, now),
-        health={"mode": mode, "state": am.get_state(s), "sending": st.outbound_email_enabled, "reading": bool(st.imap_host),
+        health={"mode": mode, "state": am.get_state(s), "sending": st.outbound_email_enabled, "reading": st.imap_configured,
                 "publishing": st.publishing_enabled, "blockers": am.blockers(s, st, ready, reason),
                 "authorizations": len(am.active_authorizations(s, now))},
     )
@@ -1702,7 +1749,7 @@ def system_status(ctx: AppContext, s, team: list[dict], sender: tuple[bool, str]
             + ("; every email needs a person" if st.require_human_approval else ""), "/followups")
 
     inbox = s.execute(select(JobState).where(JobState.job == "inbox")).scalars().first()
-    if not st.imap_host:
+    if not st.imap_configured:
         add("Mailbox reading", "NOT CONFIGURED", "no mailbox is set up, so replies are not read; reading needs your "
             "approval (A2)", "/integrations")
     elif inbox and inbox.consecutive_failures:
@@ -1796,7 +1843,7 @@ def ai_employee(ctx: AppContext, s) -> dict:
         week_counts[agent][status] = n
     failures_by_job = {row.job: row.consecutive_failures or 0 for row in s.execute(select(JobState)).scalars()}
     blocked_by = {"publishing": None if st.publishing_enabled else "publishing is off (PUBLISHING_ENABLED is false)",
-                  "inbox_monitor": None if st.imap_host else "mailbox reading is off (IMAP not set)"}
+                  "inbox_monitor": None if st.imap_configured else "mailbox reading is off (mailbox not set up)"}
     team = []
     for agent, title, job, stage, ico in TEAM:
         last = s.execute(select(AgentRun).where(AgentRun.agent == agent, AgentRun.status != "running")

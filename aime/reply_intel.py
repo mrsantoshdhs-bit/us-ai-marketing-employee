@@ -99,7 +99,7 @@ QUESTION_PLACEHOLDER = "[Write your answer here]"
 
 def classify(row: InboundEmail) -> tuple[str, str, list[str]]:
     category, confidence, reasons = _classify(row)
-    if not row.new_text and confidence == "high" and category not in ("bounce", "calendly"):
+    if not row.new_text and (row.body_text or "").strip() and confidence == "high" and category not in ("bounce", "calendly"):
         # Nothing was written above the quote: the words were found below or inside it, so a person checks first.
         return category, "medium", [*reasons, "reply written below the quoted email"]
     return category, confidence, reasons
@@ -118,6 +118,34 @@ def intent_of(row: InboundEmail) -> str | None:
     return "more_info" if MORE_INFO.search(text) else None
 
 
+UNSUBSCRIBE_SUBJECT = re.compile(r"^\s*((re|fwd?|aw)\s*:\s*)*(unsubscribe|opt[- ]?out|remove me)\s*[.!]?\s*$", re.I)
+
+# How each kind of reply reads, and what the lead should become: shown on Replies for the person who reviews it.
+SENTIMENT = {"interested": "positive", "referral": "positive", "calendly": "positive", "question": "neutral",
+             "out_of_office": "neutral", "bounce": "neutral", "other": "neutral", "objection": "negative",
+             "not_interested": "negative", "unsubscribe": "negative"}
+RECOMMENDED = {
+    "interested": "Opportunity: answer and offer a meeting",
+    "referral": "Contact the person they referred us to",
+    "question": "Answer the question; keep the lead active",
+    "objection": "A person answers the objection",
+    "not_interested": "Close as not interested; nurture later",
+    "unsubscribe": "Do not contact: address suppressed",
+    "bounce": "Address invalid: find another contact",
+    "out_of_office": "Wait until they are back",
+    "calendly": "Meeting booked: prepare for it",
+    "other": "A person reviews it",
+}
+
+
+def sentiment_and_recommendation(category: str, intent: str | None) -> tuple[str, str]:
+    if intent == "meeting_request":
+        return "positive", "Opportunity: book the meeting they asked for"
+    if intent == "pricing_request":
+        return "positive", "A person answers the pricing question (prices always need a person)"
+    return SENTIMENT.get(category, "neutral"), RECOMMENDED.get(category, RECOMMENDED["other"])
+
+
 def _classify(row: InboundEmail) -> tuple[str, str, list[str]]:
     text = row.new_text or own_text(row.body_text or "")
     subject = row.subject or ""
@@ -128,6 +156,8 @@ def _classify(row: InboundEmail) -> tuple[str, str, list[str]]:
     if CALENDLY.search(row.from_email or "") or (CALENDLY.search(row.body_text or "")  # also a forwarded notice
                                                   and CALENDLY_NOTICE.match(subject)):
         return "calendly", "high", ["Calendly notification"]
+    if not text.strip() and UNSUBSCRIBE_SUBJECT.match(subject):  # our List-Unsubscribe link: subject only, no text
+        return "unsubscribe", "high", [f'subject "{subject.strip()[:60]}" with no other text']
     if not text.strip():
         return "other", "low", ["no new text of its own (only the quoted email)"]
     complaint = COMPLAINT.search(f"{subject}\n{text}")
@@ -381,6 +411,7 @@ def process_pending(session: Session, settings, actor: str, llm=None) -> dict:
     for row in session.execute(select(InboundEmail).where(InboundEmail.status == "new").order_by(InboundEmail.id)).scalars().all():
         row.category, row.confidence, row.reasons = classify(row)
         row.intent = intent_of(row)
+        row.sentiment, row.recommended_status = sentiment_and_recommendation(row.category, row.intent)
         opinion = None
         if llm is not None and ai_budget > 0 and row.category in ("question", "other") and row.confidence != "high":
             ai_budget -= 1

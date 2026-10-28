@@ -45,7 +45,7 @@ def test_agents_show_one_clear_status_each(make_ctx):
         assert f"<b>{stage}</b>" in page
     # publishing is switched off in tests and the mailbox is not set: blocked, with the reason, never "running"
     assert "st-blocked" in page and "publishing is off (PUBLISHING_ENABLED is false)" in page
-    assert "mailbox reading is off (IMAP not set)" in page
+    assert "mailbox reading is off (mailbox not set up)" in page
     assert "st-completed" in page  # research ran in the fixture
 
 

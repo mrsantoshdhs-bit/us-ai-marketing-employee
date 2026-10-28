@@ -7,6 +7,27 @@
   {% for r in statuses %}<tr><td>{{ r.name }}</td><td>{{ state_pill(r.state) }}</td><td class="small">{{ r.detail }}{% if r.action %}<br><span class="muted">→ {{ r.action }}</span>{% endif %}</td></tr>{% endfor %}
 </table></div>
 
+<h2 id="accounts">Mail and calendar accounts (OAuth)</h2>
+<div class="card">
+  <p class="small">Optional: sign in to the sales mailbox and the calendar with Google or Microsoft 365 instead of an app
+  password. Connecting stores tokens encrypted on this PC; it reads, sends and books nothing. Mailbox reading
+  (<code>MAIL_AUTH=oauth</code> and <code>IMAP_HOST</code>), sending (<code>OUTBOUND_EMAIL_ENABLED</code>) and meeting booking
+  (<code>CALENDAR_PROVIDER</code> and <code>MEETING_BOOKING_ENABLED</code>) each keep their own switch and your approval.</p>
+  <div class="table-wrap"><table>
+    <tr><th>Account</th><th>For</th><th>State</th><th></th></tr>
+    {% for a in accounts %}<tr><td>{{ a.label }}</td><td>{{ a.purpose }}</td>
+      <td>{{ state_pill('CONNECTED' if a.token else ('NOT CONNECTED' if a.configured else 'NOT CONFIGURED')) }}{% if a.token %} <span class="small muted">token renewed {{ a.token.created_at|local }}</span>{% endif %}</td>
+      <td>{% if a.configured %}<a class="btn" href="/integrations/oauth/{{ a.provider }}/{{ a.purpose }}/connect">{{ 'Reconnect' if a.token else 'Connect' }}</a>{% endif %}
+        {% if a.token %}<form class="inline" method="post" action="/integrations/oauth/{{ a.provider }}/{{ a.purpose }}/disconnect"><button class="danger">Disconnect</button></form>{% endif %}</td></tr>
+    {% endfor %}
+  </table></div>
+  <ol class="small">
+    <li>Register an OAuth app: Google Cloud Console (OAuth client, type "Desktop" or "Web") or Microsoft Entra (app registration). Both are free.</li>
+    <li>Add the redirect URL <code>{{ redirect_uri }}</code>.</li>
+    <li>Put the client ID and secret in <code>.env</code> (<code>GOOGLE_CLIENT_ID</code> / <code>GOOGLE_CLIENT_SECRET</code> or <code>MICROSOFT_CLIENT_ID</code> / <code>MICROSOFT_CLIENT_SECRET</code>), restart the dashboard, then click Connect.</li>
+  </ol>
+</div>
+
 <h2>LinkedIn (official API only)</h2>
 <div class="card">
   <p>{{ state_pill('CONNECTED' if auth.can_publish else ('NOT CONFIGURED' if not auth.configured else ('NOT CONNECTED' if not auth.connected else 'BLOCKED'))) }} {{ auth.reason }}</p>

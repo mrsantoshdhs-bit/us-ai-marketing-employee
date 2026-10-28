@@ -90,6 +90,11 @@
     <div class="card">{% for o in opps %}<div><a href="/pipeline">{{ o.name }}</a> {{ status_pill(o.stage) }}</div>{% else %}<span class="muted">None.</span>{% endfor %}</div>
   </div>
   <div>
+    <h2>Conversation</h2>
+    <div class="card">
+      {% for m in thread %}<div class="small convo {{ m.dir }}" style="margin-bottom:8px"><span class="muted">{{ m.at|local }} · {{ 'we wrote to' if m.dir == 'out' else 'from' }} {{ m.who }} · {{ m.status }}{% if m.sentiment %} · {{ m.sentiment }}{% endif %}</span><br><b>{{ m.subject }}</b><div class="muted">{{ (m.text or '')[:400] }}</div></div>
+      {% else %}<span class="muted">No emails sent or received yet.</span>{% endfor %}
+    </div>
     <h2>Activity</h2>
     <div class="card">
       {% for a in acts %}<div class="small" style="margin-bottom:6px"><span class="muted">{{ a.created_at|local }} · {{ a.actor }}</span><br>{{ a.subject }}</div>

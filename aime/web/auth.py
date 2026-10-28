@@ -139,13 +139,14 @@ def current_username(request: Request) -> str:
 # Operations that change how the system runs, not the sales work itself: admin accounts only.
 # Sales Managers approve, edit, reply, log meetings and manage leads.
 ADMIN_ONLY_PREFIXES = ("/jobs/", "/integrations/linkedin/connect", "/integrations/linkedin/disconnect",
+                       "/integrations/oauth/",
                        "/inbound/process", "/automation/mode", "/automation/authorizations",
                        "/automation/state/start", "/automation/state/resume")  # pausing and stopping: anyone signed in
 
 
 def admin_only(method: str, path: str) -> bool:
-    if path.startswith("/integrations/linkedin/connect"):
-        return True  # starting OAuth changes the connected account, even though it is a GET
+    if path.startswith(("/integrations/linkedin/connect", "/integrations/oauth/")):
+        return True  # signing in changes the connected account, even though the start and callback are GETs
     return method == "POST" and path.startswith(ADMIN_ONLY_PREFIXES)
 
 
