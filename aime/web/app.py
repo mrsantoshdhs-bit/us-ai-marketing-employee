@@ -1595,6 +1595,16 @@ def manager_today(ctx: AppContext, s) -> dict:
 
     employee = ai_employee(ctx, s)
     ready, reason = EmailSender(st).status()
+    counts = {
+        "discovered": s.execute(select(func.count(Company.id)).where(Company.created_at >= day_start, Company.is_sample.is_(False),
+                                                                     Company.merged_into_id.is_(None))).scalar_one(),
+        "verified_contacts": s.execute(select(func.count(Contact.id)).where(*USABLE_EMAIL)).scalar_one(),
+        "outreach_ready": s.execute(select(func.count(func.distinct(Lead.id))).join(Contact, Contact.company_id == Lead.company_id)
+                                    .where(Lead.status == "qualified", *USABLE_EMAIL)).scalar_one(),
+        "followups": s.execute(select(func.count(FollowUp.id)).where(
+            FollowUp.status.in_(("pending", "awaiting_approval", "approved")), FollowUp.subject.not_like("Review %"),
+            ~((FollowUp.channel == "email") & (FollowUp.kind == "outreach")))).scalar_one(),
+    }
     failures = employee["employee"]["live"]["problems"] + [
         {"what": f"{a.level} alert", "why": a.message[:160], "at": a.created_at, "href": "/system#alerts"}
         for a in s.execute(select(Alert).where(Alert.acknowledged.is_(False), Alert.level.in_(("error", "warning")))
@@ -1602,11 +1612,123 @@ def manager_today(ctx: AppContext, s) -> dict:
     return dict(
         day_label=f"{as_aware_utc(now).astimezone(tz):%A %d %B %Y}", qualified=qualified, hot=hot, opportunities=opportunities,
         interested=interested, requests=requests, meetings=meetings, needs=needs, posts_waiting=posts_waiting,
-        held=held, failures=failures, employee=employee["employee"], team_counts=employee["team_counts"],
+        held=held, failures=failures, employee=employee["employee"], team_counts=employee["team_counts"], counts=counts,
+        board=system_status(ctx, s, employee["team"], (ready, reason), now), scheduler=scheduler_times(ctx, s, now),
         health={"mode": mode, "state": am.get_state(s), "sending": st.outbound_email_enabled, "reading": bool(st.imap_host),
                 "publishing": st.publishing_enabled, "blockers": am.blockers(s, st, ready, reason),
                 "authorizations": len(am.active_authorizations(s, now))},
     )
+
+
+# How each status on the Manager Today board reads (pill colour), in the words the Sales Manager sees.
+BOARD_TONE = {"ACTIVE": "ok", "PAUSED": "warn", "BLOCKED": "warn", "FAILED": "bad", "WAITING FOR AUTHORIZATION": "",
+              "NOT CONFIGURED": "off"}
+
+
+def scheduler_times(ctx: AppContext, s, now: datetime) -> dict:
+    """The last check-in, the last successful scheduled job and the next expected check-in, from the records."""
+    beat = read_heartbeat(ctx.settings)
+    at = datetime.fromisoformat(beat["at"].rstrip("Z")) if beat else None
+    tick = int(ctx.settings.schedule.get("tick_minutes", 15))
+    last_ok = s.execute(select(JobRun).where(JobRun.trigger == "scheduler", JobRun.status == "success")
+                        .order_by(JobRun.id.desc()).limit(1)).scalars().first()
+    expected = at + timedelta(minutes=tick) if at else None
+    return {"last_checkin": at, "session": (beat or {}).get("session"),
+            "last_success": (last_ok.finished_at or last_ok.started_at) if last_ok else None,
+            "last_success_job": last_ok.job.replace("_", " ") if last_ok else None,
+            "next_checkin": expected if expected and expected > now else None,
+            "overdue": bool(expected and now - expected > timedelta(minutes=tick + 5))}
+
+
+def system_status(ctx: AppContext, s, team: list[dict], sender: tuple[bool, str], now: datetime) -> list[dict]:
+    """One status per part of the automation, from the records and settings: ACTIVE, PAUSED, BLOCKED, FAILED,
+    WAITING FOR AUTHORIZATION (built, switched off until the owner approves) or NOT CONFIGURED. Never assumed."""
+    st = ctx.settings
+    state = am.get_state(s)
+    stopped = state in ("stopped", "emergency_stop")
+    beat = read_heartbeat(st)
+    tick = int(st.schedule.get("tick_minutes", 15))
+    rows: list[dict] = []
+
+    def add(name: str, status: str, detail: str, href: str) -> None:
+        rows.append({"name": name, "status": status, "tone": BOARD_TONE[status], "detail": detail, "href": href})
+
+    at = datetime.fromisoformat(beat["at"].rstrip("Z")) if beat else None
+    if beat is None:
+        add("Scheduled jobs", "NOT CONFIGURED", "no scheduled run recorded for this database", "/system")
+    elif beat.get("state") == "maintenance":
+        add("Scheduled jobs", "PAUSED", "maintenance window: scheduled runs wait until it ends", "/system")
+    elif stopped:
+        add("Scheduled jobs", "PAUSED", "stopped in Automation Control: jobs wait until an administrator starts them",
+            "/automation")
+    elif now - at <= timedelta(minutes=2 * tick + 5):
+        add("Scheduled jobs", "ACTIVE", f"last check-in {ago(at, now)}; it checks in every {tick} minutes", "/jobs")
+    else:
+        add("Scheduled jobs", "FAILED", f"last check-in {ago(at, now)}: the PC may be asleep or off, or the task stopped",
+            "/system")
+
+    background = (beat or {}).get("last_background_at")
+    if beat and beat.get("session") == "background":
+        add("Running while signed out", "ACTIVE", "the last check-in ran in the background session, so work continues "
+            "while you are signed out of Windows", "/system")
+    elif background:
+        add("Running while signed out", "BLOCKED", f"the last background run was {ago(datetime.fromisoformat(background.rstrip('Z')), now)}; "
+            "recent runs happened only while you were signed in", "/system")
+    else:
+        add("Running while signed out", "WAITING FOR AUTHORIZATION", "jobs run only while you are signed in to Windows; "
+            "running while signed out needs your approval (A1)", "/system")
+
+    failed = [a["title"] for a in team if a["status"] == "FAILED"]
+    blocked = sum(1 for a in team if a["status"] == "BLOCKED")
+    if failed:
+        add("AI agents", "FAILED", f"{len(failed)} failed: {', '.join(failed)}", "/command-center")
+    elif stopped:
+        add("AI agents", "PAUSED", "automation is stopped in Automation Control", "/automation")
+    else:
+        done = sum(1 for a in team if a["status"] in ("COMPLETED", "RUNNING"))
+        add("AI agents", "ACTIVE", f"{done} of {len(team)} ran in the last 24 hours"
+            + (f"; {blocked} waiting on a switch" if blocked else ""), "/command-center")
+
+    ready, reason = sender
+    if not st.outbound_email_enabled:
+        add("Email sending", "WAITING FOR AUTHORIZATION", "OUTBOUND_EMAIL_ENABLED=false: emails are drafted, never sent; "
+            "sending needs your approval (A3)", "/automation")
+    elif not ready:
+        add("Email sending", "BLOCKED", reason, "/integrations")
+    elif stopped or state == "paused":
+        add("Email sending", "PAUSED", "automation is paused or stopped: nothing is sent", "/automation")
+    else:
+        add("Email sending", "ACTIVE", "approved emails go out within the limits"
+            + ("; every email needs a person" if st.require_human_approval else ""), "/followups")
+
+    inbox = s.execute(select(JobState).where(JobState.job == "inbox")).scalars().first()
+    if not st.imap_host:
+        add("Mailbox reading", "NOT CONFIGURED", "no mailbox is set up, so replies are not read; reading needs your "
+            "approval (A2)", "/integrations")
+    elif inbox and inbox.consecutive_failures:
+        add("Mailbox reading", "FAILED", f"the last {inbox.consecutive_failures} mailbox check(s) failed", "/jobs")
+    else:
+        add("Mailbox reading", "ACTIVE", "replies are read (read-only) and classified", "/inbox")
+
+    add("Meeting booking", "NOT CONFIGURED", ("emails offer your booking link; " if st.calendly_url else "")
+        + "no calendar is connected, so nothing is booked automatically (A4)", "/meetings")
+
+    if not st.publishing_enabled:
+        add("LinkedIn publishing", "WAITING FOR AUTHORIZATION", "PUBLISHING_ENABLED=false: posts are drafted for "
+            "approval and never published", "/content")
+    elif stopped or state == "paused":
+        add("LinkedIn publishing", "PAUSED", "automation is paused or stopped: nothing is published", "/automation")
+    else:
+        add("LinkedIn publishing", "ACTIVE", "approved posts are published at their time", "/content")
+
+    last = (kv_get(s, "backup.last_verified") or {}).get("at")
+    if not last:
+        add("Backups", "NOT CONFIGURED", "no verified backup recorded yet", "/system")
+    else:
+        when = datetime.fromisoformat(str(last).rstrip("Z"))
+        add("Backups", "ACTIVE" if now - when <= timedelta(hours=26) else "FAILED",
+            f"last verified backup {ago(when, now)}", "/system")
+    return rows
 
 
 def job_schedule(ctx: AppContext, s, now: datetime) -> list[dict]:
@@ -1672,6 +1794,7 @@ def ai_employee(ctx: AppContext, s) -> dict:
     for agent, status, n in s.execute(select(AgentRun.agent, AgentRun.status, func.count(AgentRun.id)).where(
             AgentRun.started_at >= week, AgentRun.status != "running").group_by(AgentRun.agent, AgentRun.status)).all():
         week_counts[agent][status] = n
+    failures_by_job = {row.job: row.consecutive_failures or 0 for row in s.execute(select(JobState)).scalars()}
     blocked_by = {"publishing": None if st.publishing_enabled else "publishing is off (PUBLISHING_ENABLED is false)",
                   "inbox_monitor": None if st.imap_host else "mailbox reading is off (IMAP not set)"}
     team = []
@@ -1706,7 +1829,8 @@ def ai_employee(ctx: AppContext, s) -> dict:
                      "last_run": ended, "last_result": last.status if last else None, "last_success": last_ok,
                      "ok_7d": week_counts[agent]["success"],
                      "failed_7d": week_counts[agent]["failed"] + week_counts[agent]["abandoned"],
-                     "next_at": min(nexts) if nexts else None, "jobs": sorted(agent_jobs[agent])})
+                     "next_at": min(nexts) if nexts else None, "jobs": sorted(agent_jobs[agent]),
+                     "retries": max((failures_by_job.get(j, 0) for j in agent_jobs[agent]), default=0)})
     counts = Counter(a["status"] for a in team)
 
     # the live workspace
