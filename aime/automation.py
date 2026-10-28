@@ -258,6 +258,16 @@ def sent_counts(session: Session, a: CampaignAuthorization, now: datetime | None
     return day, session.execute(base).scalar_one()
 
 
+def committed_counts(session: Session, a: CampaignAuthorization, now: datetime | None = None) -> tuple[int, int]:
+    """(in the last 24 hours, in total) emails this authorization has committed to: sent or possibly sent, plus the
+    ones it approved that are still waiting to go out. Limits are checked against these, so approvals that wait
+    (outside the send window, or behind the per-run and per-domain limits) can never add up past a limit."""
+    day, total = sent_counts(session, a, now)
+    waiting = session.execute(select(func.count(FollowUp.id)).where(
+        FollowUp.authorization_id == a.id, FollowUp.status == "approved")).scalar_one()
+    return day + waiting, total + waiting
+
+
 # --------------------------------------------------------------------------- send-time decisions
 
 def blockers(session: Session, settings, sender_ready: bool, sender_reason: str = "") -> list[str]:
@@ -330,7 +340,9 @@ def campaign_for(session: Session, f: FollowUp, mode: str, now: datetime,
     if (f.contact and f.contact.consent_status == "opted_out") or is_suppressed(session, to):
         return None, "the recipient opted out or is suppressed"
     for a in camps:
-        day, total = sent_counts(session, a, now)
+        day, total = committed_counts(session, a, now)
+        if f.status == "approved" and f.authorization_id == a.id:  # its own approval is already counted
+            day, total = day - 1, total - 1
         extra = (pending or {}).get(a.id, 0)
         if day + extra < a.daily_limit and total + extra < a.total_limit:
             return a, ""
@@ -366,8 +378,10 @@ def apply_campaign_approvals(session: Session, settings, now: datetime, actor: s
     return approved
 
 
-def campaign_approval_problem(session: Session, f: FollowUp, now: datetime) -> str | None:
-    """For an email a campaign approved: why that approval no longer holds (None: it does)."""
+def campaign_approval_problem(session: Session, f: FollowUp, now: datetime, settings=None) -> str | None:
+    """For an email a campaign approved: why that approval no longer holds (None: it does). Checked just before it
+    is sent: the authorization, its rule or recipients, its limits, the automation state and mode, and
+    REQUIRE_HUMAN_APPROVAL (switched back on, it takes back every approval a campaign gave)."""
     if not f.authorization_id:
         return None
     a = session.get(CampaignAuthorization, f.authorization_id)
@@ -381,6 +395,12 @@ def campaign_approval_problem(session: Session, f: FollowUp, now: datetime) -> s
         return "the recipient is no longer on its campaign authorization"
     if (f.approved_by or "").startswith("campaign") and (get_state(session) != "running" or get_mode(session) == "approval"):
         return "automation is not running in Hybrid or Automatic mode"
+    if (f.approved_by or "").startswith("campaign"):
+        if settings is not None and settings.require_human_approval:
+            return "REQUIRE_HUMAN_APPROVAL=true: every email needs a person"
+        day, total = sent_counts(session, a, now)
+        if day >= a.daily_limit or total >= a.total_limit:
+            return "its campaign's daily or total limit is reached"
     return None
 
 
