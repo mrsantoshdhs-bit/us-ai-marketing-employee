@@ -280,6 +280,9 @@ class Meeting(Timestamped, Base):
     notes: Mapped[str | None] = mapped_column(Text)
     inbound_email_id: Mapped[int | None] = mapped_column(Integer)
     is_simulated: Mapped[bool] = mapped_column(Boolean, default=False)
+    event_id: Mapped[str | None] = mapped_column(String(200))  # the calendar event (source "calendar")
+    provider: Mapped[str | None] = mapped_column(String(20))  # google | microsoft
+    reminded_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     lead: Mapped["Lead | None"] = relationship()
 
@@ -591,6 +594,30 @@ class Report(Base):
     path_html: Mapped[str] = mapped_column(String(400))
     summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class MeetingProposal(Timestamped, Base):
+    """Free slots offered to a prospect who asked for a call (aime/booking.py). The offer is an email a person
+    approves; a person books the slot the prospect chose."""
+
+    __tablename__ = "meeting_proposals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id"), index=True)
+    contact_id: Mapped[int | None] = mapped_column(ForeignKey("contacts.id"))
+    inbound_email_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    prospect_email: Mapped[str] = mapped_column(String(200))
+    prospect_tz: Mapped[str] = mapped_column(String(60))
+    minutes: Mapped[int] = mapped_column(Integer, default=30)
+    slots: Mapped[list[Any]] = mapped_column(JSON, default=list)  # ISO starts, naive UTC
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)  # draft | offered | booked | declined | cancelled
+    offer_followup_id: Mapped[int | None] = mapped_column(Integer)
+    chosen_slot: Mapped[datetime | None] = mapped_column(DateTime)
+    meeting_id: Mapped[int | None] = mapped_column(Integer)
+    provider: Mapped[str | None] = mapped_column(String(20))
+    approved_by: Mapped[str | None] = mapped_column(String(80))
+
+    lead: Mapped["Lead"] = relationship()
 
 
 class OAuthToken(Base):

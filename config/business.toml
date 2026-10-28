@@ -90,6 +90,18 @@ sends_per_run = 5
 # reputation whatever the mix. Emails over it wait, they are not cancelled.
 mailbox_daily_limit = 50
 
+[meetings]
+# A4 meeting booking (off unless CALENDAR_PROVIDER and MEETING_BOOKING_ENABLED are set in .env).
+owner_timezone = "Asia/Kolkata"   # the owner's own working hours below are in this zone
+owner_hours = "08:00-23:30"       # the owner takes calls between these local times (US mornings are Indian evenings)
+prospect_hours = "09:00-17:00"    # slots fall inside the prospect's business hours, on their weekdays
+slot_minutes = 30
+days_ahead = 5                    # look this many weekdays ahead
+slots_offered = 3                 # at most one per day, so the prospect has a real choice
+min_notice_hours = 24
+reminder_hours = 24               # an alert for the Sales Manager this long before each meeting
+remind_prospect = false           # also draft a reminder email for the prospect (it waits for approval)
+
 [pipeline]
 # Open opportunities with nothing logged for this long get a "decide the next step" task.
 stalled_days = 10

@@ -74,7 +74,7 @@
   </div>
   <div class="panel">
     <div class="panel-head"><h2>{{ icon('calendar') }} Meeting requests</h2></div>
-    {% for r in requests %}<div class="row-item"><a href="/inbox?show=all">{{ r.subject or '(no subject)' }}</a> <span class="muted small">{{ r.from_email }}</span><div class="small muted">not booked yet: the reply offers the booking link</div></div>
+    {% for r in requests %}<div class="row-item"><a href="/inbox?show=all">{{ r.subject or '(no subject)' }}</a> <span class="muted small">{{ r.from_email }}</span><div class="small muted">not booked yet{% if r.suggested_followup_id %}: a reply waits for your approval or has gone out{% else %}: no reply drafted yet{% endif %}</div></div>
     {% else %}<div class="empty-state"><b>No open meeting requests</b>Replies asking for a call appear here until they book.</div>{% endfor %}
   </div>
   <div class="panel" id="meetings">

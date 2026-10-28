@@ -38,7 +38,7 @@ from aime.knowledge.geo import US_REGIONS
 from aime.knowledge.industries import INDUSTRIES, industry_label
 from aime.knowledge.services import SERVICES, service_name
 from aime import automation as am
-from aime.models import (Activity, AgentRun, Alert, AuditEvent, Campaign, CampaignAuthorization, Company, Contact,
+from aime.models import (MeetingProposal, Activity, AgentRun, Alert, AuditEvent, Campaign, CampaignAuthorization, Company, Contact,
                          ContentItem, FollowUp, InboundEmail, InboundInquiry, Meeting,
                          JobRun, JobState, Lead, MarketingPlan, Opportunity, PolicyDecision, PublishAttempt, Report,
                          ResearchSnapshot, ResearchTopic, Signal)
@@ -484,13 +484,24 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     # ------------------------------------------------------------------ meetings
     @app.get("/meetings", response_class=HTMLResponse)
     def meetings_page(request: Request):
+        from aime import booking
+        now = utcnow()
         with C().db.session() as s:
             rows = s.execute(select(Meeting).order_by(Meeting.starts_at.desc()).limit(200)).scalars().all()
             for m in rows:
                 _ = m.lead.company if m.lead else None
-        now = utcnow()
+            proposals = s.execute(select(MeetingProposal).order_by(MeetingProposal.id.desc()).limit(50)).scalars().all()
+            for p in proposals:
+                _ = p.lead.company
+            asked = {p.inbound_email_id for p in proposals}
+            requests = [r for r in s.execute(select(InboundEmail).where(
+                InboundEmail.intent == "meeting_request", InboundEmail.lead_id.is_not(None),
+                InboundEmail.received_at >= now - timedelta(days=7))).scalars() if r.id not in asked]
+            ready, why = booking.ready(s, C().settings)
         return render(request, "meetings.html", upcoming=[m for m in rows if m.status == "scheduled" and m.ends_at >= now][::-1],
-                      past=[m for m in rows if not (m.status == "scheduled" and m.ends_at >= now)])
+                      past=[m for m in rows if not (m.status == "scheduled" and m.ends_at >= now)],
+                      proposals=proposals, requests=requests, booking_ready=ready, booking_why=why,
+                      slot_label=booking.label, slots_of=lambda p: [datetime.fromisoformat(x) for x in p.slots or []])
 
     @app.post("/meetings/{mid}/link")
     def link_meeting_to_lead(request: Request, mid: int, lead_id: int = Form(...)):
@@ -507,6 +518,63 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                                                           InboundEmail.status == "needs_review")).scalars():
                 r.lead_id, r.company_id, r.status = lead.id, lead.company_id, "actioned"
         return back("/meetings", f"Meeting linked to lead #{lead_id}")
+
+    def _with_calendar(fn):
+        """Run `fn(session, calendar)` with the connected calendar; calendar and sign-in errors come back as words."""
+        from aime.integrations.calendar import CalendarError, calendar_for
+        ctx = C()
+        with ctx.db.session() as s, ctx.http() as http:
+            provider = (ctx.settings.calendar_provider or "").lower()
+            cal = calendar_for(ctx.settings, http,
+                               lambda: oauth.access_token(s, ctx.settings, http, provider, "calendar"))
+            try:
+                return fn(s, cal), None
+            except (CalendarError, oauth.OAuthError, ValueError) as exc:
+                s.rollback()
+                return None, str(exc)
+
+    @app.post("/meetings/proposals/{pid}/book")
+    def proposal_book(request: Request, pid: int, slot: int = Form(...)):
+        from aime import booking
+        res, err = _with_calendar(lambda s, cal: booking.book(s, C().settings, cal, s.get(MeetingProposal, pid) or _404(),
+                                                              slot, who(request)).id)
+        return back("/meetings#proposals", err or f"Booked: meeting #{res} is in the calendar; the confirmation "
+                    "email waits for your approval on Follow-ups")
+
+    @app.post("/meetings/proposals/{pid}/decline")
+    def proposal_decline(request: Request, pid: int):
+        with C().db.session() as s:
+            p = s.get(MeetingProposal, pid) or _404()
+            if p.status in ("draft", "offered"):
+                p.status = "declined"
+                am.audit(s, who(request), "meeting_proposal_declined", f"proposal #{p.id}", p.prospect_email)
+        return back("/meetings#proposals", "Proposal closed")
+
+    @app.post("/meetings/requests/{rid}/propose")
+    def proposal_create(request: Request, rid: int):
+        from aime import booking
+
+        def run(s, cal):
+            ok, why = booking.ready(s, C().settings)
+            if not ok:
+                raise ValueError(f"Not proposed: {why}")
+            return booking.propose(s, C().settings, cal, s.get(InboundEmail, rid) or _404(), who(request))
+        res, err = _with_calendar(run)
+        return back("/meetings#proposals", err or f"Meeting times: {res}")
+
+    @app.post("/meetings/{mid}/move")
+    def meeting_move(request: Request, mid: int, start_local: str = Form(...)):
+        from aime import booking
+
+        def run(s, cal):
+            m = s.get(Meeting, mid) or _404()
+            try:
+                local = datetime.fromisoformat(start_local).replace(tzinfo=ZoneInfo(m.timezone or "UTC"))
+            except ValueError as exc:
+                raise ValueError("Not moved: give the new date and time") from exc
+            booking.move(s, C().settings, cal, m, to_naive_utc(local), who(request))
+        _res, err = _with_calendar(run)
+        return back("/meetings", err or "Meeting moved in the calendar; the note to the prospect waits for your approval")
 
     @app.post("/meetings/{mid}/{action}")
     def meeting_action(request: Request, mid: int, action: str, notes: str = Form("")):
@@ -525,6 +593,18 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     opp.next_step = "No-show: follow up to rebook"
             if action == "cancel":  # as for a cancellation Calendly reports: the lead reopens unless another is booked
                 reopen_after_cancel(s, m, who(request))
+                if m.event_id:  # booked through the calendar: cancel the event too (a person clicked Cancel)
+                    from aime import booking
+                    from aime.integrations.calendar import CalendarError, calendar_for
+                    with C().http() as http:
+                        provider = m.provider or C().settings.calendar_provider
+                        cal = calendar_for(C().settings, http, lambda: oauth.access_token(s, C().settings, http,
+                                                                                          provider, "calendar"))
+                        try:
+                            booking.cancel_event(s, C().settings, cal, m, who(request))
+                        except (CalendarError, oauth.OAuthError) as exc:
+                            s.add(Alert(level="warning", source="meetings",
+                                        message=f"Meeting #{m.id} cancelled here, but not in the calendar: {exc}"))
             if m.lead_id and action == "no_show":
                 s.add(FollowUp(lead_id=m.lead_id, company_id=m.company_id, channel="task", step=1, status="pending",
                                subject=f"Rebook the meeting with {m.invitee_name or m.invitee_email}",
@@ -1757,8 +1837,23 @@ def system_status(ctx: AppContext, s, team: list[dict], sender: tuple[bool, str]
     else:
         add("Mailbox reading", "ACTIVE", "replies are read (read-only) and classified", "/inbox")
 
-    add("Meeting booking", "NOT CONFIGURED", ("emails offer your booking link; " if st.calendly_url else "")
-        + "no calendar is connected, so nothing is booked automatically (A4)", "/meetings")
+    from aime import booking
+    ok, why = booking.ready(s, st)
+    link = "emails offer your booking link; " if st.calendly_url else ""
+    provider = (st.calendar_provider or "").lower()
+    linked = provider in oauth.PROVIDERS and oauth.connected(s, provider, "calendar") is not None
+    if ok:
+        add("Meeting booking", "ACTIVE", "free times are proposed from your calendar; a person approves each email "
+            "and books each slot", "/meetings")
+    elif not provider or not linked:
+        add("Meeting booking", "NOT CONFIGURED", f"{link}"
+            + ("no calendar is set (CALENDAR_PROVIDER)" if not provider else f"the {provider} calendar is not connected")
+            + ", so nothing is booked automatically (A4)", "/meetings")
+    elif not st.meeting_booking_enabled:
+        add("Meeting booking", "WAITING FOR AUTHORIZATION", f"{link}calendar connected; MEETING_BOOKING_ENABLED=false "
+            "(A4)", "/meetings")
+    else:
+        add("Meeting booking", "PAUSED", why, "/automation")
 
     if not st.publishing_enabled:
         add("LinkedIn publishing", "WAITING FOR AUTHORIZATION", "PUBLISHING_ENABLED=false: posts are drafted for "

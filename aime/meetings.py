@@ -40,6 +40,12 @@ TZ_NAMES = {
     "arizona": "America/Phoenix", "pacific": "America/Los_Angeles", "alaska": "America/Anchorage",
     "hawaii": "Pacific/Honolulu", "india": "Asia/Kolkata", "ist": "Asia/Kolkata", "utc": "UTC", "gmt": "UTC",
 }
+FOREIGN_ZONES = {
+    "central european": "Europe/Berlin", "eastern european": "Europe/Athens", "western european": "Europe/Lisbon",
+    "british": "Europe/London", "greenwich": "Europe/London", "australian eastern": "Australia/Sydney",
+    "australian central": "Australia/Adelaide", "australian western": "Australia/Perth", "singapore": "Asia/Singapore",
+    "japan": "Asia/Tokyo", "china": "Asia/Shanghai", "gulf": "Asia/Dubai", "brasilia": "America/Sao_Paulo",
+}
 TIME_RANGE = re.compile(r"(\d{1,2}(?::\d{2})?\s*[ap]m)\s*(?:-|–|to)\s*(\d{1,2}(?::\d{2})?\s*[ap]m)", re.I)
 ONE_TIME = re.compile(r"\d{1,2}(?::\d{2})?\s*[ap]m", re.I)
 # Calendly writes the date as the account's locale does: "Thursday, October 29, 2026" or "Wednesday, 28 October 2026"
@@ -61,8 +67,12 @@ def _zone(text: str, default: str) -> ZoneInfo:
             return ZoneInfo(label.split()[0])
     except ZoneInfoNotFoundError:
         pass
+    low = label.lower()
+    for foreign, name in FOREIGN_ZONES.items():  # "Central European Time" is not US Central
+        if foreign in low:
+            return ZoneInfo(name)
     for key, name in TZ_NAMES.items():
-        if key in label.lower():
+        if re.search(rf"\b{key}\b", low):
             return ZoneInfo(name)
     return ZoneInfo(default)
 
