@@ -323,3 +323,23 @@ def test_a_deal_goes_to_the_salesperson_already_working_its_lead(org):
         s.add(other)
         s.flush()
         assert assign_new(s, ctx.settings, other, "test") == "eva"
+
+
+def test_approving_an_inquiry_reply_makes_the_salesperson_its_owner_on_record(org):
+    from aime.models import FollowUp
+    from aime.reply_intel import reply_footer
+
+    ctx, leads = org
+    with ctx.db.session() as s:
+        lead = s.get(Lead, leads["nobody"])
+        f = FollowUp(lead_id=lead.id, company_id=lead.company_id, channel="email", kind=None, step=1, due_at=utcnow(),
+                     status="awaiting_approval", subject="Re: your inquiry", body="Hi" + reply_footer(ctx.settings),
+                     to_email="asker@acme.example")
+        s.add(f)
+        s.flush()
+        fid = f.id
+    client(ctx, "mia").post(f"/followups/{fid}/approve", headers=ORIGIN)
+    with ctx.db.session() as s:
+        assert s.get(Lead, leads["nobody"]).owner == "mia"
+        a = s.execute(select(Assignment).where(Assignment.lead_id == leads["nobody"])).scalar_one()
+        assert (a.method, a.to_owner, a.actor) == ("approval", "mia", "mia")

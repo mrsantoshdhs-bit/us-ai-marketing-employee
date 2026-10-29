@@ -789,7 +789,7 @@ class Assignment(Base):
     opportunity_id: Mapped[int | None] = mapped_column(ForeignKey("opportunities.id"), index=True)
     from_owner: Mapped[str | None] = mapped_column(String(60))
     to_owner: Mapped[str | None] = mapped_column(String(60), index=True)
-    method: Mapped[str] = mapped_column(String(30))  # lead_owner | workload | round_robin | skill | manual | escalation | none
+    method: Mapped[str] = mapped_column(String(30))  # approval | lead_owner | workload | round_robin | skill | manual | escalation | none
     reason: Mapped[str | None] = mapped_column(String(300))
     actor: Mapped[str] = mapped_column(String(80))
 
