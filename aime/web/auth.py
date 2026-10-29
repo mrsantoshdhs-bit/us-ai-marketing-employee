@@ -40,6 +40,11 @@ LOCK_MINUTES = 15
 SIGN_IN_FAILED = (f"Wrong username or password. After {MAX_FAILED} wrong attempts an account waits {LOCK_MINUTES} "
                   "minutes before it can sign in again")
 MIN_PASSWORD = 12
+SCRYPT_N = 2 ** 15  # new and changed passwords; older hashes (2**14) are upgraded at the next successful sign-in
+SCRYPT_MAXMEM = 64 * 1024 * 1024
+# a well-formed hash nobody's password matches: an unknown user or a locked account costs the same scrypt work as a
+# wrong password, so timing does not reveal which accounts exist
+DUMMY_HASH = f"scrypt${SCRYPT_N}$8$1$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 PUBLIC_PREFIXES = ("/login", "/static/", "/setup")  # /setup: a one-time account link
 PUBLIC_PATHS = ("/api/inbound",)  # protected by its own token and rate limit
 _SECRETS: dict[str, bytes] = {}
@@ -52,8 +57,8 @@ def hash_password(password: str) -> str:
     if len(password) < MIN_PASSWORD:
         raise ValueError(f"Password must be at least {MIN_PASSWORD} characters")
     salt = os.urandom(16)
-    n, r, p = 2 ** 14, 8, 1
-    digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=n, r=r, p=p, dklen=32)
+    n, r, p = SCRYPT_N, 8, 1
+    digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=n, r=r, p=p, dklen=32, maxmem=SCRYPT_MAXMEM)
     return f"scrypt${n}${r}${p}${base64.b64encode(salt).decode()}${base64.b64encode(digest).decode()}"
 
 
@@ -63,7 +68,7 @@ def verify_password(password: str, stored: str) -> bool:
         if scheme != "scrypt":
             return False
         calc = hashlib.scrypt(password.encode("utf-8"), salt=base64.b64decode(salt), n=int(n), r=int(r), p=int(p),
-                              dklen=32)
+                              dklen=32, maxmem=SCRYPT_MAXMEM)
         return hmac.compare_digest(calc, base64.b64decode(digest))
     except (ValueError, TypeError):
         return False
@@ -115,11 +120,11 @@ def authenticate(session: Session, username: str, password: str) -> tuple[User |
     """Check a login. Same message for unknown user and wrong password; lock after repeated failures."""
     user = session.execute(select(User).where(User.username == username.strip().lower())).scalars().first()
     if user is None or not user.active:
-        verify_password(password, "scrypt$16384$8$AAAAAAAAAAAAAAAAAAAAAA==$AAAA")  # similar timing for unknown users
+        verify_password(password, DUMMY_HASH)  # similar timing for unknown users
         return None, SIGN_IN_FAILED
     now = utcnow()
     if user.locked_until and user.locked_until > now:
-        verify_password(password, "scrypt$16384$8$AAAAAAAAAAAAAAAAAAAAAA==$AAAA")
+        verify_password(password, DUMMY_HASH)
         return None, SIGN_IN_FAILED  # the same words as a wrong password: nobody learns which accounts exist
     if not verify_password(password, user.password_hash):
         user.failed_logins = (user.failed_logins or 0) + 1
@@ -127,6 +132,8 @@ def authenticate(session: Session, username: str, password: str) -> tuple[User |
             user.locked_until, user.failed_logins = now + timedelta(minutes=LOCK_MINUTES), 0
         return None, SIGN_IN_FAILED
     user.failed_logins, user.locked_until, user.last_login_at = 0, None, now
+    if not user.password_hash.startswith(f"scrypt${SCRYPT_N}$"):
+        user.password_hash = hash_password(password)  # same password, today's work factor; sessions stay valid
     return user, "Signed in"
 
 
@@ -179,7 +186,7 @@ ADMIN_ROLES = tuple(k for k, v in BUILTIN_ROLES.items() if "admin_ops" in v["per
 READ_METHODS = ("GET", "HEAD")
 _APPROVALS = re.compile(r"/(?:followups/\d+/(?:approve|reconfirm|mark_sent|requeue)"
                         r"|content/\d+/(?:approve|confirm_published|requeue)|campaigns(?:/\d+/status)?"
-                        r"|meetings/proposals/\d+/book|meetings/\d+/move)/?")
+                        r"|meetings/proposals/\d+/book|meetings/\d+/move|inbox/\d+/(?:reclassify|apply_calendly))/?")
 # one record in the URL: /leads/7, /opportunities/3, /followups/12/approve, /inbox/5/reviewed, /meetings/2/held,
 # /meetings/proposals/4/book, /meetings/requests/9/propose
 _RECORD = re.compile(r"/(?:meetings/)?(leads|opportunities|followups|inbox|meetings|proposals|requests)/(\d+)(?:/|$)")
