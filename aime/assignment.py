@@ -3,6 +3,7 @@
 The pool is the Sales Managers chosen in Settings › Sales settings (`[handover] sales_manager`), or, when none are
 chosen, every active user whose role receives leads. People marked unavailable, and people at their capacity of open
 deals, are skipped. The rule (`[handover] strategy`):
+- a deal on a lead someone in the pool already owns stays with them (one person per customer);
 - workload (default): the fewest open deals, ties in pool order;
 - round_robin: the next person after the last one assigned;
 - skill: people who list the deal's service among their skills first, then the fewest open deals.
@@ -93,9 +94,14 @@ def assign_new(session: Session, settings, opp: Opportunity, actor: str) -> str 
     if opp.owner:
         return opp.owner
     session.flush()  # deals assigned earlier in this run count towards the balance
-    owner, method, reason = choose(session, settings, opp.service)
-    opp.owner = owner
     lead = session.get(Lead, opp.lead_id) if opp.lead_id else None
+    available = {u.username for u in pool(session, settings)}
+    if lead is not None and lead.owner and lead.owner in available:
+        # the salesperson already working this lead keeps the customer: one person per customer
+        owner, method, reason = lead.owner, "lead_owner", "already works this lead"
+    else:
+        owner, method, reason = choose(session, settings, opp.service)
+    opp.owner = owner
     if lead is not None and owner and not lead.owner:
         lead.owner = owner
     record(session, lead_id=opp.lead_id, opportunity_id=opp.id, from_owner=None, to_owner=owner, method=method,

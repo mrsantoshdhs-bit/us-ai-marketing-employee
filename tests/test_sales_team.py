@@ -303,3 +303,43 @@ def test_companies_and_contacts_follow_the_leads_a_person_may_see(org):
     assert "zeta.example" not in contacts and "fresh.example" in contacts
     assert "Zeta Corp" in zoe.get("/companies").text and "zeta.example" in zoe.get("/contacts").text
     assert "Zeta" not in eva.get("/search?q=zeta").text.split("<main", 1)[-1]
+
+
+def test_a_deal_goes_to_the_salesperson_already_working_its_lead(org):
+    ctx, leads = org
+    ctx.settings.business.setdefault("handover", {})["sales_manager"] = ["eva", "ed"]
+    with ctx.db.session() as s:
+        ed_deal = Opportunity(company_id=s.get(Lead, leads["eva"]).company_id, name="ed busy", stage="new", owner="ed")
+        s.add(ed_deal)  # the workload rule alone would pick eva next; ed already works the lead below
+        s.flush()
+        s.get(Lead, leads["nobody"]).owner = "ed"
+        opp = Opportunity(company_id=ed_deal.company_id, lead_id=leads["nobody"], name="Ed's customer", stage="new")
+        s.add(opp)
+        s.flush()
+        assert assign_new(s, ctx.settings, opp, "test") == "ed"
+        assert s.execute(select(Assignment).where(Assignment.opportunity_id == opp.id)).scalar_one().method == "lead_owner"
+        s.execute(select(User).where(User.username == "ed")).scalar_one().available = False  # on leave: the rule decides
+        other = Opportunity(company_id=ed_deal.company_id, lead_id=leads["nobody"], name="second deal", stage="new")
+        s.add(other)
+        s.flush()
+        assert assign_new(s, ctx.settings, other, "test") == "eva"
+
+
+def test_approving_an_inquiry_reply_makes_the_salesperson_its_owner_on_record(org):
+    from aime.models import FollowUp
+    from aime.reply_intel import reply_footer
+
+    ctx, leads = org
+    with ctx.db.session() as s:
+        lead = s.get(Lead, leads["nobody"])
+        f = FollowUp(lead_id=lead.id, company_id=lead.company_id, channel="email", kind=None, step=1, due_at=utcnow(),
+                     status="awaiting_approval", subject="Re: your inquiry", body="Hi" + reply_footer(ctx.settings),
+                     to_email="asker@acme.example")
+        s.add(f)
+        s.flush()
+        fid = f.id
+    client(ctx, "mia").post(f"/followups/{fid}/approve", headers=ORIGIN)
+    with ctx.db.session() as s:
+        assert s.get(Lead, leads["nobody"]).owner == "mia"
+        a = s.execute(select(Assignment).where(Assignment.lead_id == leads["nobody"])).scalar_one()
+        assert (a.method, a.to_owner, a.actor) == ("approval", "mia", "mia")

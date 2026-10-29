@@ -833,12 +833,17 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     # on is not asked to "Confirm again" because the follow-ups job had not run since the switch.
                     am.observe_sending(s, C().settings.outbound_email_enabled, now)
                     f.status, f.approved_by, f.approved_at = "approved", who(request), now
+                    lead = f.lead
+                    user = getattr(request.state, "user", None)
+                    # whoever approves the first email to a lead (outreach or a reply to someone who contacted us)
+                    # works it from then on, if their role receives leads (an administrator approving does not)
+                    if not lead.owner and (user is None or "receive_leads" in user.get("perms", ())):
+                        from aime.assignment import record as record_assignment
+
+                        lead.owner = who(request)
+                        record_assignment(s, lead_id=lead.id, opportunity_id=None, from_owner=None, to_owner=lead.owner,
+                                          method="approval", reason=f"approved email #{f.id}", actor=who(request))
                     if f.kind == "outreach":
-                        lead = f.lead
-                        user = getattr(request.state, "user", None)
-                        # the approver becomes the owner only if they work leads (an administrator approving does not)
-                        if not lead.owner and (user is None or "receive_leads" in user.get("perms", ())):
-                            lead.owner = who(request)
                         if f.step == 1:
                             set_outreach_status(s, lead, "approved", who(request))
                         if qc_status in ("held", "failed"):
