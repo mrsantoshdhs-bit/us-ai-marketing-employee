@@ -40,6 +40,12 @@ def _kw_re(keyword: str) -> re.Pattern:
     return re.compile(r"(?<![a-z0-9])" + re.escape(keyword.lower()) + r"(?![a-z0-9])")
 
 
+# Words that say "automate" without saying what. They are evidence of business process automation only when the
+# text names nothing more specific: "lead generation automation" asks for lead generation and "automate our sales
+# follow-ups" for sales automation, not for back-office process work.
+GENERIC_KEYWORDS = frozenset({"automate", "automation", "automating"})
+
+
 @dataclass
 class ServiceMatch:
     service_id: str
@@ -50,26 +56,49 @@ class ServiceMatch:
     def strength(self) -> float:
         return min(1.0, self.score / 4.0)
 
+    @property
+    def confidence(self) -> str:
+        """high: two specific phrases, or one with supporting words; medium: one specific phrase; low: generic."""
+        specific = [k for k in self.keywords if k in SERVICES[self.service_id].strong and k not in GENERIC_KEYWORDS]
+        if len(specific) >= 2 or specific and self.score >= 4:
+            return "high"
+        return "medium" if specific else "low"
+
+    def explain(self) -> str:
+        return f"{SERVICES[self.service_id].name} ({self.confidence}): mentions {', '.join(self.keywords[:4])}"
+
 
 def match_services(text: str | None) -> list[ServiceMatch]:
     """Return services evidenced by the text, strongest first."""
     if not text:
         return []
     lower = text.lower()
-    matches: list[ServiceMatch] = []
+    found: dict[str, list[tuple[str, int, list[tuple[int, int]]]]] = {}
     for svc in SERVICES.values():
-        score, hits = 0, []
-        for kw in svc.strong:
-            if _kw_re(kw).search(lower):
-                score += 2
-                hits.append(kw)
-        for kw in svc.weak:
-            if _kw_re(kw).search(lower):
-                score += 1
-                hits.append(kw)
-        # Weak-only matches are too generic to count as a requirement.
-        if score >= 2 and any(k in svc.strong for k in hits) or score >= 3:
-            matches.append(ServiceMatch(svc.id, score, hits))
+        for kw, weight in [(k, 2) for k in svc.strong] + [(k, 1) for k in svc.weak]:
+            spans = [m.span() for m in _kw_re(kw).finditer(lower)]
+            if spans:
+                found.setdefault(svc.id, []).append((kw, weight, spans))
+
+    def inside_another_service(sid: str, spans: list[tuple[int, int]]) -> bool:
+        # every mention is part of a longer phrase of another service: "automation" in "sales automation"
+        longer = [(a, b) for other, hits in found.items() if other != sid for _, _, os in hits for a, b in os]
+        return all(any(a <= s and e <= b and b - a > e - s for a, b in longer) for s, e in spans)
+
+    counted = {sid: [(kw, w) for kw, w, spans in hits if not inside_another_service(sid, spans)]
+               for sid, hits in found.items()}
+    specific = {sid for sid, hits in counted.items() if any(w == 2 and kw not in GENERIC_KEYWORDS for kw, w in hits)}
+    matches: list[ServiceMatch] = []
+    for sid, hits in counted.items():
+        score = sum(w for _, w in hits)
+        # Weak-only matches are too generic to count as a requirement, and a generic "automate" yields to a service
+        # the text names specifically.
+        if not (score >= 2 and any(w == 2 for _, w in hits) or score >= 3):
+            continue
+        generic_only = sid not in specific and any(kw in GENERIC_KEYWORDS for kw, _ in hits)
+        if generic_only and specific - {sid}:
+            continue
+        matches.append(ServiceMatch(sid, score, [kw for kw, _ in hits]))
     matches.sort(key=lambda m: (-m.score, m.service_id))
     return matches
 
