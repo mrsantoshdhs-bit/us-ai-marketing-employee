@@ -288,9 +288,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 _ = r.lead.company if r.lead else None
             counts = dict(s.execute(select(InboundEmail.category, func.count(InboundEmail.id))
                                     .group_by(InboundEmail.category)).all())
-            state = kv_get(s, "inbox.state")
+            # the .env mailbox's position, else the first Mailboxes panel mailbox that is read
+            state = kv_get(s, "inbox.state") or next(
+                (kv_get(s, f"inbox.state.mailbox{a.id}") for a in mail_accounts.readable(s)), None)
+            reading, where = mail_accounts.reading_status(s, settings)
         return render(request, "mailbox.html", rows=rows, show=show, counts=counts, state=state,
-                      mailbox=f"{settings.imap_host} / {settings.imap_folder}" if settings.imap_configured else None)
+                      mailbox=where.removesuffix(", read-only") if reading else None)
 
     @app.post("/inbox/{eid}/{action}")
     def inbox_action(request: Request, eid: int, action: str, category: str = Form("")):
@@ -714,7 +717,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             for r in rows:
                 _ = r.lead.company, r.contact
             reconfirm = {r.id for r in rows if am.needs_reconfirmation(s, r)}
-        ready, reason = EmailSender(C().settings).status()
+            ready, reason = mail_accounts.sending_status(s, C().settings)  # the primary panel mailbox, else .env
         return render(request, "followups.html", rows=rows, show=show, email_ready=ready, email_reason=reason,
                       hidden=total - len(rest), page_size=FOLLOWUPS_PAGE, reconfirm=reconfirm)
 
@@ -1099,9 +1102,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def settings_page(request: Request):
         ctx = C()
         st = ctx.settings
-        ready, reason = EmailSender(st).status()
         with ctx.db.session() as s:
             mode, state = am.get_mode(s), am.get_state(s)
+            ready, reason = mail_accounts.sending_status(s, st)  # the primary panel mailbox, else .env
+            box = mail_accounts.primary(s)
+            server, sender = (box.smtp_host, box.email) if box else (st.smtp_host or "not set", st.smtp_from or "not set")
+            reading, read_where = mail_accounts.reading_status(s, st)
         follow = st.section("followup")
         outreach = st.section("outreach")
         sections = [
@@ -1112,8 +1118,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                             ("REQUIRE_HUMAN_APPROVAL", str(st.require_human_approval).lower()),
                             ("PUBLISHING_ENABLED", str(st.publishing_enabled).lower())]),
             ("Email", [("OUTBOUND_EMAIL_ENABLED", str(st.outbound_email_enabled).lower()),
-                       ("Mail server", st.smtp_host or "not set"), ("Sender address", st.smtp_from or "not set"),
-                       ("Mail server status", "ready" if ready else reason), ("Reading replies (IMAP)", st.imap_host or "off"),
+                       ("Mail server", server), ("Sender address", sender),
+                       ("Mail server status", "ready" if ready else reason),
+                       ("Reading replies (IMAP)", read_where if reading else "off"),
                        ("Test mode recipients", ", ".join(sorted(st.test_recipients)) or "off")]),
             ("Outreach rules", [("Send window", f"{follow.get('send_window_start', '08:00')}–{follow.get('send_window_end', '18:00')} "
                                                 f"{follow.get('send_window_timezone', 'America/New_York')}, weekdays"),
@@ -1134,9 +1141,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.get("/automation", response_class=HTMLResponse)
     def automation_page(request: Request):
         ctx = C()
-        ready, reason = EmailSender(ctx.settings).status()
         now = utcnow()
         with ctx.db.session() as s:
+            ready, reason = mail_accounts.sending_status(s, ctx.settings)  # the primary panel mailbox, else .env
             am.expire_authorizations(s)
             auths = s.execute(select(CampaignAuthorization).order_by(CampaignAuthorization.id.desc()).limit(50)).scalars().all()
             queued = s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "approved")).scalars().all()
@@ -1807,12 +1814,14 @@ def operations_view(ctx: AppContext, s) -> dict:
     for row in timeline:
         row["ago"] = ago(row["at"], now)
     ready, reason = EmailSender(mail_accounts.sending_settings(s, st)).status()
+    box = mail_accounts.primary(s)
     return dict(
         timeline=timeline[:14],
         automation={"mode": am.get_mode(s), "state": am.get_state(s), "active": len(am.active_authorizations(s, now)),
                     "blockers": am.blockers(s, st, ready, reason)},
-        gmail={"sending": st.outbound_email_enabled, "ready": ready, "reason": reason, "sender": st.smtp_from,
-               "reading": st.imap_configured, "test_mode": len(st.test_recipients)},
+        gmail={"sending": st.outbound_email_enabled, "ready": ready, "reason": reason,
+               "sender": box.email if box else st.smtp_from,
+               "reading": mail_accounts.reading_status(s, st)[0], "test_mode": len(st.test_recipients)},
         calendly={"url": st.calendly_url,
                   "last_notice": s.execute(select(func.max(InboundEmail.received_at)).where(
                       InboundEmail.category == "calendly")).scalar_one()},
@@ -1978,7 +1987,8 @@ def manager_today(ctx: AppContext, s) -> dict:
         interested=interested, requests=requests, meetings=meetings, needs=needs, posts_waiting=posts_waiting,
         held=held, failures=failures, employee=employee["employee"], team_counts=employee["team_counts"], counts=counts,
         board=system_status(ctx, s, employee["team"], (ready, reason), now), scheduler=scheduler_times(ctx, s, now),
-        health={"mode": mode, "state": am.get_state(s), "sending": st.outbound_email_enabled, "reading": st.imap_configured,
+        health={"mode": mode, "state": am.get_state(s), "sending": st.outbound_email_enabled,
+                "reading": mail_accounts.reading_status(s, st)[0],
                 "publishing": st.publishing_enabled, "blockers": am.blockers(s, st, ready, reason),
                 "authorizations": len(am.active_authorizations(s, now))},
     )

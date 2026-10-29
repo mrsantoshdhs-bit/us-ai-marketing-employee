@@ -328,3 +328,47 @@ def test_the_super_admin_role_is_given_from_the_command_line_only(roles, capsys)
     from aime.doctor import run_checks
     checks = {c["name"]: c for c in run_checks(roles)}
     assert checks["Dashboard admin account"]["ok"]
+
+
+# --------------------------------------------------------------------------- what the pages say
+
+def test_the_pages_report_the_mailbox_that_actually_sends_and_reads(make_ctx):
+    """Sending and reading use the Mailboxes panel, but the Follow-ups banner, the Automation and Settings pages,
+    the Replies page, `aime status` and the doctor used to look at .env only and said "NOT CONFIGURED"."""
+    from aime.doctor import run_checks
+    from aime.integrations.status import integration_statuses
+
+    ctx = make_ctx(outbound_email_enabled=True, company_postal_address="1 Sample St, Austin, TX 78701")
+    ctx.settings.business.setdefault("outreach", {})["b2b_enabled"] = True
+    client = TestClient(create_app(ctx))
+    out, read = "Outbound email (approved replies and outreach)", "Sales mailbox (replies, bounces)"
+
+    def rows():
+        with ctx.db.session() as s:
+            return {r["name"]: (r["state"], r["detail"]) for r in integration_statuses(ctx, s, include_scheduler=False)}
+
+    def monitored():
+        return next(c for c in run_checks(ctx) if c["name"] == "Sales mailbox monitored")["ok"]
+
+    assert rows()[out] == ("NOT CONFIGURED", "NOT CONFIGURED: SMTP_HOST / SMTP_FROM missing")  # no mailbox anywhere
+    assert rows()[read][0] == "NOT CONFIGURED" and not monitored()
+    aid = add(ctx)
+    with ctx.db.session() as s:
+        ma.change(s, "owner", aid, "enable")
+        ma.change(s, "owner", aid, "read_on")
+    assert rows()[out] == ("NOT CONFIGURED", "NOT CONFIGURED: no sending mailbox; make one Primary on the Mailboxes page")
+    assert rows()[read] == ("CONFIGURED", "sales@us.example / INBOX (Mailboxes panel), read-only") and monitored()
+    assert "sales@us.example / INBOX (Mailboxes panel)</b>" in client.get("/inbox").text
+    with ctx.db.session() as s:
+        ma.change(s, "owner", aid, "primary")
+    state, detail = rows()[out]
+    assert state == "READY" and detail == "Ready; sends from sales@us.example (Mailboxes panel)"
+    for path in ("/followups", "/automation", "/settings"):
+        page = client.get(path).text
+        assert "SMTP_HOST / SMTP_FROM missing" not in page, path
+    assert "sends from sales@us.example (Mailboxes panel)" in client.get("/followups").text
+    assert 'Mail server</span><span class="val"><span class="pill ok">ready' in client.get("/automation").text
+    settings_page = client.get("/settings").text
+    assert "smtp.gmail.com" in settings_page and "sales@us.example / INBOX (Mailboxes panel), read-only" in settings_page
+    ctx.settings.outbound_email_enabled = False
+    assert rows()[out][0] == "DISABLED"  # the switch still decides, whatever the mailbox

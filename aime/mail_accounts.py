@@ -177,6 +177,30 @@ def sending_settings(session: Session, settings):
     return settings_for(settings, a) if a is not None else settings
 
 
+def sending_status(session: Session, settings) -> tuple[bool, str]:
+    """Whether email can go out now, and why not, judged as sending judges it: the primary panel mailbox when there
+    is one, else .env. The pages and `aime status` show this, so a panel mailbox is never reported as missing."""
+    from aime.integrations.email_smtp import EmailSender
+
+    a = primary(session)
+    ready, reason = EmailSender(sending_settings(session, settings)).status()
+    if a is not None:
+        return ready, f"{reason}; sends from {a.email} (Mailboxes panel)" if ready else reason
+    if not ready and reason.startswith("NOT CONFIGURED: SMTP_HOST") and session.execute(
+            select(MailAccount.id).where(MailAccount.active.is_(True))).first():
+        reason = "NOT CONFIGURED: no sending mailbox; make one Primary on the Mailboxes page"
+    return ready, reason
+
+
+def reading_status(session: Session, settings) -> tuple[bool, str]:
+    """Which mailboxes are read for replies: the .env one and every enabled panel mailbox with Read replies on."""
+    read = ([f"{settings.imap_host} / {settings.imap_folder}"] if settings.imap_configured else []) + [
+        f"{a.email} / {a.imap_folder or 'INBOX'} (Mailboxes panel)" for a in readable(session)]
+    if read:
+        return True, "; ".join(read) + ", read-only"
+    return False, "No mailbox is read: on the Mailboxes page enable one and turn on Read replies (or set IMAP_HOST in .env)"
+
+
 def settings_for(settings, a: MailAccount):
     """The app's settings with this mailbox's server, user and sign-in in place of the .env mail settings. Every
     switch (OUTBOUND_EMAIL_ENABLED, REQUIRE_HUMAN_APPROVAL, ...) stays as it is."""

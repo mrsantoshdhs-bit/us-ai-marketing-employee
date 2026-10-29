@@ -3,7 +3,7 @@
 {% block content %}
 <h1>Replies</h1>
 <div class="card small">
-  Sales mailbox: {% if mailbox %}<b>{{ mailbox }}</b> (read-only{% if state %}, last message {{ state.last_uid }}{% endif %}){% else %}<span class="pill warn">not configured</span> set IMAP_HOST (Gmail: imap.gmail.com) and the app password{% endif %}.
+  Sales mailbox: {% if mailbox %}<b>{{ mailbox }}</b> (read-only{% if state %}, last message {{ state.last_uid }}{% endif %}){% else %}<span class="pill warn">not configured</span> on the Mailboxes page enable a mailbox and turn on Read replies (or set IMAP_HOST in .env){% endif %}.
   Every human reply stops the automated sequence. Unsubscribes and bounces are suppressed. Suggested replies wait
   in <a href="/followups">Follow-ups</a> for your approval. Simulated replies (testing only) are marked SIMULATED.
   <div style="margin-top:6px">{% for c, n in counts.items() if c %}<span class="pill">{{ c|replace('_', ' ') }}: {{ n }}</span> {% endfor %}
