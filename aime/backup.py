@@ -49,6 +49,29 @@ def backup_sqlite_file(db_path: Path, backup_dir: Path, label: str = "auto") -> 
     return target
 
 
+def prune_manual_backups(backup_dir: Path, keep: int, min_age_days: int = 30, now=None) -> list[str]:
+    """Opt-in (BACKUP_KEEP_MANUAL > 0): keep the newest `keep` manual, pre-deploy and pre-migration copies, never
+    one younger than `min_age_days`, and never the automatic ones (they have their own rotation). Also clears empty
+    -wal/-shm files left beside copies. Returns the removed names."""
+    import time
+
+    if keep <= 0:
+        return []
+    now = now or time.time()
+    manual = sorted((p for p in backup_dir.glob("aime-*.db") if not p.name.startswith("aime-auto-")),
+                    key=lambda p: p.stat().st_mtime)
+    removed = []
+    for old in manual[:-keep]:
+        if now - old.stat().st_mtime >= min_age_days * 86400:
+            old.unlink()
+            removed.append(old.name)
+    for side in list(backup_dir.glob("aime-*.db-wal")) + list(backup_dir.glob("aime-*.db-shm")):
+        if side.stat().st_size == 0:
+            side.unlink()
+            removed.append(side.name)
+    return removed
+
+
 def prune_backups(backup_dir: Path, label: str = "auto", keep: int = 14) -> int:
     files = sorted(backup_dir.glob(f"aime-{label}-*.db"))
     removed = 0

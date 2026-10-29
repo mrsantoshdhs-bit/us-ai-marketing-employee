@@ -140,3 +140,37 @@ def team_members(session: Session) -> dict[int, list[str]]:
     for team_id, username in session.execute(select(User.team_id, User.username).where(User.team_id.is_not(None))).all():
         out[team_id].append(username)
     return dict(out)
+
+
+def campaign_stats(session: Session) -> dict[int, dict]:
+    """Per campaign, from the leads it brought (leads.campaign_id): leads, emails sent, positive replies, meetings,
+    deals opened, won, won value. Recorded data only."""
+    from aime.models import Campaign
+
+    out: dict[int, dict] = {c: {"leads": 0, "emails_sent": 0, "positive_replies": 0, "meetings": 0, "deals": 0,
+                                 "won": 0, "won_value": 0.0}
+                            for c in session.execute(select(Campaign.id)).scalars()}
+    lead_campaign = dict(session.execute(select(Lead.id, Lead.campaign_id).where(Lead.campaign_id.is_not(None))).all())
+    for cid in lead_campaign.values():
+        if cid in out:
+            out[cid]["leads"] += 1
+
+    def add(lead_id, key, amount=1):
+        cid = lead_campaign.get(lead_id)
+        if cid in out:
+            out[cid][key] += amount
+
+    for (lead_id,) in session.execute(select(FollowUp.lead_id).where(FollowUp.channel == "email",
+                                                                     FollowUp.sent_at.is_not(None))).all():
+        add(lead_id, "emails_sent")
+    for (lead_id,) in session.execute(select(InboundEmail.lead_id).where(InboundEmail.category.in_(POSITIVE),
+                                                                         InboundEmail.is_simulated.is_(False))).all():
+        add(lead_id, "positive_replies")
+    for (lead_id,) in session.execute(select(Meeting.lead_id).where(Meeting.is_simulated.is_(False))).all():
+        add(lead_id, "meetings")
+    for o in session.execute(select(Opportunity).where(Opportunity.lead_id.is_not(None))).scalars():
+        add(o.lead_id, "deals")
+        if o.stage == "won":
+            add(o.lead_id, "won")
+            add(o.lead_id, "won_value", o.est_value or 0.0)
+    return out

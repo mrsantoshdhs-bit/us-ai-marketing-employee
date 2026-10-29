@@ -1002,7 +1002,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             post_counts = dict(s.execute(select(ContentItem.campaign_id, func.count(ContentItem.id))
                                          .group_by(ContentItem.campaign_id)).all())
             plans = s.execute(select(MarketingPlan).order_by(MarketingPlan.id.desc()).limit(7)).scalars().all()
-        return render(request, "campaigns.html", rows=rows, post_counts=post_counts, plans=plans)
+            from aime.performance import campaign_stats
+            results = campaign_stats(s)
+        return render(request, "campaigns.html", rows=rows, post_counts=post_counts, plans=plans, results=results)
 
     @app.post("/campaigns")
     def create_campaign(name: str = Form(...), objective: str = Form(...), service: str = Form(""),

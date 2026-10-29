@@ -3,13 +3,14 @@
 {% block content %}
 <h1>Campaigns</h1>
 <div class="card table-wrap"><table>
-  <tr><th>Name</th><th>Objective</th><th>Dates</th><th>Status</th><th class="n">Posts</th><th>Targets</th><th></th></tr>
+  <tr><th>Name</th><th>Objective</th><th>Dates</th><th>Status</th><th class="n">Posts</th><th>Targets</th><th>Results (recorded)</th><th></th></tr>
   {% for c in rows %}
   <tr><td>{{ c.name }}<div class="small muted">by {{ c.created_by }}</div></td><td class="small">{{ c.objective }}</td>
       <td class="small">{{ c.start_date }} → {{ c.end_date }}</td><td>{{ status_pill(c.status) }}</td>
       <td class="n">{{ post_counts.get(c.id, 0) }}</td><td class="small">{% for k, v in c.kpis.items() %}{{ k }}: {{ v }}<br>{% endfor %}</td>
+      {% set r = results.get(c.id) %}<td class="small">{% if r %}{{ r.leads }} leads · {{ r.emails_sent }} emails · {{ r.positive_replies }} positive · {{ r.meetings }} meetings · {{ r.deals }} deals · {{ r.won }} won{% if r.won_value %} (${{ '{:,.0f}'.format(r.won_value) }}){% endif %}{% else %}—{% endif %}</td>
       <td><form method="post" action="/campaigns/{{ c.id }}/status" class="filters"><select name="status">{% for st in ['planned', 'active', 'paused', 'completed'] %}<option {{ 'selected' if c.status == st }}>{{ st }}</option>{% endfor %}</select><button class="secondary">Set</button></form></td></tr>
-  {% else %}<tr><td colspan="7" class="muted">No campaigns yet; the Marketing Manager creates a monthly campaign automatically.</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="8" class="muted">No campaigns yet; the Marketing Manager creates a monthly campaign automatically.</td></tr>{% endfor %}
 </table></div>
 
 <h2>New campaign</h2>

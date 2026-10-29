@@ -172,6 +172,9 @@ def job_db_maintenance(ctx: AppContext, job: str = "db_maintenance") -> JobOutco
     backup = backup_sqlite_file(Path(db_path), s.backups_dir, label="auto") if db_path else None
     verified = verify_backup(backup) if backup else None
     pruned = prune_backups(s.backups_dir, label="auto", keep=14)
+    from aime.backup import prune_manual_backups
+
+    pruned += len(prune_manual_backups(s.backups_dir, int(getattr(s, "backup_keep_manual", 0) or 0)))  # opt-in
     check = integrity_check(ctx.db)
     checkpoint(ctx.db)
     problems = []
