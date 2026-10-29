@@ -776,6 +776,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     f.subject, edited = subject.strip(), True
                 if body.strip() and body.replace("\r\n", "\n") != f.body:
                     f.body, edited = body.replace("\r\n", "\n"), True
+                if edited:
+                    f.generator = f"template, edited by {who(request)}"[:80]
                 address = C().settings.company_postal_address
                 if address and POSTAL_PLACEHOLDER in (f.body or ""):  # any email kind drafted before it was set
                     f.body, edited = f.body.replace(POSTAL_PLACEHOLDER, address), True

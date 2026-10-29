@@ -245,6 +245,10 @@ class FollowUp(Timestamped, Base):
     __tablename__ = "followups"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # who wrote the text: "template" (fixed wording filled with the lead's facts; no AI model writes emails) or
+    # "template, edited by <user>" once a person changed it. Shown with every draft, so a template is never taken
+    # for an AI's own reasoning.
+    generator: Mapped[str] = mapped_column(String(80), default="template")
     lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id"), index=True)
     contact_id: Mapped[int | None] = mapped_column(ForeignKey("contacts.id"))
     company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"))
