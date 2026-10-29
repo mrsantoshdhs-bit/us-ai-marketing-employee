@@ -57,8 +57,8 @@ from aime.meetings import check_double_bookings, record_meeting, reopen_after_ca
 from aime.scheduler.runner import ABANDON_AFTER, due_jobs, load_job_specs, next_run, run_job
 from aime.scoring import lead_tier, tier_reason
 from aime.timeutil import as_aware_utc, fmt_et, fmt_local, local_tz, to_naive_utc, utcnow
-from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username,
-                           make_cookie, safe_next, session_secret, user_count)
+from aime.web.auth import (COOKIE, LOGIN_LOCK, ROLE_LABELS, SESSION_SECONDS, AuthMiddleware, authenticate,
+                           current_username, make_cookie, safe_next, session_secret, user_count)
 
 WEB_DIR = Path(__file__).resolve().parent
 STAGES = ["new", "discovery", "proposal", "negotiation", "won", "lost"]
@@ -169,9 +169,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         user = data["current_user"]
         data.setdefault("user_name", (user["username"].title() if user else C().settings.sender_name or ""))
         data.setdefault("is_super_admin", not C().settings.dashboard_auth or bool(user and user.get("role") == "super_admin"))
-        data.setdefault("user_role", {"admin": "Administrator", "sales_manager": "Sales Manager",
-                                      "super_admin": "Super Admin"}.get(
-            (user or {}).get("role", ""), "Preview · no sign-in"))
+        data.setdefault("user_role", ROLE_LABELS.get((user or {}).get("role", ""), "Preview · no sign-in"))
         if "nav_status" not in data and request.url.path != "/login":  # the top bar and sidebar on every page
             with C().db.session() as s:
                 state = am.get_state(s)

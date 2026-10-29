@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import threading
 import time
 from datetime import timedelta
@@ -159,6 +160,28 @@ def admin_only(method: str, path: str) -> bool:
     return method == "POST" and path.startswith(ADMIN_ONLY_PREFIXES)
 
 
+# Least privilege below a Sales Manager:
+# - a Read-Only Analyst sees every page a Sales Manager sees (reports, pipeline, leads, replies) and changes nothing;
+# - a Sales Executive (BDE) works leads, notes, meetings, replies and drafts like a Sales Manager, but cannot approve
+#   what goes out to a customer (an email, a post), confirm or resend one, or start a campaign: a Sales Manager does.
+ROLES = ("analyst", "sales_executive", "sales_manager", "admin", "super_admin")
+ROLE_LABELS = {"analyst": "Read-Only Analyst", "sales_executive": "Sales Executive", "sales_manager": "Sales Manager",
+               "admin": "Administrator", "super_admin": "Super Admin"}
+APPROVER_ROLES = ("sales_manager", "admin", "super_admin")
+READ_METHODS = ("GET", "HEAD")
+_APPROVALS = re.compile(r"/(?:followups/\d+/(?:approve|reconfirm|mark_sent|requeue)"
+                        r"|content/\d+/(?:approve|confirm_published|requeue)|campaigns(?:/\d+/status)?)/?")
+
+
+def read_only(role: str, method: str, path: str) -> bool:
+    """Whether this request changes something a Read-Only Analyst may not change (anything but signing out)."""
+    return role == "analyst" and method not in READ_METHODS and path != "/logout"
+
+
+def approver_only(method: str, path: str) -> bool:
+    return method == "POST" and bool(_APPROVALS.fullmatch(path))
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """Every page and API needs a signed-in user (when DASHBOARD_AUTH is on); operational changes need an admin."""
 
@@ -182,8 +205,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if path.startswith("/api/"):
                 return JSONResponse({"detail": "Sign in required"}, status_code=401)
             return RedirectResponse(f"/login?next={quote(path)}", status_code=303)
-        if super_admin_only(path) and request.state.user["role"] != "super_admin":
+        role = request.state.user["role"]
+        if super_admin_only(path) and role != "super_admin":
             return JSONResponse({"detail": "Super Admin only"}, status_code=403)
-        if admin_only(request.method, path) and request.state.user["role"] not in ADMIN_ROLES:
+        if admin_only(request.method, path) and role not in ADMIN_ROLES:
             return JSONResponse({"detail": "Admin only: ask an admin to do this"}, status_code=403)
+        if read_only(role, request.method, path):
+            return JSONResponse({"detail": "Read-only access: ask a Sales Manager to do this"}, status_code=403)
+        if approver_only(request.method, path) and role not in APPROVER_ROLES:
+            return JSONResponse({"detail": "A Sales Manager approves what goes out to customers: ask one to do this"},
+                                status_code=403)
         return await call_next(request)
