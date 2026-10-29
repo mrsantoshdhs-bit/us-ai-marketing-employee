@@ -59,3 +59,35 @@ def test_manual_backup_retention_is_opt_in_and_spares_recent_and_automatic_copie
                                "aime-predeploy-2-2026.db"]  # the newest two manual copies stay
     left = {p.name for p in tmp_path.iterdir()}
     assert {"aime-auto-1.db", "aime-recent-label.db", "aime-predeploy-3-2026.db"} <= left  # automatic and recent stay
+
+
+def test_a_campaign_audience_finds_its_leads_and_credits_only_unattributed_ones(make_ctx):
+    from aime.audiences import parse
+
+    ctx = make_ctx()
+    with ctx.db.session() as s:
+        camp, other = (Campaign(name=n, objective="leads", start_date=date(2026, 10, 1), end_date=date(2026, 12, 31),
+                                created_by="test") for n in ("Texas realty", "Older campaign"))
+        tx = Company(name="TX Realty", normalized_name="tx realty", source="test", industry="real_estate", state="TX")
+        ca = Company(name="CA Realty", normalized_name="ca realty", source="test", industry="real_estate", state="CA")
+        s.add_all([camp, other, tx, ca])
+        s.flush()
+        leads = [Lead(company_id=tx.id, source="research", status="qualified", grade="A", score=80),
+                 Lead(company_id=tx.id, source="research", status="qualified", grade="C", score=40),
+                 Lead(company_id=ca.id, source="research", status="qualified", grade="A", score=85),
+                 Lead(company_id=tx.id, source="research", status="qualified", grade="A", score=90, campaign_id=other.id)]
+        s.add_all(leads)
+        s.flush()
+        cid, ids = camp.id, [lead.id for lead in leads]
+    assert parse({"states": "tx, zz9", "grades": "a,x", "industries": "real_estate, nonsense", "min_score": "70"}) == {
+        "industries": ["real_estate"], "states": ["TX"], "grades": ["A"], "services": [], "sources": [], "min_score": 70}
+    c = TestClient(create_app(ctx))
+    form = {"industries": "real_estate", "states": "TX", "grades": "A", "min_score": "50"}
+    r = c.post(f"/campaigns/{cid}/audience", headers={"origin": "http://testserver"}, data=form, follow_redirects=False)
+    assert "2 matching leads" in r.headers["location"].replace("%20", " ")  # the A-grade Texas leads
+    c.post(f"/campaigns/{cid}/audience", headers={"origin": "http://testserver"}, data={**form, "attach": "yes"})
+    with ctx.db.session() as s:
+        got = [s.get(Lead, i).campaign_id for i in ids]
+    assert got[0] == cid and got[1] is None and got[2] is None  # only the match without a campaign
+    assert got[3] != cid  # already credited to another campaign: left as it is
+    assert "Audience: 2 leads" in c.get("/campaigns").text

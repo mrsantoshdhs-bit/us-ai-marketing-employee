@@ -431,6 +431,7 @@ class Campaign(Timestamped, Base):
     status: Mapped[str] = mapped_column(String(20), default="active")  # planned | active | paused | completed
     kpis: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # targets, never reported as results
     created_by: Mapped[str] = mapped_column(String(60), default="marketing_manager")
+    audience: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # who it is for (aime.audiences)
 
 
 class ContentItem(Timestamped, Base):

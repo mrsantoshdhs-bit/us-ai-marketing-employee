@@ -1010,9 +1010,35 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             post_counts = dict(s.execute(select(ContentItem.campaign_id, func.count(ContentItem.id))
                                          .group_by(ContentItem.campaign_id)).all())
             plans = s.execute(select(MarketingPlan).order_by(MarketingPlan.id.desc()).limit(7)).scalars().all()
+            from aime.audiences import describe, matching
             from aime.performance import campaign_stats
             results = campaign_stats(s)
-        return render(request, "campaigns.html", rows=rows, post_counts=post_counts, plans=plans, results=results)
+            audiences = {}
+            for c in rows:
+                leads = matching(s, c.audience or {})
+                audiences[c.id] = {"text": describe(c.audience or {}), "matches": len(leads),
+                                   "unattributed": sum(1 for lead in leads if lead.campaign_id is None)}
+        return render(request, "campaigns.html", rows=rows, post_counts=post_counts, plans=plans, results=results,
+                      audiences=audiences)
+
+    @app.post("/campaigns/{camp_id}/audience")
+    async def campaign_audience(request: Request, camp_id: int):
+        from aime.audiences import matching, parse
+
+        form = await request.form()
+        with C().db.session() as s:
+            camp = s.get(Campaign, camp_id) or _404()
+            camp.audience = parse(dict(form))
+            note = f"Audience saved: {len(matching(s, camp.audience))} matching leads"
+            if form.get("attach") == "yes":
+                attached = 0
+                for lead in matching(s, camp.audience):
+                    if lead.campaign_id is None:
+                        lead.campaign_id, attached = camp.id, attached + 1
+                log_activity(s, f"Campaign '{camp.name}': {attached} matching leads attributed to it", who(request),
+                             type_="campaign")
+                note += f"; {attached} leads without a campaign attributed to it"
+        return back("/campaigns", note)
 
     @app.post("/campaigns")
     def create_campaign(name: str = Form(...), objective: str = Form(...), service: str = Form(""),
