@@ -188,7 +188,7 @@ def _date(text: str) -> datetime | None:
     return None
 
 
-def match_lead(session: Session, email: str) -> tuple[Lead | None, Contact | None]:
+def match_lead(session: Session, email: str, test_recipients=frozenset()) -> tuple[Lead | None, Contact | None]:
     contact = session.execute(select(Contact).where(func.lower(Contact.email) == email.lower())).scalars().first()
     if contact:
         lead = session.execute(select(Lead).where(Lead.contact_id == contact.id)).scalars().first() or \
@@ -198,10 +198,16 @@ def match_lead(session: Session, email: str) -> tuple[Lead | None, Contact | Non
     company = session.execute(select(Company).where(Company.domain == domain, Company.merged_into_id.is_(None))).scalars().first()
     if company:
         return session.execute(select(Lead).where(Lead.company_id == company.id)).scalars().first(), None
-    # The address we emailed (or that replied to us) for a lead: e.g. a prospect booking from their reply address,
-    # or the owner's test address in a controlled test.
-    f = session.execute(select(FollowUp).where((func.lower(FollowUp.to_email) == email) | (func.lower(FollowUp.delivered_to) == email))
-                        .order_by(FollowUp.id.desc())).scalars().first()
+    # The address we emailed (or that replied to us) for a lead: e.g. a prospect booking from their reply address.
+    # Only an email that went out counts: a draft nobody approved says nothing about who booked.
+    went_to = ((func.lower(FollowUp.to_email) == email.lower()) | (func.lower(FollowUp.delivered_to) == email.lower())) \
+        & FollowUp.sent_at.is_not(None)
+    if email.lower() in test_recipients:
+        # Test mode: every lead's email went to this address, so the last one emailed is not who booked. The lead
+        # that was sent a booking link here is; with none or several, a person links the booking on Meetings.
+        leads = set(session.execute(select(FollowUp.lead_id).where(went_to, FollowUp.purpose == "booking_link")).scalars())
+        return (session.get(Lead, leads.pop()) if len(leads) == 1 else None), None
+    f = session.execute(select(FollowUp).where(went_to).order_by(FollowUp.id.desc())).scalars().first()
     if f is not None:
         return session.get(Lead, f.lead_id), None
     r = session.execute(select(InboundEmail).where(func.lower(InboundEmail.from_email) == email, InboundEmail.lead_id.is_not(None))
@@ -212,7 +218,7 @@ def match_lead(session: Session, email: str) -> tuple[Lead | None, Contact | Non
 def record_meeting(session: Session, settings, info: dict, actor: str, row: InboundEmail | None = None,
                    source: str = "calendly_email") -> tuple[Meeting | None, str]:
     """Create, or cancel, the meeting described by `info`. Returns (meeting, note)."""
-    lead, contact = match_lead(session, info["invitee_email"])
+    lead, contact = match_lead(session, info["invitee_email"], getattr(settings, "test_recipients", frozenset()))
     simulated = bool(row and row.is_simulated)
     same_slot = select(Meeting).where(func.lower(Meeting.invitee_email) == info["invitee_email"],
                                       Meeting.starts_at == info["starts_at"])
