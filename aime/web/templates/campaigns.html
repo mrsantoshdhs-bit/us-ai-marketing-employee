@@ -9,7 +9,18 @@
       <td class="small">{{ c.start_date }} → {{ c.end_date }}</td><td>{{ status_pill(c.status) }}</td>
       <td class="n">{{ post_counts.get(c.id, 0) }}</td><td class="small">{% for k, v in c.kpis.items() %}{{ k }}: {{ v }}<br>{% endfor %}</td>
       {% set r = results.get(c.id) %}<td class="small">{% if r %}{{ r.leads }} leads · {{ r.emails_sent }} emails · {{ r.positive_replies }} positive · {{ r.meetings }} meetings · {{ r.deals }} deals · {{ r.won }} won{% if r.won_value %} (${{ '{:,.0f}'.format(r.won_value) }}){% endif %}{% else %}—{% endif %}</td>
-      <td><form method="post" action="/campaigns/{{ c.id }}/status" class="filters"><select name="status">{% for st in ['planned', 'active', 'paused', 'completed'] %}<option {{ 'selected' if c.status == st }}>{{ st }}</option>{% endfor %}</select><button class="secondary">Set</button></form></td></tr>
+      <td>{% set au = audiences.get(c.id) %}{% if au %}<details class="small"><summary>Audience: {{ au.matches }} leads</summary>
+        <div class="muted">{{ au.text }} · {{ au.unattributed }} not yet in a campaign</div>
+        <form method="post" action="/campaigns/{{ c.id }}/audience" class="filters" style="flex-wrap:wrap">
+          <input name="industries" placeholder="industries (ids)" value="{{ (c.audience or {}).get('industries', [])|join(', ') }}" size="14">
+          <input name="states" placeholder="states (TX, CA)" value="{{ (c.audience or {}).get('states', [])|join(', ') }}" size="10">
+          <input name="grades" placeholder="grades (A, B)" value="{{ (c.audience or {}).get('grades', [])|join(', ') }}" size="7">
+          <input name="services" placeholder="services (ids)" value="{{ (c.audience or {}).get('services', [])|join(', ') }}" size="14">
+          <input name="sources" placeholder="sources" value="{{ (c.audience or {}).get('sources', [])|join(', ') }}" size="10">
+          <input name="min_score" type="number" min="0" max="100" placeholder="min score" value="{{ (c.audience or {}).get('min_score') or '' }}" style="width:90px">
+          <button class="secondary">Save</button> <button class="secondary" name="attach" value="yes">Save and attribute matching leads</button>
+        </form></details>{% endif %}
+        <form method="post" action="/campaigns/{{ c.id }}/status" class="filters"><select name="status">{% for st in ['planned', 'active', 'paused', 'completed'] %}<option {{ 'selected' if c.status == st }}>{{ st }}</option>{% endfor %}</select><button class="secondary">Set</button></form></td></tr>
   {% else %}<tr><td colspan="8" class="muted">No campaigns yet; the Marketing Manager creates a monthly campaign automatically.</td></tr>{% endfor %}
 </table></div>
 

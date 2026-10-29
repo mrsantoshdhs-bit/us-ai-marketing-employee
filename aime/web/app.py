@@ -174,7 +174,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return app.state.ctx or get_context()
 
     def render(request: Request, name: str, **data):
-        data.setdefault("msg", request.query_params.get("msg"))
+        note = request.query_params.get("msg")
+        data.setdefault("msg", note if note and hmac.compare_digest(note_sig(note), request.query_params.get("n", "")) else None)
         data.setdefault("company_name", C().settings.company_name)
         data.setdefault("data_role", C().settings.data_role)
         data.setdefault("maintenance", maintenance.active(C().settings.data_dir))
@@ -213,6 +214,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def login_page(request: Request, next: str = "/", error: str = ""):
         with C().db.session() as s:
             has_users = user_count(s) > 0
+        error = error if error and hmac.compare_digest(note_sig(error), request.query_params.get("n", "")) else ""
         return render(request, "login.html", next=safe_next(next), error=error, has_users=has_users,
                       auth_on=C().settings.dashboard_auth)
 
@@ -222,7 +224,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             user, message = authenticate(s, username, password)
             cookie = make_cookie(session_secret(C().settings.data_dir), user) if user else None
         if not cookie:
-            return RedirectResponse(f"/login?error={quote(message)}&next={quote(safe_next(next))}", status_code=303)
+            return RedirectResponse(f"/login?error={quote(message)}&n={note_sig(message)}&next={quote(safe_next(next))}",
+                                    status_code=303)
         response = RedirectResponse(safe_next(next), status_code=303)
         response.set_cookie(COOKIE, cookie, max_age=SESSION_SECONDS, httponly=True, samesite="lax",
                             secure=request.url.scheme == "https", path="/")
@@ -236,14 +239,19 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 account = s.get(User, user["id"])
                 if account is not None:
                     account.session_version = (account.session_version or 1) + 1
-        response = RedirectResponse("/login?error=" + quote("Signed out"), status_code=303)
+        response = RedirectResponse(f"/login?error={quote('Signed out')}&n={note_sig('Signed out')}", status_code=303)
         response.delete_cookie(COOKIE, path="/")
         return response
+
+    def note_sig(text: str) -> str:
+        """A page shows a note (?msg=) only when this app wrote it: a link someone crafts cannot put words on a page."""
+        key = session_secret(C().settings.data_dir)
+        return hmac.new(key, ("note:" + text).encode("utf-8"), "sha256").hexdigest()[:20]
 
     def back(url: str, msg: str) -> RedirectResponse:
         path, mark, anchor = url.partition("#")  # the message goes in the query, before any #anchor
         sep = "&" if "?" in path else "?"
-        return RedirectResponse(f"{path}{sep}msg={quote(msg)}{mark}{anchor}", status_code=303)
+        return RedirectResponse(f"{path}{sep}msg={quote(msg)}&n={note_sig(msg)}{mark}{anchor}", status_code=303)
 
     # ------------------------------------------------------------------ dashboard (Sales Manager home)
     @app.get("/", response_class=HTMLResponse)
@@ -1002,9 +1010,35 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             post_counts = dict(s.execute(select(ContentItem.campaign_id, func.count(ContentItem.id))
                                          .group_by(ContentItem.campaign_id)).all())
             plans = s.execute(select(MarketingPlan).order_by(MarketingPlan.id.desc()).limit(7)).scalars().all()
+            from aime.audiences import describe, matching
             from aime.performance import campaign_stats
             results = campaign_stats(s)
-        return render(request, "campaigns.html", rows=rows, post_counts=post_counts, plans=plans, results=results)
+            audiences = {}
+            for c in rows:
+                leads = matching(s, c.audience or {})
+                audiences[c.id] = {"text": describe(c.audience or {}), "matches": len(leads),
+                                   "unattributed": sum(1 for lead in leads if lead.campaign_id is None)}
+        return render(request, "campaigns.html", rows=rows, post_counts=post_counts, plans=plans, results=results,
+                      audiences=audiences)
+
+    @app.post("/campaigns/{camp_id}/audience")
+    async def campaign_audience(request: Request, camp_id: int):
+        from aime.audiences import matching, parse
+
+        form = await request.form()
+        with C().db.session() as s:
+            camp = s.get(Campaign, camp_id) or _404()
+            camp.audience = parse(dict(form))
+            note = f"Audience saved: {len(matching(s, camp.audience))} matching leads"
+            if form.get("attach") == "yes":
+                attached = 0
+                for lead in matching(s, camp.audience):
+                    if lead.campaign_id is None:
+                        lead.campaign_id, attached = camp.id, attached + 1
+                log_activity(s, f"Campaign '{camp.name}': {attached} matching leads attributed to it", who(request),
+                             type_="campaign")
+                note += f"; {attached} leads without a campaign attributed to it"
+        return back("/campaigns", note)
 
     @app.post("/campaigns")
     def create_campaign(name: str = Form(...), objective: str = Form(...), service: str = Form(""),

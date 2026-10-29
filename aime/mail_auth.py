@@ -1,9 +1,11 @@
 """Is an email really from who it says? A Calendly notice can create, move or cancel meetings and move deals, and
-anyone can type "From: notifications@calendly.com". So such a notice changes the CRM by itself only when the
-receiving mail server vouches for it: the topmost Authentication-Results header (the one our own server, or Gmail
-for a forwarded notice, added; RFC 8601) shows a passing DKIM signature or DMARC result for calendly.com, or for
-one of our trusted forwarders (our own mailbox, the owner's test address, CALENDLY_FORWARDERS). Anything else waits
-for a person to confirm it on Replies. Lower Authentication-Results headers are ignored: a sender can write those."""
+anyone can type "From: notifications@calendly.com". So such a notice changes the CRM by itself only when its
+signature is verified: AIME checks the DKIM signatures itself when it reads the email (aime.dkim_verify; our mail
+server stamps no Authentication-Results), and records "aime.dkim; dkim=pass header.d=<domain>" for each that holds.
+A server's own Authentication-Results line counts only if that server is named in TRUSTED_AUTHSERV_IDS; a header
+the sender wrote is never believed. The notice must be signed by calendly.com, or forwarded by one of our trusted
+forwarders (our own mailbox, the owner's test address, CALENDLY_FORWARDERS) and signed by that forwarder's domain.
+Anything else waits for a person to confirm it on Replies."""
 
 from __future__ import annotations
 
@@ -11,6 +13,19 @@ import re
 
 _PASS = re.compile(r"\b(dkim|dmarc|spf)\s*=\s*pass\b([^;]*)", re.I)
 _DOMAIN = re.compile(r"\b(?:header\.d|header\.i|header\.from|smtp\.mailfrom)\s*=\s*@?([a-z0-9.-]+\.[a-z]{2,})", re.I)
+
+
+OWN_AUTHSERV = "aime.dkim"  # the line AIME writes itself after verifying DKIM signatures (aime.dkim_verify)
+
+
+def authserv_id(auth_results: str | None) -> str:
+    return (auth_results or "").split(";", 1)[0].strip().lower()
+
+
+def trusted_authserv_ids(settings) -> set[str]:
+    """Servers whose Authentication-Results lines are believed (TRUSTED_AUTHSERV_IDS, comma-separated): only a server
+    that removes such lines from incoming mail may be named. Empty by default: our mail server stamps none."""
+    return {x.strip().lower() for x in (getattr(settings, "trusted_authserv_ids", "") or "").split(",") if x.strip()}
 
 
 def passing_domains(auth_results: str | None) -> set[str]:
@@ -42,9 +57,11 @@ def calendly_verified(session, settings, from_email: str | None, auth_results: s
     """(trusted, why) for a Calendly notice."""
     sender = (from_email or "").lower()
     sender_domain = sender.rsplit("@", 1)[-1]
-    domains = passing_domains(auth_results)
     if not auth_results:
-        return False, "the mail server added no authentication result to this email"
+        return False, "no verified signature was recorded for this email"
+    if authserv_id(auth_results) not in {OWN_AUTHSERV} | trusted_authserv_ids(settings):
+        return False, "its authentication line was not written by AIME or a trusted mail server"
+    domains = passing_domains(auth_results)
     if _within(sender_domain, "calendly.com"):
         if any(_within(d, "calendly.com") for d in domains):
             return True, "signed by calendly.com (DKIM/DMARC pass)"
