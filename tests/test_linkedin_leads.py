@@ -395,3 +395,95 @@ def test_without_the_form_definition_the_address_is_still_found_and_the_profile_
     assert p["external_id"] == "linkedin:z9" and p["message"].startswith("LinkedIn event: a lead form")
     assert p["email"] == PAT and "Answer 10: A custom CRM" in p["message"]
     assert "linkedin.com/in/" not in json.dumps(p)
+
+
+# --------------------------------------------------------------------------- everyone who asked gets an answer
+
+UNLISTED = "pat.lee@unlisted-co.example"  # a company website the checker cannot reach, so the score stays below B
+
+
+def test_a_registrant_below_grade_b_still_gets_an_answer_that_waits_for_a_person(make_ctx):
+    from aime.agents import SalesWorkflowAgent
+    from aime.crm_ops import log_activity
+
+    ctx = leads_ctx(make_ctx, FakeLinkedIn([lead("c1", email=UNLISTED)]), **SENDING)
+    job_inbound(ctx)
+    with ctx.db.session() as s:
+        parked = s.execute(select(Lead)).scalar_one()
+        assert (parked.status, parked.grade) == ("nurture", "C")
+        [draft] = s.execute(select(FollowUp).where(FollowUp.channel == "email")).scalars().all()
+        assert draft.status == "awaiting_approval" and draft.subject.startswith("Thanks for registering")
+        lead_id = parked.id
+    ctx.settings.require_human_approval = False
+    sender = EmailSender(ctx.settings, smtp_factory=FakeSMTP)
+    FakeSMTP.sent = []
+    with ctx.db.session() as s:  # an "asked us" campaign covers grade B and up: this answer waits for a person
+        warm = am.create_rule_authorization(s, "boss", "LinkedIn leads", "B", "asked_us", False, 5, 20, 7)
+        warm.starts_at, warm.expires_at = TUESDAY_11AM_ET - timedelta(days=1), TUESDAY_11AM_ET + timedelta(days=6)
+        am.change_authorization(s, warm, "activate", "boss")
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})
+    assert FakeSMTP.sent == []
+    with ctx.db.session() as s:
+        f = s.execute(select(FollowUp).where(FollowUp.lead_id == lead_id)).scalar_one()
+        assert f.status == "awaiting_approval"
+        f.status, f.approved_by, f.approved_at = "approved", "boss", utcnow()
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})
+    assert [m["To"] for m in FakeSMTP.sent] == [UNLISTED]
+    with ctx.db.session() as s:  # no answer: the day-3 follow-up names the event, and also waits for a person
+        first = s.execute(select(FollowUp).where(FollowUp.status == "sent")).scalar_one()
+        first.sent_at = TUESDAY_11AM_ET - timedelta(days=4)
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})
+    with ctx.db.session() as s:
+        step2 = s.execute(select(FollowUp).where(FollowUp.lead_id == lead_id, FollowUp.step == 2)).scalar_one()
+        assert step2.subject == "Following up: AI agents for US service businesses"
+        assert "follow up on your registration for AI agents for US service businesses" in step2.body
+        assert step2.status == "awaiting_approval" and len(FakeSMTP.sent) == 1
+        step2.status = "cancelled"
+        # a person parks the lead: nothing more is drafted, and an approval given earlier is not sent
+        log_activity(s, "Lead nurture → nurture (moved by a person)", "boss", type_="status_change", lead_id=lead_id)
+        s.add(FollowUp(lead_id=lead_id, contact_id=first.contact_id, company_id=first.company_id, channel="email",
+                       step=3, due_at=TUESDAY_11AM_ET, status="approved", approved_by="boss", approved_at=utcnow(),
+                       subject="Closing the loop on your inquiry", body=first.body))
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": TUESDAY_11AM_ET.isoformat()})
+    with ctx.db.session() as s:
+        last = s.execute(select(FollowUp).where(FollowUp.lead_id == lead_id, FollowUp.step == 3)).scalar_one()
+        assert last.status == "cancelled" and last.blocked_reason == "Lead is nurture"
+        assert s.execute(select(FollowUp).where(FollowUp.lead_id == lead_id)).scalars().all()[-1].id == last.id
+    assert len(FakeSMTP.sent) == 1
+
+
+def test_only_a_lead_parked_by_its_score_alone_is_still_answered(make_ctx):
+    from aime.agents import SalesWorkflowAgent
+    from aime.crm_ops import log_activity
+
+    ctx = leads_ctx(make_ctx, FakeLinkedIn([lead("c2", email=UNLISTED)]))
+    job_inbound(ctx)
+    with ctx.db.session() as s:
+        s.execute(select(FollowUp)).scalar_one().status = "cancelled"
+        parked = s.execute(select(Lead)).scalar_one()
+        agent = SalesWorkflowAgent(ctx)
+        assert agent._may_answer(s, parked)
+        parked.source = "research"
+        assert not agent._may_answer(s, parked)
+        parked.source, parked.status = "inbound", "disqualified"
+        assert not agent._may_answer(s, parked)
+        # qualified later, then a "not interested" reply parks it (that move leaves no status record of its own)
+        log_activity(s, "Lead nurture → qualified (score 60, grade B)", "qualification", type_="status_change",
+                     lead_id=parked.id)
+        parked.status = "nurture"
+        assert not agent._may_answer(s, parked)
+
+
+def test_service_names_keep_their_acronyms_in_replies(tmp_path):
+    from aime.config import Settings
+    from aime.email_templates import draft_reply
+
+    settings = Settings.load(env_file=tmp_path / "no.env", data_dir=tmp_path / "data", data_role="test",
+                             company_postal_address="1 Sample St, Austin, TX 78701")
+    settings.business["company"]["name"] = "Example Co"
+    assert draft_reply(settings, 2, "Sam", "ai_agents", None)[0] == "Following up on your AI agent development inquiry"
+    assert "about custom CRM development." in draft_reply(settings, 2, "Sam", "custom_crm", None)[1]
+    assert draft_reply(settings, 1, "Sam", "saas_dev", None)[0] == "Re: your inquiry about SaaS development"
+    assert draft_reply(settings, 2, "Sam", None, None)[0] == "Following up on your inquiry"
+    form_reply = draft_reply(settings, 1, "Sam", None, None, "LinkedIn lead form: Contact us")
+    assert form_reply[0] == "Thanks for your interest in Example Co"
