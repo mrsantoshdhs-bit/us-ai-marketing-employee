@@ -13,10 +13,12 @@
       <div><a href="/leads/{{ o.lead_id }}">{{ o.name }}</a></div>
       <div class="small muted">{{ o.service|service }}{% if o.est_value %} · ${{ '{:,.0f}'.format(o.est_value) }}{% endif %} · {{ o.probability }}%</div>
       {% if o.owner %}<div class="small">Sales Manager: {{ o.owner }}</div>{% endif %}
+      {% if o.lost_reason %}<div class="small">Lost: {{ o.lost_reason }}</div>{% endif %}
       {% if o.next_step %}<div class="small">Next: {{ o.next_step }}</div>{% endif %}
       <form method="post" action="/opportunities/{{ o.id }}" style="margin-top:6px">
         <select name="stage">{% for st in STAGES %}<option {{ 'selected' if st == o.stage }}>{{ st }}</option>{% endfor %}</select>
         <input name="est_value" placeholder="Value $" size="7"><input name="next_step" placeholder="Next step" size="12">
+        <input name="lost_reason" placeholder="Reason, if lost" size="12" maxlength="200">
         <button class="secondary">Save</button>
       </form>
     </div>
