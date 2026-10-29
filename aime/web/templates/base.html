@@ -36,7 +36,7 @@
                         ('/approvals', 'Approval Queue', 'check-square', nav_c.approvals, 'alert'),
                         ('/agents', 'AI Agents', 'cpu', None, ''), ('/jobs', 'Jobs', 'clock', None, ''),
                         ('/audit', 'Audit Logs', 'list', None, '')]),
-        ('Analytics', [('/reports', 'Sales Analytics', 'chart', None, '')]),
+        ('Analytics', [('/reports', 'Sales Analytics', 'chart', None, ''), ('/performance', 'Sales performance', 'users', None, '')]),
         ('Settings', [('/integrations', 'Integrations', 'plug', None, ''), ('/system', 'System health', 'server', None, ''),
                       ('/settings', 'Settings', 'gear', None, '')]
                      + ([('/admin/users', 'Users & teams', 'users', None, '')] if can_manage_users else [])

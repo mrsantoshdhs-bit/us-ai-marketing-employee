@@ -301,6 +301,39 @@ def register(app, C, render, back, who) -> None:
         return back("/pipeline", note)
 
 
+    # ------------------------------------------------------------------ sales performance
+    @app.get("/performance", response_class=HTMLResponse)
+    def performance_page(request: Request, start: str = "", end: str = "", team: str = "", owner: str = "",
+                         source: str = ""):
+        from datetime import date, datetime
+
+        from aime.performance import build, team_members
+
+        today = utcnow().date()
+        try:
+            first = date.fromisoformat(start) if start else today - timedelta(days=30)
+            last = date.fromisoformat(end) if end else today
+        except ValueError:
+            return back("/performance", "Dates are YYYY-MM-DD")
+        sc = getattr(request.state, "scope", None)
+        with C().db.session() as s:
+            people = list(s.execute(select(User.username).where(User.active.is_(True)).order_by(User.username)).scalars())
+            if sc is not None and not sc.all:
+                people = [p for p in people if p in sc.usernames]  # their own, or their team's
+            teams = s.execute(select(Team).where(Team.active.is_(True)).order_by(Team.name)).scalars().all()
+            if team.isdigit():
+                members = set(team_members(s).get(int(team), []))
+                people = [p for p in people if p in members]
+            if owner:
+                people = [p for p in people if p == owner]
+            report = build(s, datetime.combine(first, datetime.min.time()),
+                           datetime.combine(last + timedelta(days=1), datetime.min.time()), people, source or None)
+            sources = sorted(x for x in s.execute(select(Lead.source).distinct()).scalars() if x)
+        return render(request, "performance.html", report=report, teams=teams, sources=sources,
+                      f={"start": first.isoformat(), "end": last.isoformat(), "team": team, "owner": owner, "source": source},
+                      everyone=sc is None or sc.all)
+
+
 def assignment_history(s, lead_id: int) -> list[Assignment]:
     return s.execute(select(Assignment).where(Assignment.lead_id == lead_id).order_by(Assignment.id.desc()).limit(30)).scalars().all()
 

@@ -392,7 +392,9 @@ def _advance_opportunity(session: Session, lead: Lead, meeting: Meeting, actor: 
     from aime.reply_intel import ensure_opportunity
     opp = ensure_opportunity(session, lead, actor)
     if opp.stage in ("new", "discovery"):
-        opp.stage, opp.probability = "discovery", max(opp.probability or 0, 30)
+        from aime.stages import move
+
+        move(session, opp, "discovery", actor, "meeting booked", probability=max(opp.probability or 0, 30))
     opp.next_step = f"Meeting {meeting.starts_at:%Y-%m-%d %H:%M} UTC: prepare, then record the outcome"
     return opp
 

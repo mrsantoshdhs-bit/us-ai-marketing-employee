@@ -205,9 +205,26 @@ class Opportunity(Timestamped, Base):
     owner: Mapped[str | None] = mapped_column(String(80), index=True)  # the salesperson it is assigned to (username)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime)
     lost_reason: Mapped[str | None] = mapped_column(String(200))
+    expected_close: Mapped[date | None] = mapped_column(Date)  # entered by a person
+    origin: Mapped[str] = mapped_column(String(20), default="ai")  # ai: opened by the agents | human: by a person
+    won_by: Mapped[str | None] = mapped_column(String(80))  # who moved it to won
 
     lead: Mapped[Lead | None] = relationship(back_populates="opportunities")
     company: Mapped[Company] = relationship()
+
+
+class StageChange(Base):
+    """Every move of a deal through the pipeline (aime.stages): from, to, when, who and why."""
+
+    __tablename__ = "opportunity_stage_changes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    opportunity_id: Mapped[int] = mapped_column(ForeignKey("opportunities.id"), index=True)
+    from_stage: Mapped[str | None] = mapped_column(String(20))  # None: the deal was opened
+    to_stage: Mapped[str] = mapped_column(String(20), index=True)
+    at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    actor: Mapped[str] = mapped_column(String(80))
+    reason: Mapped[str | None] = mapped_column(String(300))
 
 
 class Activity(Base):

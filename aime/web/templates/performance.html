@@ -1,0 +1,39 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}Sales performance · AI Sales Employee{% endblock %}
+{% macro pct(v) %}{{ '%.0f%%'|format(v * 100) if v is not none else '—' }}{% endmacro %}
+{% macro usd(v) %}{{ '$' ~ '{:,.0f}'.format(v) if v else '—' }}{% endmacro %}
+{% block content %}
+<div class="page-head"><div>
+  <h1>{{ icon('chart') }} Sales performance</h1>
+  <p class="subtitle">Recorded activity only, {{ f.start }} to {{ f.end }}{% if not everyone %}, for you and the people you can see{% endif %}.
+    A won deal counts once: for whoever won it, and as AI-sourced when the agents opened it. Revenue is the value people entered.</p>
+</div></div>
+<form class="filters card" method="get" action="/performance">
+  <label class="small">From<input type="date" name="start" value="{{ f.start }}"></label>
+  <label class="small">To<input type="date" name="end" value="{{ f.end }}"></label>
+  <label class="small">Team<select name="team"><option value="">All</option>{% for t in teams %}<option value="{{ t.id }}" {{ 'selected' if f.team == t.id|string }}>{{ t.name }}</option>{% endfor %}</select></label>
+  <label class="small">Source<select name="source"><option value="">All</option>{% for x in sources %}<option {{ 'selected' if f.source == x }}>{{ x }}</option>{% endfor %}</select></label>
+  <button class="secondary">Show</button>
+</form>
+<div class="card table-wrap"><table>
+  <tr><th>Salesperson</th><th>Leads owned</th><th>Assigned</th><th>Emails sent</th><th>Positive replies</th><th>Negative replies</th>
+    <th>Meetings</th><th>Deals opened</th><th>Won</th><th>Lost</th><th>Win rate</th><th>Won value</th><th>of it AI-sourced</th></tr>
+  {% for r in report.rows %}<tr>
+    <td><a href="/performance?owner={{ r.username }}&start={{ f.start }}&end={{ f.end }}">{{ r.username }}</a></td><td>{{ r.leads_owned }}</td><td>{{ r.assigned }}</td><td>{{ r.emails_sent }}</td>
+    <td>{{ r.positive_replies }}</td><td>{{ r.negative_replies }}</td><td>{{ r.meetings }}</td><td>{{ r.deals_opened }}</td>
+    <td>{{ r.won }}</td><td>{{ r.lost }}</td><td>{{ pct(r.conversion) }}</td><td>{{ usd(r.won_value) }}</td><td>{{ usd(r.won_value_ai_sourced) }}</td></tr>
+  {% endfor %}
+  {% if everyone and report.unassigned %}{% set r = report.unassigned %}<tr class="muted">
+    <td>{{ r.username }}</td><td>—</td><td>—</td><td>{{ r.emails_sent }}</td><td>{{ r.positive_replies }}</td><td>{{ r.negative_replies }}</td>
+    <td>{{ r.meetings }}</td><td>{{ r.deals_opened }}</td><td>{{ r.won }}</td><td>{{ r.lost }}</td><td>{{ pct(r.conversion) }}</td><td>{{ usd(r.won_value) }}</td><td>{{ usd(r.won_value_ai_sourced) }}</td></tr>{% endif %}
+  {% set t = report.total %}<tr><th>Total</th><th>{{ t.leads_owned }}</th><th>{{ t.assigned }}</th><th>{{ t.emails_sent }}</th><th>{{ t.positive_replies }}</th>
+    <th>{{ t.negative_replies }}</th><th>{{ t.meetings }}</th><th>{{ t.deals_opened }}</th><th>{{ t.won }}</th><th>{{ t.lost }}</th>
+    <th>{{ pct(t.conversion) }}</th><th>{{ usd(t.won_value) }}</th><th>{{ usd(t.won_value_ai_sourced) }}</th></tr>
+</table></div>
+<h2>The AI employee in this period</h2>
+<div class="card small">
+  <div>Email drafts written: <b>{{ report.ai.drafts_written }}</b>{% for k, n in report.ai.drafts_by_kind.items() %} <span class="pill">{{ (k or 'inquiry reply')|replace('_', ' ') }}: {{ n }}</span>{% endfor %}</div>
+  <div>Replies read and classified: <b>{{ report.ai.replies_classified }}</b> · deals opened by the agents: <b>{{ report.ai.deals_opened }}</b> · of them won: <b>{{ report.ai.deals_won_ai_sourced }}</b></div>
+  <div>Won value from AI-sourced deals: <b>{{ usd(report.ai.won_value_ai_sourced) }}</b> · from deals people opened: <b>{{ usd(report.ai.won_value_human_sourced) }}</b></div>
+</div>
+{% endblock %}

@@ -33,6 +33,7 @@ from aime.models import Alert, Contact, FollowUp, InboundEmail, Lead, Meeting, O
 from aime.notify import notify_event
 from aime.integrations.email_smtp import POSTAL_PLACEHOLDER
 from aime.outreach import stop_sequence
+from aime.stages import move, opened
 from aime.timeutil import utcnow
 
 PATTERNS: list[tuple[str, re.Pattern]] = [
@@ -312,15 +313,16 @@ def ensure_opportunity(session: Session, lead: Lead, actor: str) -> Opportunity:
                           next_step="Book a meeting: approve the suggested reply with your booking link")
         session.add(opp)
         session.flush()
+        opened(session, opp, actor, "interested reply")
         log_activity(session, f"Opportunity created from an interested reply: {opp.name}", actor, type_="opportunity",
                      company_id=lead.company_id, lead_id=lead.id, opportunity_id=opp.id)
     elif opp.stage == "new":
-        opp.stage, opp.probability = "discovery", max(opp.probability or 0, 20)
+        move(session, opp, "discovery", actor, "interested reply", probability=max(opp.probability or 0, 20))
     elif opp.stage == "lost":  # they said no before and are interested now: the deal is open again
         log_activity(session, f"Opportunity stage lost → discovery (reopened by an interested reply; it was lost: "
                      f"{opp.lost_reason or 'no reason recorded'})", actor, type_="opportunity",
                      company_id=opp.company_id, lead_id=lead.id, opportunity_id=opp.id)
-        opp.stage, opp.probability, opp.closed_at, opp.lost_reason = "discovery", 20, None, None
+        move(session, opp, "discovery", actor, f"reopened by an interested reply (lost: {opp.lost_reason or 'no reason'})")
     return opp
 
 
@@ -337,8 +339,8 @@ def close_opportunities(session: Session, lead: Lead, reason: str, actor: str, s
                                                          Opportunity.stage.not_in(("won", "lost")))).scalars():
         if sure and opp.stage in AUTO_CLOSE_STAGES:
             old = opp.stage
-            opp.stage, opp.probability, opp.closed_at, opp.lost_reason = "lost", 0, utcnow(), reason[:200]
-            opp.next_step = None
+            move(session, opp, "lost", actor, reason)
+            opp.lost_reason, opp.next_step = reason[:200], None
             log_activity(session, f"Opportunity stage {old} → lost ({reason})", actor, type_="opportunity",
                          company_id=opp.company_id, lead_id=lead.id, opportunity_id=opp.id)
             notes.append(f"opportunity closed as lost ({reason})")

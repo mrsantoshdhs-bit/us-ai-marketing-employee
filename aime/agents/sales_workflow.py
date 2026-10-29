@@ -153,6 +153,9 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                           next_step="Review the drafted reply and send once approved")
         session.add(opp)
         session.flush()
+        from aime.stages import opened
+
+        opened(session, opp, self.name, "a qualified lead who contacted us")
         out.opportunities_created.append(opp.id)
         log_activity(session, f"Opportunity created: {opp.name}", self.name, type_="opportunity",
                      company_id=lead.company_id, lead_id=lead.id, opportunity_id=opp.id)

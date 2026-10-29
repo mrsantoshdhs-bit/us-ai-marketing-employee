@@ -59,6 +59,8 @@ from aime.scheduler.runner import ABANDON_AFTER, due_jobs, load_job_specs, next_
 from aime.scoring import lead_tier, tier_reason
 from aime.timeutil import as_aware_utc, fmt_et, fmt_local, local_tz, to_naive_utc, utcnow
 from aime.permissions import role_label
+from aime.stages import PROBABILITY
+from aime.stages import move as move_stage
 from aime.web.team_pages import assignment_history
 from aime.web.team_pages import register as register_team_pages
 from aime.visibility import EVERYTHING, lead_condition, opportunity_condition, record_condition
@@ -478,7 +480,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                                                       FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
                 f.status, f.blocked_reason = "cancelled", "Contact replied; sequence stopped"
             for o in s.execute(select(Opportunity).where(Opportunity.lead_id == lead.id, Opportunity.stage == "new")).scalars():
-                o.stage, o.probability = "discovery", 20
+                move_stage(s, o, "discovery", who(request), "contact replied (logged manually)")
             lead.last_activity_at = utcnow()
             log_activity(s, "Contact replied (logged manually); automated follow-ups stopped", who(request),
                          type_="reply", company_id=lead.company_id, lead_id=lead.id)
@@ -706,7 +708,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/opportunities/{opp_id}")
     def update_opp(request: Request, opp_id: int, stage: str = Form(...), next_step: str = Form(""),
-                   est_value: str = Form(""), lost_reason: str = Form("")):
+                   est_value: str = Form(""), lost_reason: str = Form(""), expected_close: str = Form("")):
         if stage not in STAGES:
             raise HTTPException(400)
         value = None
@@ -715,25 +717,28 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 value = float(est_value.replace(",", "").replace("$", ""))
             except ValueError:
                 return back("/pipeline", f"Estimated value '{est_value[:40]}' is not a number; nothing was changed")
+        close_by = None
+        if expected_close.strip():
+            try:
+                close_by = date.fromisoformat(expected_close.strip())
+            except ValueError:
+                return back("/pipeline", "Expected close date is not a date; nothing was changed")
         with C().db.session() as s:
             o = s.get(Opportunity, opp_id) or _404()
             old = o.stage
-            o.stage, o.next_step = stage, next_step or o.next_step
-            o.probability = {"new": 10, "discovery": 20, "proposal": 50, "negotiation": 70, "won": 100, "lost": 0}[stage]
+            o.next_step = next_step or o.next_step
+            reason = (" ".join(lost_reason.split())[:200] or o.lost_reason or "No reason given") if stage == "lost" else None
+            move_stage(s, o, stage, who(request), reason)  # history, close date, credit for a win; reopening clears them
+            o.probability = PROBABILITY[stage]
             if value is not None:
                 o.est_value = value
-            if stage in ("won", "lost"):
-                if old != stage:
-                    o.closed_at = utcnow()
-                if stage == "won" and o.lead_id:
-                    lead = s.get(Lead, o.lead_id)
-                    lead.status = "converted"
-            else:  # open again: no close date, no reason it was lost
-                o.closed_at = None
+            if close_by is not None:
+                o.expected_close = close_by
+            if stage == "won" and o.lead_id:
+                lead = s.get(Lead, o.lead_id)
+                lead.status = "converted"
             if stage == "lost":
-                o.lost_reason = " ".join(lost_reason.split())[:200] or o.lost_reason or "No reason given"
-            else:
-                o.lost_reason = None
+                o.lost_reason = reason
             change = f"Opportunity stage {old} → {stage}" + (f" ({o.lost_reason})" if stage == "lost" else "")
             log_activity(s, change, who(request), type_="opportunity",
                          company_id=o.company_id, lead_id=o.lead_id, opportunity_id=o.id)
