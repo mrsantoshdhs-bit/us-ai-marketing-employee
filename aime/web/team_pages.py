@@ -60,7 +60,8 @@ def register(app, C, render, back, who) -> None:
             Opportunity.stage.not_in(("won", "lost"))).group_by(Opportunity.owner)).all())
         teams = {t.id: t.name for t in s.execute(select(Team)).scalars()}
         roles = all_roles(s)
-        return [{"u": u, "role": roles.get(u.role, {}).get("label", u.role), "team": teams.get(u.team_id), "open": load.get(u.username, 0)}
+        return [{"u": u, "role": roles.get(u.role, {}).get("label", u.role), "team": teams.get(u.team_id), "open": load.get(u.username, 0),
+                 "receives": "receive_leads" in roles.get(u.role, {}).get("permissions", ())}
                 for u in s.execute(select(User).order_by(User.active.desc(), User.username)).scalars()]
 
     def users_view(request, s, **extra):

@@ -241,3 +241,29 @@ def test_the_administration_pages_render_for_an_administrator(org):
     boss.post("/admin/teams", headers=ORIGIN, data={"name": "US West", "manager": "zoe"})
     with ctx.db.session() as s:
         assert s.execute(select(Team).where(Team.name == "US West")).scalar_one().manager == "zoe"
+
+
+def test_approving_makes_the_approver_the_owner_only_if_they_work_leads(org):
+    from aime.models import FollowUp
+    from aime.reply_intel import reply_footer
+
+    ctx, leads = org
+    with ctx.db.session() as s:
+        co = s.execute(select(Company)).scalars().first()
+        extra = Lead(company_id=co.id, source="research", status="qualified")
+        s.add(extra)
+        s.flush()
+        drafts = {}
+        for name, lead_id in (("boss", leads["nobody"]), ("mia", extra.id)):
+            f = FollowUp(lead_id=lead_id, company_id=co.id, channel="email", kind="outreach", step=1, due_at=utcnow(),
+                         status="awaiting_approval", subject="Hello", body="Hi" + reply_footer(ctx.settings),
+                         to_email=f"{name}-lead@acme.example")
+            s.add(f)
+            s.flush()
+            drafts[name] = (f.id, lead_id)
+    for name, (fid, _lead) in drafts.items():
+        client(ctx, name).post(f"/followups/{fid}/approve", headers=ORIGIN, data={"qc_override": "yes"})
+    with ctx.db.session() as s:
+        assert s.get(FollowUp, drafts["boss"][0]).approved_by == "boss"
+        assert s.get(Lead, drafts["boss"][1]).owner is None  # an administrator approving does not take the lead
+        assert s.get(Lead, drafts["mia"][1]).owner == "mia"  # a Sales Manager approving does

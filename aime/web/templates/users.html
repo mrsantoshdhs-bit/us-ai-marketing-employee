@@ -22,7 +22,7 @@
     <td>{{ r.role }}</td>
     <td>{{ r.team or '—' }}</td>
     <td>{{ u.manager or '—' }}</td>
-    <td class="small">{{ 'available' if u.available is not false else 'unavailable' }}{% if u.capacity %} · up to {{ u.capacity }}{% endif %}
+    <td class="small">{% if not r.receives %}<span class="muted">not in rotation (role)</span>{% else %}{{ 'available' if u.available is not false else 'unavailable' }}{% if u.capacity %} · up to {{ u.capacity }}{% endif %}{% endif %}
       {% if u.skills %}<br><span class="muted">{{ u.skills|map('service')|join(', ') }}</span>{% endif %}</td>
     <td>{{ r.open }}</td>
     <td class="small">{{ u.last_login_at|local if u.last_login_at else '—' }}</td>

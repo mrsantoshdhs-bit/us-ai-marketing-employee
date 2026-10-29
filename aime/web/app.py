@@ -809,7 +809,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     f.status, f.approved_by, f.approved_at = "approved", who(request), now
                     if f.kind == "outreach":
                         lead = f.lead
-                        lead.owner = lead.owner or who(request)
+                        user = getattr(request.state, "user", None)
+                        # the approver becomes the owner only if they work leads (an administrator approving does not)
+                        if not lead.owner and (user is None or "receive_leads" in user.get("perms", ())):
+                            lead.owner = who(request)
                         if f.step == 1:
                             set_outreach_status(s, lead, "approved", who(request))
                         if qc_status in ("held", "failed"):
