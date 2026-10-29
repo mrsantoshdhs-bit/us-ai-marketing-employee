@@ -44,6 +44,7 @@ class ParsedEmail:
     is_bounce: bool = False
     bounced_addresses: list[str] = field(default_factory=list)
     bounced_message_id: str | None = None
+    auth_results: str | None = None  # the topmost Authentication-Results header: added by the receiving server
 
 
 def _text_of(msg: Message) -> str:
@@ -143,7 +144,7 @@ def parse_message(raw: bytes, own: frozenset[str] | set[str] = frozenset()) -> P
         references=" ".join((msg.get("References") or "").split()), from_email=(addr or "").lower(),
         from_name=name or None, to_email=(to[0].lower() if to else None), subject=subject[:300], received_at=received,
         body_text=_text_of(msg)[:20000], auto_submitted=auto, is_bounce=is_bounce, bounced_addresses=bounced,
-        bounced_message_id=original)
+        bounced_message_id=original, auth_results=(str(msg.get("Authentication-Results") or "").strip()[:2000] or None))
 
 
 def new_text(body: str) -> str:

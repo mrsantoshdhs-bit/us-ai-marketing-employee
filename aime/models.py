@@ -350,6 +350,7 @@ class InboundEmail(Base):
     action_note: Mapped[str | None] = mapped_column(Text)
     is_simulated: Mapped[bool] = mapped_column(Boolean, default=False)  # created by `aime simulate-reply`
     processed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    auth_results: Mapped[str | None] = mapped_column(Text)  # the receiving server's Authentication-Results
 
     lead: Mapped["Lead | None"] = relationship()
     contact: Mapped["Contact | None"] = relationship()

@@ -133,6 +133,8 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "meeting_booking_enabled": ("MEETING_BOOKING_ENABLED", bool),
     "calendar_send_invites": ("CALENDAR_SEND_INVITES", bool),
     "inbox_scope": ("INBOX_SCOPE", str),
+    "calendly_verified_only": ("CALENDLY_VERIFIED_ONLY", bool),
+    "calendly_forwarders": ("CALENDLY_FORWARDERS", str),
     "calendly_url": ("CALENDLY_URL", str),
     "dashboard_host": ("DASHBOARD_HOST", str),
     "dashboard_port": ("DASHBOARD_PORT", int),
@@ -233,6 +235,10 @@ class Settings:
     # so a mailbox you also use for other work is not copied into the CRM. all: keep every email (a dedicated
     # sales mailbox, where new inquiries by email should show up too).
     inbox_scope: str = "related"
+    # A Calendly notice changes the CRM by itself only when the mail server vouches for it (aime.mail_auth); others
+    # wait for a person. CALENDLY_FORWARDERS: extra addresses allowed to forward notices (comma-separated).
+    calendly_verified_only: bool = True
+    calendly_forwarders: str = ""
     calendly_url: str = ""  # booking link offered to interested prospects
 
     dashboard_host: str = "127.0.0.1"

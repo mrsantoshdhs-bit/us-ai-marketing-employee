@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from aime.config import Settings
 from aime.integrations.email_smtp import compliance_footer
 from aime.knowledge.services import SERVICES
@@ -17,7 +19,10 @@ def _service_phrase(service_id: str | None) -> str:
 def _linkedin_event(source_page: str | None) -> str:
     """The event's name when the person registered for a LinkedIn event ("LinkedIn event: <name>"), else ""."""
     page = source_page or ""
-    return page.split(": ", 1)[1].strip() if page.startswith("LinkedIn event:") and ": " in page else ""
+    name = page.split(": ", 1)[1].strip() if page.startswith("LinkedIn event:") and ": " in page else ""
+    # the event's name reaches a subject line: no links, no addresses, plain words only
+    name = re.sub(r"(?i)\b(?:https?://|www\.)\S+|\S+@\S+", "", name)
+    return " ".join(re.sub(r"[^\w &'.,:()/+-]", " ", name).split())[:80]
 
 
 def draft_reply(settings: Settings, step: int, first_name: str | None, service_id: str | None,
@@ -46,7 +51,9 @@ def draft_reply(settings: Settings, step: int, first_name: str | None, service_i
         )
     elif step == 1:
         subject = f"Re: your inquiry about {phrase}"
-        echo = f'\n\nYou mentioned: "{inquiry_excerpt.strip()[:240]}"' if inquiry_excerpt else ""
+        # the inquiry's own words are not quoted back: a reply that may go out under a campaign authorization must
+        # not carry text a stranger typed into the form to whatever address they gave
+        echo = ""
         body = (
             f"Hi {name},\n\n"
             f"Thank you for contacting {company} about {phrase}.{echo}\n\n"

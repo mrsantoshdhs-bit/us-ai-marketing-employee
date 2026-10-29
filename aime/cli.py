@@ -86,7 +86,20 @@ def cmd_tick(args, ctx) -> int:
     return 0
 
 
+class PathOnlyAccessLog:
+    """Logging filter for uvicorn's access log: the path without its query string. Queries can carry sign-in codes
+    (OAuth callbacks), one-time setup links and messages with email addresses, which do not belong in a log file."""
+
+    def filter(self, record) -> bool:
+        args = getattr(record, "args", None)
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            record.args = (*args[:2], args[2].split("?", 1)[0], *args[3:])
+        return True
+
+
 def cmd_serve(args, ctx) -> int:
+    import logging
+
     import uvicorn
 
     from aime.web.app import create_app
@@ -96,7 +109,10 @@ def cmd_serve(args, ctx) -> int:
     if host not in ("127.0.0.1", "localhost", "::1"):
         print("Refusing to bind to a non-local address. The dashboard is a local tool; see docs/DEPLOYMENT.md.")
         return 2
-    uvicorn.run(create_app(ctx), host=host, port=port, log_level="info")
+    logging.getLogger("uvicorn.access").addFilter(PathOnlyAccessLog())
+    # proxy_headers off: nothing sits in front of this local dashboard, so X-Forwarded-For is never trusted (it
+    # would let any local program pick the address the inbound API's rate limit counts)
+    uvicorn.run(create_app(ctx), host=host, port=port, log_level="info", proxy_headers=False)
     return 0
 
 

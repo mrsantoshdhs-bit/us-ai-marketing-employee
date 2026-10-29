@@ -226,7 +226,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return response
 
     @app.post("/logout")
-    def logout():
+    def logout(request: Request):
+        user = getattr(request.state, "user", None)
+        if user:  # a copied cookie stops working too: every session of this account ends
+            with C().db.session() as s:
+                account = s.get(User, user["id"])
+                if account is not None:
+                    account.session_version = (account.session_version or 1) + 1
         response = RedirectResponse("/login?error=" + quote("Signed out"), status_code=303)
         response.delete_cookie(COOKIE, path="/")
         return response
@@ -322,6 +328,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             if action == "reviewed":
                 row.status = "reviewed"
                 msg = "Marked reviewed"
+            elif action == "apply_calendly" and row.category == "calendly" and row.status == "needs_review":
+                from aime.meetings import handle_calendly_email
+                note = handle_calendly_email(s, C().settings, row, who(request), confirmed_by=who(request))
+                row.action_note = f"{note} (confirmed by {who(request)})"
+                log_activity(s, f"Calendly notice #{row.id} confirmed and applied", who(request), type_="override",
+                             company_id=row.company_id, lead_id=row.lead_id)
+                msg = f"Applied: {note}"
             elif action == "reclassify" and category in ("interested", "not_interested", "objection", "referral",
                                                           "question", "unsubscribe", "out_of_office", "bounce", "other"):
                 if row.suggested_followup_id:

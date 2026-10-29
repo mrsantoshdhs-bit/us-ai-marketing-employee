@@ -37,6 +37,8 @@ COOKIE = "aime_session"
 SESSION_SECONDS = 12 * 3600
 MAX_FAILED = 5
 LOCK_MINUTES = 15
+SIGN_IN_FAILED = (f"Wrong username or password. After {MAX_FAILED} wrong attempts an account waits {LOCK_MINUTES} "
+                  "minutes before it can sign in again")
 MIN_PASSWORD = 12
 PUBLIC_PREFIXES = ("/login", "/static/", "/setup")  # /setup: a one-time account link
 PUBLIC_PATHS = ("/api/inbound",)  # protected by its own token and rate limit
@@ -114,15 +116,16 @@ def authenticate(session: Session, username: str, password: str) -> tuple[User |
     user = session.execute(select(User).where(User.username == username.strip().lower())).scalars().first()
     if user is None or not user.active:
         verify_password(password, "scrypt$16384$8$AAAAAAAAAAAAAAAAAAAAAA==$AAAA")  # similar timing for unknown users
-        return None, "Wrong username or password"
+        return None, SIGN_IN_FAILED
     now = utcnow()
     if user.locked_until and user.locked_until > now:
-        return None, f"Account locked after repeated failed sign-ins; try again after {user.locked_until:%H:%M} UTC"
+        verify_password(password, "scrypt$16384$8$AAAAAAAAAAAAAAAAAAAAAA==$AAAA")
+        return None, SIGN_IN_FAILED  # the same words as a wrong password: nobody learns which accounts exist
     if not verify_password(password, user.password_hash):
         user.failed_logins = (user.failed_logins or 0) + 1
         if user.failed_logins >= MAX_FAILED:
             user.locked_until, user.failed_logins = now + timedelta(minutes=LOCK_MINUTES), 0
-        return None, "Wrong username or password"
+        return None, SIGN_IN_FAILED
     user.failed_logins, user.locked_until, user.last_login_at = 0, None, now
     return user, "Signed in"
 
@@ -175,7 +178,8 @@ ROLE_LABELS = {k: v["label"] for k, v in BUILTIN_ROLES.items()}
 ADMIN_ROLES = tuple(k for k, v in BUILTIN_ROLES.items() if "admin_ops" in v["permissions"])
 READ_METHODS = ("GET", "HEAD")
 _APPROVALS = re.compile(r"/(?:followups/\d+/(?:approve|reconfirm|mark_sent|requeue)"
-                        r"|content/\d+/(?:approve|confirm_published|requeue)|campaigns(?:/\d+/status)?)/?")
+                        r"|content/\d+/(?:approve|confirm_published|requeue)|campaigns(?:/\d+/status)?"
+                        r"|meetings/proposals/\d+/book|meetings/\d+/move)/?")
 # one record in the URL: /leads/7, /opportunities/3, /followups/12/approve, /inbox/5/reviewed, /meetings/2/held,
 # /meetings/proposals/4/book, /meetings/requests/9/propose
 _RECORD = re.compile(r"/(?:meetings/)?(leads|opportunities|followups|inbox|meetings|proposals|requests)/(\d+)(?:/|$)")

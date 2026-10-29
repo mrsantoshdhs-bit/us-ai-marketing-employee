@@ -399,7 +399,17 @@ def _advance_opportunity(session: Session, lead: Lead, meeting: Meeting, actor: 
     return opp
 
 
-def handle_calendly_email(session: Session, settings, row: InboundEmail, actor: str) -> str:
+def handle_calendly_email(session: Session, settings, row: InboundEmail, actor: str, confirmed_by: str | None = None) -> str:
+    """Apply a Calendly notice. Unless the mail server vouches for it (aime.mail_auth) or a person confirmed it
+    (`confirmed_by`), it changes nothing and waits for review: a forged notice must not book or cancel meetings."""
+    if getattr(settings, "calendly_verified_only", True) and not row.is_simulated and not confirmed_by:
+        from aime.mail_auth import calendly_verified
+
+        trusted, why = calendly_verified(session, settings, row.from_email, row.auth_results)
+        if not trusted:
+            row.status = "needs_review"
+            return (f"Calendly notice not applied: {why}. Check it in Calendly, then press Apply on Replies "
+                    "if it is genuine")
     own = {a.lower() for a in (settings.smtp_from, settings.imap_credentials[0]) if a}
     info = parse_calendly(row.subject or "", row.body_text or "", own,
                           settings.section("followup").get("send_window_timezone", "America/New_York"),

@@ -87,4 +87,6 @@ jobs:
           fi
 
       - name: Dependency vulnerability audit
-        run: pip-audit -r requirements.txt --progress-spinner off
+        run: |
+          pip-audit -r requirements.txt --progress-spinner off
+          pip-audit -r requirements.lock --progress-spinner off  # the exact versions running in production
