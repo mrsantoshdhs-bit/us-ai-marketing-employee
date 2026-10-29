@@ -84,7 +84,7 @@ def test_pipeline_automation_creates_each_task_once(make_ctx):
         subjects = [f.subject for f in s.execute(select(FollowUp).where(FollowUp.channel == "task",
                                                                        FollowUp.status == "pending")).scalars()]
     assert stats["stalled_tasks"] == 1 and stats["meeting_tasks"] == 1 and again == {"stalled_tasks": 0, "no_response": 0,
-                                                                                       "meeting_tasks": 0}
+                                                                                       "meeting_tasks": 0, "escalated": 0}
     assert any(s.startswith("Stalled:") for s in subjects) and any(s.startswith("Record the outcome") for s in subjects)
 
 
