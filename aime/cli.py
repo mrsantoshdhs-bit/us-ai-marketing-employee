@@ -301,7 +301,7 @@ def cmd_user(args, ctx, prompt_fn=None) -> int:
 
     from aime.crm_ops import log_activity
     from aime.models import User
-    from aime.web.auth import hash_password
+    from aime.web.auth import ROLES, hash_password
 
     prompt_fn = prompt_fn or getpass.getpass
     with ctx.db.session() as s:
@@ -355,7 +355,7 @@ def cmd_user(args, ctx, prompt_fn=None) -> int:
         elif args.action == "set-role":
             # Only from the command line on this computer: the dashboard cannot change roles.
             if not getattr(args, "role", None):
-                print("--role is required (sales_manager, admin or super_admin)")
+                print(f"--role is required ({', '.join(ROLES)})")
                 return 1
             old, user.role = user.role, args.role
             log_activity(s, f"Dashboard account {username}: role {old} -> {args.role}", "command line", type_="security")
@@ -655,8 +655,9 @@ def build_parser() -> argparse.ArgumentParser:
     us = sub.add_parser("user", help="Dashboard sign-in accounts (you type the password at the prompt)")
     us.add_argument("action", choices=["create", "list", "set-password", "set-role", "disable", "enable"])
     us.add_argument("--username")
-    us.add_argument("--role", choices=["sales_manager", "admin", "super_admin"],
-                    help="default for create: sales_manager; super_admin also configures mailboxes and sales settings")
+    us.add_argument("--role", choices=["analyst", "sales_executive", "sales_manager", "admin", "super_admin"],
+                    help="default for create: sales_manager; analyst only reads; sales_executive works leads but "
+                         "cannot approve emails or posts; super_admin also configures mailboxes and sales settings")
     us.add_argument("--data-dir", help="Use another data folder (e.g. the demo database)")
     return p
 

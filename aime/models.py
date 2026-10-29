@@ -678,7 +678,7 @@ class User(Timestamped, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(60), unique=True)
     password_hash: Mapped[str] = mapped_column(String(200))  # scrypt$n$r$p$salt$hash
-    role: Mapped[str] = mapped_column(String(30), default="sales_manager")  # sales_manager | admin | super_admin
+    role: Mapped[str] = mapped_column(String(30), default="sales_manager")  # analyst | sales_executive | sales_manager | admin | super_admin
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     session_version: Mapped[int] = mapped_column(Integer, default=1)  # bump to sign out every session
     failed_logins: Mapped[int] = mapped_column(Integer, default=0)
