@@ -213,6 +213,38 @@ class Opportunity(Timestamped, Base):
     company: Mapped[Company] = relationship()
 
 
+class Quote(Timestamped, Base):
+    """A price a person offered on a deal. Never written by an agent: prices and terms come only from people."""
+
+    __tablename__ = "quotes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    opportunity_id: Mapped[int] = mapped_column(ForeignKey("opportunities.id"), index=True)
+    amount: Mapped[float] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(3), default="USD")
+    status: Mapped[str] = mapped_column(String(20), default="draft")  # draft | sent | accepted | rejected | expired
+    valid_until: Mapped[date | None] = mapped_column(Date)
+    terms: Mapped[str | None] = mapped_column(String(500))
+    created_by: Mapped[str] = mapped_column(String(80))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class Attachment(Timestamped, Base):
+    """A document on a deal (proposal, contract, requirements). Stored under data/attachments, served only through
+    the dashboard's permission checks, always as a download."""
+
+    __tablename__ = "attachments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    opportunity_id: Mapped[int] = mapped_column(ForeignKey("opportunities.id"), index=True)
+    filename: Mapped[str] = mapped_column(String(200))
+    stored_as: Mapped[str] = mapped_column(String(80))
+    content_type: Mapped[str] = mapped_column(String(100))
+    size: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    uploaded_by: Mapped[str] = mapped_column(String(80))
+
+
 class StageChange(Base):
     """Every move of a deal through the pipeline (aime.stages): from, to, when, who and why."""
 

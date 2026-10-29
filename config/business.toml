@@ -111,6 +111,9 @@ strategy = "workload"             # workload (fewest open deals) | round_robin |
 escalate_after_hours = 24         # a deal its owner has not touched for this long: their manager is told (0 = never)
 
 [pipeline]
+# Open stages in order with their win probability (%). new and discovery stay (the agents open deals there); won and
+# lost always follow. Changed by the Super Admin in Settings › Sales settings.
+stages = "new:10, discovery:20, proposal:50, negotiation:70"
 # Open opportunities with nothing logged for this long get a "decide the next step" task.
 stalled_days = 10
 # After the last outreach email, wait this long for a reply before marking "no response" (lead -> nurture).

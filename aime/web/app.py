@@ -59,10 +59,11 @@ from aime.scheduler.runner import ABANDON_AFTER, due_jobs, load_job_specs, next_
 from aime.scoring import lead_tier, tier_reason
 from aime.timeutil import as_aware_utc, fmt_et, fmt_local, local_tz, to_naive_utc, utcnow
 from aime.permissions import role_label
-from aime.stages import PROBABILITY
+from aime.stages import probability_of, stage_names
 from aime.stages import move as move_stage
 from aime.web.team_pages import assignment_history
 from aime.web.team_pages import register as register_team_pages
+from aime.web.deal_pages import register as register_deal_pages
 from aime.visibility import (EVERYTHING, company_condition, contact_condition, lead_condition, opportunity_condition,
                              org_page, record_condition)
 from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate,
@@ -526,10 +527,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 _ = o.company
             outreach = dict(s.execute(select(Lead.outreach_status, func.count(Lead.id)).where(
                 Lead.outreach_status.is_not(None), lead_condition(scope(request))).group_by(Lead.outreach_status)).all())
-        board = {st: [o for o in opps if o.stage == st] for st in STAGES}
+        names = stage_names(C().settings)
+        names += sorted({o.stage for o in opps} - set(names))  # a stage removed from Settings keeps its deals in view
+        board = {st: [o for o in opps if o.stage == st] for st in names}
         order = ["drafted", "approved", "contacted", "replied", "interested", "meeting", "not_interested", "no_response",
                  "unsubscribed", "bounced", "stopped"]
-        return render(request, "pipeline.html", board=board, outreach=[(k, outreach.get(k, 0)) for k in order])
+        return render(request, "pipeline.html", board=board, STAGES=names, outreach=[(k, outreach.get(k, 0)) for k in order])
 
     # ------------------------------------------------------------------ meetings
     @app.get("/meetings", response_class=HTMLResponse)
@@ -724,7 +727,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.post("/opportunities/{opp_id}")
     def update_opp(request: Request, opp_id: int, stage: str = Form(...), next_step: str = Form(""),
                    est_value: str = Form(""), lost_reason: str = Form(""), expected_close: str = Form("")):
-        if stage not in STAGES:
+        if stage not in stage_names(C().settings):
             raise HTTPException(400)
         value = None
         if est_value.strip():
@@ -743,8 +746,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             old = o.stage
             o.next_step = next_step or o.next_step
             reason = (" ".join(lost_reason.split())[:200] or o.lost_reason or "No reason given") if stage == "lost" else None
-            move_stage(s, o, stage, who(request), reason)  # history, close date, credit for a win; reopening clears them
-            o.probability = PROBABILITY[stage]
+            move_stage(s, o, stage, who(request), reason, settings=C().settings)  # history, close date, credit for a win
+            o.probability = probability_of(C().settings, stage)
             if value is not None:
                 o.est_value = value
             if close_by is not None:
@@ -1723,6 +1726,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             }
 
     register_team_pages(app, C, render, back, who)
+    register_deal_pages(app, C, render, back, who)
 
     @app.get("/api/leads")
     def api_leads(request: Request, status: str = "qualified", limit: int = 50):
@@ -1857,7 +1861,7 @@ def analytics_view(ctx: AppContext, s) -> dict:
         chart_meetings=charts.column_chart(labels, [("Meetings booked", [n for _, n in meetings_w])],
                                            "Meetings booked per week", "No meetings booked in the last 8 weeks"),
         chart_funnel=charts.bar_list(funnel, "Sales funnel", "The funnel fills as research runs"),
-        chart_pipeline=charts.bar_list([(stage.title(), by_stage.get(stage, 0), "/pipeline") for stage in STAGES],
+        chart_pipeline=charts.bar_list([(stage.title(), by_stage.get(stage, 0), "/pipeline") for stage in stage_names(ctx.settings)],
                                        "Opportunities by stage", "No opportunities yet: they open on an interested reply"),
         funnel_tiles=funnel_detail(s),
     )
