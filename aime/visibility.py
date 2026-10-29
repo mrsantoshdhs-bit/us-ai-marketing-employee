@@ -83,6 +83,37 @@ def record_condition(scope: Scope, column, allow_unlinked: bool | None = None):
     return or_(column.in_(lead_ids(scope)), column.is_(None)) if unlinked else column.in_(lead_ids(scope))
 
 
+def company_condition(scope: Scope):
+    """Companies with a lead this scope sees, plus companies without any lead (research not yet a lead) for those
+    who see unassigned work."""
+    from aime.models import Company
+
+    if scope.all:
+        return true()
+    parts = [Company.id.in_(select(Lead.company_id).where(lead_condition(scope)))]
+    if scope.unassigned:
+        parts.append(~Company.id.in_(select(Lead.company_id)))
+    return or_(*parts)
+
+
+def contact_condition(scope: Scope):
+    from aime.models import Company, Contact
+
+    if scope.all:
+        return true()
+    return Contact.company_id.in_(select(Company.id).where(company_condition(scope)))
+
+
+# Pages that show the whole organisation's numbers and work: only for roles that see everything (view_all). Others
+# get "My work" (/my), built from what they may see.
+ORG_EXACT = ("/", "/manager", "/audit", "/system", "/automation", "/api/stats")
+ORG_PREFIXES = ("/command-center", "/reports", "/agents", "/jobs/", "/jobs")
+
+
+def org_page(path: str) -> bool:
+    return path in ORG_EXACT or any(path == p or path.startswith(p.rstrip("/") + "/") for p in ORG_PREFIXES)
+
+
 def opportunity_condition(scope: Scope):
     if scope.all:
         return true()

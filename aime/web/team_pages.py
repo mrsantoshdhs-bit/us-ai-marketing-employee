@@ -302,6 +302,49 @@ def register(app, C, render, back, who) -> None:
         return back("/pipeline", note)
 
 
+    # ------------------------------------------------------------------ my work
+    @app.get("/my", response_class=HTMLResponse)
+    def my_work(request: Request):
+
+        from aime.models import FollowUp, InboundEmail, Meeting
+        from aime.performance import build
+        from aime.visibility import EVERYTHING, lead_condition, opportunity_condition, record_condition
+
+        sc = getattr(request.state, "scope", None) or EVERYTHING
+        user = getattr(request.state, "user", None)
+        name = user["username"] if user else None
+        now = utcnow()
+        with C().db.session() as s:
+            mine = Lead.owner.in_(sc.usernames) if not sc.all else Lead.owner.is_not(None)
+            leads = s.execute(select(Lead).where(lead_condition(sc), mine, Lead.status.not_in(("merged", "disqualified")))
+                              .order_by(Lead.score.desc()).limit(12)).scalars().all()
+            for lead in leads:
+                _ = lead.company
+            lead_total = s.execute(select(func.count(Lead.id)).where(lead_condition(sc), mine)).scalar_one()
+            unassigned = s.execute(select(func.count(Lead.id)).where(lead_condition(sc), Lead.owner.is_(None),
+                                                                     Lead.status == "qualified")).scalar_one() if sc.unassigned else 0
+            deals = s.execute(select(Opportunity).where(opportunity_condition(sc), Opportunity.stage.not_in(("won", "lost")))
+                              .order_by(Opportunity.expected_close.is_(None), Opportunity.expected_close, Opportunity.id)).scalars().all()
+            for d in deals:
+                _ = d.company
+            approvals = s.execute(select(func.count(FollowUp.id)).where(
+                record_condition(sc, FollowUp.lead_id), FollowUp.status == "awaiting_approval")).scalar_one()
+            tasks = s.execute(select(FollowUp).where(record_condition(sc, FollowUp.lead_id), FollowUp.channel == "task",
+                                                     FollowUp.status == "pending").order_by(FollowUp.due_at).limit(10)).scalars().all()
+            for t in tasks:
+                _ = t.lead.company
+            replies = s.execute(select(func.count(InboundEmail.id)).where(
+                record_condition(sc, InboundEmail.lead_id), InboundEmail.status == "needs_review")).scalar_one()
+            meetings = s.execute(select(Meeting).where(record_condition(sc, Meeting.lead_id, allow_unlinked=False),
+                                                       Meeting.status == "scheduled", Meeting.ends_at >= now)
+                                 .order_by(Meeting.starts_at).limit(8)).scalars().all()
+            people = sorted(sc.usernames) if not sc.all else ([name] if name else [])
+            report = build(s, now - timedelta(days=30), now, people) if people else None
+        return render(request, "my.html", leads=leads, lead_total=lead_total, unassigned=unassigned, deals=deals,
+                      approvals=approvals, tasks=tasks, replies=replies, meetings=meetings, report=report,
+                      who_label=("you and your team" if sc.usernames and len(sc.usernames) > 1 else "you"),
+                      pipeline_value=sum(d.est_value or 0 for d in deals), today=now.date())
+
     # ------------------------------------------------------------------ sales performance
     @app.get("/performance", response_class=HTMLResponse)
     def performance_page(request: Request, start: str = "", end: str = "", team: str = "", owner: str = "",

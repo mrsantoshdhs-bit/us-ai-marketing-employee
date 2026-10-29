@@ -63,7 +63,8 @@ from aime.stages import PROBABILITY
 from aime.stages import move as move_stage
 from aime.web.team_pages import assignment_history
 from aime.web.team_pages import register as register_team_pages
-from aime.visibility import EVERYTHING, lead_condition, opportunity_condition, record_condition
+from aime.visibility import (EVERYTHING, company_condition, contact_condition, lead_condition, opportunity_condition,
+                             org_page, record_condition)
 from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate,
                            current_username, make_cookie, safe_next, session_secret, user_count)
 
@@ -165,7 +166,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     env = templates.env
     env.filters.update(local=fmt_local, et=fmt_et, service=service_name, industry=industry_label, safe_url=safe_url,
                        tier=lead_tier, tier_reason=tier_reason, run_summary=run_summary, intent_label=lambda i: INTENT_LABELS.get(i or "", ""))
-    env.globals.update(describe_rule=am.describe_rule, ADDRESS_RULES=am.ADDRESS_RULES, SERVICES=SERVICES, INDUSTRIES=INDUSTRIES, STATES=US_REGIONS, STAGES=STAGES,
+    env.globals.update(org_page=org_page, describe_rule=am.describe_rule, ADDRESS_RULES=am.ADDRESS_RULES, SERVICES=SERVICES, INDUSTRIES=INDUSTRIES, STATES=US_REGIONS, STAGES=STAGES,
                        LEAD_STATUSES=LEAD_STATUSES)
 
     def C() -> AppContext:
@@ -182,6 +183,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         data.setdefault("user_name", (user["username"].title() if user else C().settings.sender_name or ""))
         data.setdefault("is_super_admin", not C().settings.dashboard_auth or bool(user and "configure_system" in user.get("perms", ())))
         data.setdefault("can_manage_users", not C().settings.dashboard_auth or bool(user and "manage_users" in user.get("perms", ())))
+        data.setdefault("can_view_all", not C().settings.dashboard_auth or bool(user and "view_all" in user.get("perms", ())))
         if "user_role" not in data:
             with C().db.session() as s:
                 data["user_role"] = role_label(s, user["role"]) if user else "Preview · no sign-in"
@@ -441,7 +443,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.get("/contacts", response_class=HTMLResponse)
     def contacts_page(request: Request, confidence: str = "", role: str = "", reachable: str = ""):
         with C().db.session() as s:
-            stmt = select(Contact).where(Contact.source.in_(("website", "sec_filing")))
+            stmt = select(Contact).where(Contact.source.in_(("website", "sec_filing")), contact_condition(scope(request)))
             if reachable:
                 stmt = stmt.where(*USABLE_EMAIL)
             if confidence:
@@ -502,7 +504,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.get("/companies", response_class=HTMLResponse)
     def companies(request: Request, q: str = "", state: str = "", industry: str = ""):
         with C().db.session() as s:
-            stmt = select(Company).where(Company.merged_into_id.is_(None))
+            stmt = select(Company).where(Company.merged_into_id.is_(None), company_condition(scope(request)))
             if q:
                 stmt = stmt.where(Company.name.ilike(f"%{q}%"))
             if state:
@@ -1121,14 +1123,14 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         if len(q) >= 2:
             like = f"%{q.lower()}%"
             with C().db.session() as s:
-                companies = s.execute(select(Company).where(Company.merged_into_id.is_(None), or_(
+                companies = s.execute(select(Company).where(Company.merged_into_id.is_(None), company_condition(scope(request)), or_(
                     func.lower(Company.name).like(like), func.lower(Company.domain).like(like))).limit(12)).scalars().all()
                 leads = {lead.company_id: lead.id for lead in s.execute(select(Lead).where(
                     Lead.company_id.in_([c.id for c in companies] or [0]), lead_condition(scope(request)))).scalars()}
                 groups.append(("Companies", "building", [
                     (c.name, f"/leads/{leads[c.id]}" if c.id in leads else "/companies", " · ".join(
                         x for x in (c.domain, c.state, c.website_status) if x)) for c in companies]))
-                contacts = s.execute(select(Contact).where(or_(
+                contacts = s.execute(select(Contact).where(contact_condition(scope(request)), or_(
                     func.lower(Contact.first_name).like(like), func.lower(Contact.last_name).like(like),
                     func.lower(Contact.email).like(like), func.lower(Contact.title).like(like))).limit(12)).scalars().all()
                 groups.append(("Contacts", "users", [

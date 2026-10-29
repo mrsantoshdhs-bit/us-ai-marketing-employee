@@ -1,0 +1,37 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}{% from "_macros.html" import status_pill %}
+{% block title %}My work · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+  <h1>{{ icon('target') }} My work</h1>
+  <p class="subtitle">What is on {{ who_label }} today: your leads, deals, emails to approve, replies and meetings.
+    Only records you may see are counted.</p>
+</div></div>
+<div class="card small">
+  <span class="pill">Leads: {{ lead_total }}</span>
+  {% if unassigned %}<a class="pill" href="/leads?status=qualified">Unassigned qualified leads: {{ unassigned }}</a>{% endif %}
+  <a class="pill" href="/pipeline">Open deals: {{ deals|length }}{% if pipeline_value %} · ${{ '{:,.0f}'.format(pipeline_value) }}{% endif %}</a>
+  <a class="pill {{ 'warn' if approvals }}" href="/approvals">Emails to approve: {{ approvals }}</a>
+  <a class="pill {{ 'warn' if replies }}" href="/inbox">Replies to review: {{ replies }}</a>
+  <a class="pill" href="/meetings">Upcoming meetings: {{ meetings|length }}</a>
+</div>
+<h2>Open deals</h2>
+<div class="card table-wrap"><table>
+  <tr><th>Deal</th><th>Stage</th><th>Owner</th><th>Value</th><th>Close by</th><th>Next step</th></tr>
+  {% for d in deals %}<tr><td><a href="/leads/{{ d.lead_id }}">{{ d.name }}</a></td><td>{{ status_pill(d.stage) }}</td><td>{{ d.owner or '—' }}</td>
+    <td>{{ '$' ~ '{:,.0f}'.format(d.est_value) if d.est_value else '—' }}</td>
+    <td{% if d.expected_close and d.expected_close < today %} class="bad"{% endif %}>{{ d.expected_close or '—' }}</td><td class="small">{{ d.next_step or '' }}</td></tr>
+  {% else %}<tr><td colspan="6" class="muted">No open deals.</td></tr>{% endfor %}
+</table></div>
+<div class="grid">
+  <div><h2>Tasks</h2><div class="card">{% for t in tasks %}<div class="row-item"><a href="/leads/{{ t.lead_id }}">{{ t.subject }}</a> <span class="small muted">{{ t.lead.company.name }} · due {{ t.due_at|local }}</span></div>{% else %}<span class="muted">No open tasks.</span>{% endfor %}</div></div>
+  <div><h2>Meetings</h2><div class="card">{% for m in meetings %}<div class="row-item"><a href="/leads/{{ m.lead_id }}">{{ m.title }}</a> <span class="small muted">{{ m.starts_at|local }}</span></div>{% else %}<span class="muted">No upcoming meetings.</span>{% endfor %}</div></div>
+</div>
+<h2>Leads</h2>
+<div class="card">{% for l in leads %}<div class="row-item"><a href="/leads/{{ l.id }}">{{ l.company.name }}</a> <span class="small muted">{{ l.grade or '' }} · {{ l.score }} · {{ l.owner }}</span></div>{% else %}<span class="muted">No leads assigned yet.</span>{% endfor %}</div>
+{% if report %}<h2>Last 30 days</h2>
+<div class="card table-wrap"><table>
+  <tr><th>Person</th><th>Emails sent</th><th>Positive replies</th><th>Meetings</th><th>Deals opened</th><th>Won</th><th>Lost</th><th>Won value</th></tr>
+  {% for r in report.rows %}<tr><td>{{ r.username }}</td><td>{{ r.emails_sent }}</td><td>{{ r.positive_replies }}</td><td>{{ r.meetings }}</td><td>{{ r.deals_opened }}</td><td>{{ r.won }}</td><td>{{ r.lost }}</td><td>{{ '$' ~ '{:,.0f}'.format(r.won_value) if r.won_value else '—' }}</td></tr>{% endfor %}
+</table></div>
+<p class="small muted"><a href="/performance">Sales performance</a> has the full report with filters.</p>{% endif %}
+{% endblock %}

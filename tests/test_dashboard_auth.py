@@ -88,9 +88,10 @@ def test_tampered_expired_and_revoked_sessions_are_rejected(auth_ctx):
     assert not read_cookie(secret, good[:-2] + "00")
     client = TestClient(create_app(auth_ctx))
     client.cookies.set(COOKIE, good)
-    assert client.get("/", follow_redirects=False).status_code == 200
+    assert client.get("/leads", follow_redirects=False).status_code == 200  # a page every signed-in user opens
     assert cmd_user(Args("set-password", "manager"), auth_ctx, prompt_fn=lambda _p: GOOD + "!") == 0
-    assert client.get("/", follow_redirects=False).status_code == 303  # password change signed it out
+    r = client.get("/leads", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"].startswith("/login")  # password change signed it out
 
 
 def test_approvals_record_the_signed_in_manager(auth_ctx):

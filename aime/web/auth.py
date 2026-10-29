@@ -29,7 +29,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from aime.models import User
 from aime.permissions import BUILTIN_ROLES, permissions_of
-from aime.visibility import EVERYTHING, record_visible, scope_for
+from aime.visibility import EVERYTHING, org_page, record_visible, scope_for
 from aime.secure_store import protect, unprotect
 from aime.timeutil import utcnow
 
@@ -255,6 +255,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return JSONResponse({"detail": "Not found"}, status_code=404)
         if reason := refusal(request.state.user["perms"], request.method, path):
             return JSONResponse({"detail": reason}, status_code=403)
+        if request.method in READ_METHODS and org_page(path) and "view_all" not in request.state.user["perms"]:
+            # the whole organisation's figures and work: their own (or their team's) are on My work
+            if path.startswith("/api/"):
+                return JSONResponse({"detail": "Organisation-wide figures need a role that sees all records"},
+                                    status_code=403)
+            return RedirectResponse("/my", status_code=303)
         with ctx.db.session() as s:
             request.state.scope = scope_for(s, request.state.user)
             if (m := _RECORD.match(path)) and not record_visible(s, request.state.scope, m.group(1), int(m.group(2))):

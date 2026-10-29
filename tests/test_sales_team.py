@@ -267,3 +267,39 @@ def test_approving_makes_the_approver_the_owner_only_if_they_work_leads(org):
         assert s.get(FollowUp, drafts["boss"][0]).approved_by == "boss"
         assert s.get(Lead, drafts["boss"][1]).owner is None  # an administrator approving does not take the lead
         assert s.get(Lead, drafts["mia"][1]).owner == "mia"  # a Sales Manager approving does
+
+
+def test_organisation_dashboards_are_for_roles_that_see_everything(org):
+    ctx, leads = org
+    eva = client(ctx, "eva")
+    for path in ("/", "/manager", "/command-center", "/reports", "/agents", "/jobs", "/audit", "/system"):
+        r = eva.get(path, follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/my", path
+    assert eva.get("/api/stats").status_code == 403
+    page = eva.get("/my").text
+    assert "My work" in page and 'href="/manager"' not in page and 'href="/reports"' not in page
+    for user in ("boss", "ana"):  # an administrator and the read-only analyst see the organisation
+        assert client(ctx, user).get("/", follow_redirects=False).status_code == 200
+
+
+def test_companies_and_contacts_follow_the_leads_a_person_may_see(org):
+    from aime.models import Contact
+
+    ctx, leads = org
+    with ctx.db.session() as s:
+        other = Company(name="Zeta Corp", normalized_name="zeta corp", source="test")
+        fresh = Company(name="Fresh Research Inc", normalized_name="fresh research inc", source="test")
+        s.add_all([other, fresh])
+        s.flush()
+        s.add(Lead(company_id=other.id, source="inbound", status="qualified", owner="zoe"))
+        s.add_all([Contact(company_id=other.id, email="cfo@zeta.example", first_name="Zed", source="website",
+                           consent_status="none"),
+                   Contact(company_id=fresh.id, email="ops@fresh.example", first_name="Fay", source="website",
+                           consent_status="none")])
+    eva, zoe = client(ctx, "eva"), client(ctx, "zoe")
+    companies = eva.get("/companies").text
+    assert "Acme" in companies and "Zeta Corp" not in companies and "Fresh Research Inc" in companies  # no lead yet
+    contacts = eva.get("/contacts").text
+    assert "zeta.example" not in contacts and "fresh.example" in contacts
+    assert "Zeta Corp" in zoe.get("/companies").text and "zeta.example" in zoe.get("/contacts").text
+    assert "Zeta" not in eva.get("/search?q=zeta").text.split("<main", 1)[-1]
