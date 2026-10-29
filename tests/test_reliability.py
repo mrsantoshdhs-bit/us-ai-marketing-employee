@@ -115,9 +115,27 @@ def test_toasts_never_fire_in_tests_or_when_disabled(make_ctx):
 
 
 def test_toast_script_escapes_text():
+    import base64
+    import re
+
     script = notify.toast_script("T", "It's <b>&</b>")
-    # XML-escaped (quotes too), so the single-quoted PowerShell string can't be broken out of
-    assert "It&#x27;s" in script and "&lt;b&gt;&amp;&lt;/b&gt;" in script and "It's" not in script
+    # the XML (escaped) reaches the script only as base64, and decodes back to exactly the escaped text
+    [xml, app] = [base64.b64decode(b).decode("utf-8") for b in re.findall(r"FromBase64String\('([A-Za-z0-9+/=]*)'\)", script)]
+    assert "It&#x27;s" in xml and "&lt;b&gt;&amp;&lt;/b&gt;" in xml and app == notify.APP_ID
+    assert "It" not in script.split("FromBase64String")[1]
+
+
+def test_no_text_can_break_out_of_the_toast_script():
+    """PowerShell ends a single-quoted string at ' and at the typographic quotes U+2018-U+201B too: an email could
+    carry `’;Start-Process calc;’` in a Calendly invitee name. None of the text reaches the script as text."""
+    import re
+
+    payloads = ["x’; Start-Process calc; ’", "x‘;calc;‘", "x‚;calc;‛", "x'; calc; '", 'x"; calc; "', "$(calc)", "`calc`"]
+    for p in payloads:
+        script = notify.toast_script("T", p)
+        quoted = re.findall(r"'([^']*)'", script)
+        assert quoted and all(re.fullmatch(r"[A-Za-z0-9+/=]*", q) for q in quoted), p  # only base64 between quotes
+        assert not any(ch in script for ch in "‘’‚‛") and "calc" not in script, p
 
 
 # ---------------------------------------------------------------- scheduler task
