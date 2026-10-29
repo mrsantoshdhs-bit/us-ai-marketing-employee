@@ -676,7 +676,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/opportunities/{opp_id}")
     def update_opp(request: Request, opp_id: int, stage: str = Form(...), next_step: str = Form(""),
-                   est_value: str = Form("")):
+                   est_value: str = Form(""), lost_reason: str = Form("")):
         if stage not in STAGES:
             raise HTTPException(400)
         value = None
@@ -693,11 +693,19 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             if value is not None:
                 o.est_value = value
             if stage in ("won", "lost"):
-                o.closed_at = utcnow()
+                if old != stage:
+                    o.closed_at = utcnow()
                 if stage == "won" and o.lead_id:
                     lead = s.get(Lead, o.lead_id)
                     lead.status = "converted"
-            log_activity(s, f"Opportunity stage {old} → {stage}", who(request), type_="opportunity",
+            else:  # open again: no close date, no reason it was lost
+                o.closed_at = None
+            if stage == "lost":
+                o.lost_reason = " ".join(lost_reason.split())[:200] or o.lost_reason or "No reason given"
+            else:
+                o.lost_reason = None
+            change = f"Opportunity stage {old} → {stage}" + (f" ({o.lost_reason})" if stage == "lost" else "")
+            log_activity(s, change, who(request), type_="opportunity",
                          company_id=o.company_id, lead_id=o.lead_id, opportunity_id=o.id)
         return back("/pipeline", "Opportunity updated")
 
