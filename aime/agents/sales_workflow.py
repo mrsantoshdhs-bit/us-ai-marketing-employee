@@ -1,7 +1,8 @@
 """Sales Workflow Agent: opportunities, permitted follow-ups, B2B outreach drafts, human tasks, approved sends.
 
 Rules:
-- Replies are drafted for people who contacted us (consent "inquiry") or opted in.
+- Replies are drafted for people who contacted us (consent "inquiry") or opted in, whatever their grade: one whom
+  only the score put in nurture is still answered (that draft waits for a person; rule campaigns cover grade B up).
 - Researched leads get a B2B outreach draft (aime.outreach) only when the owner's outreach policy is on and
   the primary contact has a business email the company publishes, with quotable evidence; otherwise a
   human review task is created instead.
@@ -23,11 +24,12 @@ from sqlalchemy.orm import Session
 from aime.agents.base import BaseAgent, RetryPolicy
 from aime import automation
 from aime.agents.contracts import BlockedItem
+from aime.agents.qualification import LeadQualificationAgent
 from aime.crm_ops import is_suppressed, log_activity
 from aime.email_templates import draft_reply
 from aime.integrations.email_smtp import EmailNotReady, EmailSender, compliance_problem, new_message_id
 from aime.knowledge.services import service_name
-from aime.models import Alert, FollowUp, InboundEmail, InboundInquiry, Lead, Opportunity, Signal
+from aime.models import Activity, Alert, FollowUp, InboundEmail, InboundInquiry, Lead, Opportunity, Signal
 from aime.outreach import STOP_STATUSES, draft_outreach, eligible, gather_evidence, record_delivery, set_status
 from aime.pipeline import pipeline_checks
 from aime.outreach import policy as outreach_policy
@@ -128,6 +130,13 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 if result in ("created", "exists", "budget"):
                     continue
             self._ensure_task(session, lead, out)
+        # People who asked us but scored below the qualification threshold still get an answer.
+        parked = select(Lead).where(Lead.status == "nurture", Lead.source == "inbound").order_by(Lead.id)
+        if inp.lead_ids:
+            parked = parked.where(Lead.id.in_(inp.lead_ids))
+        for lead in session.execute(parked).scalars().all():
+            if self._may_answer(session, lead):
+                self._ensure_sequence(session, lead, now, cfg, out)
         self._progress_sequences(session, now, cfg, out)
         self._send_approved(session, now, cfg, out)
         out.pipeline = pipeline_checks(session, self.settings, now, self.name)
@@ -148,15 +157,31 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         log_activity(session, f"Opportunity created: {opp.name}", self.name, type_="opportunity",
                      company_id=lead.company_id, lead_id=lead.id, opportunity_id=opp.id)
 
+    def _may_answer(self, session: Session, lead: Lead) -> bool:
+        """Whether the inquiry sequence may write to this lead: a qualified one, or a person who asked us (an
+        inquiry, a LinkedIn form or event registration, with consent) whom only the score put in nurture. Never a
+        disqualified lead, nor one that a person, a "not interested" reply or the stale-lead rule parked."""
+        if lead.status == "qualified":
+            return True
+        contact = lead.contact
+        if (lead.status != "nurture" or lead.source != "inbound" or not contact or not contact.email
+                or contact.consent_status not in CONSENTED):
+            return False
+        # The last recorded move must be the score's own "new → nurture": a "not interested" reply parks a
+        # qualified lead without a record of its own, so its last record still reads "→ qualified".
+        last = session.execute(select(Activity).where(Activity.lead_id == lead.id, Activity.type == "status_change")
+                               .order_by(Activity.created_at.desc(), Activity.id.desc())).scalars().first()
+        return last is not None and last.actor == LeadQualificationAgent.name and "→ nurture" in (last.subject or "")
+
     def _inquiry(self, session: Session, lead: Lead) -> InboundInquiry | None:
         return session.execute(select(InboundInquiry).where(InboundInquiry.lead_id == lead.id)
                                .order_by(InboundInquiry.id.desc())).scalars().first()
 
     def _new_draft(self, session: Session, lead: Lead, step: int, due: datetime, out: SalesOutput,
                    in_reply_to: str | None = None) -> None:
-        inq = self._inquiry(session, lead) if step == 1 else None
+        inq = self._inquiry(session, lead)  # its message is quoted in the first reply; its source names an event
         subject, body = draft_reply(self.settings, step, lead.contact.first_name, lead.primary_service,
-                                    (inq.payload.get("message") or None) if inq else None,
+                                    (inq.payload.get("message") or None) if inq and step == 1 else None,
                                     source_page=inq.payload.get("source_page") if inq else None)
         # Every draft waits for approval: a person's, or at send time an active campaign authorization (aime/automation.py).
         session.add(FollowUp(lead_id=lead.id, contact_id=lead.contact_id, company_id=lead.company_id,
@@ -214,13 +239,14 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             outreach = last.kind == "outreach"
             intervals = list(pol["intervals"] if outreach else cfg.get("intervals_days", [0, 3, 7]))
             max_touches = min(pol["max_touches"] if outreach else int(cfg.get("max_touches", 3)), len(intervals))
-            if lead is None or lead.status != "qualified" or last.step >= max_touches:
+            if lead is None or last.step >= max_touches:
                 continue
             if outreach:
-                if lead.outreach_status != "contacted" or not eligible(session, self.settings, lead)[0]:
+                if (lead.status != "qualified" or lead.outreach_status != "contacted"
+                        or not eligible(session, self.settings, lead)[0]):
                     continue  # replied, unsubscribed, bounced, stopped, or no longer reachable
-            elif (not lead.contact or lead.contact.consent_status not in CONSENTED
-                    or lead.outreach_status in STOP_STATUSES):
+            elif (not self._may_answer(session, lead) or not lead.contact
+                    or lead.contact.consent_status not in CONSENTED or lead.outreach_status in STOP_STATUSES):
                 continue  # they replied, booked, unsubscribed, bounced, or a person stopped the sequence
             has_open = session.execute(select(FollowUp.id).where(
                 FollowUp.lead_id == lead_id, FollowUp.channel == "email", FollowUp.status.in_(OPEN_FOLLOWUP))).first()
@@ -362,7 +388,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 f.status, f.blocked_reason = "cancelled", f"Not sent: the sequence stopped ({lead.outreach_status})"
                 out.cancelled += 1
                 continue
-            if lead.status != "qualified" and f.kind != "response" and test_auth is None:
+            answerable = lead.status == "qualified" or (f.kind is None and self._may_answer(session, lead))
+            if not answerable and f.kind != "response" and test_auth is None:
                 f.status = "cancelled"
                 f.blocked_reason = f"Lead is {lead.status}"
                 out.cancelled += 1

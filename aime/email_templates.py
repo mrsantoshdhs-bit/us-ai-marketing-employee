@@ -8,7 +8,16 @@ from aime.knowledge.services import SERVICES
 
 
 def _service_phrase(service_id: str | None) -> str:
-    return SERVICES[service_id].name.lower() if service_id in SERVICES else "your project"
+    """The service in running text: "AI agent development", "custom CRM development" (acronyms keep their case)."""
+    if service_id not in SERVICES:
+        return "your project"
+    return " ".join(w if sum(c.isupper() for c in w) > 1 else w.lower() for w in SERVICES[service_id].name.split())
+
+
+def _linkedin_event(source_page: str | None) -> str:
+    """The event's name when the person registered for a LinkedIn event ("LinkedIn event: <name>"), else ""."""
+    page = source_page or ""
+    return page.split(": ", 1)[1].strip() if page.startswith("LinkedIn event:") and ": " in page else ""
 
 
 def draft_reply(settings: Settings, step: int, first_name: str | None, service_id: str | None,
@@ -17,13 +26,13 @@ def draft_reply(settings: Settings, step: int, first_name: str | None, service_i
     company = settings.company_name
     sender = settings.sender_name or f"The {company} team"
     phrase = _service_phrase(service_id)
+    event = _linkedin_event(source_page)
     if step == 1 and (source_page or "").startswith("LinkedIn"):  # a LinkedIn lead form or event registration
-        what = source_page.split(": ", 1)[1].strip() if ": " in source_page else ""
-        if source_page.startswith("LinkedIn event:") and what:
-            subject = f"Thanks for registering: {what}"[:150]
-            opening = f"Thank you for registering for {what} on LinkedIn."
+        if event:
+            subject = f"Thanks for registering: {event}"[:150]
+            opening = f"Thank you for registering for {event} on LinkedIn."
         else:
-            subject = f"Thanks for your interest in {phrase}"
+            subject = f"Thanks for your interest in {phrase if service_id in SERVICES else company}"
             opening = f"Thank you for sharing your details with {company} on LinkedIn."
         body = (
             f"Hi {name},\n\n"
@@ -49,10 +58,12 @@ def draft_reply(settings: Settings, step: int, first_name: str | None, service_i
             f"Best regards,\n{sender}\n{company}"
         )
     elif step == 2:
-        subject = f"Following up on your {phrase} inquiry"
+        subject = (f"Following up: {event}"[:150] if event else f"Following up on your {phrase} inquiry"
+                   if service_id in SERVICES else "Following up on your inquiry")
+        about = f"your registration for {event}" if event else f"your recent inquiry about {phrase}"
         body = (
             f"Hi {name},\n\n"
-            f"I wanted to follow up on your recent inquiry about {phrase}. "
+            f"I wanted to follow up on {about}. "
             "If it's still a priority, I'm happy to set up a short call to understand what you need. "
             "If the timing isn't right, just let me know.\n\n"
             f"Best regards,\n{sender}\n{company}"

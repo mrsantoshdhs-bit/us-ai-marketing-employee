@@ -30,11 +30,13 @@ LinkedIn's terms forbid scraping, bots and building prospect lists from its data
 4. **Into the CRM.** The CRM agent applies the same checks as to every inquiry: spam, suppression list, US location. It then creates the company, a contact and a hot lead.
    - The contact's consent is `opt_in` if they ticked a consent box, otherwise `inquiry`. The consent source names the form or event, for example "LinkedIn event: AI agents for US service businesses".
    - The lead is qualified like any other.
-5. **First email.** A qualified lead gets a first email:
+5. **First email.** Everyone who asked gets a first email, whatever their grade:
    - "Thanks for registering: <event>" for an event;
    - "Thanks for your interest in <service>" for a form.
 
-   The 3-email inquiry sequence follows. Every email waits for a person, or for an active campaign that covers it (step 6).
+   The 3-email inquiry sequence follows; for an event, the follow-up is "Following up: <event>". Every email waits for a person, or for an active campaign that covers it (step 6).
+   - A lead the score put in nurture (grade C or D) is still answered, but a campaign rule covers only the grade it names, so these emails wait for a person.
+   - A lead that a person, a "not interested" reply or the stale-lead rule moved to nurture gets nothing more. Neither does a disqualified lead (outside the target country, a competitor, or on the suppression list).
 6. **Campaigns.** An "asked us" campaign rule sends these emails without a person. In Automation Control, create a rule campaign with **Addresses = "the address of a person who asked us to contact them"**.
    - It covers replies and follow-ups to people from inquiry forms, LinkedIn forms and event registrations. It never covers cold outreach.
    - The outreach rules ("published", "role_or_published") never answer people who wrote to us.
