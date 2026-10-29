@@ -7,6 +7,7 @@ scheduler watchdog can use it without loading the app.
 
 from __future__ import annotations
 
+import base64
 import os
 import subprocess
 from html import escape
@@ -18,8 +19,12 @@ APP_ID = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powersh
 TITLE = "AI Marketing Employee"
 
 
-def _ps_quote(text: str) -> str:
-    return "'" + text.replace("'", "''") + "'"
+def _ps_text(text: str) -> str:
+    """A PowerShell expression for `text` that no character in it can break out of. Quoting is not enough: besides
+    ', PowerShell ends a single-quoted string at the typographic quotes U+2018-U+201B, which can arrive in any email
+    (a Calendly invitee name, a company name). Only base64 letters reach the script."""
+    data = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    return f"[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{data}'))"
 
 
 def toast_script(title: str, message: str) -> str:
@@ -29,8 +34,8 @@ def toast_script(title: str, message: str) -> str:
         "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null;"
         "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null;"
         "$x = New-Object Windows.Data.Xml.Dom.XmlDocument;"
-        f"$x.LoadXml({_ps_quote(xml)});"
-        f"[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier({_ps_quote(APP_ID)})"
+        f"$x.LoadXml({_ps_text(xml)});"
+        f"[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier({_ps_text(APP_ID)})"
         ".Show([Windows.UI.Notifications.ToastNotification]::new($x))"
     )
 
