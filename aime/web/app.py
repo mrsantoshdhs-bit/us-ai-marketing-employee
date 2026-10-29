@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 import threading
 import time
 from collections import Counter, defaultdict, deque
@@ -67,6 +68,10 @@ from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, 
 WEB_DIR = Path(__file__).resolve().parent
 STAGES = ["new", "discovery", "proposal", "negotiation", "won", "lost"]
 LEAD_STATUSES = ["new", "qualified", "nurture", "disqualified", "converted", "merged"]
+
+
+# one email address or one domain: never a pattern (% or _ would match other contacts)
+SUPPRESS_VALUE = re.compile(r"[a-z0-9.!#$&'*+/=?^`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+|[a-z0-9-]+(?:\.[a-z0-9-]+)+")
 
 
 def _404():
@@ -141,7 +146,8 @@ USABLE_EMAIL = (Contact.source.in_(("website", "sec_filing")), Contact.email_sta
 
 
 def create_app(ctx: AppContext | None = None) -> FastAPI:
-    app = FastAPI(title="AI Marketing Employee", docs_url="/api/docs", redoc_url=None)
+    # no interactive API docs: they need a script from a CDN and a relaxed content policy on the signed-in origin
+    app = FastAPI(title="AI Marketing Employee", docs_url=None, redoc_url=None)
     app.state.ctx = ctx
     limiter = InboundLimiter()
     app.add_middleware(AuthMiddleware, get_ctx=lambda: app.state.ctx or get_context())
@@ -1024,7 +1030,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         if not token:
             raise HTTPException(403, "The inbound API is off: set INBOUND_API_TOKEN in .env and send it as the "
                                      "X-Inbound-Token header")
-        if not hmac.compare_digest(request.headers.get("x-inbound-token", ""), token):
+        if not hmac.compare_digest(request.headers.get("x-inbound-token", "").encode("utf-8", "replace"), token.encode("utf-8")):
             raise HTTPException(401, "Invalid inbound token")
         if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
             raise HTTPException(415, "Send the inquiry as JSON (Content-Type: application/json)")
@@ -1045,6 +1051,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/suppress")
     def suppress_form(value: str = Form(...), reason: str = Form("Requested by contact")):
+        value = value.strip().lower()
+        if not SUPPRESS_VALUE.fullmatch(value):
+            return back("/followups", "Give one email address or one domain (example.com) to add to the do-not-contact list")
         with C().db.session() as s:
             suppress(s, value, reason)
         return back("/followups", f"{value} added to the do-not-contact list")

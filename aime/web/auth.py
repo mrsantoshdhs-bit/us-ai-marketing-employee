@@ -196,6 +196,15 @@ def assigning(method: str, path: str) -> bool:
     return method == "POST" and bool(_ASSIGN.fullmatch(path))
 
 
+# FastAPI reads "+1", "1_0", " 1" (%20) or "1.0" in a path as the number 1, while the rules here match plain digits
+# only: such a path could reach an approval under another name, so it is refused outright.
+_LOOSE_NUMBER = re.compile(r"\s*[+-]?[\d_]+(?:\.0*)?\s*")
+
+
+def odd_number(path: str) -> bool:
+    return any(seg and not seg.isdigit() and _LOOSE_NUMBER.fullmatch(seg) for seg in path.split("/"))
+
+
 def refusal(perms, method: str, path: str) -> str | None:
     """Why this signed-in user may not make this request, or None."""
     if super_admin_only(path) and "configure_system" not in perms:
@@ -238,6 +247,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if path.startswith("/api/"):
                 return JSONResponse({"detail": "Sign in required"}, status_code=401)
             return RedirectResponse(f"/login?next={quote(path)}", status_code=303)
+        if odd_number(path):
+            return JSONResponse({"detail": "Not found"}, status_code=404)
         if reason := refusal(request.state.user["perms"], request.method, path):
             return JSONResponse({"detail": reason}, status_code=403)
         with ctx.db.session() as s:
