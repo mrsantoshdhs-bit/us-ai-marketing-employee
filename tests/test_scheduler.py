@@ -132,6 +132,7 @@ def test_dashboard_task_starts_nothing_when_running_or_in_maintenance(tmp_path, 
     spec = importlib.util.spec_from_file_location("dashboard_task", Path(__file__).parent.parent / "scripts" / "dashboard_task.py")
     task = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(task)
+    task.PAUSE = 0
     started = []
     monkeypatch.setattr("aime.cli.main", lambda argv: started.append(argv) or 0)
     monkeypatch.setenv("AIME_DATA_DIR", str(tmp_path))
@@ -144,6 +145,11 @@ def test_dashboard_task_starts_nothing_when_running_or_in_maintenance(tmp_path, 
     maintenance.start(tmp_path, hours=1, reason="deploy")
     assert task.main() == 0 and started == []
     maintenance.stop(tmp_path)
+    # a restart: the old dashboard still answers once while it stops, then it is gone; this run must take over
+    answers = iter([True, False])
+    monkeypatch.setattr(task, "listening", lambda host, port: next(answers, False))
+    assert task.main() == 0 and started == [["serve"]]
+    started.clear()
     assert task.main() == 0 and started == [["serve"]]
 
 

@@ -132,10 +132,14 @@ def run_checks(ctx: AppContext) -> list[dict]:
 
     st = ctx.settings
     if st.outbound_email_enabled and st.section("outreach").get("b2b_enabled"):
-        add("Sales mailbox monitored", st.imap_configured,
-            "replies, unsubscribes and bounces are read" if st.imap_configured else
-            "outreach can be sent but replies, unsubscribes and bounces are not read: set IMAP_HOST (your mail server's "
-            "IMAP host, e.g. imap.gmail.com)",
+        from aime import mail_accounts
+
+        with ctx.db.session() as s:  # the .env mailbox or a Mailboxes panel mailbox with Read replies on
+            reading, where = mail_accounts.reading_status(s, st)
+        add("Sales mailbox monitored", reading,
+            f"replies, unsubscribes and bounces are read: {where}" if reading else
+            "outreach can be sent but replies, unsubscribes and bounces are not read: on the Mailboxes page enable a "
+            "mailbox and turn on Read replies (or set IMAP_HOST in .env)",
             "warning")
     mode = str(ctx.settings.section("publish_policy").get("mode", "shadow")).lower()
     add("Auto-publish policy is shadow-only", mode == "shadow",

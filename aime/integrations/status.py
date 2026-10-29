@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
+from aime import mail_accounts
 from aime.context import AppContext
-from aime.integrations.email_smtp import EmailSender
 from aime.integrations.linkedin import get_auth_status
 from aime.llm.ollama import OllamaProvider
 from aime.monitoring import read_heartbeat
@@ -60,12 +60,12 @@ def integration_statuses(ctx: AppContext, session: Session, include_scheduler: b
     rows.append({"name": "Publishing master switch", "state": "ENABLED" if s.publishing_enabled else "DISABLED",
                  "detail": "PUBLISHING_ENABLED in .env (posts also need per-post approval)", "action": ""})
 
-    ready, reason = EmailSender(s).status()
+    ready, reason = mail_accounts.sending_status(session, s)  # the Mailboxes panel's primary mailbox, else .env
     rows.append({"name": "Outbound email (approved replies and outreach)", "state": "READY" if ready else
                  ("DISABLED" if "DISABLED" in reason else "NOT CONFIGURED"), "detail": reason, "action": ""})
-    rows.append({"name": "Sales mailbox (replies, bounces)", "state": "CONFIGURED" if s.imap_configured else "NOT CONFIGURED",
-                 "detail": f"{s.imap_host} / {s.imap_folder}, read-only" if s.imap_configured else "IMAP_HOST and credentials empty",
-                 "action": "" if s.imap_configured else "Set IMAP_HOST to your mail server's IMAP host (Gmail: imap.gmail.com with an app password)"})
+    reading, where = mail_accounts.reading_status(session, s)
+    rows.append({"name": "Sales mailbox (replies, bounces)", "state": "CONFIGURED" if reading else "NOT CONFIGURED",
+                 "detail": where, "action": ""})
     rows.append({"name": "Booking link (Calendly)", "state": "CONFIGURED" if s.calendly_url else "NOT CONFIGURED",
                  "detail": s.calendly_url or "CALENDLY_URL empty: replies ask for times instead", "action": ""})
 
