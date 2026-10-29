@@ -72,8 +72,8 @@ def test_wrong_password_and_lockout(auth_ctx):
     for _ in range(MAX_FAILED):
         r = _login(client, password="wrong password!!")
         assert "Wrong" in r.headers["location"] or "Wrong%20" in r.headers["location"]
-    r = _login(client)  # right password, but locked now
-    assert "locked" in r.headers["location"]
+    r = _login(client)  # right password, but locked now: refused, in the same words as a wrong password
+    assert r.headers["location"].startswith("/login?error=Wrong")
     with auth_ctx.db.session() as s:
         assert s.execute(select(User)).scalar_one().locked_until > utcnow()
 
