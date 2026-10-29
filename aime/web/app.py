@@ -1095,8 +1095,21 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             if agent:
                 stmt = stmt.where(AgentRun.agent == agent)
             runs = s.execute(stmt).scalars().all()
+            disabled = set((kv_get(s, "agents.disabled") or {}).get("names", []))
         team = [cls.describe() for cls in AGENTS.values()]
-        return render(request, "agents.html", team=team, stats=stats, runs=runs, agent=agent)
+        return render(request, "agents.html", team=team, stats=stats, runs=runs, agent=agent, disabled=disabled,
+                      is_admin=is_admin(request))
+
+    @app.post("/agents/{name}/switch")
+    def agent_switch(request: Request, name: str, on: str = Form("")):
+        if name not in AGENTS:
+            raise HTTPException(404)
+        with C().db.session() as s:
+            names = set((kv_get(s, "agents.disabled") or {}).get("names", []))
+            names = names - {name} if on == "yes" else names | {name}
+            kv_set(s, "agents.disabled", {"names": sorted(names)})
+            am.audit(s, who(request), "agent_switched", f"agent {name}", "on" if on == "yes" else "off")
+        return back("/agents", f"{name} switched {'on' if on == 'yes' else 'off'}")
 
     @app.get("/command-center/agents/{agent}", response_class=HTMLResponse)
     def agent_detail(request: Request, agent: str):

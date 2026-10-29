@@ -600,6 +600,11 @@ class AgentRun(Base):
     input_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     output_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
+    # the language model in this run (aime.llm.usage): calls, tokens as the model reported them, time, cost
+    llm_calls: Mapped[int] = mapped_column(Integer, default=0)
+    llm_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    llm_ms: Mapped[int] = mapped_column(Integer, default=0)
+    llm_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
 
 
 class JobRun(Base):

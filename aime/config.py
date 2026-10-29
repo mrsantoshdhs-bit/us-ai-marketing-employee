@@ -134,6 +134,8 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "calendar_send_invites": ("CALENDAR_SEND_INVITES", bool),
     "inbox_scope": ("INBOX_SCOPE", str),
     "calendly_verified_only": ("CALENDLY_VERIFIED_ONLY", bool),
+    "llm_cost_per_1k_tokens": ("LLM_COST_PER_1K_TOKENS", float),
+    "ai_email_drafts": ("AI_EMAIL_DRAFTS", bool),
     "calendly_forwarders": ("CALENDLY_FORWARDERS", str),
     "calendly_url": ("CALENDLY_URL", str),
     "dashboard_host": ("DASHBOARD_HOST", str),
@@ -238,6 +240,10 @@ class Settings:
     # A Calendly notice changes the CRM by itself only when the mail server vouches for it (aime.mail_auth); others
     # wait for a person. CALENDLY_FORWARDERS: extra addresses allowed to forward notices (comma-separated).
     calendly_verified_only: bool = True
+    llm_cost_per_1k_tokens: float = 0.0  # the local model is free; for a provider that charges per token
+    # Let the local model write the personal opening line of a reply draft, checked for prices, promises and claims;
+    # anything doubtful falls back to the template. Off by default.
+    ai_email_drafts: bool = False
     calendly_forwarders: str = ""
     calendly_url: str = ""  # booking link offered to interested prospects
 

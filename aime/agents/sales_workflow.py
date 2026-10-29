@@ -186,10 +186,20 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         subject, body = draft_reply(self.settings, step, lead.contact.first_name, lead.primary_service,
                                     (inq.payload.get("message") or None) if inq and step == 1 else None,
                                     source_page=inq.payload.get("source_page") if inq else None)
+        generator = "template"
+        if step == 1 and getattr(self.settings, "ai_email_drafts", False) and inq is not None:
+            from aime.ai_drafts import opening
+
+            line = opening(self.ctx.llm, lead.contact.first_name, lead.company.name, service_name(lead.primary_service),
+                           inq.payload.get("message"))
+            first = body.split("\n\n", 2)  # greeting, the template's opening, the rest
+            if line and len(first) == 3:
+                body = f"{first[0]}\n\n{line}\n\n{first[2]}"
+                generator = f"AI ({self.ctx.llm.label}) opening + template"
         # Every draft waits for approval: a person's, or at send time an active campaign authorization (aime/automation.py).
         session.add(FollowUp(lead_id=lead.id, contact_id=lead.contact_id, company_id=lead.company_id,
                              channel="email", step=step, due_at=due, status="awaiting_approval",
-                             subject=subject, body=body, in_reply_to=in_reply_to))
+                             subject=subject, body=body, in_reply_to=in_reply_to, generator=generator[:80]))
         out.drafts_created += 1
         log_activity(session, f"Drafted follow-up email #{step} (awaiting approval)", self.name, type_="email_draft",
                      company_id=lead.company_id, lead_id=lead.id)

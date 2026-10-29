@@ -36,7 +36,7 @@ class JobOutcome:
             "duration_ms": result.duration_ms, "error": result.error,
             "output": result.output.model_dump(mode="json") if result.output else None,
         })
-        if not result.ok:
+        if not result.ok and result.status != "skipped":  # an agent switched off is not a failure
             self.failed = True
         return result
 

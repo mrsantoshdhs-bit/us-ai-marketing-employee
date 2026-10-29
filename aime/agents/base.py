@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from aime.context import AppContext
 from aime.logging_setup import append_jsonl
+from aime.llm import usage as llm_usage
 from aime.models import AgentRun
 from aime.redact import redact
 from aime.runtime import current_job_run_id
@@ -88,6 +89,17 @@ def summarize(value: Any, max_list: int = 15, max_str: int = 400, depth: int = 0
     return value
 
 
+def agent_enabled(ctx, name: str) -> bool:
+    """An administrator can switch a single agent off (AI Agents page); its jobs then skip it."""
+    from aime.db import kv_get
+
+    try:
+        with ctx.db.session() as s:
+            return name not in set((kv_get(s, "agents.disabled") or {}).get("names", []))
+    except Exception:
+        return True  # never let the switch itself stop the work
+
+
 class BaseAgent(ABC, Generic[InT, OutT]):
     name: ClassVar[str]
     title: ClassVar[str]
@@ -110,6 +122,26 @@ class BaseAgent(ABC, Generic[InT, OutT]):
         run_id = uuid.uuid4().hex[:12]
         started = utcnow()
         t0 = time.perf_counter()
+        if not agent_enabled(self.ctx, self.name):  # switched off on the AI Agents page: recorded, nothing done
+            return self._skip(run_id, job, started)
+        llm_token = llm_usage.start()
+        try:
+            return self._run(payload, job, run_id, started, t0)
+        finally:
+            llm_usage.stop(llm_token)
+
+    def _skip(self, run_id: str, job: str | None, started) -> AgentResult:
+        try:
+            with self.ctx.db.session() as s:
+                s.add(AgentRun(run_id=run_id, agent=self.name, job=job, job_run_id=current_job_run_id.get(),
+                               status="skipped", started_at=started, finished_at=utcnow(), duration_ms=0,
+                               error="Switched off on the AI Agents page"))
+        except Exception:
+            self.log.exception("Could not record a skipped run")
+        return AgentResult(agent=self.name, run_id=run_id, status="skipped", attempts=0, duration_ms=0,
+                           error="Switched off on the AI Agents page")
+
+    def _run(self, payload, job, run_id, started, t0) -> AgentResult:
 
         try:
             if isinstance(payload, BaseModel):
@@ -179,6 +211,11 @@ class BaseAgent(ABC, Generic[InT, OutT]):
                 row.duration_ms = duration_ms
                 row.output_summary = out_summary if isinstance(out_summary, dict) else {"value": out_summary}
                 row.error = error
+                used = llm_usage._current.get()
+                if used is not None and used.calls:
+                    rate = float(getattr(self.settings, "llm_cost_per_1k_tokens", 0.0) or 0.0)
+                    row.llm_calls, row.llm_tokens, row.llm_ms = used.calls, used.tokens, used.ms
+                    row.llm_cost_usd = round(used.tokens / 1000 * rate, 6)
         except Exception:
             self.log.exception("Could not record agent finish")
         append_jsonl(
