@@ -103,6 +103,8 @@ def test_roles_are_given_only_from_the_command_line(team, capsys):
     assert cmd_user(Args("set-role", "bde", role="analyst"), ctx) == 0
     assert "bde is now analyst (was sales_executive)" in capsys.readouterr().out
     assert cmd_user(Args("set-role", "bde", role=None), ctx) == 1
-    assert "analyst, sales_executive, sales_manager, admin, super_admin" in capsys.readouterr().out
+    out = capsys.readouterr().out  # every built-in role is offered
+    assert all(r in out for r in ("super_admin", "sales_director", "team_leader", "sales_executive", "bde",
+                                  "lead_gen_executive", "analyst"))
     bde = signed_in(ctx, "bde")
     assert bde.post(f"/leads/{1}/note", headers=ORIGIN, data={"note": "x"}, follow_redirects=False).status_code == 403

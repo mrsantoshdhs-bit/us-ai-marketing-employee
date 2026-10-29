@@ -52,12 +52,38 @@ def _default_sql(col) -> str | None:
     return None
 
 
+def pending_indexes(engine: Engine) -> list:
+    """Indexes the models declare that an existing table lacks: create_all makes indexes only with a new table."""
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    out = []
+    for table in Base.metadata.sorted_tables:
+        if table.name not in tables:
+            continue
+        have = {i["name"] for i in insp.get_indexes(table.name)}
+        cols = {c["name"] for c in insp.get_columns(table.name)}
+        out.extend(i for i in table.indexes if i.name not in have and {c.name for c in i.columns} <= cols)
+    return out
+
+
+def ensure_indexes(engine: Engine) -> list[str]:
+    """Create the missing indexes (additive: CREATE INDEX IF NOT EXISTS, no data changes)."""
+    applied = []
+    with engine.begin() as conn:
+        for index in pending_indexes(engine):
+            index.create(conn, checkfirst=True)
+            applied.append(f"CREATE INDEX {index.name}")
+    for ddl in applied:
+        log.warning("Schema migration applied: %s", ddl)
+    return applied
+
+
 def migrate(engine: Engine, backup_dir: Path | None = None, has_data: bool = False) -> list[str]:
-    """Create missing tables and add missing columns. Returns the applied statements."""
+    """Create missing tables, add missing columns and indexes. Returns the applied statements."""
     Base.metadata.create_all(engine)
     todo = pending_columns(engine)
     if not todo:
-        return []
+        return ensure_indexes(engine)
     if has_data and backup_dir is not None and engine.url.database:
         from aime.backup import backup_sqlite_file
 
@@ -79,4 +105,4 @@ def migrate(engine: Engine, backup_dir: Path | None = None, has_data: bool = Fal
             {"v": json.dumps({"v": SCHEMA_VERSION})})
     for ddl in applied:
         log.warning("Schema migration applied: %s", ddl)
-    return applied
+    return applied + ensure_indexes(engine)

@@ -1,12 +1,11 @@
-"""Handover to the Sales Managers: when a prospect shows interest or a meeting is booked, the opportunity is assigned
-to one of the configured Sales Managers (`[handover] sales_manager`, set by the Super Admin: one dashboard username
-or several), who is told on the dashboard and, when signed in at the PC, with a desktop notification. With several,
-each new opportunity goes to the one with the fewest open opportunities (ties: in the order chosen), and it stays
-with them. Every handover is in the audit log and on the lead's activity. Nothing is sent to the prospect."""
+"""Handover to the sales team: when a prospect shows interest or a meeting is booked, the opportunity is assigned
+(aime.assignment: the Sales Managers chosen in Settings, or everyone whose role receives leads; by workload, round
+robin or skill; skipping people who are unavailable or at capacity). The owner is told on the dashboard and, when
+signed in at the PC, with a desktop notification, and the deal stays with them. Every handover is in the audit log,
+the assignment history and the lead's activity. Nothing is sent to the prospect."""
 
 from __future__ import annotations
 
-from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from aime.crm_ops import log_activity
@@ -15,19 +14,16 @@ from aime.notify import notify_event
 
 
 def sales_managers(settings) -> list[str]:
-    value = settings.section("handover").get("sales_manager") or []
-    names = [value] if isinstance(value, str) else list(value)
-    return [n.strip() for n in names if n and n.strip()]
+    from aime.assignment import configured_pool
+
+    return configured_pool(settings)
 
 
-def next_owner(session: Session, settings) -> str | None:
-    """The Sales Manager with the fewest open opportunities (ties: the first in the configured order)."""
-    names = sales_managers(settings)
-    if len(names) < 2:
-        return names[0] if names else None
-    load = dict(session.execute(select(Opportunity.owner, func.count(Opportunity.id)).where(
-        Opportunity.owner.in_(names), Opportunity.stage.not_in(("won", "lost"))).group_by(Opportunity.owner)).all())
-    return min(names, key=lambda n: (load.get(n, 0), names.index(n)))
+def next_owner(session: Session, settings, service: str | None = None) -> str | None:
+    """Who the next new deal would go to by the configured rule (aime.assignment), or None."""
+    from aime.assignment import choose
+
+    return choose(session, settings, service)[0]
 
 
 def handover(session: Session, settings, opp: Opportunity, reason: str, actor: str) -> str:
@@ -35,8 +31,9 @@ def handover(session: Session, settings, opp: Opportunity, reason: str, actor: s
     from aime.automation import audit
 
     if not opp.owner:
-        session.flush()  # opportunities assigned earlier in this run count towards the balance
-        opp.owner = next_owner(session, settings)
+        from aime.assignment import assign_new
+
+        assign_new(session, settings, opp, actor)  # by the configured rule, on record in the assignment history
     who = opp.owner or "the Sales Manager (none assigned: set one in Settings › Sales settings)"
     message = f"Handed over to {who}: {opp.name} — {reason}"
     session.add(Alert(level="info", source="handover", message=message[:500]))

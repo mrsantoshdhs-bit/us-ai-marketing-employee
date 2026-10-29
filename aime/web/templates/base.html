@@ -39,6 +39,7 @@
         ('Analytics', [('/reports', 'Sales Analytics', 'chart', None, '')]),
         ('Settings', [('/integrations', 'Integrations', 'plug', None, ''), ('/system', 'System health', 'server', None, ''),
                       ('/settings', 'Settings', 'gear', None, '')]
+                     + ([('/admin/users', 'Users & teams', 'users', None, '')] if can_manage_users else [])
                      + ([('/admin/mailboxes', 'Mailboxes', 'mail', None, ''),
                          ('/admin/settings', 'Sales settings', 'sliders', None, '')] if is_super_admin else [])),
       ] -%}

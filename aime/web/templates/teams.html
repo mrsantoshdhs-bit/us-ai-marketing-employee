@@ -1,0 +1,32 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}Teams · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+  <h1>{{ icon('users') }} Teams</h1>
+  <p class="subtitle">A team's manager and members see the team's leads and deals; people also see the work of everyone
+    who reports to them. Put people in a team on <a href="/admin/users">Users</a>.</p>
+</div></div>
+
+<div class="card table-wrap"><table>
+  <tr><th>Team</th><th>Manager</th><th>Members</th><th>Change</th></tr>
+  {% for t in teams %}<tr{% if not t.active %} class="muted"{% endif %}>
+    <td><b>{{ t.name }}</b>{% if not t.active %} <span class="pill">inactive</span>{% endif %}</td>
+    <td>{{ t.manager or '—' }}</td>
+    <td class="small">{{ members[t.id]|join(', ') or '—' }}</td>
+    <td><form class="inline" method="post" action="/admin/teams">
+      <input type="hidden" name="team_id" value="{{ t.id }}"><input name="name" value="{{ t.name }}" size="14" maxlength="80">
+      <select name="manager"><option value="">No manager</option>{% for n in usernames %}<option {{ 'selected' if n == t.manager }}>{{ n }}</option>{% endfor %}</select>
+      <select name="active"><option value="yes" {{ 'selected' if t.active }}>active</option><option value="no" {{ 'selected' if not t.active }}>inactive</option></select>
+      <button class="secondary">Save</button></form></td></tr>
+  {% else %}<tr><td colspan="4" class="muted">No teams yet.</td></tr>{% endfor %}
+</table></div>
+
+<h2>Add a team</h2>
+<form class="card" method="post" action="/admin/teams">
+  <div class="filters" style="flex-wrap:wrap">
+    <label>Name<input name="name" required maxlength="80" placeholder="e.g. US East"></label>
+    <label>Manager<select name="manager"><option value="">No manager</option>{% for n in usernames %}<option>{{ n }}</option>{% endfor %}</select></label>
+  </div>
+  <div class="row-actions"><button>Add team</button></div>
+</form>
+{% endblock %}

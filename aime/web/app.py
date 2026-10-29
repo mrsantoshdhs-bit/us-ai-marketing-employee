@@ -57,7 +57,11 @@ from aime.meetings import check_double_bookings, record_meeting, reopen_after_ca
 from aime.scheduler.runner import ABANDON_AFTER, due_jobs, load_job_specs, next_run, run_job
 from aime.scoring import lead_tier, tier_reason
 from aime.timeutil import as_aware_utc, fmt_et, fmt_local, local_tz, to_naive_utc, utcnow
-from aime.web.auth import (COOKIE, LOGIN_LOCK, ROLE_LABELS, SESSION_SECONDS, AuthMiddleware, authenticate,
+from aime.permissions import role_label
+from aime.web.team_pages import assignment_history
+from aime.web.team_pages import register as register_team_pages
+from aime.visibility import EVERYTHING, lead_condition, opportunity_condition, record_condition
+from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate,
                            current_username, make_cookie, safe_next, session_secret, user_count)
 
 WEB_DIR = Path(__file__).resolve().parent
@@ -168,8 +172,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         data.setdefault("sending_on", C().settings.outbound_email_enabled)
         user = data["current_user"]
         data.setdefault("user_name", (user["username"].title() if user else C().settings.sender_name or ""))
-        data.setdefault("is_super_admin", not C().settings.dashboard_auth or bool(user and user.get("role") == "super_admin"))
-        data.setdefault("user_role", ROLE_LABELS.get((user or {}).get("role", ""), "Preview · no sign-in"))
+        data.setdefault("is_super_admin", not C().settings.dashboard_auth or bool(user and "configure_system" in user.get("perms", ())))
+        data.setdefault("can_manage_users", not C().settings.dashboard_auth or bool(user and "manage_users" in user.get("perms", ())))
+        if "user_role" not in data:
+            with C().db.session() as s:
+                data["user_role"] = role_label(s, user["role"]) if user else "Preview · no sign-in"
         if "nav_status" not in data and request.url.path != "/login":  # the top bar and sidebar on every page
             with C().db.session() as s:
                 state = am.get_state(s)
@@ -185,6 +192,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return templates.TemplateResponse(request, name, data)
 
     who = current_username  # the signed-in Sales Manager, recorded on approvals and activities
+
+    def scope(request: Request):
+        """The records this user may see (aime.visibility), set by the sign-in middleware."""
+        return getattr(request.state, "scope", EVERYTHING)
 
     # ------------------------------------------------------------------ sign in
     @app.get("/login", response_class=HTMLResponse)
@@ -242,9 +253,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             cnt = lambda m, *c: s.execute(select(func.count(m.id)).where(*c)).scalar_one()  # noqa: E731
             posts = s.execute(select(ContentItem).where(ContentItem.status == "awaiting_approval")
                               .order_by(ContentItem.scheduled_for).limit(10)).scalars().all()
-            emails = s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "awaiting_approval")
+            mine = record_condition(scope(request), FollowUp.lead_id)
+            emails = s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "awaiting_approval", mine)
                                .order_by(FollowUp.due_at).limit(10)).scalars().all()
-            tasks = s.execute(select(FollowUp).where(FollowUp.channel == "task", FollowUp.status == "pending")
+            tasks = s.execute(select(FollowUp).where(FollowUp.channel == "task", FollowUp.status == "pending", mine)
                               .order_by(FollowUp.id).limit(6)).scalars().all()
             for f in emails + tasks:
                 _ = f.lead.company
@@ -261,7 +273,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                                .order_by(Alert.id.desc()).limit(8)).scalars().all()
             task_total = cnt(FollowUp, FollowUp.channel == "task", FollowUp.status == "pending")
             health = health_strip(ctx, s)
-            replies = s.execute(select(InboundEmail).where(InboundEmail.status == "needs_review")
+            replies = s.execute(select(InboundEmail).where(InboundEmail.status == "needs_review",
+                                                           record_condition(scope(request), InboundEmail.lead_id))
                                 .order_by(InboundEmail.received_at.desc()).limit(10)).scalars().all()
             policy = agreement(s)
             pending = [r for r in policy["rows"] if r["post_status"] in ("awaiting_approval", "approved")]
@@ -278,13 +291,14 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def inbox_page(request: Request, show: str = "review"):
         settings = C().settings
         with C().db.session() as s:
-            stmt = select(InboundEmail)
+            stmt = select(InboundEmail).where(record_condition(scope(request), InboundEmail.lead_id))
             if show == "review":
                 stmt = stmt.where(InboundEmail.status == "needs_review")
             rows = s.execute(stmt.order_by(InboundEmail.received_at.desc()).limit(200)).scalars().all()
             for r in rows:
                 _ = r.lead.company if r.lead else None
             counts = dict(s.execute(select(InboundEmail.category, func.count(InboundEmail.id))
+                                    .where(record_condition(scope(request), InboundEmail.lead_id))
                                     .group_by(InboundEmail.category)).all())
             # the .env mailbox's position, else the first Mailboxes panel mailbox that is read
             state = kv_get(s, "inbox.state") or next(
@@ -347,7 +361,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def leads(request: Request, grade: str = "", status: str = "", state: str = "", industry: str = "",
               source: str = "", q: str = "", page: int = 1):
         with C().db.session() as s:
-            stmt = select(Lead).join(Company, Company.id == Lead.company_id)
+            stmt = select(Lead).join(Company, Company.id == Lead.company_id).where(lead_condition(scope(request)))
             stmt = stmt.where(Lead.status == status) if status else stmt.where(Lead.status.not_in(("merged",)))
             if grade:
                 stmt = stmt.where(Lead.grade == grade)
@@ -386,14 +400,22 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                                  .order_by(ResearchSnapshot.id.desc())).scalars().first()
             meetings = s.execute(select(Meeting).where(Meeting.lead_id == lead.id).order_by(Meeting.starts_at.desc())).scalars().all()
             replies = s.execute(select(InboundEmail).where(InboundEmail.lead_id == lead.id)).scalars().all()
+            assignments = assignment_history(s, lead.id)
+            sc = scope(request)
+            # who this user may hand the lead to: anyone active (view_all), else their team
+            assignees = [u for u in s.execute(select(User.username).where(User.active.is_(True)).order_by(User.username)).scalars()
+                         if sc.all or u in sc.usernames]
             # both directions in time order: what we sent (or may have sent) and what they wrote back
             thread = sorted([{"at": f.sent_at, "dir": "out", "subject": f.subject, "who": f.to_email, "text": f.body,
                               "status": f.status} for f in fups if f.channel == "email" and f.sent_at]
                             + [{"at": r.received_at, "dir": "in", "subject": r.subject, "who": r.from_email,
                                 "text": r.new_text or r.body_text, "status": (r.category or "new").replace("_", " "),
                                 "sentiment": r.sentiment} for r in replies], key=lambda m: m["at"])
+        user = getattr(request.state, "user", None)
+        can_assign = not C().settings.dashboard_auth or bool(user and "assign_leads" in user.get("perms", ()))
         return render(request, "lead_detail.html", lead=lead, signals=signals, acts=acts, fups=fups, opps=opps,
-                      people=people, research=research, meetings=meetings, withdrawn=withdrawn, thread=thread)
+                      people=people, research=research, meetings=meetings, withdrawn=withdrawn, thread=thread,
+                      assignments=assignments, assignees=assignees, can_assign=can_assign)
 
     @app.get("/contacts", response_class=HTMLResponse)
     def contacts_page(request: Request, confidence: str = "", role: str = "", reachable: str = ""):
@@ -475,11 +497,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.get("/pipeline", response_class=HTMLResponse)
     def pipeline(request: Request):
         with C().db.session() as s:
-            opps = s.execute(select(Opportunity).order_by(Opportunity.updated_at.desc())).scalars().all()
+            opps = s.execute(select(Opportunity).where(opportunity_condition(scope(request)))
+                             .order_by(Opportunity.updated_at.desc())).scalars().all()
             for o in opps:
                 _ = o.company
             outreach = dict(s.execute(select(Lead.outreach_status, func.count(Lead.id)).where(
-                Lead.outreach_status.is_not(None)).group_by(Lead.outreach_status)).all())
+                Lead.outreach_status.is_not(None), lead_condition(scope(request))).group_by(Lead.outreach_status)).all())
         board = {st: [o for o in opps if o.stage == st] for st in STAGES}
         order = ["drafted", "approved", "contacted", "replied", "interested", "meeting", "not_interested", "no_response",
                  "unsubscribed", "bounced", "stopped"]
@@ -491,15 +514,18 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         from aime import booking
         now = utcnow()
         with C().db.session() as s:
-            rows = s.execute(select(Meeting).order_by(Meeting.starts_at.desc()).limit(200)).scalars().all()
+            rows = s.execute(select(Meeting).where(record_condition(scope(request), Meeting.lead_id))
+                             .order_by(Meeting.starts_at.desc()).limit(200)).scalars().all()
             for m in rows:
                 _ = m.lead.company if m.lead else None
-            proposals = s.execute(select(MeetingProposal).order_by(MeetingProposal.id.desc()).limit(50)).scalars().all()
+            proposals = s.execute(select(MeetingProposal).where(record_condition(scope(request), MeetingProposal.lead_id))
+                                  .order_by(MeetingProposal.id.desc()).limit(50)).scalars().all()
             for p in proposals:
                 _ = p.lead.company
             asked = {p.inbound_email_id for p in proposals}
             requests = [r for r in s.execute(select(InboundEmail).where(
                 InboundEmail.intent == "meeting_request", InboundEmail.lead_id.is_not(None),
+                record_condition(scope(request), InboundEmail.lead_id),
                 InboundEmail.received_at >= now - timedelta(days=7))).scalars() if r.id not in asked]
             ready, why = booking.ready(s, C().settings)
         return render(request, "meetings.html", upcoming=[m for m in rows if m.status == "scheduled" and m.ends_at >= now][::-1],
@@ -712,9 +738,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def followups(request: Request, show: str = "open"):
         with C().db.session() as s:
             needs_you = ("awaiting_approval", "uncertain")  # always listed, whatever else is open
-            first = s.execute(select(FollowUp).where(FollowUp.status.in_(needs_you))
+            mine = record_condition(scope(request), FollowUp.lead_id)
+            first = s.execute(select(FollowUp).where(FollowUp.status.in_(needs_you), mine)
                               .order_by(FollowUp.due_at)).scalars().all()
-            stmt = select(FollowUp).where(FollowUp.status.not_in(needs_you))
+            stmt = select(FollowUp).where(FollowUp.status.not_in(needs_you), mine)
             if show == "open":
                 stmt = stmt.where(FollowUp.status.in_(("pending", "approved", "sending")))
             total = s.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
@@ -1065,7 +1092,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 companies = s.execute(select(Company).where(Company.merged_into_id.is_(None), or_(
                     func.lower(Company.name).like(like), func.lower(Company.domain).like(like))).limit(12)).scalars().all()
                 leads = {lead.company_id: lead.id for lead in s.execute(select(Lead).where(
-                    Lead.company_id.in_([c.id for c in companies] or [0]))).scalars()}
+                    Lead.company_id.in_([c.id for c in companies] or [0]), lead_condition(scope(request)))).scalars()}
                 groups.append(("Companies", "building", [
                     (c.name, f"/leads/{leads[c.id]}" if c.id in leads else "/companies", " · ".join(
                         x for x in (c.domain, c.state, c.website_status) if x)) for c in companies]))
@@ -1075,17 +1102,18 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 groups.append(("Contacts", "users", [
                     (c.display_name, "/contacts", " · ".join(x for x in (c.title, c.email, c.company.name if c.company else None) if x))
                     for c in contacts]))
-                emails = s.execute(select(FollowUp).where(FollowUp.channel == "email", or_(
+                emails = s.execute(select(FollowUp).where(FollowUp.channel == "email",
+                                                          record_condition(scope(request), FollowUp.lead_id), or_(
                     func.lower(FollowUp.subject).like(like), func.lower(FollowUp.to_email).like(like)))
                     .order_by(FollowUp.id.desc()).limit(12)).scalars().all()
                 groups.append(("Emails", "mail", [(f.subject, f"/followups#f{f.id}", f"{f.status.replace('_', ' ')} · to {f.to_email or '—'}")
                                                   for f in emails]))
-                replies = s.execute(select(InboundEmail).where(or_(
+                replies = s.execute(select(InboundEmail).where(record_condition(scope(request), InboundEmail.lead_id), or_(
                     func.lower(InboundEmail.subject).like(like), func.lower(InboundEmail.from_email).like(like)))
                     .order_by(InboundEmail.id.desc()).limit(12)).scalars().all()
                 groups.append(("Conversations", "chat", [(r.subject or "(no subject)", "/inbox?show=all",
                                                           f"{r.from_email} · {(r.category or 'new').replace('_', ' ')}") for r in replies]))
-                meetings = s.execute(select(Meeting).where(or_(
+                meetings = s.execute(select(Meeting).where(record_condition(scope(request), Meeting.lead_id), or_(
                     func.lower(Meeting.invitee_name).like(like), func.lower(Meeting.invitee_email).like(like),
                     func.lower(Meeting.title).like(like))).order_by(Meeting.starts_at.desc()).limit(12)).scalars().all()
                 groups.append(("Meetings", "calendar", [(f"{m.invitee_name or m.invitee_email} · {m.title}",
@@ -1096,13 +1124,15 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.get("/approvals", response_class=HTMLResponse)
     def approvals_page(request: Request):
         with C().db.session() as s:
+            mine = record_condition(scope(request), FollowUp.lead_id)
             emails = s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status.in_(
-                ("awaiting_approval", "uncertain"))).order_by(FollowUp.due_at)).scalars().all()
+                ("awaiting_approval", "uncertain")), mine).order_by(FollowUp.due_at)).scalars().all()
             for f in emails:
                 _ = f.lead.company, f.contact
             posts = s.execute(select(ContentItem).where(ContentItem.status == "awaiting_approval")
                               .order_by(ContentItem.scheduled_for)).scalars().all()
-            reconfirm = s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "approved")).scalars().all()
+            reconfirm = s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "approved",
+                                                         mine)).scalars().all()
             reconfirm = [f for f in reconfirm if am.needs_reconfirmation(s, f)]
             for f in reconfirm:
                 _ = f.lead.company
@@ -1146,7 +1176,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     # ------------------------------------------------------------------ automation control center
     def is_admin(request: Request) -> bool:
         user = getattr(request.state, "user", None)
-        return not C().settings.dashboard_auth or bool(user and user.get("role") in ("admin", "super_admin"))
+        return not C().settings.dashboard_auth or bool(user and "admin_ops" in user.get("perms", ()))
 
     @app.get("/automation", response_class=HTMLResponse)
     def automation_page(request: Request):
@@ -1658,10 +1688,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                                                          .group_by(Opportunity.stage)).all()),
             }
 
+    register_team_pages(app, C, render, back, who)
+
     @app.get("/api/leads")
-    def api_leads(status: str = "qualified", limit: int = 50):
+    def api_leads(request: Request, status: str = "qualified", limit: int = 50):
         with C().db.session() as s:
-            rows = s.execute(select(Lead).where(Lead.status == status).order_by(Lead.score.desc()).limit(min(limit, 500))).scalars().all()
+            rows = s.execute(select(Lead).where(Lead.status == status, lead_condition(scope(request)))
+                             .order_by(Lead.score.desc()).limit(min(limit, 500))).scalars().all()
             return [{
                 "id": l.id, "company": l.company.name, "state": l.company.state, "industry": l.company.industry,
                 "website": l.company.website, "score": l.score, "grade": l.grade, "source": l.source,

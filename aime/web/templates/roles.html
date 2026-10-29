@@ -1,0 +1,36 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}Roles · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+  <h1>{{ icon('shield') }} Roles and permissions</h1>
+  <p class="subtitle">What each role may do, enforced by the server for every page and every record. Built-in roles are
+    fixed; add a custom role when none fits. Give roles on <a href="/admin/users">Users</a>.</p>
+</div></div>
+
+<div class="card table-wrap"><table>
+  <tr><th>Role</th><th>Users</th>{% for p in permissions %}<th class="small" title="{{ permissions[p] }}">{{ p|replace('_', ' ') }}</th>{% endfor %}<th></th></tr>
+  {% for k, r in builtin.items() %}<tr>
+    <td><b>{{ r.label }}</b><br><span class="small muted">{{ k }} · built in</span></td><td>{{ used.get(k, 0) }}</td>
+    {% for p in permissions %}<td>{{ '✓' if p in r.permissions else '' }}</td>{% endfor %}<td></td></tr>
+  {% endfor %}
+  {% for r in custom %}<tr{% if not r.active %} class="muted"{% endif %}>
+    <td><b>{{ r.label }}</b><br><span class="small muted">{{ r.name }} · custom{% if not r.active %} · inactive{% endif %}</span></td><td>{{ used.get(r.name, 0) }}</td>
+    {% for p in permissions %}<td>{{ '✓' if p in (r.permissions or []) else '' }}</td>{% endfor %}
+    <td><a class="btn secondary" href="/admin/roles?edit={{ r.id }}#edit">Edit</a></td></tr>
+  {% endfor %}
+</table></div>
+<div class="card small">{% for p, text in permissions.items() %}<div><b>{{ p|replace('_', ' ') }}</b>: {{ text }}</div>{% endfor %}</div>
+
+<h2 id="edit">{{ 'Edit ' ~ edit.label if edit else 'Add a custom role' }}</h2>
+<form class="card" method="post" action="/admin/roles">
+  {% if edit %}<input type="hidden" name="role_id" value="{{ edit.id }}"><input type="hidden" name="name" value="{{ edit.name }}">{% endif %}
+  <div class="filters" style="flex-wrap:wrap">
+    {% if not edit %}<label>Name (lower case, e.g. inside_sales)<input name="name" required pattern="[a-z][a-z0-9_]{2,29}"></label>{% endif %}
+    <label>Label<input name="label" required maxlength="80" value="{{ edit.label if edit else '' }}"></label>
+    {% if edit %}<label>State<select name="active"><option value="yes" {{ 'selected' if edit.active }}>active</option><option value="no" {{ 'selected' if not edit.active }}>inactive</option></select></label>{% endif %}
+  </div>
+  <fieldset><legend class="small">Permissions (only those you hold yourself)</legend>
+    <div class="checks">{% for p in grantable %}<label title="{{ permissions[p] }}"><input type="checkbox" name="permissions" value="{{ p }}" {{ 'checked' if edit and p in (edit.permissions or []) }}> {{ p|replace('_', ' ') }}</label> {% endfor %}</div></fieldset>
+  <div class="row-actions"><button>{{ 'Save' if edit else 'Add role' }}</button>{% if edit %} <a class="btn secondary" href="/admin/roles">Cancel</a>{% endif %}</div>
+</form>
+{% endblock %}

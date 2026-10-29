@@ -28,6 +28,8 @@ from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from aime.models import User
+from aime.permissions import BUILTIN_ROLES, permissions_of
+from aime.visibility import EVERYTHING, record_visible, scope_for
 from aime.secure_store import protect, unprotect
 from aime.timeutil import utcnow
 
@@ -36,7 +38,7 @@ SESSION_SECONDS = 12 * 3600
 MAX_FAILED = 5
 LOCK_MINUTES = 15
 MIN_PASSWORD = 12
-PUBLIC_PREFIXES = ("/login", "/static/")
+PUBLIC_PREFIXES = ("/login", "/static/", "/setup")  # /setup: a one-time account link
 PUBLIC_PATHS = ("/api/inbound",)  # protected by its own token and rate limit
 _SECRETS: dict[str, bytes] = {}
 # One sign-in check at a time (the dashboard is one process): parallel wrong passwords each count towards the lock.
@@ -145,9 +147,10 @@ ADMIN_ONLY_PREFIXES = ("/jobs/", "/integrations/linkedin/connect", "/integration
                        "/automation/state/start", "/automation/state/resume")  # pausing and stopping: anyone signed in
 
 
-ADMIN_ROLES = ("admin", "super_admin")  # a Super Admin can do everything an admin can
-# Mailbox configuration (servers, passwords, which mailbox sends): Super Admin only, for viewing too.
+# Mailbox configuration (servers, passwords, which mailbox sends): `configure_system` (Super Admin), viewing too.
 SUPER_ADMIN_PREFIXES = ("/admin/mailboxes", "/api/mailboxes", "/admin/settings", "/integrations/linkedin-leads")
+# The sales organisation: accounts, teams, custom roles: `manage_users`, viewing too.
+TEAM_ADMIN_PREFIXES = ("/admin/users", "/admin/teams", "/admin/roles")
 
 
 def super_admin_only(path: str) -> bool:
@@ -160,26 +163,54 @@ def admin_only(method: str, path: str) -> bool:
     return method == "POST" and path.startswith(ADMIN_ONLY_PREFIXES)
 
 
-# Least privilege below a Sales Manager:
-# - a Read-Only Analyst sees every page a Sales Manager sees (reports, pipeline, leads, replies) and changes nothing;
-# - a Sales Executive (BDE) works leads, notes, meetings, replies and drafts like a Sales Manager, but cannot approve
-#   what goes out to a customer (an email, a post), confirm or resend one, or start a campaign: a Sales Manager does.
-ROLES = ("analyst", "sales_executive", "sales_manager", "admin", "super_admin")
-ROLE_LABELS = {"analyst": "Read-Only Analyst", "sales_executive": "Sales Executive", "sales_manager": "Sales Manager",
-               "admin": "Administrator", "super_admin": "Super Admin"}
-APPROVER_ROLES = ("sales_manager", "admin", "super_admin")
+# Roles are sets of permissions (aime.permissions): the built-in sales roles from Read-Only Analyst to Super Admin,
+# and custom roles an administrator defines. What each request needs:
+# - configure_system: mailboxes, sales settings, LinkedIn Lead Sync;  admin_ops: jobs, automation, integrations;
+# - manage_users: accounts, teams and roles;  assign_leads: moving a lead or deal to someone else;
+# - approve_outbound: approving, confirming or resending what goes out to customers, and campaigns;
+# - edit_records: every other change. Without it (a Read-Only Analyst) a user can only look and sign out.
+# Which records a user sees and works is limited separately (aime.visibility).
+ROLES = tuple(BUILTIN_ROLES)
+ROLE_LABELS = {k: v["label"] for k, v in BUILTIN_ROLES.items()}
+ADMIN_ROLES = tuple(k for k, v in BUILTIN_ROLES.items() if "admin_ops" in v["permissions"])
 READ_METHODS = ("GET", "HEAD")
 _APPROVALS = re.compile(r"/(?:followups/\d+/(?:approve|reconfirm|mark_sent|requeue)"
                         r"|content/\d+/(?:approve|confirm_published|requeue)|campaigns(?:/\d+/status)?)/?")
+# one record in the URL: /leads/7, /opportunities/3, /followups/12/approve, /inbox/5/reviewed, /meetings/2/held,
+# /meetings/proposals/4/book, /meetings/requests/9/propose
+_RECORD = re.compile(r"/(?:meetings/)?(leads|opportunities|followups|inbox|meetings|proposals|requests)/(\d+)(?:/|$)")
+_ASSIGN = re.compile(r"/(?:leads|opportunities)/\d+/assign/?")
 
 
-def read_only(role: str, method: str, path: str) -> bool:
-    """Whether this request changes something a Read-Only Analyst may not change (anything but signing out)."""
-    return role == "analyst" and method not in READ_METHODS and path != "/logout"
+def read_only(perms, method: str, path: str) -> bool:
+    """Whether this request changes something a user without `edit_records` may not change (anything but signing
+    out)."""
+    return "edit_records" not in perms and method not in READ_METHODS and path != "/logout"
 
 
 def approver_only(method: str, path: str) -> bool:
     return method == "POST" and bool(_APPROVALS.fullmatch(path))
+
+
+def assigning(method: str, path: str) -> bool:
+    return method == "POST" and bool(_ASSIGN.fullmatch(path))
+
+
+def refusal(perms, method: str, path: str) -> str | None:
+    """Why this signed-in user may not make this request, or None."""
+    if super_admin_only(path) and "configure_system" not in perms:
+        return "Super Admin only"
+    if path.startswith(TEAM_ADMIN_PREFIXES) and "manage_users" not in perms:
+        return "Only an administrator manages users, teams and roles"
+    if admin_only(method, path) and "admin_ops" not in perms:
+        return "Admin only: ask an admin to do this"
+    if read_only(perms, method, path):
+        return "Read-only access: ask a Sales Manager to do this"
+    if approver_only(method, path) and "approve_outbound" not in perms:
+        return "A Sales Manager approves what goes out to customers: ask one to do this"
+    if assigning(method, path) and "assign_leads" not in perms:
+        return "Only a manager assigns leads and deals: ask one to do this"
+    return None
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -191,6 +222,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         request.state.user = None
+        request.state.scope = EVERYTHING  # which records this user may see (aime.visibility); all without sign-in
         ctx = self.get_ctx()
         path = request.url.path
         if not ctx.settings.dashboard_auth or path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES):
@@ -200,19 +232,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
             with ctx.db.session() as s:
                 user = s.get(User, payload.get("u"))
                 if user and user.active and user.session_version == payload.get("v"):
-                    request.state.user = {"id": user.id, "username": user.username, "role": user.role}
+                    request.state.user = {"id": user.id, "username": user.username, "role": user.role,
+                                          "perms": permissions_of(s, user.role)}
         if request.state.user is None:
             if path.startswith("/api/"):
                 return JSONResponse({"detail": "Sign in required"}, status_code=401)
             return RedirectResponse(f"/login?next={quote(path)}", status_code=303)
-        role = request.state.user["role"]
-        if super_admin_only(path) and role != "super_admin":
-            return JSONResponse({"detail": "Super Admin only"}, status_code=403)
-        if admin_only(request.method, path) and role not in ADMIN_ROLES:
-            return JSONResponse({"detail": "Admin only: ask an admin to do this"}, status_code=403)
-        if read_only(role, request.method, path):
-            return JSONResponse({"detail": "Read-only access: ask a Sales Manager to do this"}, status_code=403)
-        if approver_only(request.method, path) and role not in APPROVER_ROLES:
-            return JSONResponse({"detail": "A Sales Manager approves what goes out to customers: ask one to do this"},
-                                status_code=403)
+        if reason := refusal(request.state.user["perms"], request.method, path):
+            return JSONResponse({"detail": reason}, status_code=403)
+        with ctx.db.session() as s:
+            request.state.scope = scope_for(s, request.state.user)
+            if (m := _RECORD.match(path)) and not record_visible(s, request.state.scope, m.group(1), int(m.group(2))):
+                # someone else's lead, deal, email, reply or meeting: as if it did not exist, for viewing and changing
+                return JSONResponse({"detail": "Not found"}, status_code=404)
         return await call_next(request)

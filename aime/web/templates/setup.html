@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Set your password · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="card" style="max-width:420px;margin:40px auto">
+  <h1 style="margin-top:0">Set your password</h1>
+  {% if error %}<div class="flash">{{ error }}</div>{% endif %}
+  {% if username %}
+  <form method="post" action="/setup">
+    <input type="hidden" name="token" value="{{ token }}">
+    <p>Account: <b>{{ username }}</b></p>
+    <label class="small">New password (at least 12 characters)</label><input name="password" type="password" autocomplete="new-password" required minlength="12" style="width:100%">
+    <label class="small">Again</label><input name="confirm" type="password" autocomplete="new-password" required minlength="12" style="width:100%">
+    <div class="row-actions" style="margin-top:12px"><button>Set password</button></div>
+  </form>
+  {% else %}
+  <p>This setup link is not valid: it was used already, it expired, or the account is deactivated.
+    Ask an administrator for a new one.</p>
+  <p><a href="/login">Sign in</a></p>
+  {% endif %}
+</div>
+{% endblock %}

@@ -180,7 +180,7 @@ class Lead(Timestamped, Base):
     # not_interested | no_response | unsubscribed | bounced | stopped | None (not in outreach)
     outreach_status: Mapped[str | None] = mapped_column(String(20), index=True)
     outreach_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
-    owner: Mapped[str | None] = mapped_column(String(80))  # the Sales Manager who approved its first outreach
+    owner: Mapped[str | None] = mapped_column(String(80), index=True)  # who works the lead: assigned, or who approved its first outreach
     notes: Mapped[str | None] = mapped_column(Text)
     is_sample: Mapped[bool] = mapped_column(Boolean, default=False)
 
@@ -202,7 +202,7 @@ class Opportunity(Timestamped, Base):
     est_value: Mapped[float | None] = mapped_column(Float)  # only when a human enters it
     probability: Mapped[int] = mapped_column(Integer, default=10)
     next_step: Mapped[str | None] = mapped_column(String(300))
-    owner: Mapped[str | None] = mapped_column(String(80))  # the Sales Manager it is handed over to (username)
+    owner: Mapped[str | None] = mapped_column(String(80), index=True)  # the salesperson it is assigned to (username)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime)
     lost_reason: Mapped[str | None] = mapped_column(String(200))
 
@@ -684,6 +684,54 @@ class User(Timestamped, Base):
     failed_logins: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # the sales organisation (aime.permissions, aime.assignment)
+    display_name: Mapped[str | None] = mapped_column(String(120))
+    team_id: Mapped[int | None] = mapped_column(ForeignKey("teams.id"), index=True)
+    manager: Mapped[str | None] = mapped_column(String(60), index=True)  # the username they report to
+    skills: Mapped[list[str]] = mapped_column(JSON, default=list)  # service ids they sell best
+    available: Mapped[bool] = mapped_column(Boolean, default=True)  # off: no new leads (leave, holiday)
+    capacity: Mapped[int] = mapped_column(Integer, default=0)  # most open deals at once; 0 = no limit
+    # one-time account setup / password reset link: only its hash is stored, it expires
+    setup_token_hash: Mapped[str | None] = mapped_column(String(100))
+    setup_expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class Team(Timestamped, Base):
+    __tablename__ = "teams"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+    manager: Mapped[str | None] = mapped_column(String(60))  # the team's manager (username)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class CustomRole(Timestamped, Base):
+    """A role an administrator defined: a name and a set of permissions from aime.permissions.PERMISSIONS."""
+
+    __tablename__ = "roles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(30), unique=True)
+    label: Mapped[str] = mapped_column(String(80))
+    permissions: Mapped[list[str]] = mapped_column(JSON, default=list)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_by: Mapped[str | None] = mapped_column(String(80))
+
+
+class Assignment(Base):
+    """Every change of who owns a lead or a deal: automatic (and by which rule), manual, or an escalation."""
+
+    __tablename__ = "assignments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    lead_id: Mapped[int | None] = mapped_column(ForeignKey("leads.id"), index=True)
+    opportunity_id: Mapped[int | None] = mapped_column(ForeignKey("opportunities.id"), index=True)
+    from_owner: Mapped[str | None] = mapped_column(String(60))
+    to_owner: Mapped[str | None] = mapped_column(String(60), index=True)
+    method: Mapped[str] = mapped_column(String(30))  # workload | round_robin | skill | manual | escalation | none
+    reason: Mapped[str | None] = mapped_column(String(300))
+    actor: Mapped[str] = mapped_column(String(80))
 
 
 class KeyValue(Base):

@@ -1,0 +1,68 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}Users · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+  <h1>{{ icon('users') }} Users</h1>
+  <p class="subtitle">The sales team: accounts, roles, teams, who reports to whom, and who receives new leads.
+    <a href="/admin/teams">Teams</a> · <a href="/admin/roles">Roles and permissions</a></p>
+</div></div>
+
+{% if setup %}
+<div class="send-check ok"><b>{{ icon('lock') }} One-time setup link for {{ setup.username }}</b>
+  <span>Give this link to {{ setup.username }} privately. It works once, for {{ setup.hours }} hours, on this PC's dashboard address,
+    and lets them choose their own password. It is not shown again; you can issue a new one with <strong>New setup link</strong>.</span>
+  <code style="user-select:all;word-break:break-all">{{ setup.path }}</code></div>
+{% endif %}
+
+<div class="card table-wrap"><table>
+  <tr><th>User</th><th>Role</th><th>Team</th><th>Reports to</th><th>Receives leads</th><th>Open deals</th><th>Last sign-in</th><th>Actions</th></tr>
+  {% for r in rows %}{% set u = r.u %}<tr{% if not u.active %} class="muted"{% endif %}>
+    <td><b>{{ u.username }}</b>{% if u.display_name %}<br><span class="small">{{ u.display_name }}</span>{% endif %}
+      {% if not u.active %}<br><span class="pill">deactivated</span>{% elif u.setup_token_hash %}<br><span class="pill warn">setup link open</span>{% endif %}</td>
+    <td>{{ r.role }}</td>
+    <td>{{ r.team or '—' }}</td>
+    <td>{{ u.manager or '—' }}</td>
+    <td class="small">{{ 'available' if u.available is not false else 'unavailable' }}{% if u.capacity %} · up to {{ u.capacity }}{% endif %}
+      {% if u.skills %}<br><span class="muted">{{ u.skills|map('service')|join(', ') }}</span>{% endif %}</td>
+    <td>{{ r.open }}</td>
+    <td class="small">{{ u.last_login_at|local if u.last_login_at else '—' }}</td>
+    <td class="row-actions">
+      <a class="btn secondary" href="/admin/users?edit={{ u.id }}#edit">Edit</a>
+      <form class="inline" method="post" action="/admin/users/{{ u.id }}/reset"><button class="secondary">New setup link</button></form>
+      <form class="inline" method="post" action="/admin/users/{{ u.id }}/{{ 'deactivate' if u.active else 'activate' }}"><button class="secondary">{{ 'Deactivate' if u.active else 'Activate' }}</button></form>
+    </td></tr>
+  {% endfor %}
+</table></div>
+
+{% if edit %}
+<h2 id="edit">Edit {{ edit.username }}</h2>
+<form class="card" method="post" action="/admin/users/{{ edit.id }}/edit">
+  <div class="filters" style="flex-wrap:wrap">
+    <label>Name shown<input name="display_name" value="{{ edit.display_name or '' }}" maxlength="120"></label>
+    <label>Role<select name="role">{% for k, v in roles.items() %}<option value="{{ k }}" {{ 'selected' if k == edit.role }}>{{ v.label }}</option>{% endfor %}</select></label>
+    <label>Team<select name="team_id"><option value="">No team</option>{% for t in teams %}<option value="{{ t.id }}" {{ 'selected' if t.id == edit.team_id }}>{{ t.name }}</option>{% endfor %}</select></label>
+    <label>Reports to<select name="manager"><option value="">Nobody</option>{% for n in usernames if n != edit.username %}<option {{ 'selected' if n == edit.manager }}>{{ n }}</option>{% endfor %}</select></label>
+    <label>Most open deals at once (0 = no limit)<input name="capacity" type="number" min="0" max="1000" value="{{ edit.capacity or 0 }}"></label>
+    <label><input type="checkbox" name="available" value="yes" {{ 'checked' if edit.available is not false }}> Available for new leads</label>
+  </div>
+  <fieldset><legend class="small">Services they sell best (skill-based assignment)</legend>
+    <div class="checks">{% for k, svc in services.items() %}<label><input type="checkbox" name="skills" value="{{ k }}" {{ 'checked' if k in (edit.skills or []) }}> {{ svc.name }}</label> {% endfor %}</div></fieldset>
+  <div class="row-actions"><button>Save</button> <a class="btn secondary" href="/admin/users">Cancel</a></div>
+  <p class="small muted">A new role applies from their next sign-in. You cannot change your own account, or an account with permissions you do not have.</p>
+</form>
+{% endif %}
+
+<h2>Add a user</h2>
+<form class="card" method="post" action="/admin/users">
+  <div class="filters" style="flex-wrap:wrap">
+    <label>Username<input name="username" required pattern="[a-z][a-z0-9._\-]{1,59}" placeholder="e.g. jsmith"></label>
+    <label>Name shown<input name="display_name" maxlength="120"></label>
+    <label>Role<select name="role">{% for k, v in roles.items() %}<option value="{{ k }}" {{ 'selected' if k == 'sales_executive' }}>{{ v.label }}</option>{% endfor %}</select></label>
+    <label>Team<select name="team_id"><option value="">No team</option>{% for t in teams %}<option value="{{ t.id }}">{{ t.name }}</option>{% endfor %}</select></label>
+    <label>Reports to<select name="manager"><option value="">Nobody</option>{% for n in usernames %}<option>{{ n }}</option>{% endfor %}</select></label>
+  </div>
+  <div class="row-actions"><button>Create and get a setup link</button></div>
+  <p class="small muted">Nobody types another person's password: the new user chooses theirs through the one-time link.
+    Only roles whose permissions you hold yourself are offered.</p>
+</form>
+{% endblock %}

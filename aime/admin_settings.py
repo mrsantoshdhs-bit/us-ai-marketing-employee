@@ -87,6 +87,13 @@ def _days(raw: str) -> list[int]:
     return days
 
 
+def _strategy(raw: str) -> str:
+    value = (raw or "workload").strip().lower().replace(" ", "_").replace("-", "_")
+    if value not in ("workload", "round_robin", "skill"):
+        raise ValueError("must be workload, round_robin or skill")
+    return value
+
+
 def _bool(raw: str) -> bool:
     return str(raw).lower() in ("yes", "on", "true", "1")
 
@@ -118,7 +125,10 @@ FIELDS: list[tuple[str, str, str, Any, str]] = [
     ("meetings", "min_notice_hours", "Minimum notice (hours)", _int(0, 168), "number"),
     ("meetings", "reminder_hours", "Reminder before a meeting (hours)", _int(1, 72), "number"),
     ("meetings", "remind_prospect", "Also draft a reminder for the prospect", _bool, "bool"),
-    ("handover", "sales_manager", "Sales Managers for handovers (new opportunities go to the least busy)", None, "users"),
+    ("handover", "sales_manager", "Who receives new deals (none chosen: everyone whose role receives leads)", None, "users"),
+    ("handover", "strategy", "Assignment rule: workload, round_robin or skill", _strategy, "text"),
+    ("handover", "escalate_after_hours", "Tell the owner's manager when a deal is untouched for (hours, 0 = never)",
+     _int(0, 336), "number"),
 ]
 
 
