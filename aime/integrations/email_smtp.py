@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import smtplib
 import ssl
 from collections.abc import Callable
@@ -13,6 +14,17 @@ from aime.config import Settings
 
 POSTAL_PLACEHOLDER = "[postal address required before sending]"
 MAIL_TIMEOUT = 60  # seconds for SMTP and IMAP connections; a hung server must not hold a job for an hour
+TEST_MARKER = re.compile(r"\[TEST for ([^\]\s]+)\]\s*", re.I)
+
+
+def marked_subject(subject: str, to: str) -> str:
+    """The subject of a test-mode email for `to`: exactly one "[TEST for <to>]" marker. A reply keeps its subject
+    (and its marker where it stands) so it stays threaded; markers for other addresses or repeated ones, carried
+    over from another thread, are removed."""
+    found = [m.group(1).lower() for m in TEST_MARKER.finditer(subject)]
+    if found == [to.lower()]:
+        return subject
+    return f"[TEST for {to}] {' '.join(TEST_MARKER.sub('', subject).split())}".strip()
 
 
 def tls_context() -> ssl.SSLContext:
@@ -106,8 +118,7 @@ class EmailSender:
         subject = " ".join(subject.split())  # a header is one line: no folding, no injected headers
         actual, redirected = self.recipient_for(to)
         if redirected:  # controlled test: nobody outside the test list is ever emailed
-            if f"[TEST for {to}]" not in subject:  # a reply in a test thread keeps its subject, so it stays threaded
-                subject = f"[TEST for {to}] {subject}"
+            subject = marked_subject(subject, to)
             body = (f"TEST MODE: this email would have gone to {to}. Only addresses in OUTBOUND_TEST_RECIPIENTS "
                     f"receive email.\n\n{body}")
         msg = EmailMessage()

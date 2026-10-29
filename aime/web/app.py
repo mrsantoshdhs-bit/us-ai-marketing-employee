@@ -756,7 +756,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     return back(f"/followups#f{f.id}", f"Quality checks {qc_status}: review the findings and tick "
                                                        "'I reviewed the quality findings' to approve")
                 else:
-                    f.status, f.approved_by, f.approved_at = "approved", who(request), utcnow()
+                    now = utcnow()
+                    # The switch as this dashboard sees it, recorded before the approval: one given while sending is
+                    # on is not asked to "Confirm again" because the follow-ups job had not run since the switch.
+                    am.observe_sending(s, C().settings.outbound_email_enabled, now)
+                    f.status, f.approved_by, f.approved_at = "approved", who(request), now
                     if f.kind == "outreach":
                         lead = f.lead
                         lead.owner = lead.owner or who(request)

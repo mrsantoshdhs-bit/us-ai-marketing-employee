@@ -347,7 +347,12 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
                          "check it, and reclassify it as a bounce if delivery failed")
         row.status = "actioned" if failed and (f or contact) else "needs_review"  # unmatched: a person checks
     elif row.category == "unsubscribe":
-        suppress(session, row.from_email, f"Unsubscribe request by email{' (complaint)' if row.confidence != 'high' else ''}")
+        # Test mode (OUTBOUND_TEST_RECIPIENTS): every lead's email went to the owner's own test address, so an opt-out
+        # from it speaks for the lead in that thread. Suppressing the shared test address would cancel every later
+        # test email to every other lead; only the lead's own address is suppressed.
+        test_address = (row.from_email or "").lower() in getattr(settings, "test_recipients", set())
+        if not test_address:
+            suppress(session, row.from_email, f"Unsubscribe request by email{' (complaint)' if row.confidence != 'high' else ''}")
         if contact and contact.consent_status != "opted_out":
             contact.consent_status, contact.consent_at = "opted_out", utcnow()
         if lead and lead.outreach_status:
@@ -356,8 +361,14 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             # an opt-out in our thread from another address (a colleague, a personal address, test mode): the
             # address we wrote to is suppressed as well
             suppress(session, contact.email, "Unsubscribe request in the email thread")
-        notes.append(f"{row.from_email} suppressed; no further email")
-        row.status = "actioned" if row.confidence == "high" else "needs_review"
+        if test_address:
+            notes.append(f"{contact.email} suppressed (test mode: the opt-out came from the test address "
+                         f"{row.from_email}, which stays deliverable)" if contact and contact.email else
+                         f"test mode: the opt-out came from the test address {row.from_email} and matches no lead; "
+                         "nothing suppressed, check which lead it was for")
+        else:
+            notes.append(f"{row.from_email} suppressed; no further email")
+        row.status = "actioned" if row.confidence == "high" and (contact or not test_address) else "needs_review"
     elif row.category == "out_of_office":
         notes.append("Automatic reply: the sequence continues")
         row.status = "actioned"
