@@ -224,3 +224,20 @@ def test_missing_indexes_are_added_to_an_existing_database(tmp_path):
     assert "ix_leads_owner" in {i["name"] for i in inspect(engine).get_indexes("leads")}
     # expression indexes (lower(email)) are invisible to SQLAlchemy's inspector: a later start must not recreate them
     assert migrate(engine) == []
+
+
+def test_the_administration_pages_render_for_an_administrator(org):
+    ctx, leads = org
+    boss = client(ctx, "boss")
+    with ctx.db.session() as s:
+        uid = s.execute(select(User).where(User.username == "eva")).scalar_one().id
+    boss.post("/admin/roles", headers=ORIGIN, data={"name": "inside_sales", "label": "Inside Sales", "permissions": ["view_own"]})
+    pages = {"/admin/users": "Add a user", f"/admin/users?edit={uid}": "Edit eva", "/admin/teams": "US East",
+             "/admin/roles": "Inside Sales", f"/leads/{leads['eva']}": "Assign lead and its open deals"}
+    for path, text_ in pages.items():
+        r = boss.get(path)
+        assert r.status_code == 200 and text_ in r.text, path
+    assert "Users &amp; teams" in boss.get("/").text and "Users &amp; teams" not in client(ctx, "mia").get("/").text
+    boss.post("/admin/teams", headers=ORIGIN, data={"name": "US West", "manager": "zoe"})
+    with ctx.db.session() as s:
+        assert s.execute(select(Team).where(Team.name == "US West")).scalar_one().manager == "zoe"
