@@ -877,7 +877,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 return back(f"/content/{cid}", msg)
             if action == "save":
                 item.title = title.strip() or item.title
-                item.body = body.strip() or item.body
+                # A browser sends the textarea's line breaks as CR LF: store plain ones, as email drafts do.
+                item.body = body.replace("\r\n", "\n").replace("\r", "\n").strip() or item.body
                 if hashtags.strip():
                     item.hashtags = ["#" + t.lstrip("#") for t in hashtags.replace(",", " ").split() if t.strip("#")]
                 if scheduled_et.strip():

@@ -83,7 +83,8 @@ def format_commentary(body: str, hashtags: list[str]) -> str:
         clean = tag.lstrip("#").strip()
         if clean.isalnum():
             tags.append("{hashtag|\\#|" + clean + "}")
-    text = escape_little_text(body.strip())
+    # Plain line breaks only: a post saved before the dashboard stored them may still hold CR LF.
+    text = escape_little_text(body.replace("\r\n", "\n").replace("\r", "\n").strip())
     return f"{text}\n\n{' '.join(tags)}" if tags else text
 
 

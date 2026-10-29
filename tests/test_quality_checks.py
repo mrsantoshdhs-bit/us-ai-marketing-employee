@@ -143,6 +143,29 @@ def test_held_post_needs_explicit_review_before_approval(ctx):
         assert s.execute(select(Activity).where(Activity.subject.like("%despite quality findings%"))).first()
 
 
+def test_a_post_saved_from_the_browser_keeps_plain_line_breaks(ctx):
+    """A browser sends the textarea's line breaks as CR LF. Stored as sent, the post looked like one paragraph to
+    the checks ("needs short paragraphs") and its carriage returns would have gone to LinkedIn."""
+    from aime.integrations.linkedin import format_commentary
+
+    with ctx.db.session() as s:
+        item = ContentItem(service="bpa", industry="real_estate", title="The hidden cost of copy-paste work",
+                           body=GOOD_BODY, hashtags=TAGS, generator="t", fingerprint="f", status="awaiting_approval")
+        s.add(item)
+        s.flush()
+        cid = item.id
+    client = TestClient(create_app(ctx))
+    client.post(f"/content/{cid}/save", data={"body": GOOD_BODY.replace("\n", "\r\n")}, headers=ORIGIN)
+    with ctx.db.session() as s:
+        item = s.get(ContentItem, cid)
+        assert "\r" not in item.body and item.body == GOOD_BODY.strip()
+        rules = next(c for c in item.qc["checks"] if c["name"] == "content rules")
+        assert rules["status"] == "pass", rules
+    # a post stored with CR LF before this fix is still sent with plain line breaks
+    assert format_commentary("One.\r\n\r\nTwo?", TAGS) == format_commentary("One.\n\nTwo?", TAGS)
+    assert "\r" not in format_commentary("One.\rTwo?", [])
+
+
 def test_saving_an_edit_reruns_the_checks(ctx):
     with ctx.db.session() as s:
         item = ContentItem(service="bpa", industry="real_estate", title="The hidden cost of copy-paste work",
