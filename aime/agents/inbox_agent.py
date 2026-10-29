@@ -113,6 +113,20 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
             except (CalendarError, oauth.OAuthError) as exc:
                 session.add(Alert(level="warning", source=self.name, message=f"Meeting times not proposed: {exc}"))
 
+    def _authentication(self, raw: bytes, p: ParsedEmail) -> str | None:
+        """Who vouches for this email, as stored for the Calendly check (aime.mail_auth). A Calendly-looking email is
+        DKIM-verified by AIME itself ("aime.dkim; ..."); a server's own Authentication-Results line is kept only when
+        that server is named in TRUSTED_AUTHSERV_IDS. A header written by the sender is never stored as trusted."""
+        from aime.mail_auth import authserv_id, trusted_authserv_ids
+
+        if p.auth_results and authserv_id(p.auth_results) in trusted_authserv_ids(self.settings):
+            return p.auth_results
+        if not looks_like_calendly(p):
+            return None
+        from aime.dkim_verify import auth_results
+
+        return auth_results(raw)
+
     def execute(self, inp: InboxInput, session: Session) -> InboxOutput:
         out = InboxOutput()
         from aime.models import MailAccount
@@ -142,7 +156,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                     references=p.references, from_email=p.from_email, from_name=p.from_name, to_email=p.to_email,
                     subject=p.subject, received_at=p.received_at, body_text=p.body_text, new_text=new_text(p.body_text),
                     auto_submitted=p.auto_submitted, bounced_addresses=p.bounced_addresses, status="new",
-                    auth_results=p.auth_results))
+                    auth_results=self._authentication(raw, p)))
                 out.stored += 1
             kv_set(session, state_key, state)
             session.commit()
@@ -156,6 +170,13 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
 CALENDLY_SUBJECT = re.compile(r"\b(new event|canceled|cancelled|rescheduled|invitee)\b", re.I)
 
 
+def looks_like_calendly(p: ParsedEmail) -> bool:
+    """A Calendly booking notice, sent by Calendly or forwarded (its subject and a calendly.com mention)."""
+    sender_domain = p.from_email.rsplit("@", 1)[-1]
+    return bool((sender_domain.endswith("calendly.com") or "calendly.com" in (p.body_text or "").lower())
+                and (CALENDLY_SUBJECT.search(p.subject or "") or CALENDLY_NOTICE.match(p.subject or "")))
+
+
 def sales_related(session: Session, p: ParsedEmail) -> bool:
     """Is this email part of the sales work? A reply in one of our threads, a bounce, a Calendly booking notice
     (also forwarded), or mail from a known contact or a lead's company domain. Everything else in a shared mailbox,
@@ -163,8 +184,7 @@ def sales_related(session: Session, p: ParsedEmail) -> bool:
     if p.is_bounce or p.bounced_addresses:
         return True
     sender_domain = p.from_email.rsplit("@", 1)[-1]
-    if (sender_domain.endswith("calendly.com") or "calendly.com" in (p.body_text or "").lower()) \
-            and (CALENDLY_SUBJECT.search(p.subject or "") or CALENDLY_NOTICE.match(p.subject or "")):
+    if looks_like_calendly(p):
         return True
     ids = {i.strip() for i in [p.in_reply_to or "", *(p.references or "").split()] if i.strip()}
     if ids and session.execute(select(FollowUp.id).where(FollowUp.message_id.in_(ids))).first():

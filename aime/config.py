@@ -138,6 +138,7 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "backup_keep_manual": ("BACKUP_KEEP_MANUAL", int),
     "ai_email_drafts": ("AI_EMAIL_DRAFTS", bool),
     "calendly_forwarders": ("CALENDLY_FORWARDERS", str),
+    "trusted_authserv_ids": ("TRUSTED_AUTHSERV_IDS", str),
     "calendly_url": ("CALENDLY_URL", str),
     "dashboard_host": ("DASHBOARD_HOST", str),
     "dashboard_port": ("DASHBOARD_PORT", int),
@@ -247,6 +248,7 @@ class Settings:
     # anything doubtful falls back to the template. Off by default.
     ai_email_drafts: bool = False
     calendly_forwarders: str = ""
+    trusted_authserv_ids: str = ""  # mail servers whose Authentication-Results are believed (ours stamps none)
     calendly_url: str = ""  # booking link offered to interested prospects
 
     dashboard_host: str = "127.0.0.1"

@@ -38,7 +38,7 @@ def meetings(ctx):
 
 
 def test_only_a_calendly_notice_the_mail_server_vouches_for_changes_the_crm(make_ctx):
-    ctx, _, _ = contacted(make_ctx, calendly_verified_only=True)
+    ctx, _, _ = contacted(make_ctx, calendly_verified_only=True, trusted_authserv_ids="mx.us.example")
     FakeIMAP.ctx, FakeIMAP.messages = ctx, {}
     forged = notice(1)  # "From: Calendly" with no authentication result: anyone can write that
     assert (forged.category, forged.status) == ("calendly", "needs_review") and "not applied" in forged.action_note
@@ -75,7 +75,8 @@ def test_only_the_topmost_authentication_result_counts():
 
 def test_a_notice_forwarded_by_the_owner_counts_only_with_the_owners_signature(make_ctx):
     owner = "owner@owner-test.example"
-    ctx, _, _ = contacted(make_ctx, calendly_verified_only=True, outbound_test_recipients=owner)
+    ctx, _, _ = contacted(make_ctx, calendly_verified_only=True, outbound_test_recipients=owner,
+                          trusted_authserv_ids="mx.us.example")
     FakeIMAP.ctx, FakeIMAP.messages = ctx, {}
     fwd = f"---------- Forwarded message ---------\nFrom: Calendly <notifications@calendly.com>\n\n{BOOKED_BODY}"
     unsigned = notice(1, frm=f"Owner <{owner}>", subject=f"Fwd: {BOOKED_SUBJECT}", body=fwd)
