@@ -220,5 +220,7 @@ def test_missing_indexes_are_added_to_an_existing_database(tmp_path):
     with engine.begin() as conn:
         conn.execute(text("DROP INDEX ix_leads_owner"))
     assert "ix_leads_owner" not in {i["name"] for i in inspect(engine).get_indexes("leads")}
-    assert "CREATE INDEX ix_leads_owner" in migrate(engine)
+    assert migrate(engine) == ["CREATE INDEX ix_leads_owner"]
     assert "ix_leads_owner" in {i["name"] for i in inspect(engine).get_indexes("leads")}
+    # expression indexes (lower(email)) are invisible to SQLAlchemy's inspector: a later start must not recreate them
+    assert migrate(engine) == []

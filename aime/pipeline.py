@@ -36,9 +36,11 @@ def pipeline_checks(session: Session, settings, now: datetime, actor: str) -> di
     stats = {"stalled_tasks": 0, "no_response": 0, "meeting_tasks": 0}
 
     for opp in session.execute(select(Opportunity).where(Opportunity.stage.not_in(("won", "lost")))).scalars().all():
-        last = session.execute(select(func.max(Activity.created_at)).where(
-            (Activity.opportunity_id == opp.id) | (Activity.lead_id == opp.lead_id))).scalar_one()
-        last = max(d for d in (last, opp.updated_at, opp.created_at) if d)
+        # two indexed lookups: an OR of the two columns makes SQLite scan every activity for each deal
+        by_opp = session.execute(select(func.max(Activity.created_at)).where(Activity.opportunity_id == opp.id)).scalar_one()
+        by_lead = session.execute(select(func.max(Activity.created_at)).where(
+            Activity.lead_id == opp.lead_id)).scalar_one() if opp.lead_id else None
+        last = max(d for d in (by_opp, by_lead, opp.updated_at, opp.created_at) if d)
         if opp.lead_id and now - last > timedelta(days=stalled_days):
             days = (now - last).days
             if _task(session, opp.lead_id, opp.company_id, f"Stalled: {opp.name}",

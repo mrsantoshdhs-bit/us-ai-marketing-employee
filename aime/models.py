@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from aime.timeutil import utcnow
@@ -779,3 +779,21 @@ class AuditEvent(Base):
     action: Mapped[str] = mapped_column(String(60), index=True)
     target: Mapped[str | None] = mapped_column(String(120))
     detail: Mapped[str | None] = mapped_column(Text)
+
+
+# --------------------------------------------------------------------------- indexes for the hot paths
+# Reply and bounce matching, the tick's "is anything running" checks, pipeline checks, dashboard counts. Built on
+# existing databases by aime.migrations.ensure_indexes (CREATE INDEX IF NOT EXISTS; no data changes).
+Index("ix_followups_message_id", FollowUp.message_id)
+Index("ix_followups_to_email_lower", func.lower(FollowUp.to_email))
+Index("ix_followups_delivered_to_lower", func.lower(FollowUp.delivered_to))
+Index("ix_job_runs_running", JobRun.status, sqlite_where=JobRun.status == "running")
+Index("ix_agent_runs_running", AgentRun.status, sqlite_where=AgentRun.status == "running")
+Index("ix_agent_runs_agent_status", AgentRun.agent, AgentRun.status, AgentRun.finished_at)
+Index("ix_activities_opportunity_id", Activity.opportunity_id)
+Index("ix_activities_lead_type_created", Activity.lead_id, Activity.type, Activity.created_at)
+Index("ix_contacts_email_lower", func.lower(Contact.email))
+Index("ix_leads_contact_id", Lead.contact_id)
+Index("ix_companies_domain_lower", func.lower(Company.domain))
+Index("ix_inbound_emails_from_email_lower", func.lower(InboundEmail.from_email))
+Index("ix_opportunities_owner_stage", Opportunity.owner, Opportunity.stage)
