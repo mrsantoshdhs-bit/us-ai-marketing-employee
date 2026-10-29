@@ -23,7 +23,7 @@ from aime.timeutil import utcnow
 
 def agent_stats(session: Session, days: int = 7) -> list[dict]:
     since = utcnow() - timedelta(days=days)
-    rows = session.execute(select(AgentRun).where(AgentRun.started_at >= since, AgentRun.status != "running")
+    rows = session.execute(select(AgentRun).where(AgentRun.started_at >= since, AgentRun.status.not_in(("running", "skipped")))
                            .order_by(AgentRun.started_at)).scalars().all()
     by_agent: dict[str, list[AgentRun]] = defaultdict(list)
     for r in rows:
@@ -45,6 +45,8 @@ def agent_stats(session: Session, days: int = 7) -> list[dict]:
             "retries": sum(max(0, (r.attempts or 1) - 1) for r in runs),
             "last_run": runs[-1].started_at,
             "last_error": failed[-1].error if failed else None,
+            "llm_calls": sum(r.llm_calls or 0 for r in runs), "llm_tokens": sum(r.llm_tokens or 0 for r in runs),
+            "llm_ms": sum(r.llm_ms or 0 for r in runs), "llm_cost_usd": round(sum(r.llm_cost_usd or 0 for r in runs), 4),
         })
     return out
 

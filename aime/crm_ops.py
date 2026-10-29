@@ -164,8 +164,9 @@ def suppress(session: Session, value: str, reason: str) -> None:
         return
     session.add(Suppression(value=value, kind="email" if "@" in value else "domain", reason=reason))
     # Stop anything queued for that address/domain.
+    literal = value.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")  # the value, not a pattern
     contacts = session.execute(select(Contact).where(
-        or_(Contact.email == value, Contact.email.like(f"%@{value}")))).scalars().all()
+        or_(Contact.email == value, Contact.email.like(f"%@{literal}", escape="\\")))).scalars().all()
     for c in contacts:
         if c.consent_status != "opted_out":
             c.consent_status, c.consent_at = "opted_out", utcnow()  # when: emails sent before it were allowed

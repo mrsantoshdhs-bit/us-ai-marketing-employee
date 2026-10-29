@@ -86,7 +86,20 @@ def cmd_tick(args, ctx) -> int:
     return 0
 
 
+class PathOnlyAccessLog:
+    """Logging filter for uvicorn's access log: the path without its query string. Queries can carry sign-in codes
+    (OAuth callbacks), one-time setup links and messages with email addresses, which do not belong in a log file."""
+
+    def filter(self, record) -> bool:
+        args = getattr(record, "args", None)
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            record.args = (*args[:2], args[2].split("?", 1)[0], *args[3:])
+        return True
+
+
 def cmd_serve(args, ctx) -> int:
+    import logging
+
     import uvicorn
 
     from aime.web.app import create_app
@@ -96,7 +109,10 @@ def cmd_serve(args, ctx) -> int:
     if host not in ("127.0.0.1", "localhost", "::1"):
         print("Refusing to bind to a non-local address. The dashboard is a local tool; see docs/DEPLOYMENT.md.")
         return 2
-    uvicorn.run(create_app(ctx), host=host, port=port, log_level="info")
+    logging.getLogger("uvicorn.access").addFilter(PathOnlyAccessLog())
+    # proxy_headers off: nothing sits in front of this local dashboard, so X-Forwarded-For is never trusted (it
+    # would let any local program pick the address the inbound API's rate limit counts)
+    uvicorn.run(create_app(ctx), host=host, port=port, log_level="info", proxy_headers=False)
     return 0
 
 
@@ -301,6 +317,7 @@ def cmd_user(args, ctx, prompt_fn=None) -> int:
 
     from aime.crm_ops import log_activity
     from aime.models import User
+    from aime.permissions import all_roles
     from aime.web.auth import hash_password
 
     prompt_fn = prompt_fn or getpass.getpass
@@ -316,6 +333,10 @@ def cmd_user(args, ctx, prompt_fn=None) -> int:
             return 1
         user = s.execute(select(User).where(User.username == username)).scalars().first()
         role = getattr(args, "role", None) or "sales_manager"
+        roles = all_roles(s)  # the built-in roles and the custom ones defined on Administration › Roles
+        if args.action in ("create", "set-role") and getattr(args, "role", None) and role not in roles:
+            print(f"Unknown role {role}: choose one of {', '.join(roles)}")
+            return 1
         if args.action == "create":
             if user:
                 print(f"User {username} already exists")
@@ -355,7 +376,7 @@ def cmd_user(args, ctx, prompt_fn=None) -> int:
         elif args.action == "set-role":
             # Only from the command line on this computer: the dashboard cannot change roles.
             if not getattr(args, "role", None):
-                print("--role is required (sales_manager, admin or super_admin)")
+                print(f"--role is required ({', '.join(roles)})")
                 return 1
             old, user.role = user.role, args.role
             log_activity(s, f"Dashboard account {username}: role {old} -> {args.role}", "command line", type_="security")
@@ -655,8 +676,9 @@ def build_parser() -> argparse.ArgumentParser:
     us = sub.add_parser("user", help="Dashboard sign-in accounts (you type the password at the prompt)")
     us.add_argument("action", choices=["create", "list", "set-password", "set-role", "disable", "enable"])
     us.add_argument("--username")
-    us.add_argument("--role", choices=["sales_manager", "admin", "super_admin"],
-                    help="default for create: sales_manager; super_admin also configures mailboxes and sales settings")
+    us.add_argument("--role", help="default for create: sales_manager. Built in: super_admin, admin, sales_director, "
+                                   "sales_manager, team_leader, sales_executive, bde, lead_gen_executive, analyst; "
+                                   "or a custom role from Administration > Roles")
     us.add_argument("--data-dir", help="Use another data folder (e.g. the demo database)")
     return p
 

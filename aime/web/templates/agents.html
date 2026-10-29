@@ -7,6 +7,9 @@
   <div class="card">
     <strong>{{ a.title }}</strong> <span class="muted small">({{ a.name }})</span>
     {% if st %}<span class="pill {{ 'ok' if st.success_rate >= 90 else 'warn' }}">{{ st.success_rate }}% · {{ st.runs }} runs · avg {{ st.avg_ms }} ms</span>{% else %}<span class="pill">no runs yet</span>{% endif %}
+    {% if a.name in disabled %}<span class="pill bad">switched off</span>{% endif %}
+    <div class="small muted">AI model, 7 days: {{ st.llm_calls if st else 0 }} calls · {{ '{:,}'.format(st.llm_tokens) if st else 0 }} tokens · {{ ((st.llm_ms if st else 0) / 1000)|round(1) }} s · ${{ '%.4f'|format(st.llm_cost_usd if st else 0) }}</div>
+    {% if is_admin %}<form class="inline" method="post" action="/agents/{{ a.name }}/switch"><input type="hidden" name="on" value="{{ 'yes' if a.name in disabled else '' }}"><button class="secondary">{{ 'Switch on' if a.name in disabled else 'Switch off' }}</button></form>{% endif %}
     <ul class="reasons small">{% for r in a.responsibilities %}<li>{{ r }}</li>{% endfor %}</ul>
     <details class="small"><summary>Contracts and retry policy</summary>
       <div><strong>Input</strong>: {% for k, v in a.input.items() %}<code>{{ k }}: {{ v }}</code> {% endfor %}</div>

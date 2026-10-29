@@ -26,6 +26,7 @@
     <select name="category">{% for c in ['interested', 'not_interested', 'objection', 'referral', 'question', 'unsubscribe', 'out_of_office', 'bounce', 'other'] %}<option {{ 'selected' if r.category == c }}>{{ c }}</option>{% endfor %}</select>
     <button class="secondary">Reclassify and apply</button>
     <button formaction="/inbox/{{ r.id }}/reviewed">Mark reviewed</button>
+    {% if r.category == 'calendly' and r.status == 'needs_review' %}<button formaction="/inbox/{{ r.id }}/apply_calendly" title="You checked it in Calendly: apply the booking, change or cancellation">Apply (checked in Calendly)</button>{% endif %}
   </form>{% endif %}
 </div>
 {% else %}<div class="card muted">{{ 'Nothing needs review.' if show == 'review' else 'No replies yet.' }}</div>{% endfor %}

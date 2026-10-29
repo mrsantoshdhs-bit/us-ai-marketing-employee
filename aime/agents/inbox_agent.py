@@ -141,7 +141,8 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                     in_reply_to=p.bounced_message_id if p.is_bounce and p.bounced_message_id else p.in_reply_to,
                     references=p.references, from_email=p.from_email, from_name=p.from_name, to_email=p.to_email,
                     subject=p.subject, received_at=p.received_at, body_text=p.body_text, new_text=new_text(p.body_text),
-                    auto_submitted=p.auto_submitted, bounced_addresses=p.bounced_addresses, status="new"))
+                    auto_submitted=p.auto_submitted, bounced_addresses=p.bounced_addresses, status="new",
+                    auth_results=p.auth_results))
                 out.stored += 1
             kv_set(session, state_key, state)
             session.commit()

@@ -293,6 +293,24 @@ def act_on_answers(session: Session, settings, calendar, actor: str, now: dateti
     return booked
 
 
+def invite_problem(session: Session, settings, attendee: str | None) -> str | None:
+    """With CALENDAR_SEND_INVITES on, Google or Microsoft email the attendee directly, outside our email checks:
+    the same rules apply first (do-not-contact list, opt-outs, test mode)."""
+    if not getattr(settings, "calendar_send_invites", False) or not attendee:
+        return None
+    from aime.crm_ops import is_suppressed
+
+    if is_suppressed(session, attendee):
+        return f"{attendee} is on the do-not-contact list"
+    contact = session.execute(select(Contact).where(func.lower(Contact.email) == attendee.lower())).scalars().first()
+    if contact is not None and contact.consent_status == "opted_out":
+        return f"{attendee} opted out"
+    tests = getattr(settings, "test_recipients", set())
+    if tests and attendee.lower() not in tests:
+        return f"test mode: invitations go only to {', '.join(sorted(tests))}"
+    return None
+
+
 def book(session: Session, settings, calendar, p: MeetingProposal, index: int, actor: str,
          now: datetime | None = None) -> Meeting:
     """A person books the slot the prospect chose: checked again against the calendar, then one event."""
@@ -300,6 +318,8 @@ def book(session: Session, settings, calendar, p: MeetingProposal, index: int, a
     ok, why = ready(session, settings)
     if not ok:
         raise ValueError(f"Not booked: {why}")
+    if problem := invite_problem(session, settings, p.prospect_email):
+        raise ValueError(f"Not booked: the calendar would email an invitation, but {problem}")
     if p.status == "booked" and p.meeting_id:
         return session.get(Meeting, p.meeting_id)  # already booked: the same meeting, never a second
     if p.status not in OPEN_PROPOSAL:
@@ -354,6 +374,8 @@ def move(session: Session, settings, calendar, m: Meeting, start: datetime, acto
     ok, why = ready(session, settings)
     if not ok:
         raise ValueError(f"Not moved: {why}")
+    if problem := invite_problem(session, settings, m.invitee_email):
+        raise ValueError(f"Not moved: the calendar would email the update, but {problem}")
     if m.status != "scheduled" or not m.event_id:
         raise ValueError("Not moved: only a scheduled meeting booked through the calendar can be moved here")
     end = start + (m.ends_at - m.starts_at)
@@ -377,6 +399,11 @@ def move(session: Session, settings, calendar, m: Meeting, start: datetime, acto
 def cancel_event(session: Session, settings, calendar, m: Meeting, actor: str) -> None:
     """With the meeting cancelled in the CRM: cancel the calendar event too, and draft a note for approval."""
     if not m.event_id or calendar is None:
+        return
+    if problem := invite_problem(session, settings, m.invitee_email):
+        # the provider would email the cancellation to them: leave the event for a person to remove
+        session.add(Alert(level="warning", source="meetings", message=(
+            f"Calendar event for meeting #{m.id} not cancelled automatically: {problem}; remove it in the calendar")[:500]))
         return
     calendar.cancel_event(m.event_id)
     lead = session.get(Lead, m.lead_id) if m.lead_id else None

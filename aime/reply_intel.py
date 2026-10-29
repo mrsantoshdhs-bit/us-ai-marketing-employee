@@ -33,6 +33,7 @@ from aime.models import Alert, Contact, FollowUp, InboundEmail, Lead, Meeting, O
 from aime.notify import notify_event
 from aime.integrations.email_smtp import POSTAL_PLACEHOLDER
 from aime.outreach import stop_sequence
+from aime.stages import move, opened
 from aime.timeutil import utcnow
 
 PATTERNS: list[tuple[str, re.Pattern]] = [
@@ -312,11 +313,41 @@ def ensure_opportunity(session: Session, lead: Lead, actor: str) -> Opportunity:
                           next_step="Book a meeting: approve the suggested reply with your booking link")
         session.add(opp)
         session.flush()
+        opened(session, opp, actor, "interested reply")
         log_activity(session, f"Opportunity created from an interested reply: {opp.name}", actor, type_="opportunity",
                      company_id=lead.company_id, lead_id=lead.id, opportunity_id=opp.id)
     elif opp.stage == "new":
-        opp.stage, opp.probability = "discovery", max(opp.probability or 0, 20)
+        move(session, opp, "discovery", actor, "interested reply", probability=max(opp.probability or 0, 20))
+    elif opp.stage == "lost":  # they said no before and are interested now: the deal is open again
+        log_activity(session, f"Opportunity stage lost → discovery (reopened by an interested reply; it was lost: "
+                     f"{opp.lost_reason or 'no reason recorded'})", actor, type_="opportunity",
+                     company_id=opp.company_id, lead_id=lead.id, opportunity_id=opp.id)
+        move(session, opp, "discovery", actor, f"reopened by an interested reply (lost: {opp.lost_reason or 'no reason'})")
     return opp
+
+
+# Opportunities the automation opened and no person has moved on yet. A "not interested" or opt-out reply closes
+# these as lost; a deal a person has taken further (proposal, negotiation) is theirs to close.
+AUTO_CLOSE_STAGES = ("new", "discovery")
+
+
+def close_opportunities(session: Session, lead: Lead, reason: str, actor: str, sure: bool) -> list[str]:
+    """End the lead's open deals after a clear "no": early ones are closed as lost with the reason; a later-stage
+    deal, or any deal when the reading is uncertain, stays open with a next step asking a person to decide."""
+    notes = []
+    for opp in session.execute(select(Opportunity).where(Opportunity.lead_id == lead.id,
+                                                         Opportunity.stage.not_in(("won", "lost")))).scalars():
+        if sure and opp.stage in AUTO_CLOSE_STAGES:
+            old = opp.stage
+            move(session, opp, "lost", actor, reason)
+            opp.lost_reason, opp.next_step = reason[:200], None
+            log_activity(session, f"Opportunity stage {old} → lost ({reason})", actor, type_="opportunity",
+                         company_id=opp.company_id, lead_id=lead.id, opportunity_id=opp.id)
+            notes.append(f"opportunity closed as lost ({reason})")
+        else:
+            opp.next_step = f"They replied: {reason.lower()}. Close it as lost or keep it open"[:300]
+            notes.append(f"opportunity left open in {opp.stage}: a person decides")
+    return notes
 
 
 def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
@@ -357,6 +388,8 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             contact.consent_status, contact.consent_at = "opted_out", utcnow()
         if lead and lead.outreach_status:
             stop_sequence(session, lead, "unsubscribed", "Asked not to be contacted", actor)
+        if lead:
+            notes += close_opportunities(session, lead, "Unsubscribed", actor, sure=row.confidence == "high")
         if contact and contact.email and contact.email.lower() != (row.from_email or "").lower():
             # an opt-out in our thread from another address (a colleague, a personal address, test mode): the
             # address we wrote to is suppressed as well
@@ -399,6 +432,7 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             if lead.status == "qualified":
                 lead.status = "nurture"
             notes.append("lead moved to nurture")
+            notes += close_opportunities(session, lead, "Not interested", actor, sure=row.confidence == "high")
         booked = None
         if row.category == "interested":
             from aime.meetings import next_meeting

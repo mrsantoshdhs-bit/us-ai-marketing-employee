@@ -46,6 +46,12 @@
     <form method="post" action="/leads/{{ lead.id }}/note" class="filters"><input name="note" placeholder="Add a note" style="flex:1" required><button class="secondary">Add note</button></form>
     {% if lead.contact %}<form method="post" action="/leads/{{ lead.id }}/replied"><button class="secondary">They replied — stop follow-ups</button></form>{% endif %}
     {% if lead.outreach_status in ['drafted', 'approved', 'contacted'] %}<form method="post" action="/leads/{{ lead.id }}/stop_outreach" style="margin-top:6px"><button class="danger">Stop outreach</button></form>{% endif %}
+    <h2>Owner</h2>
+    <p class="small">{{ lead.owner or 'Unassigned' }}{% for o in opps if o.owner and o.owner != lead.owner %} · deal {{ o.name }}: {{ o.owner }}{% endfor %}</p>
+    {% if can_assign %}<form method="post" action="/leads/{{ lead.id }}/assign" class="filters">
+      <select name="owner"><option value="">Unassigned</option>{% for n in assignees %}<option {{ 'selected' if n == lead.owner }}>{{ n }}</option>{% endfor %}</select>
+      <input name="reason" placeholder="Reason (optional)" maxlength="200"><button class="secondary">Assign lead and its open deals</button></form>{% endif %}
+    {% if assignments %}<ul class="small">{% for a in assignments %}<li>{{ a.created_at|local }}: {{ a.from_owner or 'unassigned' }} → {{ a.to_owner or 'unassigned' }} ({{ a.method|replace('_', ' ') }}{% if a.reason %}: {{ a.reason }}{% endif %}) by {{ a.actor }}</li>{% endfor %}</ul>{% endif %}
     <h2>Meetings</h2>
     {% for m in meetings %}<div class="row-item small">{% if m.is_simulated %}<span class="pill bad">SIMULATED</span> {% endif %}{{ m.starts_at|et }} · {{ m.title }} · {{ m.status|replace('_', ' ') }} <span class="muted">({{ m.source|replace('_', ' ') }})</span></div>
     {% else %}<p class="muted small">None yet.</p>{% endfor %}

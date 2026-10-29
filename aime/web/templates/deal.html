@@ -1,0 +1,60 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}{% from "_macros.html" import status_pill %}
+{% block title %}{{ opp.name }} · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+  <h1>{{ icon('kanban') }} {{ opp.name }}</h1>
+  <p class="subtitle">{{ status_pill(opp.stage) }} · {{ opp.probability }}% · owner {{ opp.owner or 'unassigned' }}
+    {% if opp.est_value %} · ${{ '{:,.0f}'.format(opp.est_value) }}{% endif %}{% if opp.expected_close %} · close by {{ opp.expected_close }}{% endif %}
+    · {{ 'opened by the AI' if opp.origin == 'ai' else 'opened by a person' }}{% if opp.won_by %} · won by {{ opp.won_by }}{% endif %}
+    {% if opp.lead_id %} · <a href="/leads/{{ opp.lead_id }}">lead and conversation</a>{% endif %}</p>
+</div></div>
+
+<div class="grid">
+<div>
+  <h2>Stage</h2>
+  <form class="card filters" method="post" action="/opportunities/{{ opp.id }}">
+    <select name="stage">{% for st in stages %}<option {{ 'selected' if st == opp.stage }}>{{ st }}</option>{% endfor %}</select>
+    <input name="est_value" placeholder="Value $" size="8"><input name="next_step" placeholder="Next step" size="16" value="{{ opp.next_step or '' }}">
+    <input name="expected_close" type="date" value="{{ opp.expected_close or '' }}"><input name="lost_reason" placeholder="Reason, if lost" size="12" maxlength="200">
+    <button class="secondary">Save</button>
+  </form>
+  <div class="card small">{% for c in history %}<div>{{ c.at|local }}: {{ c.from_stage or 'opened' }} → <b>{{ c.to_stage }}</b> by {{ c.actor }}{% if c.reason %} ({{ c.reason }}){% endif %}</div>{% else %}<span class="muted">No stage changes recorded yet.</span>{% endfor %}</div>
+
+  <h2>Quotes</h2>
+  <div class="card table-wrap"><table>
+    <tr><th>#</th><th>Amount</th><th>Status</th><th>Valid until</th><th>Terms</th><th>By</th><th></th></tr>
+    {% for q in quotes %}<tr><td>{{ q.id }}</td><td>{{ q.currency }} {{ '{:,.2f}'.format(q.amount) }}</td><td>{{ status_pill(q.status) }}</td>
+      <td>{{ q.valid_until or '—' }}</td><td class="small">{{ q.terms or '' }}</td><td class="small">{{ q.created_by }}</td>
+      <td class="row-actions">{% for a, label in [('send', 'Mark sent'), ('accept', 'Accepted'), ('reject', 'Rejected'), ('expire', 'Expired')] if q.status not in ('accepted', 'rejected', 'expired') %}
+        <form class="inline" method="post" action="/opportunities/{{ opp.id }}/quotes/{{ q.id }}/{{ a }}"><button class="secondary">{{ label }}</button></form>{% endfor %}</td></tr>
+    {% else %}<tr><td colspan="7" class="muted">No quotes yet.</td></tr>{% endfor %}
+  </table></div>
+  <form class="card filters" method="post" action="/opportunities/{{ opp.id }}/quotes">
+    <input name="amount" placeholder="Amount" required size="10"><input name="currency" value="USD" size="4" maxlength="3">
+    <input name="valid_until" type="date" title="Valid until"><input name="terms" placeholder="Terms (optional)" size="24" maxlength="500">
+    <button class="secondary">Add quote</button>
+  </form>
+  <p class="small muted">Prices and terms are entered by people only; the agents never quote. Marking a quote sent moves
+    an early deal to proposal; nothing is emailed from here.</p>
+</div>
+<div>
+  <h2>Documents</h2>
+  <div class="card">{% for f in files %}<div class="row-item"><a href="/opportunities/{{ opp.id }}/attachments/{{ f.id }}">{{ f.filename }}</a>
+    <span class="small muted">{{ (f.size / 1024)|round(0)|int }} KB · {{ f.uploaded_by }} · {{ f.created_at|local }}</span></div>{% else %}<span class="muted">No documents yet.</span>{% endfor %}
+    <form method="post" action="/opportunities/{{ opp.id }}/attachments" enctype="multipart/form-data" style="margin-top:8px">
+      <input type="file" name="file" required> <button class="secondary">Upload</button>
+      <div class="small muted">Allowed: {{ allowed }}; up to {{ max_mb }} MB. Files open as downloads only.</div></form></div>
+
+  <h2>Owner</h2>
+  <div class="card small">
+    <form class="filters" method="post" action="/opportunities/{{ opp.id }}/assign">
+      <select name="owner"><option value="">Unassigned</option>{% for n in assignees %}<option {{ 'selected' if n == opp.owner }}>{{ n }}</option>{% endfor %}</select>
+      <input name="reason" placeholder="Reason (optional)" maxlength="200"><button class="secondary">Assign</button></form>
+    {% for a in owners %}<div>{{ a.created_at|local }}: {{ a.from_owner or 'unassigned' }} → {{ a.to_owner or 'unassigned' }} ({{ a.method|replace('_', ' ') }}{% if a.reason %}: {{ a.reason }}{% endif %}) by {{ a.actor }}</div>{% endfor %}
+  </div>
+
+  <h2>Activity</h2>
+  <div class="card small">{% for a in acts %}<div>{{ a.created_at|local }} · {{ a.subject }} <span class="muted">· {{ a.actor }}</span></div>{% else %}<span class="muted">Nothing yet.</span>{% endfor %}</div>
+</div>
+</div>
+{% endblock %}

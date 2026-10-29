@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 import threading
 import time
 from collections import Counter, defaultdict, deque
@@ -57,12 +58,24 @@ from aime.meetings import check_double_bookings, record_meeting, reopen_after_ca
 from aime.scheduler.runner import ABANDON_AFTER, due_jobs, load_job_specs, next_run, run_job
 from aime.scoring import lead_tier, tier_reason
 from aime.timeutil import as_aware_utc, fmt_et, fmt_local, local_tz, to_naive_utc, utcnow
-from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username,
-                           make_cookie, safe_next, session_secret, user_count)
+from aime.permissions import role_label
+from aime.stages import probability_of, stage_names
+from aime.stages import move as move_stage
+from aime.web.team_pages import assignment_history
+from aime.web.team_pages import register as register_team_pages
+from aime.web.deal_pages import register as register_deal_pages
+from aime.visibility import (EVERYTHING, company_condition, contact_condition, lead_condition, opportunity_condition,
+                             org_page, record_condition)
+from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate,
+                           current_username, make_cookie, safe_next, session_secret, user_count)
 
 WEB_DIR = Path(__file__).resolve().parent
 STAGES = ["new", "discovery", "proposal", "negotiation", "won", "lost"]
 LEAD_STATUSES = ["new", "qualified", "nurture", "disqualified", "converted", "merged"]
+
+
+# one email address or one domain: never a pattern (% or _ would match other contacts)
+SUPPRESS_VALUE = re.compile(r"[a-z0-9.!#$&'*+/=?^`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+|[a-z0-9-]+(?:\.[a-z0-9-]+)+")
 
 
 def _404():
@@ -137,7 +150,8 @@ USABLE_EMAIL = (Contact.source.in_(("website", "sec_filing")), Contact.email_sta
 
 
 def create_app(ctx: AppContext | None = None) -> FastAPI:
-    app = FastAPI(title="AI Marketing Employee", docs_url="/api/docs", redoc_url=None)
+    # no interactive API docs: they need a script from a CDN and a relaxed content policy on the signed-in origin
+    app = FastAPI(title="AI Marketing Employee", docs_url=None, redoc_url=None)
     app.state.ctx = ctx
     limiter = InboundLimiter()
     app.add_middleware(AuthMiddleware, get_ctx=lambda: app.state.ctx or get_context())
@@ -153,7 +167,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     env = templates.env
     env.filters.update(local=fmt_local, et=fmt_et, service=service_name, industry=industry_label, safe_url=safe_url,
                        tier=lead_tier, tier_reason=tier_reason, run_summary=run_summary, intent_label=lambda i: INTENT_LABELS.get(i or "", ""))
-    env.globals.update(describe_rule=am.describe_rule, ADDRESS_RULES=am.ADDRESS_RULES, SERVICES=SERVICES, INDUSTRIES=INDUSTRIES, STATES=US_REGIONS, STAGES=STAGES,
+    env.globals.update(org_page=org_page, describe_rule=am.describe_rule, ADDRESS_RULES=am.ADDRESS_RULES, SERVICES=SERVICES, INDUSTRIES=INDUSTRIES, STATES=US_REGIONS, STAGES=STAGES,
                        LEAD_STATUSES=LEAD_STATUSES)
 
     def C() -> AppContext:
@@ -168,10 +182,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         data.setdefault("sending_on", C().settings.outbound_email_enabled)
         user = data["current_user"]
         data.setdefault("user_name", (user["username"].title() if user else C().settings.sender_name or ""))
-        data.setdefault("is_super_admin", not C().settings.dashboard_auth or bool(user and user.get("role") == "super_admin"))
-        data.setdefault("user_role", {"admin": "Administrator", "sales_manager": "Sales Manager",
-                                      "super_admin": "Super Admin"}.get(
-            (user or {}).get("role", ""), "Preview · no sign-in"))
+        data.setdefault("is_super_admin", not C().settings.dashboard_auth or bool(user and "configure_system" in user.get("perms", ())))
+        data.setdefault("can_manage_users", not C().settings.dashboard_auth or bool(user and "manage_users" in user.get("perms", ())))
+        data.setdefault("can_view_all", not C().settings.dashboard_auth or bool(user and "view_all" in user.get("perms", ())))
+        if "user_role" not in data:
+            with C().db.session() as s:
+                data["user_role"] = role_label(s, user["role"]) if user else "Preview · no sign-in"
         if "nav_status" not in data and request.url.path != "/login":  # the top bar and sidebar on every page
             with C().db.session() as s:
                 state = am.get_state(s)
@@ -187,6 +203,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return templates.TemplateResponse(request, name, data)
 
     who = current_username  # the signed-in Sales Manager, recorded on approvals and activities
+
+    def scope(request: Request):
+        """The records this user may see (aime.visibility), set by the sign-in middleware."""
+        return getattr(request.state, "scope", EVERYTHING)
 
     # ------------------------------------------------------------------ sign in
     @app.get("/login", response_class=HTMLResponse)
@@ -209,7 +229,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return response
 
     @app.post("/logout")
-    def logout():
+    def logout(request: Request):
+        user = getattr(request.state, "user", None)
+        if user:  # a copied cookie stops working too: every session of this account ends
+            with C().db.session() as s:
+                account = s.get(User, user["id"])
+                if account is not None:
+                    account.session_version = (account.session_version or 1) + 1
         response = RedirectResponse("/login?error=" + quote("Signed out"), status_code=303)
         response.delete_cookie(COOKIE, path="/")
         return response
@@ -244,9 +270,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             cnt = lambda m, *c: s.execute(select(func.count(m.id)).where(*c)).scalar_one()  # noqa: E731
             posts = s.execute(select(ContentItem).where(ContentItem.status == "awaiting_approval")
                               .order_by(ContentItem.scheduled_for).limit(10)).scalars().all()
-            emails = s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "awaiting_approval")
+            mine = record_condition(scope(request), FollowUp.lead_id)
+            emails = s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "awaiting_approval", mine)
                                .order_by(FollowUp.due_at).limit(10)).scalars().all()
-            tasks = s.execute(select(FollowUp).where(FollowUp.channel == "task", FollowUp.status == "pending")
+            tasks = s.execute(select(FollowUp).where(FollowUp.channel == "task", FollowUp.status == "pending", mine)
                               .order_by(FollowUp.id).limit(6)).scalars().all()
             for f in emails + tasks:
                 _ = f.lead.company
@@ -263,7 +290,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                                .order_by(Alert.id.desc()).limit(8)).scalars().all()
             task_total = cnt(FollowUp, FollowUp.channel == "task", FollowUp.status == "pending")
             health = health_strip(ctx, s)
-            replies = s.execute(select(InboundEmail).where(InboundEmail.status == "needs_review")
+            replies = s.execute(select(InboundEmail).where(InboundEmail.status == "needs_review",
+                                                           record_condition(scope(request), InboundEmail.lead_id))
                                 .order_by(InboundEmail.received_at.desc()).limit(10)).scalars().all()
             policy = agreement(s)
             pending = [r for r in policy["rows"] if r["post_status"] in ("awaiting_approval", "approved")]
@@ -280,13 +308,14 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def inbox_page(request: Request, show: str = "review"):
         settings = C().settings
         with C().db.session() as s:
-            stmt = select(InboundEmail)
+            stmt = select(InboundEmail).where(record_condition(scope(request), InboundEmail.lead_id))
             if show == "review":
                 stmt = stmt.where(InboundEmail.status == "needs_review")
             rows = s.execute(stmt.order_by(InboundEmail.received_at.desc()).limit(200)).scalars().all()
             for r in rows:
                 _ = r.lead.company if r.lead else None
             counts = dict(s.execute(select(InboundEmail.category, func.count(InboundEmail.id))
+                                    .where(record_condition(scope(request), InboundEmail.lead_id))
                                     .group_by(InboundEmail.category)).all())
             # the .env mailbox's position, else the first Mailboxes panel mailbox that is read
             state = kv_get(s, "inbox.state") or next(
@@ -302,6 +331,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             if action == "reviewed":
                 row.status = "reviewed"
                 msg = "Marked reviewed"
+            elif action == "apply_calendly" and row.category == "calendly" and row.status == "needs_review":
+                from aime.meetings import handle_calendly_email
+                note = handle_calendly_email(s, C().settings, row, who(request), confirmed_by=who(request))
+                row.action_note = f"{note} (confirmed by {who(request)})"
+                log_activity(s, f"Calendly notice #{row.id} confirmed and applied", who(request), type_="override",
+                             company_id=row.company_id, lead_id=row.lead_id)
+                msg = f"Applied: {note}"
             elif action == "reclassify" and category in ("interested", "not_interested", "objection", "referral",
                                                           "question", "unsubscribe", "out_of_office", "bounce", "other"):
                 if row.suggested_followup_id:
@@ -349,7 +385,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def leads(request: Request, grade: str = "", status: str = "", state: str = "", industry: str = "",
               source: str = "", q: str = "", page: int = 1):
         with C().db.session() as s:
-            stmt = select(Lead).join(Company, Company.id == Lead.company_id)
+            stmt = select(Lead).join(Company, Company.id == Lead.company_id).where(lead_condition(scope(request)))
             stmt = stmt.where(Lead.status == status) if status else stmt.where(Lead.status.not_in(("merged",)))
             if grade:
                 stmt = stmt.where(Lead.grade == grade)
@@ -388,19 +424,27 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                                  .order_by(ResearchSnapshot.id.desc())).scalars().first()
             meetings = s.execute(select(Meeting).where(Meeting.lead_id == lead.id).order_by(Meeting.starts_at.desc())).scalars().all()
             replies = s.execute(select(InboundEmail).where(InboundEmail.lead_id == lead.id)).scalars().all()
+            assignments = assignment_history(s, lead.id)
+            sc = scope(request)
+            # who this user may hand the lead to: anyone active (view_all), else their team
+            assignees = [u for u in s.execute(select(User.username).where(User.active.is_(True)).order_by(User.username)).scalars()
+                         if sc.all or u in sc.usernames]
             # both directions in time order: what we sent (or may have sent) and what they wrote back
             thread = sorted([{"at": f.sent_at, "dir": "out", "subject": f.subject, "who": f.to_email, "text": f.body,
                               "status": f.status} for f in fups if f.channel == "email" and f.sent_at]
                             + [{"at": r.received_at, "dir": "in", "subject": r.subject, "who": r.from_email,
                                 "text": r.new_text or r.body_text, "status": (r.category or "new").replace("_", " "),
                                 "sentiment": r.sentiment} for r in replies], key=lambda m: m["at"])
+        user = getattr(request.state, "user", None)
+        can_assign = not C().settings.dashboard_auth or bool(user and "assign_leads" in user.get("perms", ()))
         return render(request, "lead_detail.html", lead=lead, signals=signals, acts=acts, fups=fups, opps=opps,
-                      people=people, research=research, meetings=meetings, withdrawn=withdrawn, thread=thread)
+                      people=people, research=research, meetings=meetings, withdrawn=withdrawn, thread=thread,
+                      assignments=assignments, assignees=assignees, can_assign=can_assign)
 
     @app.get("/contacts", response_class=HTMLResponse)
     def contacts_page(request: Request, confidence: str = "", role: str = "", reachable: str = ""):
         with C().db.session() as s:
-            stmt = select(Contact).where(Contact.source.in_(("website", "sec_filing")))
+            stmt = select(Contact).where(Contact.source.in_(("website", "sec_filing")), contact_condition(scope(request)))
             if reachable:
                 stmt = stmt.where(*USABLE_EMAIL)
             if confidence:
@@ -452,7 +496,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                                                       FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
                 f.status, f.blocked_reason = "cancelled", "Contact replied; sequence stopped"
             for o in s.execute(select(Opportunity).where(Opportunity.lead_id == lead.id, Opportunity.stage == "new")).scalars():
-                o.stage, o.probability = "discovery", 20
+                move_stage(s, o, "discovery", who(request), "contact replied (logged manually)")
             lead.last_activity_at = utcnow()
             log_activity(s, "Contact replied (logged manually); automated follow-ups stopped", who(request),
                          type_="reply", company_id=lead.company_id, lead_id=lead.id)
@@ -461,7 +505,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.get("/companies", response_class=HTMLResponse)
     def companies(request: Request, q: str = "", state: str = "", industry: str = ""):
         with C().db.session() as s:
-            stmt = select(Company).where(Company.merged_into_id.is_(None))
+            stmt = select(Company).where(Company.merged_into_id.is_(None), company_condition(scope(request)))
             if q:
                 stmt = stmt.where(Company.name.ilike(f"%{q}%"))
             if state:
@@ -477,15 +521,18 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.get("/pipeline", response_class=HTMLResponse)
     def pipeline(request: Request):
         with C().db.session() as s:
-            opps = s.execute(select(Opportunity).order_by(Opportunity.updated_at.desc())).scalars().all()
+            opps = s.execute(select(Opportunity).where(opportunity_condition(scope(request)))
+                             .order_by(Opportunity.updated_at.desc())).scalars().all()
             for o in opps:
                 _ = o.company
             outreach = dict(s.execute(select(Lead.outreach_status, func.count(Lead.id)).where(
-                Lead.outreach_status.is_not(None)).group_by(Lead.outreach_status)).all())
-        board = {st: [o for o in opps if o.stage == st] for st in STAGES}
+                Lead.outreach_status.is_not(None), lead_condition(scope(request))).group_by(Lead.outreach_status)).all())
+        names = stage_names(C().settings)
+        names += sorted({o.stage for o in opps} - set(names))  # a stage removed from Settings keeps its deals in view
+        board = {st: [o for o in opps if o.stage == st] for st in names}
         order = ["drafted", "approved", "contacted", "replied", "interested", "meeting", "not_interested", "no_response",
                  "unsubscribed", "bounced", "stopped"]
-        return render(request, "pipeline.html", board=board, outreach=[(k, outreach.get(k, 0)) for k in order])
+        return render(request, "pipeline.html", board=board, STAGES=names, outreach=[(k, outreach.get(k, 0)) for k in order])
 
     # ------------------------------------------------------------------ meetings
     @app.get("/meetings", response_class=HTMLResponse)
@@ -493,15 +540,18 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         from aime import booking
         now = utcnow()
         with C().db.session() as s:
-            rows = s.execute(select(Meeting).order_by(Meeting.starts_at.desc()).limit(200)).scalars().all()
+            rows = s.execute(select(Meeting).where(record_condition(scope(request), Meeting.lead_id))
+                             .order_by(Meeting.starts_at.desc()).limit(200)).scalars().all()
             for m in rows:
                 _ = m.lead.company if m.lead else None
-            proposals = s.execute(select(MeetingProposal).order_by(MeetingProposal.id.desc()).limit(50)).scalars().all()
+            proposals = s.execute(select(MeetingProposal).where(record_condition(scope(request), MeetingProposal.lead_id))
+                                  .order_by(MeetingProposal.id.desc()).limit(50)).scalars().all()
             for p in proposals:
                 _ = p.lead.company
             asked = {p.inbound_email_id for p in proposals}
             requests = [r for r in s.execute(select(InboundEmail).where(
                 InboundEmail.intent == "meeting_request", InboundEmail.lead_id.is_not(None),
+                record_condition(scope(request), InboundEmail.lead_id),
                 InboundEmail.received_at >= now - timedelta(days=7))).scalars() if r.id not in asked]
             ready, why = booking.ready(s, C().settings)
         return render(request, "meetings.html", upcoming=[m for m in rows if m.status == "scheduled" and m.ends_at >= now][::-1],
@@ -676,8 +726,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/opportunities/{opp_id}")
     def update_opp(request: Request, opp_id: int, stage: str = Form(...), next_step: str = Form(""),
-                   est_value: str = Form("")):
-        if stage not in STAGES:
+                   est_value: str = Form(""), lost_reason: str = Form(""), expected_close: str = Form("")):
+        if stage not in stage_names(C().settings):
             raise HTTPException(400)
         value = None
         if est_value.strip():
@@ -685,19 +735,30 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 value = float(est_value.replace(",", "").replace("$", ""))
             except ValueError:
                 return back("/pipeline", f"Estimated value '{est_value[:40]}' is not a number; nothing was changed")
+        close_by = None
+        if expected_close.strip():
+            try:
+                close_by = date.fromisoformat(expected_close.strip())
+            except ValueError:
+                return back("/pipeline", "Expected close date is not a date; nothing was changed")
         with C().db.session() as s:
             o = s.get(Opportunity, opp_id) or _404()
             old = o.stage
-            o.stage, o.next_step = stage, next_step or o.next_step
-            o.probability = {"new": 10, "discovery": 20, "proposal": 50, "negotiation": 70, "won": 100, "lost": 0}[stage]
+            o.next_step = next_step or o.next_step
+            reason = (" ".join(lost_reason.split())[:200] or o.lost_reason or "No reason given") if stage == "lost" else None
+            move_stage(s, o, stage, who(request), reason, settings=C().settings)  # history, close date, credit for a win
+            o.probability = probability_of(C().settings, stage)
             if value is not None:
                 o.est_value = value
-            if stage in ("won", "lost"):
-                o.closed_at = utcnow()
-                if stage == "won" and o.lead_id:
-                    lead = s.get(Lead, o.lead_id)
-                    lead.status = "converted"
-            log_activity(s, f"Opportunity stage {old} → {stage}", who(request), type_="opportunity",
+            if close_by is not None:
+                o.expected_close = close_by
+            if stage == "won" and o.lead_id:
+                lead = s.get(Lead, o.lead_id)
+                lead.status = "converted"
+            if stage == "lost":
+                o.lost_reason = reason
+            change = f"Opportunity stage {old} → {stage}" + (f" ({o.lost_reason})" if stage == "lost" else "")
+            log_activity(s, change, who(request), type_="opportunity",
                          company_id=o.company_id, lead_id=o.lead_id, opportunity_id=o.id)
         return back("/pipeline", "Opportunity updated")
 
@@ -706,9 +767,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def followups(request: Request, show: str = "open"):
         with C().db.session() as s:
             needs_you = ("awaiting_approval", "uncertain")  # always listed, whatever else is open
-            first = s.execute(select(FollowUp).where(FollowUp.status.in_(needs_you))
+            mine = record_condition(scope(request), FollowUp.lead_id)
+            first = s.execute(select(FollowUp).where(FollowUp.status.in_(needs_you), mine)
                               .order_by(FollowUp.due_at)).scalars().all()
-            stmt = select(FollowUp).where(FollowUp.status.not_in(needs_you))
+            stmt = select(FollowUp).where(FollowUp.status.not_in(needs_you), mine)
             if show == "open":
                 stmt = stmt.where(FollowUp.status.in_(("pending", "approved", "sending")))
             total = s.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
@@ -732,6 +794,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     f.subject, edited = subject.strip(), True
                 if body.strip() and body.replace("\r\n", "\n") != f.body:
                     f.body, edited = body.replace("\r\n", "\n"), True
+                if edited:
+                    f.generator = f"template, edited by {who(request)}"[:80]
                 address = C().settings.company_postal_address
                 if address and POSTAL_PLACEHOLDER in (f.body or ""):  # any email kind drafted before it was set
                     f.body, edited = f.body.replace(POSTAL_PLACEHOLDER, address), True
@@ -763,7 +827,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     f.status, f.approved_by, f.approved_at = "approved", who(request), now
                     if f.kind == "outreach":
                         lead = f.lead
-                        lead.owner = lead.owner or who(request)
+                        user = getattr(request.state, "user", None)
+                        # the approver becomes the owner only if they work leads (an administrator approving does not)
+                        if not lead.owner and (user is None or "receive_leads" in user.get("perms", ())):
+                            lead.owner = who(request)
                         if f.step == 1:
                             set_outreach_status(s, lead, "approved", who(request))
                         if qc_status in ("held", "failed"):
@@ -935,7 +1002,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             post_counts = dict(s.execute(select(ContentItem.campaign_id, func.count(ContentItem.id))
                                          .group_by(ContentItem.campaign_id)).all())
             plans = s.execute(select(MarketingPlan).order_by(MarketingPlan.id.desc()).limit(7)).scalars().all()
-        return render(request, "campaigns.html", rows=rows, post_counts=post_counts, plans=plans)
+            from aime.performance import campaign_stats
+            results = campaign_stats(s)
+        return render(request, "campaigns.html", rows=rows, post_counts=post_counts, plans=plans, results=results)
 
     @app.post("/campaigns")
     def create_campaign(name: str = Form(...), objective: str = Form(...), service: str = Form(""),
@@ -991,7 +1060,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         if not token:
             raise HTTPException(403, "The inbound API is off: set INBOUND_API_TOKEN in .env and send it as the "
                                      "X-Inbound-Token header")
-        if not hmac.compare_digest(request.headers.get("x-inbound-token", ""), token):
+        if not hmac.compare_digest(request.headers.get("x-inbound-token", "").encode("utf-8", "replace"), token.encode("utf-8")):
             raise HTTPException(401, "Invalid inbound token")
         if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
             raise HTTPException(415, "Send the inquiry as JSON (Content-Type: application/json)")
@@ -1012,6 +1081,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/suppress")
     def suppress_form(value: str = Form(...), reason: str = Form("Requested by contact")):
+        value = value.strip().lower()
+        if not SUPPRESS_VALUE.fullmatch(value):
+            return back("/followups", "Give one email address or one domain (example.com) to add to the do-not-contact list")
         with C().db.session() as s:
             suppress(s, value, reason)
         return back("/followups", f"{value} added to the do-not-contact list")
@@ -1025,8 +1097,21 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             if agent:
                 stmt = stmt.where(AgentRun.agent == agent)
             runs = s.execute(stmt).scalars().all()
+            disabled = set((kv_get(s, "agents.disabled") or {}).get("names", []))
         team = [cls.describe() for cls in AGENTS.values()]
-        return render(request, "agents.html", team=team, stats=stats, runs=runs, agent=agent)
+        return render(request, "agents.html", team=team, stats=stats, runs=runs, agent=agent, disabled=disabled,
+                      is_admin=is_admin(request))
+
+    @app.post("/agents/{name}/switch")
+    def agent_switch(request: Request, name: str, on: str = Form("")):
+        if name not in AGENTS:
+            raise HTTPException(404)
+        with C().db.session() as s:
+            names = set((kv_get(s, "agents.disabled") or {}).get("names", []))
+            names = names - {name} if on == "yes" else names | {name}
+            kv_set(s, "agents.disabled", {"names": sorted(names)})
+            am.audit(s, who(request), "agent_switched", f"agent {name}", "on" if on == "yes" else "off")
+        return back("/agents", f"{name} switched {'on' if on == 'yes' else 'off'}")
 
     @app.get("/command-center/agents/{agent}", response_class=HTMLResponse)
     def agent_detail(request: Request, agent: str):
@@ -1056,30 +1141,31 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         if len(q) >= 2:
             like = f"%{q.lower()}%"
             with C().db.session() as s:
-                companies = s.execute(select(Company).where(Company.merged_into_id.is_(None), or_(
+                companies = s.execute(select(Company).where(Company.merged_into_id.is_(None), company_condition(scope(request)), or_(
                     func.lower(Company.name).like(like), func.lower(Company.domain).like(like))).limit(12)).scalars().all()
                 leads = {lead.company_id: lead.id for lead in s.execute(select(Lead).where(
-                    Lead.company_id.in_([c.id for c in companies] or [0]))).scalars()}
+                    Lead.company_id.in_([c.id for c in companies] or [0]), lead_condition(scope(request)))).scalars()}
                 groups.append(("Companies", "building", [
                     (c.name, f"/leads/{leads[c.id]}" if c.id in leads else "/companies", " · ".join(
                         x for x in (c.domain, c.state, c.website_status) if x)) for c in companies]))
-                contacts = s.execute(select(Contact).where(or_(
+                contacts = s.execute(select(Contact).where(contact_condition(scope(request)), or_(
                     func.lower(Contact.first_name).like(like), func.lower(Contact.last_name).like(like),
                     func.lower(Contact.email).like(like), func.lower(Contact.title).like(like))).limit(12)).scalars().all()
                 groups.append(("Contacts", "users", [
                     (c.display_name, "/contacts", " · ".join(x for x in (c.title, c.email, c.company.name if c.company else None) if x))
                     for c in contacts]))
-                emails = s.execute(select(FollowUp).where(FollowUp.channel == "email", or_(
+                emails = s.execute(select(FollowUp).where(FollowUp.channel == "email",
+                                                          record_condition(scope(request), FollowUp.lead_id), or_(
                     func.lower(FollowUp.subject).like(like), func.lower(FollowUp.to_email).like(like)))
                     .order_by(FollowUp.id.desc()).limit(12)).scalars().all()
                 groups.append(("Emails", "mail", [(f.subject, f"/followups#f{f.id}", f"{f.status.replace('_', ' ')} · to {f.to_email or '—'}")
                                                   for f in emails]))
-                replies = s.execute(select(InboundEmail).where(or_(
+                replies = s.execute(select(InboundEmail).where(record_condition(scope(request), InboundEmail.lead_id), or_(
                     func.lower(InboundEmail.subject).like(like), func.lower(InboundEmail.from_email).like(like)))
                     .order_by(InboundEmail.id.desc()).limit(12)).scalars().all()
                 groups.append(("Conversations", "chat", [(r.subject or "(no subject)", "/inbox?show=all",
                                                           f"{r.from_email} · {(r.category or 'new').replace('_', ' ')}") for r in replies]))
-                meetings = s.execute(select(Meeting).where(or_(
+                meetings = s.execute(select(Meeting).where(record_condition(scope(request), Meeting.lead_id), or_(
                     func.lower(Meeting.invitee_name).like(like), func.lower(Meeting.invitee_email).like(like),
                     func.lower(Meeting.title).like(like))).order_by(Meeting.starts_at.desc()).limit(12)).scalars().all()
                 groups.append(("Meetings", "calendar", [(f"{m.invitee_name or m.invitee_email} · {m.title}",
@@ -1090,13 +1176,15 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.get("/approvals", response_class=HTMLResponse)
     def approvals_page(request: Request):
         with C().db.session() as s:
+            mine = record_condition(scope(request), FollowUp.lead_id)
             emails = s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status.in_(
-                ("awaiting_approval", "uncertain"))).order_by(FollowUp.due_at)).scalars().all()
+                ("awaiting_approval", "uncertain")), mine).order_by(FollowUp.due_at)).scalars().all()
             for f in emails:
                 _ = f.lead.company, f.contact
             posts = s.execute(select(ContentItem).where(ContentItem.status == "awaiting_approval")
                               .order_by(ContentItem.scheduled_for)).scalars().all()
-            reconfirm = s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "approved")).scalars().all()
+            reconfirm = s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "approved",
+                                                         mine)).scalars().all()
             reconfirm = [f for f in reconfirm if am.needs_reconfirmation(s, f)]
             for f in reconfirm:
                 _ = f.lead.company
@@ -1140,7 +1228,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     # ------------------------------------------------------------------ automation control center
     def is_admin(request: Request) -> bool:
         user = getattr(request.state, "user", None)
-        return not C().settings.dashboard_auth or bool(user and user.get("role") in ("admin", "super_admin"))
+        return not C().settings.dashboard_auth or bool(user and "admin_ops" in user.get("perms", ()))
 
     @app.get("/automation", response_class=HTMLResponse)
     def automation_page(request: Request):
@@ -1652,10 +1740,14 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                                                          .group_by(Opportunity.stage)).all()),
             }
 
+    register_team_pages(app, C, render, back, who)
+    register_deal_pages(app, C, render, back, who)
+
     @app.get("/api/leads")
-    def api_leads(status: str = "qualified", limit: int = 50):
+    def api_leads(request: Request, status: str = "qualified", limit: int = 50):
         with C().db.session() as s:
-            rows = s.execute(select(Lead).where(Lead.status == status).order_by(Lead.score.desc()).limit(min(limit, 500))).scalars().all()
+            rows = s.execute(select(Lead).where(Lead.status == status, lead_condition(scope(request)))
+                             .order_by(Lead.score.desc()).limit(min(limit, 500))).scalars().all()
             return [{
                 "id": l.id, "company": l.company.name, "state": l.company.state, "industry": l.company.industry,
                 "website": l.company.website, "score": l.score, "grade": l.grade, "source": l.source,
@@ -1784,7 +1876,7 @@ def analytics_view(ctx: AppContext, s) -> dict:
         chart_meetings=charts.column_chart(labels, [("Meetings booked", [n for _, n in meetings_w])],
                                            "Meetings booked per week", "No meetings booked in the last 8 weeks"),
         chart_funnel=charts.bar_list(funnel, "Sales funnel", "The funnel fills as research runs"),
-        chart_pipeline=charts.bar_list([(stage.title(), by_stage.get(stage, 0), "/pipeline") for stage in STAGES],
+        chart_pipeline=charts.bar_list([(stage.title(), by_stage.get(stage, 0), "/pipeline") for stage in stage_names(ctx.settings)],
                                        "Opportunities by stage", "No opportunities yet: they open on an interested reply"),
         funnel_tiles=funnel_detail(s),
     )

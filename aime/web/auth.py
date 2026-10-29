@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import threading
 import time
 from datetime import timedelta
@@ -27,6 +28,8 @@ from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from aime.models import User
+from aime.permissions import BUILTIN_ROLES, permissions_of
+from aime.visibility import EVERYTHING, org_page, record_visible, scope_for
 from aime.secure_store import protect, unprotect
 from aime.timeutil import utcnow
 
@@ -34,8 +37,10 @@ COOKIE = "aime_session"
 SESSION_SECONDS = 12 * 3600
 MAX_FAILED = 5
 LOCK_MINUTES = 15
+SIGN_IN_FAILED = (f"Wrong username or password. After {MAX_FAILED} wrong attempts an account waits {LOCK_MINUTES} "
+                  "minutes before it can sign in again")
 MIN_PASSWORD = 12
-PUBLIC_PREFIXES = ("/login", "/static/")
+PUBLIC_PREFIXES = ("/login", "/static/", "/setup")  # /setup: a one-time account link
 PUBLIC_PATHS = ("/api/inbound",)  # protected by its own token and rate limit
 _SECRETS: dict[str, bytes] = {}
 # One sign-in check at a time (the dashboard is one process): parallel wrong passwords each count towards the lock.
@@ -111,15 +116,16 @@ def authenticate(session: Session, username: str, password: str) -> tuple[User |
     user = session.execute(select(User).where(User.username == username.strip().lower())).scalars().first()
     if user is None or not user.active:
         verify_password(password, "scrypt$16384$8$AAAAAAAAAAAAAAAAAAAAAA==$AAAA")  # similar timing for unknown users
-        return None, "Wrong username or password"
+        return None, SIGN_IN_FAILED
     now = utcnow()
     if user.locked_until and user.locked_until > now:
-        return None, f"Account locked after repeated failed sign-ins; try again after {user.locked_until:%H:%M} UTC"
+        verify_password(password, "scrypt$16384$8$AAAAAAAAAAAAAAAAAAAAAA==$AAAA")
+        return None, SIGN_IN_FAILED  # the same words as a wrong password: nobody learns which accounts exist
     if not verify_password(password, user.password_hash):
         user.failed_logins = (user.failed_logins or 0) + 1
         if user.failed_logins >= MAX_FAILED:
             user.locked_until, user.failed_logins = now + timedelta(minutes=LOCK_MINUTES), 0
-        return None, "Wrong username or password"
+        return None, SIGN_IN_FAILED
     user.failed_logins, user.locked_until, user.last_login_at = 0, None, now
     return user, "Signed in"
 
@@ -138,15 +144,16 @@ def current_username(request: Request) -> str:
 
 # Operations that change how the system runs, not the sales work itself: admin accounts only.
 # Sales Managers approve, edit, reply, log meetings and manage leads.
-ADMIN_ONLY_PREFIXES = ("/jobs/", "/integrations/linkedin/connect", "/integrations/linkedin/disconnect",
+ADMIN_ONLY_PREFIXES = ("/jobs/", "/agents/", "/integrations/linkedin/connect", "/integrations/linkedin/disconnect",
                        "/integrations/oauth/",
                        "/inbound/process", "/automation/mode", "/automation/authorizations",
                        "/automation/state/start", "/automation/state/resume")  # pausing and stopping: anyone signed in
 
 
-ADMIN_ROLES = ("admin", "super_admin")  # a Super Admin can do everything an admin can
-# Mailbox configuration (servers, passwords, which mailbox sends): Super Admin only, for viewing too.
+# Mailbox configuration (servers, passwords, which mailbox sends): `configure_system` (Super Admin), viewing too.
 SUPER_ADMIN_PREFIXES = ("/admin/mailboxes", "/api/mailboxes", "/admin/settings", "/integrations/linkedin-leads")
+# The sales organisation: accounts, teams, custom roles: `manage_users`, viewing too.
+TEAM_ADMIN_PREFIXES = ("/admin/users", "/admin/teams", "/admin/roles")
 
 
 def super_admin_only(path: str) -> bool:
@@ -159,6 +166,66 @@ def admin_only(method: str, path: str) -> bool:
     return method == "POST" and path.startswith(ADMIN_ONLY_PREFIXES)
 
 
+# Roles are sets of permissions (aime.permissions): the built-in sales roles from Read-Only Analyst to Super Admin,
+# and custom roles an administrator defines. What each request needs:
+# - configure_system: mailboxes, sales settings, LinkedIn Lead Sync;  admin_ops: jobs, automation, integrations;
+# - manage_users: accounts, teams and roles;  assign_leads: moving a lead or deal to someone else;
+# - approve_outbound: approving, confirming or resending what goes out to customers, and campaigns;
+# - edit_records: every other change. Without it (a Read-Only Analyst) a user can only look and sign out.
+# Which records a user sees and works is limited separately (aime.visibility).
+ROLES = tuple(BUILTIN_ROLES)
+ROLE_LABELS = {k: v["label"] for k, v in BUILTIN_ROLES.items()}
+ADMIN_ROLES = tuple(k for k, v in BUILTIN_ROLES.items() if "admin_ops" in v["permissions"])
+READ_METHODS = ("GET", "HEAD")
+_APPROVALS = re.compile(r"/(?:followups/\d+/(?:approve|reconfirm|mark_sent|requeue)"
+                        r"|content/\d+/(?:approve|confirm_published|requeue)|campaigns(?:/\d+/status)?"
+                        r"|meetings/proposals/\d+/book|meetings/\d+/move)/?")
+# one record in the URL: /leads/7, /opportunities/3, /followups/12/approve, /inbox/5/reviewed, /meetings/2/held,
+# /meetings/proposals/4/book, /meetings/requests/9/propose
+_RECORD = re.compile(r"/(?:meetings/)?(leads|opportunities|followups|inbox|meetings|proposals|requests)/(\d+)(?:/|$)")
+_ASSIGN = re.compile(r"/(?:leads|opportunities)/\d+/assign/?")
+
+
+def read_only(perms, method: str, path: str) -> bool:
+    """Whether this request changes something a user without `edit_records` may not change (anything but signing
+    out)."""
+    return "edit_records" not in perms and method not in READ_METHODS and path != "/logout"
+
+
+def approver_only(method: str, path: str) -> bool:
+    return method == "POST" and bool(_APPROVALS.fullmatch(path))
+
+
+def assigning(method: str, path: str) -> bool:
+    return method == "POST" and bool(_ASSIGN.fullmatch(path))
+
+
+# FastAPI reads "+1", "1_0", " 1" (%20) or "1.0" in a path as the number 1, while the rules here match plain digits
+# only: such a path could reach an approval under another name, so it is refused outright.
+_LOOSE_NUMBER = re.compile(r"\s*[+-]?[\d_]+(?:\.0*)?\s*")
+
+
+def odd_number(path: str) -> bool:
+    return any(seg and not seg.isdigit() and _LOOSE_NUMBER.fullmatch(seg) for seg in path.split("/"))
+
+
+def refusal(perms, method: str, path: str) -> str | None:
+    """Why this signed-in user may not make this request, or None."""
+    if super_admin_only(path) and "configure_system" not in perms:
+        return "Super Admin only"
+    if path.startswith(TEAM_ADMIN_PREFIXES) and "manage_users" not in perms:
+        return "Only an administrator manages users, teams and roles"
+    if admin_only(method, path) and "admin_ops" not in perms:
+        return "Admin only: ask an admin to do this"
+    if read_only(perms, method, path):
+        return "Read-only access: ask a Sales Manager to do this"
+    if approver_only(method, path) and "approve_outbound" not in perms:
+        return "A Sales Manager approves what goes out to customers: ask one to do this"
+    if assigning(method, path) and "assign_leads" not in perms:
+        return "Only a manager assigns leads and deals: ask one to do this"
+    return None
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """Every page and API needs a signed-in user (when DASHBOARD_AUTH is on); operational changes need an admin."""
 
@@ -168,6 +235,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         request.state.user = None
+        request.state.scope = EVERYTHING  # which records this user may see (aime.visibility); all without sign-in
         ctx = self.get_ctx()
         path = request.url.path
         if not ctx.settings.dashboard_auth or path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES):
@@ -177,13 +245,25 @@ class AuthMiddleware(BaseHTTPMiddleware):
             with ctx.db.session() as s:
                 user = s.get(User, payload.get("u"))
                 if user and user.active and user.session_version == payload.get("v"):
-                    request.state.user = {"id": user.id, "username": user.username, "role": user.role}
+                    request.state.user = {"id": user.id, "username": user.username, "role": user.role,
+                                          "perms": permissions_of(s, user.role)}
         if request.state.user is None:
             if path.startswith("/api/"):
                 return JSONResponse({"detail": "Sign in required"}, status_code=401)
             return RedirectResponse(f"/login?next={quote(path)}", status_code=303)
-        if super_admin_only(path) and request.state.user["role"] != "super_admin":
-            return JSONResponse({"detail": "Super Admin only"}, status_code=403)
-        if admin_only(request.method, path) and request.state.user["role"] not in ADMIN_ROLES:
-            return JSONResponse({"detail": "Admin only: ask an admin to do this"}, status_code=403)
+        if odd_number(path):
+            return JSONResponse({"detail": "Not found"}, status_code=404)
+        if reason := refusal(request.state.user["perms"], request.method, path):
+            return JSONResponse({"detail": reason}, status_code=403)
+        if request.method in READ_METHODS and org_page(path) and "view_all" not in request.state.user["perms"]:
+            # the whole organisation's figures and work: their own (or their team's) are on My work
+            if path.startswith("/api/"):
+                return JSONResponse({"detail": "Organisation-wide figures need a role that sees all records"},
+                                    status_code=403)
+            return RedirectResponse("/my", status_code=303)
+        with ctx.db.session() as s:
+            request.state.scope = scope_for(s, request.state.user)
+            if (m := _RECORD.match(path)) and not record_visible(s, request.state.scope, m.group(1), int(m.group(2))):
+                # someone else's lead, deal, email, reply or meeting: as if it did not exist, for viewing and changing
+                return JSONResponse({"detail": "Not found"}, status_code=404)
         return await call_next(request)

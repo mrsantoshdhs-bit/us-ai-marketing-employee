@@ -24,8 +24,9 @@
     <a class="brand" href="/"><span class="brand-logo">AI</span><span class="brand-text"><b>AI Sales Employee</b><small>Your sales &amp; marketing workforce</small></span></a>
     <nav>
       {%- set nav_sections = [
-        (None, [('/', 'Dashboard', 'dashboard', None, ''), ('/manager', 'Manager Today', 'eye', None, ''),
-                ('/command-center', 'Sales Command Center', 'sparkle', None, 'NEW')]),
+        (None, ([('/', 'Dashboard', 'dashboard', None, ''), ('/manager', 'Manager Today', 'eye', None, ''),
+                 ('/command-center', 'Sales Command Center', 'sparkle', None, 'NEW')] if can_view_all else [])
+               + [('/my', 'My work', 'target', None, '')]),
         ('Sales', [('/pipeline', 'CRM Pipeline', 'kanban', None, ''), ('/companies', 'Companies', 'building', None, ''),
                    ('/contacts', 'Contacts', 'users', None, ''), ('/leads', 'Leads', 'target', None, '')]),
         ('Engagement', [('/inbox', 'Conversations', 'chat', nav_c.replies, ''), ('/followups', 'Follow-ups', 'send', None, ''),
@@ -36,16 +37,17 @@
                         ('/approvals', 'Approval Queue', 'check-square', nav_c.approvals, 'alert'),
                         ('/agents', 'AI Agents', 'cpu', None, ''), ('/jobs', 'Jobs', 'clock', None, ''),
                         ('/audit', 'Audit Logs', 'list', None, '')]),
-        ('Analytics', [('/reports', 'Sales Analytics', 'chart', None, '')]),
+        ('Analytics', [('/reports', 'Sales Analytics', 'chart', None, ''), ('/performance', 'Sales performance', 'users', None, '')]),
         ('Settings', [('/integrations', 'Integrations', 'plug', None, ''), ('/system', 'System health', 'server', None, ''),
                       ('/settings', 'Settings', 'gear', None, '')]
+                     + ([('/admin/users', 'Users & teams', 'users', None, '')] if can_manage_users else [])
                      + ([('/admin/mailboxes', 'Mailboxes', 'mail', None, ''),
                          ('/admin/settings', 'Sales settings', 'sliders', None, '')] if is_super_admin else [])),
       ] -%}
       {% for heading, links in nav_sections %}
       <div class="nav-section">
         {% if heading %}<div class="nav-heading">{{ heading }}</div>{% endif %}
-        {% for href, label, ico, count, tag in links %}
+        {% for href, label, ico, count, tag in links if can_view_all or not org_page(href) %}
         {%- set active = (nav_path == '/' and href == '/') or (href != '/' and nav_path.startswith(href)) -%}
         <a href="{{ href }}" class="nav-link{{ ' active' if active }}" title="{{ label }}"{% if active %} aria-current="page"{% endif %}>{{ icon(ico) }}<span class="nav-label">{{ label }}</span>{% if tag == 'NEW' %}<span class="tag-new">NEW</span>{% endif %}{% if count %}<span class="count{{ ' red' if tag == 'alert' }}">{{ count }}</span>{% endif %}</a>
         {% endfor %}

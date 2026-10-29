@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from aime.llm import usage
 from aime.llm.base import LLMError, LLMProvider
 
 log = logging.getLogger("aime.llm")
@@ -83,13 +84,18 @@ class OllamaProvider(LLMProvider):
         }
         if system:
             body["system"] = system
+        t0 = time.perf_counter()
         try:
             with self._client(self.timeout) as client:
                 resp = client.post(f"{self.url}/api/generate", json=body)
                 resp.raise_for_status()
-                text = resp.json().get("response", "")
+                data = resp.json()
+                text = data.get("response", "")
         except httpx.HTTPError as exc:
+            usage.record(0, 0, int((time.perf_counter() - t0) * 1000), ok=False)
             raise LLMError(f"Ollama request failed: {exc}") from exc
+        usage.record(data.get("prompt_eval_count") or 0, data.get("eval_count") or 0,
+                     int((time.perf_counter() - t0) * 1000), ok=bool(text.strip()))
         if not text.strip():
             raise LLMError("Ollama returned an empty response")
         return text.strip()

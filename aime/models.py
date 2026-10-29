@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from aime.timeutil import utcnow
@@ -180,7 +180,7 @@ class Lead(Timestamped, Base):
     # not_interested | no_response | unsubscribed | bounced | stopped | None (not in outreach)
     outreach_status: Mapped[str | None] = mapped_column(String(20), index=True)
     outreach_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
-    owner: Mapped[str | None] = mapped_column(String(80))  # the Sales Manager who approved its first outreach
+    owner: Mapped[str | None] = mapped_column(String(80), index=True)  # who works the lead: assigned, or who approved its first outreach
     notes: Mapped[str | None] = mapped_column(Text)
     is_sample: Mapped[bool] = mapped_column(Boolean, default=False)
 
@@ -202,12 +202,61 @@ class Opportunity(Timestamped, Base):
     est_value: Mapped[float | None] = mapped_column(Float)  # only when a human enters it
     probability: Mapped[int] = mapped_column(Integer, default=10)
     next_step: Mapped[str | None] = mapped_column(String(300))
-    owner: Mapped[str | None] = mapped_column(String(80))  # the Sales Manager it is handed over to (username)
+    owner: Mapped[str | None] = mapped_column(String(80), index=True)  # the salesperson it is assigned to (username)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime)
     lost_reason: Mapped[str | None] = mapped_column(String(200))
+    expected_close: Mapped[date | None] = mapped_column(Date)  # entered by a person
+    origin: Mapped[str] = mapped_column(String(20), default="ai")  # ai: opened by the agents | human: by a person
+    won_by: Mapped[str | None] = mapped_column(String(80))  # who moved it to won
 
     lead: Mapped[Lead | None] = relationship(back_populates="opportunities")
     company: Mapped[Company] = relationship()
+
+
+class Quote(Timestamped, Base):
+    """A price a person offered on a deal. Never written by an agent: prices and terms come only from people."""
+
+    __tablename__ = "quotes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    opportunity_id: Mapped[int] = mapped_column(ForeignKey("opportunities.id"), index=True)
+    amount: Mapped[float] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(3), default="USD")
+    status: Mapped[str] = mapped_column(String(20), default="draft")  # draft | sent | accepted | rejected | expired
+    valid_until: Mapped[date | None] = mapped_column(Date)
+    terms: Mapped[str | None] = mapped_column(String(500))
+    created_by: Mapped[str] = mapped_column(String(80))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class Attachment(Timestamped, Base):
+    """A document on a deal (proposal, contract, requirements). Stored under data/attachments, served only through
+    the dashboard's permission checks, always as a download."""
+
+    __tablename__ = "attachments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    opportunity_id: Mapped[int] = mapped_column(ForeignKey("opportunities.id"), index=True)
+    filename: Mapped[str] = mapped_column(String(200))
+    stored_as: Mapped[str] = mapped_column(String(80))
+    content_type: Mapped[str] = mapped_column(String(100))
+    size: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    uploaded_by: Mapped[str] = mapped_column(String(80))
+
+
+class StageChange(Base):
+    """Every move of a deal through the pipeline (aime.stages): from, to, when, who and why."""
+
+    __tablename__ = "opportunity_stage_changes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    opportunity_id: Mapped[int] = mapped_column(ForeignKey("opportunities.id"), index=True)
+    from_stage: Mapped[str | None] = mapped_column(String(20))  # None: the deal was opened
+    to_stage: Mapped[str] = mapped_column(String(20), index=True)
+    at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    actor: Mapped[str] = mapped_column(String(80))
+    reason: Mapped[str | None] = mapped_column(String(300))
 
 
 class Activity(Base):
@@ -228,6 +277,10 @@ class FollowUp(Timestamped, Base):
     __tablename__ = "followups"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # who wrote the text: "template" (fixed wording filled with the lead's facts; no AI model writes emails) or
+    # "template, edited by <user>" once a person changed it. Shown with every draft, so a template is never taken
+    # for an AI's own reasoning.
+    generator: Mapped[str] = mapped_column(String(80), default="template")
     lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id"), index=True)
     contact_id: Mapped[int | None] = mapped_column(ForeignKey("contacts.id"))
     company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"))
@@ -329,6 +382,7 @@ class InboundEmail(Base):
     action_note: Mapped[str | None] = mapped_column(Text)
     is_simulated: Mapped[bool] = mapped_column(Boolean, default=False)  # created by `aime simulate-reply`
     processed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    auth_results: Mapped[str | None] = mapped_column(Text)  # the receiving server's Authentication-Results
 
     lead: Mapped["Lead | None"] = relationship()
     contact: Mapped["Contact | None"] = relationship()
@@ -546,6 +600,11 @@ class AgentRun(Base):
     input_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     output_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
+    # the language model in this run (aime.llm.usage): calls, tokens as the model reported them, time, cost
+    llm_calls: Mapped[int] = mapped_column(Integer, default=0)
+    llm_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    llm_ms: Mapped[int] = mapped_column(Integer, default=0)
+    llm_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
 
 
 class JobRun(Base):
@@ -678,12 +737,60 @@ class User(Timestamped, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(60), unique=True)
     password_hash: Mapped[str] = mapped_column(String(200))  # scrypt$n$r$p$salt$hash
-    role: Mapped[str] = mapped_column(String(30), default="sales_manager")  # sales_manager | admin | super_admin
+    role: Mapped[str] = mapped_column(String(30), default="sales_manager")  # analyst | sales_executive | sales_manager | admin | super_admin
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     session_version: Mapped[int] = mapped_column(Integer, default=1)  # bump to sign out every session
     failed_logins: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # the sales organisation (aime.permissions, aime.assignment)
+    display_name: Mapped[str | None] = mapped_column(String(120))
+    team_id: Mapped[int | None] = mapped_column(ForeignKey("teams.id"), index=True)
+    manager: Mapped[str | None] = mapped_column(String(60), index=True)  # the username they report to
+    skills: Mapped[list[str]] = mapped_column(JSON, default=list)  # service ids they sell best
+    available: Mapped[bool] = mapped_column(Boolean, default=True)  # off: no new leads (leave, holiday)
+    capacity: Mapped[int] = mapped_column(Integer, default=0)  # most open deals at once; 0 = no limit
+    # one-time account setup / password reset link: only its hash is stored, it expires
+    setup_token_hash: Mapped[str | None] = mapped_column(String(100))
+    setup_expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class Team(Timestamped, Base):
+    __tablename__ = "teams"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+    manager: Mapped[str | None] = mapped_column(String(60))  # the team's manager (username)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class CustomRole(Timestamped, Base):
+    """A role an administrator defined: a name and a set of permissions from aime.permissions.PERMISSIONS."""
+
+    __tablename__ = "roles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(30), unique=True)
+    label: Mapped[str] = mapped_column(String(80))
+    permissions: Mapped[list[str]] = mapped_column(JSON, default=list)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_by: Mapped[str | None] = mapped_column(String(80))
+
+
+class Assignment(Base):
+    """Every change of who owns a lead or a deal: automatic (and by which rule), manual, or an escalation."""
+
+    __tablename__ = "assignments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    lead_id: Mapped[int | None] = mapped_column(ForeignKey("leads.id"), index=True)
+    opportunity_id: Mapped[int | None] = mapped_column(ForeignKey("opportunities.id"), index=True)
+    from_owner: Mapped[str | None] = mapped_column(String(60))
+    to_owner: Mapped[str | None] = mapped_column(String(60), index=True)
+    method: Mapped[str] = mapped_column(String(30))  # workload | round_robin | skill | manual | escalation | none
+    reason: Mapped[str | None] = mapped_column(String(300))
+    actor: Mapped[str] = mapped_column(String(80))
 
 
 class KeyValue(Base):
@@ -731,3 +838,21 @@ class AuditEvent(Base):
     action: Mapped[str] = mapped_column(String(60), index=True)
     target: Mapped[str | None] = mapped_column(String(120))
     detail: Mapped[str | None] = mapped_column(Text)
+
+
+# --------------------------------------------------------------------------- indexes for the hot paths
+# Reply and bounce matching, the tick's "is anything running" checks, pipeline checks, dashboard counts. Built on
+# existing databases by aime.migrations.ensure_indexes (CREATE INDEX IF NOT EXISTS; no data changes).
+Index("ix_followups_message_id", FollowUp.message_id)
+Index("ix_followups_to_email_lower", func.lower(FollowUp.to_email))
+Index("ix_followups_delivered_to_lower", func.lower(FollowUp.delivered_to))
+Index("ix_job_runs_running", JobRun.status, sqlite_where=JobRun.status == "running")
+Index("ix_agent_runs_running", AgentRun.status, sqlite_where=AgentRun.status == "running")
+Index("ix_agent_runs_agent_status", AgentRun.agent, AgentRun.status, AgentRun.finished_at)
+Index("ix_activities_opportunity_id", Activity.opportunity_id)
+Index("ix_activities_lead_type_created", Activity.lead_id, Activity.type, Activity.created_at)
+Index("ix_contacts_email_lower", func.lower(Contact.email))
+Index("ix_leads_contact_id", Lead.contact_id)
+Index("ix_companies_domain_lower", func.lower(Company.domain))
+Index("ix_inbound_emails_from_email_lower", func.lower(InboundEmail.from_email))
+Index("ix_opportunities_owner_stage", Opportunity.owner, Opportunity.stage)

@@ -69,7 +69,8 @@ def make_ctx(tmp_path):
         # image_renderer=pillow keeps tests fast and browser-free; tests/test_design.py exercises the browser.
         base = dict(data_dir=tmp_path / f"data{len(created)}", database_url="", llm_provider="template",
                     retry_base_delay=0.0, polite_delay=0.0, data_role="test", dashboard_auth=False,
-                    image_renderer="pillow")
+                    image_renderer="pillow", calendly_verified_only=False)  # the fake IMAP mail is unsigned;
+        # tests/test_security_round2.py turns the check on
         base.update(overrides)
         settings = Settings.load(env_file=Path(tmp_path / "no.env"), **base)
         ctx = create_context(settings, http_transport=httpx.MockTransport(handler))

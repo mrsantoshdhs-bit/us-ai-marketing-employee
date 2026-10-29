@@ -103,12 +103,17 @@ reminder_hours = 24               # an alert for the Sales Manager this long bef
 remind_prospect = false           # also draft a reminder email for the prospect (it waits for approval)
 
 [handover]
-# The dashboard users (usernames) interested prospects and booked meetings are handed over to; with several, each new
-# opportunity goes to the least busy. Set by the Super Admin in Settings › Sales settings; empty = unassigned (the
-# dashboard still shows every handover).
+# Who receives new deals (interested prospects, booked meetings): these usernames, or, when empty, every active user
+# whose role receives leads (Administration › Users). People marked unavailable or at their capacity are skipped.
+# Set by the Super Admin in Settings › Sales settings.
 sales_manager = []
+strategy = "workload"             # workload (fewest open deals) | round_robin | skill (their services first)
+escalate_after_hours = 24         # a deal its owner has not touched for this long: their manager is told (0 = never)
 
 [pipeline]
+# Open stages in order with their win probability (%). new and discovery stay (the agents open deals there); won and
+# lost always follow. Changed by the Super Admin in Settings › Sales settings.
+stages = "new:10, discovery:20, proposal:50, negotiation:70"
 # Open opportunities with nothing logged for this long get a "decide the next step" task.
 stalled_days = 10
 # After the last outreach email, wait this long for a reply before marking "no response" (lead -> nurture).
