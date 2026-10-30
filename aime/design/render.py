@@ -3,6 +3,11 @@
 Each render runs twice in an isolated temporary profile: once to dump the DOM (a small script in the template
 measures text overflow, overlaps, smallest font, contrast and empty space) and once to take the screenshot.
 If the layout fails, the next style is tried; if no browser is available, callers fall back to the Pillow card.
+
+On Windows a Chromium browser starting with a new profile checks whether the account's password is blank by
+signing in with an empty one, which Windows counts as a failed sign-in. One per browser start locked the Windows
+account within minutes (10 failures in 10 minutes) and stopped the scheduled tasks, so every new profile is given
+the answer the browser saved last time (OS_PASSWORD_STATE) and the check runs once per password change.
 """
 
 from __future__ import annotations
@@ -42,6 +47,9 @@ BROWSER_CANDIDATES = [
     r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
     r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe",
 ]
+# The browser's own answer to "is the Windows password blank?" ("Local State" › password_manager › os_password_*),
+# shared by every render of this Windows user (the scheduled tasks, the dashboard and test runs alike).
+OS_PASSWORD_STATE = Path(tempfile.gettempdir()) / "aime-browser-os-password.json"
 
 
 @dataclass
@@ -105,6 +113,36 @@ def _run(args: list[str], timeout: float) -> subprocess.CompletedProcess:
                           creationflags=flags)
 
 
+def seed_profile(profile: Path) -> None:
+    """Give a new profile the browser's saved answer about the Windows password, so it does not sign in to find out."""
+    try:
+        answer = json.loads(OS_PASSWORD_STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(answer, dict) and answer:
+        profile.mkdir(parents=True, exist_ok=True)
+        (profile / "Local State").write_text(json.dumps({"password_manager": answer}), encoding="utf-8")
+
+
+def keep_answer(profile: Path) -> None:
+    """Save the answer the browser wrote into this profile, for the next new profile."""
+    try:
+        saved = json.loads((profile / "Local State").read_text(encoding="utf-8")).get("password_manager") or {}
+        answer = {k: v for k, v in saved.items() if k.startswith("os_password_")}
+        if answer:
+            OS_PASSWORD_STATE.write_text(json.dumps(answer), encoding="utf-8")
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def _run_browser(browser: Path, profile: Path, w: int, h: int, extra: list[str], timeout: float):
+    seed_profile(profile)
+    try:
+        return _run(_browser_args(browser, profile, w, h) + extra, timeout)
+    finally:
+        keep_answer(profile)
+
+
 def check_layout(metrics: dict) -> list[str]:
     problems = []
     if not metrics:
@@ -164,7 +202,7 @@ def render_one(browser: Path, html: str, out_png: Path, w: int, h: int, timeout:
         page = work / "card.html"
         page.write_text(html, encoding="utf-8")
         url = page.resolve().as_uri()
-        dump = _run(_browser_args(browser, work / "p1", w, h) + ["--dump-dom", url], timeout)
+        dump = _run_browser(browser, work / "p1", w, h, ["--dump-dom", url], timeout)
         m = re.search(r'<pre id="aime-qc">(.*?)</pre>', dump.stdout or "", re.S)
         try:
             metrics = json.loads(m.group(1).replace("&quot;", '"').replace("&amp;", "&")) if m else {}
@@ -173,7 +211,7 @@ def render_one(browser: Path, html: str, out_png: Path, w: int, h: int, timeout:
         shot = work / "shot.png"
         for attempt in (2, 3):  # a blank patch is a rendering glitch, not a layout fault: take the shot once more
             shot.unlink(missing_ok=True)
-            _run(_browser_args(browser, work / f"p{attempt}", w, h) + [f"--screenshot={shot}", url], timeout)
+            _run_browser(browser, work / f"p{attempt}", w, h, [f"--screenshot={shot}", url], timeout)
             if not (shot.exists() and shot.stat().st_size > 0):
                 break
             patches = find_blank_patches(shot, metrics.get("white_boxes"), metrics.get("black_boxes")) if metrics else []

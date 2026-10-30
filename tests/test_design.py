@@ -143,6 +143,42 @@ def test_blank_patch_triggers_one_retake(tmp_path, monkeypatch):
     assert len(calls) == 2 and any("blank or unpainted patch" in p for p in check_layout(metrics))
 
 
+def test_every_new_profile_gets_the_saved_windows_password_answer(tmp_path, monkeypatch):
+    """A new profile made Edge sign in with an empty password on every start (a failed sign-in each time, which locked
+    the Windows account): the answer it saves is handed to the next new profile, so it does not sign in again."""
+    monkeypatch.setattr(render_mod, "OS_PASSWORD_STATE", tmp_path / "answer.json")
+    starts = []
+
+    def browser(args, timeout):  # what the browser does: sign in only when the profile has no answer, then save one
+        profile = Path(next(a for a in args if a.startswith("--user-data-dir=")).split("=", 1)[1])
+        state = profile / "Local State"
+        known = state.exists() and "os_password_blank" in state.read_text(encoding="utf-8")
+        starts.append("cached" if known else "signed in")
+        profile.mkdir(parents=True, exist_ok=True)
+        state.write_text('{"password_manager": {"os_password_blank": false, "os_password_last_changed": "134"},'
+                         ' "browser": {"x": 1}}', encoding="utf-8")
+        return type("Done", (), {"stdout": "", "returncode": 0})()
+
+    monkeypatch.setattr(render_mod, "_run", browser)
+    html = render_html(_brief(), "editorial", load_brand(ROOT), "DHS")
+    render_one(Path("edge.exe"), html, tmp_path / "a.png", 1080, 1350)
+    render_one(Path("edge.exe"), html, tmp_path / "b.png", 1080, 1350)
+    assert starts[0] == "signed in" and set(starts[1:]) == {"cached"} and len(starts) == 4
+    assert (tmp_path / "answer.json").read_text(encoding="utf-8") == \
+        '{"os_password_blank": false, "os_password_last_changed": "134"}'  # only the answer is kept
+
+
+def test_a_missing_or_damaged_saved_answer_is_ignored(tmp_path, monkeypatch):
+    monkeypatch.setattr(render_mod, "OS_PASSWORD_STATE", tmp_path / "answer.json")
+    render_mod.seed_profile(tmp_path / "p1")
+    assert not (tmp_path / "p1").exists()  # nothing saved yet: the profile is left to the browser
+    (tmp_path / "answer.json").write_text("{not json", encoding="utf-8")
+    render_mod.seed_profile(tmp_path / "p2")
+    assert not (tmp_path / "p2").exists()
+    render_mod.keep_answer(tmp_path / "missing")  # a browser that never started saves nothing and raises nothing
+    assert (tmp_path / "answer.json").read_text(encoding="utf-8") == "{not json"
+
+
 def test_falls_back_to_pillow_card_without_a_browser(make_ctx, monkeypatch):
     ctx = make_ctx(image_renderer="auto")
     monkeypatch.setattr("aime.design.render.find_browser", lambda configured=None: None)
