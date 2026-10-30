@@ -394,6 +394,8 @@ def register(app, C, render, back, who) -> None:
             report = build(s, midnight(first), midnight(min(last, date(9000, 1, 1)) + timedelta(days=1)),
                            people if narrowed else None, source or None, scope=sc or EVERYTHING, include_unassigned=not narrowed)
             report.rows = [r for r in report.rows if r.username in active or r.has_numbers()]
+            if narrowed:
+                report.unassigned = None  # not part of this report's Total: no row for it
             sources = sorted(x for x in s.execute(select(Lead.source).distinct()).scalars() if x)
         return render(request, "performance.html", report=report, teams=teams, sources=sources,
                       f={"start": first.isoformat(), "end": last.isoformat(), "team": team, "owner": owner, "source": source},

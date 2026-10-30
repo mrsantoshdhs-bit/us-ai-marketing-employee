@@ -1779,8 +1779,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return RedirectResponse(url, status_code=302)
 
     @app.get("/integrations/linkedin-leads/callback")
-    def linkedin_leads_callback(request: Request, code: str = "", state: str = "", error: str = "",
-                                error_description: str = ""):
+    def linkedin_leads_callback(request: Request, code: str = "", state: str = "", error: str = ""):
         ctx = C()
         if error:  # never the words in the link: a note on the page is the app's own, and anyone can craft a link
             return back("/integrations#linkedin-leads", "LinkedIn sign-in was declined or cancelled: nothing was connected")
@@ -1834,7 +1833,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return RedirectResponse(LinkedInClient(ctx.settings).authorization_url(state), status_code=302)
 
     @app.get("/integrations/linkedin/callback")
-    def linkedin_callback(code: str = "", state: str = "", error: str = "", error_description: str = ""):
+    def linkedin_callback(code: str = "", state: str = "", error: str = ""):
         ctx = C()
         if error:  # never the words in the link: see above
             return back("/integrations", "LinkedIn authorization was declined or cancelled: nothing was connected")
@@ -1866,7 +1865,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return RedirectResponse(url, status_code=302)
 
     @app.get("/integrations/oauth/callback")
-    def oauth_callback(request: Request, code: str = "", state: str = "", error: str = "", error_description: str = ""):
+    def oauth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
         ctx = C()
         if error:  # never the words in the link: see above
             return back("/integrations#accounts", "Sign-in was declined or cancelled: nothing was connected")
