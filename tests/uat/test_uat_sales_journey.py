@@ -1661,3 +1661,9 @@ def test_ok_a_double_click_on_mark_done_does_not_show_an_error(org):
     assert eva.post(f"/followups/{fid}/done", headers={**ORIGIN, **html}, follow_redirects=False).status_code == 303
     with org.db.session() as s:
         assert s.get(FollowUp, fid).status == "done"
+
+
+def test_ok_a_lead_page_links_to_its_own_deal(org):
+    lid = make_lead(org, owner="eva")
+    oid = make_deal(org, lid)
+    assert f'href="/opportunities/{oid}"' in client(org, "eva").get(f"/leads/{lid}").text

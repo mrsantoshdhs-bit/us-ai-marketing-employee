@@ -93,7 +93,7 @@
       {% else %}<tr><td colspan="4" class="muted">None.</td></tr>{% endfor %}
     </table></div>
     <h2>Opportunities</h2>
-    <div class="card">{% for o in opps %}<div><a href="/pipeline">{{ o.name }}</a> {{ status_pill(o.stage) }}</div>{% else %}<span class="muted">None.</span>{% endfor %}</div>
+    <div class="card">{% for o in opps %}<div><a href="/opportunities/{{ o.id }}">{{ o.name }}</a> {{ status_pill(o.stage) }}</div>{% else %}<span class="muted">None.</span>{% endfor %}</div>
   </div>
   <div>
     <h2>Conversation</h2>
