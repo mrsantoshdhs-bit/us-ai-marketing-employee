@@ -531,7 +531,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 f.status, f.send_started_at = "approved", None
                 f.blocked_reason = redact(f"Send failed (not delivered): {exc}")[:300]
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
-                if isinstance(exc, smtplib.SMTPAuthenticationError) or "oauth" in str(exc).lower():
+                if isinstance(exc, smtplib.SMTPAuthenticationError) or (isinstance(exc, EmailNotReady) and "oauth" in str(exc).lower()):
                     # Every other email would fail the same way, and repeated refused sign-ins can lock the mailbox.
                     sign_in_failed, ready, reason = True, False, f.blocked_reason
                     alert_once(session, "error", self.name, "The sales mailbox refused the sign-in, so approved emails are "

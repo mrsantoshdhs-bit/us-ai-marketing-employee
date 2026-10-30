@@ -20,7 +20,7 @@ SPAM_RE = re.compile(r"\b(free|guarantee[ds]?|risk[- ]free|act now|limited time|
                      r"no obligation|special promotion|click here|100%|once in a lifetime|exclusive deal|"
                      r"amazing|incredible|best in class|#1)\b|\${2,}|!{2,}", re.I)
 CLAIM_RE = re.compile(r"\b(we (increased|doubled|tripled|saved|cut|helped)|clients like|customers like|trusted by|"
-                      r"we('ve| have)( already| also)? (worked|partnered|done|built|delivered|served|helped)|"
+                      r"we('ve| have)( already| also)? (worked|partnered|done this|built|delivered|served|helped)|"
                       r"we (already )?(worked|partnered|delivered|served|built this|did this)|"
                       r"(clients|customers) (include|such as)|"
                       r"leading|leader in|award[- ]winning|proven to|industry[- ]best|world[- ]class)\b", re.I)

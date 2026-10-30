@@ -1591,8 +1591,8 @@ def _booking_link_sent_and_booked_elsewhere(make_ctx):
 
 def test_ok_known_gap_what_happens_when_the_notice_goes_to_the_owners_gmail(make_ctx):
     """State of the system today, not its ideal: no meeting, lead stays "interested", no automatic email to the prospect,
-    no record of the booking. The only hints are passive: "Last Calendly notice read: none yet" on the Command Center,
-    a sentence on the Meetings page, and docs/SALES_SETUP.md section 6."""
+    no record of the booking. The hints: "Last Calendly notice read: none yet" on the Command Center, a sentence on the
+    Meetings page, docs/SALES_SETUP.md section 6, the Integrations row, and an alert after a few days."""
     ctx, sender = _booking_link_sent_and_booked_elsewhere(make_ctx)
     run_inbox(ctx)
     assert meetings_of(ctx) == [] and lead_of(ctx).outreach_status == "interested"
