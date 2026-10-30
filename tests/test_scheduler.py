@@ -29,6 +29,7 @@ def test_interval_due_logic():
     st = JobState(job="inbound", last_attempt_at=at(10), consecutive_failures=0, enabled=True)
     assert not is_due(spec, st, at(10, 15), TZ)[0]
     assert is_due(spec, st, at(10, 29), TZ)[0]  # within tick slack
+    assert is_due(spec, st, at(10, 23), TZ)[0]  # a tick that started late must not cost the next slot
     st.enabled = False
     assert not is_due(spec, st, at(11), TZ)[0]
 

@@ -127,7 +127,7 @@ def build_task_xml(python_exe: Path, script: Path, workdir: Path, interval_minut
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>{"true" if wake_to_run else "false"}</WakeToRun>
     <ExecutionTimeLimit>{escape(time_limit)}</ExecutionTimeLimit>
-    <Priority>7</Priority>
+    <Priority>6</Priority>
   </Settings>
   <Actions Context="Author">
     <Exec>

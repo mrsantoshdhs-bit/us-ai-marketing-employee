@@ -1,5 +1,8 @@
 """Premium images: text comes only from the post, layouts are measured, and the Pillow card is the fallback."""
 
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -12,6 +15,7 @@ import aime.design.render as render_mod
 from aime.design.render import (check_layout, find_blank_patches, find_browser, load_brand, render_designed_image,
                                  render_html, render_one)
 from aime.models import ContentItem
+from aime.scheduler.runner import pid_alive
 from aime.visuals import monogram, render_post_image
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -163,7 +167,7 @@ def test_every_new_profile_gets_the_saved_windows_password_answer(tmp_path, monk
     html = render_html(_brief(), "editorial", load_brand(ROOT), "DHS")
     render_one(Path("edge.exe"), html, tmp_path / "a.png", 1080, 1350)
     render_one(Path("edge.exe"), html, tmp_path / "b.png", 1080, 1350)
-    assert starts[0] == "signed in" and set(starts[1:]) == {"cached"} and len(starts) == 4
+    assert starts[0] == "signed in" and set(starts[1:]) == {"cached"} and len(starts) == 6  # no shot: 1 + 2 tries each
     assert (tmp_path / "answer.json").read_text(encoding="utf-8") == \
         '{"os_password_blank": false, "os_password_last_changed": "134"}'  # only the answer is kept
 
@@ -177,6 +181,54 @@ def test_a_missing_or_damaged_saved_answer_is_ignored(tmp_path, monkeypatch):
     assert not (tmp_path / "p2").exists()
     render_mod.keep_answer(tmp_path / "missing")  # a browser that never started saves nothing and raises nothing
     assert (tmp_path / "answer.json").read_text(encoding="utf-8") == "{not json"
+
+
+def _fake_browser(monkeypatch, shots):
+    """Records the profile of every start; `shots` says whether each screenshot attempt produces a file."""
+    profiles, results = [], iter(shots)
+
+    def run(args, timeout):
+        profiles.append(Path(next(a for a in args if a.startswith("--user-data-dir=")).split("=", 1)[1]).name)
+        shot = next((a.split("=", 1)[1] for a in args if a.startswith("--screenshot=")), None)
+        if shot and next(results):
+            Path(shot).write_bytes(b"png")
+        return type("Done", (), {"stdout": "", "returncode": 0})()
+
+    monkeypatch.setattr(render_mod, "_run", run)
+    return profiles
+
+
+def test_the_screenshot_reuses_the_profile_and_a_failed_one_gets_a_new_profile(tmp_path, monkeypatch):
+    monkeypatch.setattr(render_mod, "OS_PASSWORD_STATE", tmp_path / "answer.json")
+    html = render_html(_brief(), "editorial", load_brand(ROOT), "DHS")
+    profiles = _fake_browser(monkeypatch, [True])
+    render_one(Path("edge.exe"), html, tmp_path / "a.png", 1080, 1350)
+    assert profiles == ["p1", "p1"] and (tmp_path / "a.png").exists()  # a second start skips the first-run set-up
+    profiles = _fake_browser(monkeypatch, [False, True])
+    render_one(Path("edge.exe"), html, tmp_path / "b.png", 1080, 1350)
+    assert profiles == ["p1", "p1", "p2"] and (tmp_path / "b.png").exists()
+    profiles = _fake_browser(monkeypatch, [False, False])
+    render_one(Path("edge.exe"), html, tmp_path / "c.png", 1080, 1350)
+    assert profiles == ["p1", "p1", "p2"] and not (tmp_path / "c.png").exists()
+
+
+def test_a_helper_that_outlives_the_browser_does_not_hold_the_render():
+    """The helper inherits the output: waiting on a pipe would wait for the helper's 25 s as well."""
+    helper = "import subprocess, sys; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(25)'])"
+    started = time.monotonic()
+    done = render_mod._run([sys.executable, "-c", f"{helper}; print('dom')"], 60)
+    assert done.stdout.strip() == "dom" and done.returncode == 0 and time.monotonic() - started < 20
+
+
+def test_an_overrunning_browser_is_stopped_with_everything_it_started(tmp_path):
+    pid_file = tmp_path / "helper.pid"
+    script = ("import subprocess, sys, time; child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)']); "
+              f"open({str(pid_file)!r}, 'w').write(str(child.pid)); time.sleep(300)")
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        render_mod._run([sys.executable, "-c", script], 15)
+    assert time.monotonic() - started < 60  # the timeout, not the time the helpers would have taken
+    assert pid_file.exists() and not pid_alive(int(pid_file.read_text()))
 
 
 def test_falls_back_to_pillow_card_without_a_browser(make_ctx, monkeypatch):
