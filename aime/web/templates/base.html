@@ -8,8 +8,10 @@
 </head>
 {%- from "_icons.html" import icon -%}
 {%- set nav_path = request.url.path -%}
-<body class="{{ 'bare' if nav_path == '/login' }}">
-{% if nav_path == '/login' %}
+{#- a page for someone not signed in: never the menu, the top bar or what they say about the installation -#}
+{%- set bare_page = bare or nav_path in ('/login', '/setup') -%}
+<body class="{{ 'bare' if bare_page }}">
+{% if bare_page %}
 <main>
   <div class="brand-mark"><span class="brand-logo">AI</span> AI Sales Employee</div>
   {% if msg %}<div class="flash">{{ msg }}</div>{% endif %}
@@ -90,11 +92,11 @@
       {% endif %}
       {% if nav_s.state %}
       <details class="menu-wrap auto-menu">
-        <summary class="btn-gradient">{{ icon('play' if nav_s.state != 'running' else 'activity') }}<span class="hide-sm">{{ {'running': 'Automation on', 'paused': 'Resume automation', 'stopped': 'Start automation', 'emergency_stop': 'Start automation'}[nav_s.state] }}</span>{{ icon('chevron-down') }}</summary>
+        <summary class="btn-gradient">{{ icon('play' if nav_s.state != 'running' else 'activity') }}<span class="hide-sm">{{ ({'running': 'Automation on', 'paused': 'Resume automation', 'stopped': 'Start automation', 'emergency_stop': 'Start automation'} if nav_s.admin else {'running': 'Automation on', 'paused': 'Automation paused', 'stopped': 'Automation stopped', 'emergency_stop': 'Automation stopped'})[nav_s.state] }}</span>{{ icon('chevron-down') }}</summary>
         <div class="menu">
-          <div class="menu-head">Automation is <b>{{ nav_s.state|replace('_', ' ') }}</b></div>
+          <div class="menu-head">Automation is <b>{{ nav_s.state|replace('_', ' ') }}</b>{% if not nav_s.admin %} · only an administrator can start it{% endif %}</div>
           {% for action, label, ico in [('start', 'Start automation', 'play'), ('resume', 'Resume', 'play'), ('pause', 'Pause sending', 'pause'), ('stop', 'Stop jobs', 'stop'), ('emergency_stop', 'Emergency stop', 'alert')] %}
-          {% if nav_s.state in nav_s.transitions[action][0] %}<form method="post" action="/automation/state/{{ action }}"><input type="hidden" name="next" value="{{ nav_s.here }}"><button class="menu-item{{ ' danger' if action == 'emergency_stop' }}">{{ icon(ico) }}{{ label }}</button></form>{% endif %}
+          {% if nav_s.state in nav_s.transitions[action][0] and (nav_s.admin if action in nav_s.admin_actions else can_edit) %}<form method="post" action="/automation/state/{{ action }}"><input type="hidden" name="next" value="{{ nav_s.here }}"><button class="menu-item{{ ' danger' if action == 'emergency_stop' }}">{{ icon(ico) }}{{ label }}</button></form>{% endif %}
           {% endfor %}
           <a class="menu-item" href="/automation">{{ icon('sliders') }}Automation Control</a>
         </div>

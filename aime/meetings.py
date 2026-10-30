@@ -191,8 +191,10 @@ def _date(text: str) -> datetime | None:
 def match_lead(session: Session, email: str, test_recipients=frozenset()) -> tuple[Lead | None, Contact | None]:
     contact = session.execute(select(Contact).where(func.lower(Contact.email) == email.lower())).scalars().first()
     if contact:
-        lead = session.execute(select(Lead).where(Lead.contact_id == contact.id)).scalars().first() or \
-            session.execute(select(Lead).where(Lead.company_id == contact.company_id)).scalars().first()
+        # a returning customer has a closed lead and a new one: the booking belongs to the one still being worked
+        closed_last = (Lead.status.in_(("converted", "merged", "disqualified")), Lead.id)
+        lead = session.execute(select(Lead).where(Lead.contact_id == contact.id).order_by(*closed_last)).scalars().first() or \
+            session.execute(select(Lead).where(Lead.company_id == contact.company_id).order_by(*closed_last)).scalars().first()
         return lead, contact
     domain = registrable_domain(email.split("@", 1)[1])
     company = session.execute(select(Company).where(Company.domain == domain, Company.merged_into_id.is_(None))).scalars().first()
@@ -216,12 +218,21 @@ def match_lead(session: Session, email: str, test_recipients=frozenset()) -> tup
 
 
 def record_meeting(session: Session, settings, info: dict, actor: str, row: InboundEmail | None = None,
-                   source: str = "calendly_email") -> tuple[Meeting | None, str]:
-    """Create, or cancel, the meeting described by `info`. Returns (meeting, note)."""
-    lead, contact = match_lead(session, info["invitee_email"], getattr(settings, "test_recipients", frozenset()))
+                   source: str = "calendly_email", lead: Lead | None = None) -> tuple[Meeting | None, str]:
+    """Create, or cancel, the meeting described by `info`. Returns (meeting, note). A notice from Calendly names only
+    the invitee, so their email finds the lead; a person logging a meeting on a lead's page gives `lead`, and the
+    meeting belongs to that lead whatever address they typed: it never moves a lead found by that address."""
+    logged_on = lead
+    if lead is None:
+        lead, contact = match_lead(session, info["invitee_email"], getattr(settings, "test_recipients", frozenset()))
+    else:
+        contact = session.execute(select(Contact).where(Contact.company_id == lead.company_id,
+                                                        func.lower(Contact.email) == info["invitee_email"])).scalars().first()
     simulated = bool(row and row.is_simulated)
     same_slot = select(Meeting).where(func.lower(Meeting.invitee_email) == info["invitee_email"],
                                       Meeting.starts_at == info["starts_at"])
+    if logged_on is not None:
+        same_slot = same_slot.where(Meeting.lead_id == logged_on.id)
     # A booking repeats only a meeting that is still scheduled: re-booking a cancelled time is a new booking.
     scheduled = session.execute(same_slot.where(Meeting.status == "scheduled")).scalars().first()
     existing = scheduled or session.execute(same_slot.order_by(Meeting.id.desc())).scalars().first()

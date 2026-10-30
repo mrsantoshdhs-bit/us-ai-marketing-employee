@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · AI Sales Employee{% endblock %}
+{% block content %}
+<h1>{{ title }}</h1>
+<div class="card">
+  <p>{{ reason }}</p>
+  <div class="row-actions" style="margin-top:8px"><a class="btn secondary" href="{{ back_to }}">Go back</a>{% if back_to != '/' and current_user %} <a class="muted" href="/">Home</a>{% endif %}</div>
+</div>
+{% endblock %}

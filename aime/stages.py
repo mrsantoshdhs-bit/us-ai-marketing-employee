@@ -26,8 +26,9 @@ def opened(session: Session, opp: Opportunity, actor: str, reason: str) -> None:
 def move(session: Session, opp: Opportunity, stage: str, actor: str, reason: str | None = None,
          probability: int | None = None, settings=None) -> bool:
     """Move the deal to `stage` (probability: the stage's, unless given). Closing sets the close date; won credits
-    the actor; reopening clears the close date, the lost reason and the credit. Returns whether the stage changed
-    (a given probability is applied either way)."""
+    the actor and clears any lost reason; reopening clears the close date, the lost reason and the credit. A deal that
+    stops being won also stops being a customer's (aime.customer.undo_handover). Returns whether the stage changed (a
+    given probability is applied either way)."""
     if probability is not None:
         opp.probability = probability
     old = opp.stage
@@ -39,9 +40,15 @@ def move(session: Session, opp: Opportunity, stage: str, actor: str, reason: str
     if stage in CLOSED:
         opp.closed_at = utcnow()
         opp.won_by = actor if stage == "won" else None
+        if stage == "won":
+            opp.lost_reason = None
     else:
         opp.closed_at, opp.lost_reason, opp.won_by = None, None, None
     record(session, opp, old, stage, actor, reason)
+    if old == "won":
+        from aime.customer import undo_handover
+
+        undo_handover(session, opp, actor)
     return True
 
 

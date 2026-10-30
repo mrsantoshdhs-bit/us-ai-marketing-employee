@@ -16,10 +16,12 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import func, select
 
 from aime.automation import audit
+from aime.db import take_write_lock
 from aime.knowledge.services import SERVICES
 from aime.models import Assignment, CustomRole, Lead, Opportunity, Team, User
 from aime.permissions import BUILTIN_ROLES, PERMISSIONS, all_roles, can_grant, permissions_of
-from aime.timeutil import utcnow
+from aime.timeutil import as_aware_utc, to_naive_utc, utcnow
+from aime.web.auth import form_id
 
 SETUP_HOURS = 48
 UNUSABLE_HASH = "setup-pending"  # matches no password: the account works once its owner sets one
@@ -77,7 +79,8 @@ def register(app, C, render, back, who) -> None:
             return users_view(request, s, **({"edit": target} if target else {}))
 
     def _team_and_manager(s, team_id: str, manager: str):
-        team = s.get(Team, int(team_id)) if team_id.strip().isdigit() else None
+        number = form_id(team_id)
+        team = s.get(Team, number) if number is not None else None
         boss = manager.strip().lower() or None
         if boss and not s.execute(select(User.id).where(User.username == boss, User.active.is_(True))).first():
             raise ValueError(f"manager {boss} is not an active user")
@@ -217,7 +220,8 @@ def register(app, C, render, back, who) -> None:
             boss = manager.strip().lower() or None
             if boss and not s.execute(select(User.id).where(User.username == boss, User.active.is_(True))).first():
                 return back("/admin/teams", f"{boss} is not an active user")
-            team = s.get(Team, int(team_id)) if team_id.strip().isdigit() else None
+            number = form_id(team_id)
+            team = s.get(Team, number) if number is not None else None
             clash = s.execute(select(Team.id).where(Team.name == label)).scalar()
             if clash and (team is None or clash != team.id):
                 return back("/admin/teams", f"A team called {label} exists")
@@ -244,7 +248,8 @@ def register(app, C, render, back, who) -> None:
                   role_id: str = Form(""), active: str = Form("yes")):
         slug = name.strip().lower()
         with C().db.session() as s:
-            role = s.get(CustomRole, int(role_id)) if role_id.strip().isdigit() else None
+            number = form_id(role_id)
+            role = s.get(CustomRole, number) if number is not None else None
             if role is None and (not ROLE_NAME_RE.fullmatch(slug) or slug in BUILTIN_ROLES):
                 return back("/admin/roles", "Role name: 3-30 lower case letters, digits or underscores, not a built-in role")
             if role is None and s.execute(select(CustomRole.id).where(CustomRole.name == slug)).first():
@@ -282,6 +287,7 @@ def register(app, C, render, back, who) -> None:
         from aime.assignment import reassign
 
         with C().db.session() as s:
+            take_write_lock(s)  # a double click: the second one finds the owner the first one set
             lead = s.get(Lead, lead_id) or _404()
             target = owner.strip().lower() or None
             if why := _assignable(s, request, target or ""):
@@ -294,6 +300,7 @@ def register(app, C, render, back, who) -> None:
         from aime.assignment import reassign
 
         with C().db.session() as s:
+            take_write_lock(s)
             opp = s.get(Opportunity, opp_id) or _404()
             target = owner.strip().lower() or None
             if why := _assignable(s, request, target or ""):
@@ -320,7 +327,8 @@ def register(app, C, render, back, who) -> None:
                               .order_by(Lead.score.desc()).limit(12)).scalars().all()
             for lead in leads:
                 _ = lead.company
-            lead_total = s.execute(select(func.count(Lead.id)).where(lead_condition(sc), mine)).scalar_one()
+            lead_total = s.execute(select(func.count(Lead.id)).where(lead_condition(sc), mine, Lead.status.not_in(
+                ("merged", "disqualified")))).scalar_one()
             unassigned = s.execute(select(func.count(Lead.id)).where(lead_condition(sc), Lead.owner.is_(None),
                                                                      Lead.status == "qualified")).scalar_one() if sc.unassigned else 0
             deals = s.execute(select(Opportunity).where(opportunity_condition(sc), Opportunity.stage.not_in(("won", "lost")))
@@ -339,7 +347,7 @@ def register(app, C, render, back, who) -> None:
                                                        Meeting.status == "scheduled", Meeting.ends_at >= now)
                                  .order_by(Meeting.starts_at).limit(8)).scalars().all()
             people = sorted(sc.usernames) if not sc.all else ([name] if name else [])
-            report = build(s, now - timedelta(days=30), now, people) if people else None
+            report = build(s, now - timedelta(days=30), now, people, scope=sc, include_unassigned=False) if people else None
         return render(request, "my.html", leads=leads, lead_total=lead_total, unassigned=unassigned, deals=deals,
                       approvals=approvals, tasks=tasks, replies=replies, meetings=meetings, report=report,
                       who_label=("you and your team" if sc.usernames and len(sc.usernames) > 1 else "you"),
@@ -352,30 +360,44 @@ def register(app, C, render, back, who) -> None:
         from datetime import date, datetime
 
         from aime.performance import build, team_members
+        from aime.timeutil import local_tz
+        from aime.visibility import EVERYTHING
 
-        today = utcnow().date()
+        tz = local_tz()  # the days a person reads: every date on screen is in this zone (fmt_local)
+        today = as_aware_utc(utcnow()).astimezone(tz).date()
         try:
             first = date.fromisoformat(start) if start else today - timedelta(days=30)
             last = date.fromisoformat(end) if end else today
         except ValueError:
             return back("/performance", "Dates are YYYY-MM-DD")
+
+        def midnight(day: date) -> datetime:
+            # the picker's far ends (0001-01-01, 9999-12-31) would overflow the conversion to UTC
+            return to_naive_utc(datetime.combine(max(min(day, date(9000, 1, 1)), date(1900, 1, 1)), datetime.min.time(), tzinfo=tz))
+
         sc = getattr(request.state, "scope", None)
+        everyone = sc is None or sc.all
+        team_id = form_id(team)
         with C().db.session() as s:
-            people = list(s.execute(select(User.username).where(User.active.is_(True)).order_by(User.username)).scalars())
-            if sc is not None and not sc.all:
+            # also people who have left: what they won stays in the report, and their row shows while it has numbers
+            people = list(s.execute(select(User.username).order_by(User.username)).scalars())
+            active = set(s.execute(select(User.username).where(User.active.is_(True))).scalars())
+            if not everyone:
                 people = [p for p in people if p in sc.usernames]  # their own, or their team's
             teams = s.execute(select(Team).where(Team.active.is_(True)).order_by(Team.name)).scalars().all()
-            if team.isdigit():
-                members = set(team_members(s).get(int(team), []))
+            if team_id is not None:
+                members = set(team_members(s).get(team_id, []))
                 people = [p for p in people if p in members]
             if owner:
                 people = [p for p in people if p == owner]
-            report = build(s, datetime.combine(first, datetime.min.time()),
-                           datetime.combine(last + timedelta(days=1), datetime.min.time()), people, source or None)
+            narrowed = not everyone or team_id is not None or bool(owner)
+            report = build(s, midnight(first), midnight(min(last, date(9000, 1, 1)) + timedelta(days=1)),
+                           people if narrowed else None, source or None, scope=sc or EVERYTHING, include_unassigned=not narrowed)
+            report.rows = [r for r in report.rows if r.username in active or r.has_numbers()]
             sources = sorted(x for x in s.execute(select(Lead.source).distinct()).scalars() if x)
         return render(request, "performance.html", report=report, teams=teams, sources=sources,
                       f={"start": first.isoformat(), "end": last.isoformat(), "team": team, "owner": owner, "source": source},
-                      everyone=sc is None or sc.all)
+                      everyone=everyone)
 
 
 def assignment_history(s, lead_id: int) -> list[Assignment]:

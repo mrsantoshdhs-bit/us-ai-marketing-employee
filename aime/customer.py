@@ -26,15 +26,16 @@ def task_subject(opp: Opportunity) -> str:
 
 
 def handover(session: Session, opp: Opportunity, actor: str) -> bool:
-    """Mark the lead converted and add the handover task, once per deal (winning it again after a reopen adds no
-    second task). Returns whether a task was added."""
+    """Mark the lead converted and add the handover task, once per deal (winning it again after a reopen brings the
+    cancelled task back instead of adding a second one). Returns whether a task was added or brought back."""
     lead = session.get(Lead, opp.lead_id) if opp.lead_id else None
     if lead is None:
         return False
     lead.status = "converted"
     subject = task_subject(opp)
-    if session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task",
-                                                 FollowUp.subject == subject)).first():
+    earlier = session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task",
+                                                     FollowUp.subject == subject)).scalars().first()
+    if earlier is not None and earlier.status != "cancelled":
         return False
     quote = session.execute(select(Quote).where(Quote.opportunity_id == opp.id, Quote.status == "accepted")
                             .order_by(Quote.decided_at.desc(), Quote.id.desc())).scalars().first()
@@ -61,8 +62,27 @@ def handover(session: Session, opp: Opportunity, actor: str) -> bool:
         "",
         "Nothing has been sent to the customer. Mark this task done when the kickoff is booked.",
     ]
-    session.add(FollowUp(lead_id=lead.id, company_id=opp.company_id, contact_id=lead.contact_id, channel="task",
-                         step=1, status="pending", due_at=utcnow(), subject=subject, body="\n".join(lines)))
+    if earlier is not None:
+        earlier.status, earlier.blocked_reason, earlier.due_at, earlier.body = "pending", None, utcnow(), "\n".join(lines)
+    else:
+        session.add(FollowUp(lead_id=lead.id, company_id=opp.company_id, contact_id=lead.contact_id, channel="task",
+                             step=1, status="pending", due_at=utcnow(), subject=subject, body="\n".join(lines)))
     log_activity(session, f"Deal won: customer handover task for {opp.owner or actor}", actor, type_="opportunity",
                  company_id=opp.company_id, lead_id=lead.id, opportunity_id=opp.id)
     return True
+
+
+def undo_handover(session: Session, opp: Opportunity, actor: str) -> None:
+    """The deal is no longer won (a person reopened it, or corrected it to lost): the lead stops being a customer unless
+    another won deal keeps it one, and delivery is no longer told to onboard them. A finished task stays on record."""
+    lead = session.get(Lead, opp.lead_id) if opp.lead_id else None
+    if lead is None:
+        return
+    another_win = session.execute(select(Opportunity.id).where(Opportunity.lead_id == lead.id, Opportunity.id != opp.id,
+                                                               Opportunity.stage == "won")).first()
+    if lead.status == "converted" and not another_win:
+        lead.status = "qualified"
+    for task in session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task",
+                                                       FollowUp.subject == task_subject(opp),
+                                                       FollowUp.status == "pending")).scalars():
+        task.status, task.blocked_reason = "cancelled", f"The deal is no longer won (changed by {actor})"
