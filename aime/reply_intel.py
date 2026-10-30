@@ -45,7 +45,7 @@ from aime.timeutil import utcnow
 log = logging.getLogger("aime.inbox")
 
 _OBJECT = (r"(me|us|my (e-?mail( address)?|address|name|details|contact details|info|information)|"
-           r"our (e-?mails?( address(es)?)?|address(es)?|details|company|name))")
+           r"our (e-?mails?( address(es)?)?|address(es)?|details|company|name)|my company)")
 _LIST = r"((mailing|e-?mail|contact|marketing|distribution|sales|prospect|outreach) )?(list|lists|database)"
 # Wider than the opt-out wording on purpose: only used to stop treating an email as a plain automatic reply.
 REMOVAL_WORDS = re.compile(r"\b(remov(e|ed|al)|unsubscrib\w*|delet(e|ed)|stop|opt(ed|ing)?[- ]?out|"
@@ -66,9 +66,12 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
         rf"(off|out of) (your|the|this) {_LIST}(?! of\b)|"
         r"from (your|the|this) (mailing|e-?mail|marketing|distribution) list|"
         r"(stop|quit|cease) (e-?mailing|contacting|sending|messaging|mailing|writing to|spamming|bothering|pestering)|"
-        r"(stop|quit|cease) (all |the |these |those |your )?(e-?mails|messages|spam)|"
-        r"no (more|further) (e-?mails|messages|contact|mail)|"
-        r"(do not|don'?t|never)( ever)? (e-?mail|contact|message|write to|reach out to) (me|us)|do not (email|contact)|"
+        r"(stop|quit|cease) (all |the |these |those |your )?(e-?mails?|messages?|spam)|(stop|quit|cease) (these|writing)\b|"
+        r"no (more|further) (e-?mails?|messages?|contact|mail)|no more of (these|this|your)\b|"
+        r"(do not|don'?t|never)( ever)? (e-?mail|contact|message|write|reach out|send)( to)?( (me|us))? (again|any ?more)|"
+        r"please (remove|delete)(?=\W*($|[.!]))|"
+        rf"(remove|delete|take)( off| from) {_LIST}|"
+        r"(do not|don'?t|never)( ever)? (e-?mail|contact|message|write to|reach out to) (me|us)|do not (email|contact)(?! (the|this|that|a|an|our|my)\b)|"
         r"(do not|don'?t|never)( ever)? send(ing)? (me |us )?(any |anymore )?((more|further|other) )?(e-?mails?|messages?|mail)|"
         r"(do not|don'?t|no longer)( \w+)? (wish|want|like|need) to (receive|get)( \w+){0,3} "
         r"(e-?mails?|messages?|mail|communications?|newsletters?)|"
@@ -90,16 +93,17 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
     ("referral", re.compile(r"\b(you should (talk|speak|reach out) to|reach out to|the right person|"
                             r"(cc|cc'?ing|copying|looping in)\b|forward(ed|ing)? (this|your)|contact our)", re.I)),
 ]
-JUST_STOP = re.compile(r"(?im)^\s*(please\s+)?stop(\s+please)?[\s.!]*$")  # the whole message, or a line of its own
+JUST_STOP = re.compile(r"(?im)^\s*((please|pls|plz)\s+)?(stop|remove|delete)(\s+(it|me|us|now))?(\s+please)?[\s.!]*$")  # the whole message, or a line of its own
 # "my spam folder", "it went to spam", "anti-spam": a mention, not an accusation (taken out before reading for one).
 SPAM_ASIDE = re.compile(r"\bspam[ -](folders?|filters?|box(es)?|traps?|checks?|checkers?|score|blockers?|protection|settings)\b|"
                         r"\banti-?spam\b|"
                         r"\b(in|to|into|from|under|out of|check\w*) (my |the |our |your |their )?spam\b", re.I)
 _LAWYER = r"(lawyers?|attorneys?|legal (team|counsel|department))"
 COMPLAINT = re.compile(r"\b((?<!can-)spam\w*|report(ed|ing)? (you|this)|legal action|lawsuit|sue you|suing|harass\w*|"
+                       r"cease and desist|(i|we)('ll| will| shall) sue|"
                        rf"(contact\w*|call\w*|hear from|involv\w*|(forward|send|report|refer|hand)\w* (this|it|these|you|your \w+)( over)? to) "
                        rf"(my|our|a|an) {_LAWYER}|"
-                       rf"(my|our) {_LAWYER} (will|is going to|shall) (contact|call|be in touch|hear)|"
+                       rf"(my|our) {_LAWYER} (will|is going to|shall) (contact|call|be in touch|hear|sue)|"
                        r"(violat\w*|breach\w*|complaint\w*|illegal|unlawful|against)\W+(\w+\W+){0,4}(gdpr|ccpa|can-?spam)|"
                        r"(gdpr|ccpa|can-?spam)\W+(\w+\W+){0,2}(violations?|breach\w*|complaints?|requests?)|"
                        r"how did you get (my|this) (email|address)|"
