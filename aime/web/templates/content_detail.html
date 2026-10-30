@@ -5,7 +5,7 @@
 <p class="small muted">{{ item.service|service }} · {{ item.industry|industry }} · scheduled {{ item.scheduled_for|et }} · written by {{ item.generator }}
   {% if item.approved_by %} · approved by {{ item.approved_by }} {{ item.approved_at|local }}{% endif %}</p>
 {% if item.status == 'uncertain' %}
-<div class="card">
+{% if can_approve %}<div class="card">
   <div class="flash bad">{{ item.publish_blocked_reason }}</div>
   <p class="small">It will not be retried automatically. Open your LinkedIn activity and check whether this post is there.</p>
   <form method="post" action="/content/{{ item.id }}/confirm_published" class="filters">
@@ -16,7 +16,7 @@
     <label class="small"><input type="checkbox" name="checked" value="yes" required> I checked LinkedIn and this post is not there</label>
     <button class="secondary">Requeue</button>
   </form>
-</div>
+</div>{% else %}<div class="flash bad">{{ item.publish_blocked_reason }}</div>{% endif %}
 {% elif item.publish_blocked_reason %}<div class="flash">Publishing blocked: {{ item.publish_blocked_reason }}</div>{% endif %}
 {% if item.last_publish_error %}<div class="flash">Last publish error: {{ item.last_publish_error }}</div>{% endif %}
 {% if item.external_url %}<div class="flash">Published: {{ ext(item.external_url, item.external_id) }} at {{ item.published_at|local }}</div>{% endif %}
@@ -43,6 +43,7 @@
   <div class="card">
     <h2 style="margin-top:0">Edit and approve</h2>
     {% if item.status in ['publishing', 'uncertain'] %}<p class="muted">Editing is locked while the publishing outcome is being resolved.</p>
+    {% elif not can_edit %}<p class="muted">Read-only access: a Sales Manager edits and approves posts.</p>
     {% elif item.status != 'published' %}
     <form method="post" action="/content/{{ item.id }}/save">
       <label class="small">Title</label><input name="title" value="{{ item.title }}" style="width:100%">
@@ -53,7 +54,7 @@
       <div class="row-actions" style="margin-top:10px"><button class="secondary">Save changes</button></div>
     </form>
     <div class="row-actions" style="margin-top:10px">
-      {% if item.status in ['awaiting_approval', 'draft', 'failed'] %}<form class="inline" method="post" action="/content/{{ item.id }}/approve">
+      {% if can_approve and item.status in ['awaiting_approval', 'draft', 'failed'] %}<form class="inline" method="post" action="/content/{{ item.id }}/approve">
         {% if item.qc_status in ['held', 'failed'] %}<label class="small"><input type="checkbox" name="qc_override" value="yes" required>
           I reviewed the quality findings above</label>{% endif %}
         <button>Approve for publishing</button></form>{% endif %}

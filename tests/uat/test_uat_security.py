@@ -245,7 +245,7 @@ def expand(template: str, values: dict | None = None):
 ORG_PAGES = ("/", "/manager", "/audit", "/system", "/automation", "/api/stats")
 ORG_PREFIXES = ("/command-center", "/reports", "/agents", "/jobs")
 APPROVALS = re.compile(r"/(followups/\d+/(approve|reconfirm|mark_sent|requeue)|content/\d+/(approve|confirm_published|requeue)"
-                       r"|campaigns|campaigns/\d+/status|meetings/proposals/\d+/book|meetings/\d+/move"
+                       r"|campaigns|campaigns/\d+/(status|audience)|meetings/proposals/\d+/book|meetings/\d+/move"
                        r"|inbox/\d+/(reclassify|apply_calendly))")
 
 
@@ -256,7 +256,7 @@ def required(method: str, path: str) -> str | None:
         return "configure_system"
     if path.startswith(("/admin/users", "/admin/teams", "/admin/roles")):
         return "manage_users"
-    if path.startswith(("/integrations/linkedin/connect", "/integrations/oauth/")):
+    if path.startswith(("/integrations/linkedin/connect", "/integrations/linkedin/callback", "/integrations/oauth/")):
         return "admin_ops"
     if method == "GET":
         if path in ORG_PAGES or any(path == p or path.startswith(p + "/") for p in ORG_PREFIXES):
@@ -271,11 +271,13 @@ def required(method: str, path: str) -> str | None:
         return "approve_outbound"
     if re.fullmatch(r"/(leads|opportunities)/\d+/assign", path):
         return "assign_leads"
+    if path.startswith("/alerts/"):
+        return "edit_records+view_all"  # alerts are about the whole organisation: only a role that sees them all
     return "edit_records"
 
 
 def may(role: str, needed: str | None) -> bool:
-    return needed is None or needed in effective(BUILTIN_ROLES[role]["permissions"])
+    return needed is None or set(needed.split("+")) <= effective(BUILTIN_ROLES[role]["permissions"])
 
 
 PUBLIC = {("GET", "/login"), ("POST", "/login"), ("GET", "/setup"), ("POST", "/setup"), ("POST", "/api/inbound")}
@@ -1490,3 +1492,291 @@ def test_ok_a_stop_is_open_to_all_who_work_but_a_start_only_to_an_admin(world):
     assert as_user(ctx, app, "r_admin").post("/automation/state/start").status_code == 303
     with ctx.db.session() as s:
         assert kv_get(s, "automation.state") == "running"
+
+
+# ------------------------------------------------------------------------------------- found in a real browser
+BROWSER = {"accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "origin": "http://testserver"}
+
+
+def in_browser(ctx, app, username, page="/my"):
+    """As a browser sends it: asks for HTML, and says which page the form was on."""
+    c = as_user(ctx, app, username)
+    c.headers.update({**BROWSER, "referer": f"http://testserver{page}"})
+    return c
+
+
+def test_ok_a_refused_button_gets_a_page_with_the_reason_and_a_way_back(world):
+    ctx, app, ids = world
+    r = in_browser(ctx, app, "exec_a", "/leads").post("/inbound/process")
+    assert r.status_code == 403 and r.headers["content-type"].startswith("text/html")
+    assert "Admin only: ask an admin to do this" in r.text and '<a class="btn secondary" href="/leads">Go back</a>' in r.text
+    assert '"detail"' not in r.text and "My work" in r.text  # a normal page of the app, with its menu
+    r = in_browser(ctx, app, "exec_a").post(f"/followups/{ids['fu_a']}/approve")
+    assert r.status_code == 403 and "A Sales Manager approves" in r.text
+    with ctx.db.session() as s:
+        assert s.get(FollowUp, ids["fu_a"]).status == "awaiting_approval"
+    r = in_browser(ctx, app, "r_analyst", "/pipeline").post(f"/opportunities/{ids['opp_a']}", data={"stage": "won"})
+    assert r.status_code == 403 and "Read-only access" in r.text and 'href="/pipeline"' in r.text
+
+
+def test_ok_every_refusal_a_browser_can_meet_is_a_page(world):
+    ctx, app, ids = world
+    eva = in_browser(ctx, app, "exec_a", "/leads")
+    assert "does not exist" not in eva.get("/admin/users").text  # refused, not hidden
+    hidden = eva.get(f"/leads/{ids['lead_b']}")  # someone else's record
+    assert hidden.status_code == 404 and hidden.headers["content-type"].startswith("text/html") and "Not found" in hidden.text
+    assert '"detail"' not in hidden.text
+    missing = eva.get("/no-such-page")
+    assert missing.status_code == 404 and "does not exist" in missing.text
+    get_on_post = eva.get(f"/followups/{ids['fu_a']}/approve")
+    assert get_on_post.status_code == 405 and "use the button" in get_on_post.text
+    bad_form = in_browser(ctx, app, "r_admin").post(f"/opportunities/{ids['opp_a']}", data={})
+    assert bad_form.status_code == 422 and "missing or not valid" in bad_form.text and '"detail"' not in bad_form.text
+    state = in_browser(ctx, app, "r_admin").post(f"/followups/{ids['fu_a']}/requeue")  # not in that state
+    assert state.status_code == 400 and "Action not allowed" in state.text
+    # the menu's forms come back to the page the form was on, not to the address that only answers POST
+    assert 'name="next" value="/leads"' in in_browser(ctx, app, "exec_a", "/leads").post("/inbound/process").text
+
+
+def test_ok_api_routes_and_clients_that_ask_for_json_keep_json(world):
+    ctx, app, ids = world
+    plain = as_user(ctx, app, "exec_a")  # a script: no HTML in its Accept header
+    r = plain.post("/inbound/process")
+    assert r.status_code == 403 and r.json() == {"detail": "Admin only: ask an admin to do this"}
+    assert plain.get(f"/leads/{ids['lead_b']}").json() == {"detail": "Not found"}
+    r = plain.post("/inbound/process", headers={"accept": "application/json"})
+    assert r.status_code == 403 and r.json()["detail"].startswith("Admin only")
+    # an /api/ route is JSON whatever the client's Accept header says
+    r = in_browser(ctx, app, "exec_a").get("/api/mailboxes")
+    assert r.status_code == 403 and r.json() == {"detail": "Super Admin only"}
+    assert in_browser(ctx, app, "exec_a").get("/api/stats").status_code == 403
+    assert as_user(ctx, app, "r_admin").post(f"/opportunities/{ids['opp_a']}", data={}).json()["detail"]
+
+
+def test_ok_an_error_page_shows_a_stranger_no_menu(world):
+    ctx, app, _ = world
+    r = in_browser(ctx, app, None).get("/setup/nothing-here")
+    assert r.status_code == 404 and "does not exist" in r.text
+    assert "/approvals" not in r.text and "Sending o" not in r.text
+
+
+class Actions(HTMLParser):
+    """What a page offers: every enabled submit button of a POST form, as (the address it posts to, its text)."""
+
+    def __init__(self):
+        super().__init__()
+        self.form, self.offered, self.button = None, [], None
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "form":
+            self.form = a.get("action") if (a.get("method") or "get").lower() == "post" else None
+        elif tag == "button" and self.form is not None and "disabled" not in a:
+            self.button = [a.get("formaction") or self.form, ""]
+
+    def handle_data(self, data):
+        if self.button:
+            self.button[1] += data
+
+    def handle_endtag(self, tag):
+        if tag == "form":
+            self.form = None
+        elif tag == "button" and self.button:
+            self.offered.append((self.button[0], " ".join(self.button[1].split())))
+            self.button = None
+
+
+def offered(html: str) -> list[tuple[str, str]]:
+    parser = Actions()
+    parser.feed(html)
+    return parser.offered
+
+
+def seed_every_button(ctx, ids) -> None:
+    """On team A's lead: everything that brings a page's buttons out."""
+    now = utcnow()
+    with ctx.db.session() as s:
+        lead = s.get(Lead, ids["lead_a"])
+        s.add_all([
+            FollowUp(lead_id=lead.id, company_id=lead.company_id, channel="email", step=1, due_at=now, status="uncertain",
+                     subject="Uncertain", body="x", to_email="a@alpha-widgets.example"),
+            FollowUp(lead_id=lead.id, company_id=lead.company_id, channel="email", step=1, due_at=now, status="approved",
+                     subject="Queued", body="x", to_email="a@alpha-widgets.example", approved_by="mgr_a",
+                     approved_at=now - timedelta(days=2)),
+            FollowUp(lead_id=lead.id, company_id=lead.company_id, channel="task", step=1, due_at=now, status="pending",
+                     subject="A task", body="x"),
+            InboundEmail(message_id="<a1@uat>", from_email="a@alpha-widgets.example", subject="Alpha reply", body_text="Hi",
+                         new_text="Hi", category="calendly", status="needs_review", lead_id=lead.id),
+            Meeting(lead_id=lead.id, company_id=lead.company_id, invitee_email="a@alpha-widgets.example", title="Alpha meeting",
+                    starts_at=now + timedelta(days=1), ends_at=now + timedelta(days=1, minutes=30), source="manual",
+                    status="scheduled", event_id="evt-1"),
+            Quote(opportunity_id=ids["opp_a"], amount=100.0, currency="USD", created_by="exec_a"),
+        ])
+        s.get(Company, ids["co_a"]).is_competitor = True
+        kv_set(s, "outbound.state", {"enabled": True, "since": now.isoformat()})
+
+
+def test_ok_no_page_offers_a_role_a_button_the_server_would_refuse(world):
+    """Every role, every page, every enabled button: the same rule the server enforces (aime.web.auth.refusal) must let
+    it through. Hiding is only the courtesy: test_ok_matrix_every_route_for_every_role keeps the refusal itself."""
+    from aime.web.auth import refusal
+
+    ctx, app, ids = world
+    seed_every_button(ctx, ids)
+    pages = ["/my", "/leads", f"/leads/{ids['lead_a']}", f"/leads/{ids['lead_u']}", f"/leads/{ids['lead_c']}", "/pipeline",
+             f"/opportunities/{ids['opp_a']}", "/followups", "/followups?show=all", "/approvals", "/inbox?show=all", "/meetings",
+             "/inbound", "/campaigns", "/content", f"/content/{ids['post']}", "/policy", "/integrations", "/companies",
+             "/contacts", "/search?q=alpha", "/settings", "/performance", "/", "/manager", "/command-center", "/automation",
+             "/jobs", "/agents", "/system", "/reports", "/audit"]
+    wrong, seen = [], set()
+    for state in ("stopped", "running"):
+        with ctx.db.session() as s:
+            kv_set(s, "automation.state", state)
+        for role in ROLES:
+            client = as_user(ctx, app, f"r_{role}")
+            perms = BUILTIN_ROLES[role]["permissions"]
+            for page in pages:
+                r = client.get(page)
+                if r.status_code != 200:
+                    continue
+                for action, text in offered(r.text):
+                    seen.add(action.split("/")[1])
+                    if why := refusal(perms, "POST", action.split("?")[0]):
+                        wrong.append((role, page, action, text, why))
+    assert not wrong, wrong
+    assert {"followups", "leads", "opportunities", "meetings", "inbox", "automation", "campaigns", "content"} <= seen
+
+
+def test_ok_the_read_only_analyst_is_offered_nothing_but_sign_out(world):
+    ctx, app, ids = world
+    seed_every_button(ctx, ids)
+    with ctx.db.session() as s:
+        kv_set(s, "automation.state", "stopped")
+    ana = as_user(ctx, app, "r_analyst")
+    for page in ("/", "/manager", "/command-center", "/automation", "/jobs", "/agents", "/system", "/followups", "/approvals",
+                 "/pipeline", f"/opportunities/{ids['opp_a']}", f"/leads/{ids['lead_a']}", "/inbox?show=all", "/meetings",
+                 "/inbound", "/campaigns", f"/content/{ids['post']}", "/policy", "/integrations", "/my"):
+        r = ana.get(page)
+        assert r.status_code == 200, page
+        assert {a for a, _ in offered(r.text)} == {"/logout"}, (page, offered(r.text))
+        assert "Start automation" not in r.text, page
+    assert ana.post("/automation/state/start").status_code == 403  # the server's refusal stays
+    assert ana.post("/jobs/inbound/run").status_code == 403
+    assert ana.post(f"/followups/{ids['fu_a']}/approve").status_code == 403
+
+
+def test_ok_a_sales_executive_is_not_offered_approve_or_reject_and_the_server_still_refuses(world):
+    ctx, app, ids = world
+    eva = as_user(ctx, app, "exec_a")
+    page = eva.get("/followups").text
+    actions = {a for a, _ in offered(page)}
+    assert f"/followups/{ids['fu_a']}/approve" not in actions and f"/followups/{ids['fu_a']}/reject" not in actions
+    assert "Alpha subject" in page and "Waiting for a Sales Manager" in page  # a reply: nothing for her to do on it
+    with ctx.db.session() as s:
+        s.get(FollowUp, ids["fu_a"]).kind = "outreach"  # outreach: she may edit the draft; Approve shows, disabled
+    page = eva.get("/followups").text
+    actions = {a for a, _ in offered(page)}
+    assert f"/followups/{ids['fu_a']}/save" in actions
+    assert f"/followups/{ids['fu_a']}/approve" not in actions and f"/followups/{ids['fu_a']}/reject" not in actions
+    assert re.search(r"<button disabled[^>]*>Approve \(send when enabled\)", page)
+    assert eva.post(f"/followups/{ids['fu_a']}/approve").status_code == 403
+    mgr = as_user(ctx, app, "mgr_a").get("/followups").text
+    assert {f"/followups/{ids['fu_a']}/approve", f"/followups/{ids['fu_a']}/reject"} <= {a for a, _ in offered(mgr)}
+
+
+def test_ok_pausing_and_stopping_stay_open_to_anyone_who_edits_records(world):
+    """aime/web/auth.py: "pausing and stopping: anyone signed in" (with edit_records): deliberately kept."""
+    ctx, app, _ = world
+    eva = as_user(ctx, app, "exec_a")
+    with ctx.db.session() as s:
+        kv_set(s, "automation.state", "running")
+    actions = {a for a, _ in offered(eva.get("/my").text)}
+    assert {"/automation/state/pause", "/automation/state/stop", "/automation/state/emergency_stop"} <= actions
+    assert "/automation/state/start" not in actions
+    assert eva.post("/automation/state/pause", data={"next": "/my"}).status_code == 303
+    with ctx.db.session() as s:
+        kv_set(s, "automation.state", "stopped")
+    page = eva.get("/my").text
+    assert "/automation/state/start" not in {a for a, _ in offered(page)} and "Start automation" not in page
+    assert "only an administrator can start it" in page
+    assert eva.post("/automation/state/start").status_code == 403
+    admin = as_user(ctx, app, "r_admin").get("/my", follow_redirects=True).text
+    assert "Start automation" in admin and "/automation/state/start" in {a for a, _ in offered(admin)}
+
+
+def approvals_of(ctx, fid):
+    with ctx.db.session() as s:
+        f = s.get(FollowUp, fid)
+        audits = s.execute(select(func.count(AuditEvent.id)).where(AuditEvent.action == "email_approve",
+                                                                   AuditEvent.target == f"follow-up #{fid}")).scalar_one()
+        return f.status, f.approved_by, f.approved_at, audits
+
+
+def test_ok_a_double_click_on_approve_records_one_approval(world, monkeypatch):
+    """Both requests of the click arrive together: the second waits, finds the email approved, and records nothing."""
+    import aime.web.app as web
+
+    ctx, app, ids = world
+    gate = threading.Barrier(2)
+    real = web.am.observe_sending
+
+    def together(*a, **k):
+        try:
+            gate.wait(timeout=2)  # on code that reads before it locks, both requests are in here at once
+        except threading.BrokenBarrierError:
+            pass
+        return real(*a, **k)
+
+    monkeypatch.setattr(web.am, "observe_sending", together)
+    mgr = in_browser(ctx, app, "mgr_a", "/followups")
+    codes = []
+    threads = [threading.Thread(target=lambda: codes.append(mgr.post(f"/followups/{ids['fu_a']}/approve").status_code))
+               for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert codes == [303, 303]  # the person sees a normal page either way
+    status, by, at, audits = approvals_of(ctx, ids["fu_a"])
+    assert (status, by, audits) == ("approved", "mgr_a", 1)
+    r = mgr.post(f"/followups/{ids['fu_a']}/approve")  # and once more, later
+    assert r.status_code == 303 and "Already approved by mgr_a" in unquote_location(r)
+    assert approvals_of(ctx, ids["fu_a"]) == (status, by, at, 1)
+    assert as_user(ctx, app, "mgr_a").post(f"/followups/{ids['fu_a']}/approve").status_code == 400  # a script: refused
+
+
+def unquote_location(r) -> str:
+    from urllib.parse import unquote
+
+    return unquote(r.headers["location"])
+
+
+def test_ok_a_second_approve_does_not_release_an_email_waiting_for_confirm_again(world):
+    """aime.automation.needs_reconfirmation: approved before sending was switched on, the email waits for "Confirm
+    again". A plain Approve never reaches it (only awaiting_approval is approved), in a browser or from a script: the
+    approval time stays older than the switch, and only the Confirm again button releases it."""
+    from aime import automation as am
+
+    ctx, app, ids = world
+    now = utcnow()
+    with ctx.db.session() as s:
+        f = s.get(FollowUp, ids["fu_a"])
+        f.status, f.approved_by, f.approved_at = "approved", "mgr_a", now - timedelta(days=1)
+        kv_set(s, "outbound.state", {"enabled": True, "since": (now - timedelta(hours=1)).isoformat()})
+        assert am.needs_reconfirmation(s, f)
+    before = approvals_of(ctx, ids["fu_a"])
+    mgr = in_browser(ctx, app, "mgr_a", "/followups")
+    r = mgr.post(f"/followups/{ids['fu_a']}/approve")
+    assert r.status_code == 303 and "it waits for Confirm again" in unquote_location(r)
+    assert as_user(ctx, app, "mgr_a").post(f"/followups/{ids['fu_a']}/approve").status_code == 400
+    assert approvals_of(ctx, ids["fu_a"]) == before
+    with ctx.db.session() as s:
+        assert am.needs_reconfirmation(s, s.get(FollowUp, ids["fu_a"]))
+    assert mgr.post(f"/followups/{ids['fu_a']}/reconfirm").status_code == 303
+    with ctx.db.session() as s:
+        confirmed = s.get(FollowUp, ids["fu_a"]).approved_at
+        assert not am.needs_reconfirmation(s, s.get(FollowUp, ids["fu_a"]))
+    assert as_user(ctx, app, "mgr_a").post(f"/followups/{ids['fu_a']}/reconfirm").status_code == 400  # a second click
+    with ctx.db.session() as s:
+        assert s.get(FollowUp, ids["fu_a"]).approved_at == confirmed
+        assert s.execute(select(func.count(AuditEvent.id)).where(AuditEvent.action == "approval_confirmed_again")).scalar_one() == 1

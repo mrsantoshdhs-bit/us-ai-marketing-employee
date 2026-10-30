@@ -5,9 +5,9 @@
 <div class="card small">
   Inquiries arrive three ways: this form (e.g. a phone call or email you log), <code>POST /api/inbound</code> (JSON with the <code>X-Inbound-Token</code> header; off until INBOUND_API_TOKEN is set; for a website
   form webhook), or JSON/CSV files dropped in <code>data/inbox/</code>. The <strong>inbound</strong> job runs every 30 minutes.
-  <form class="inline" method="post" action="/inbound/process"><button class="secondary">Process now</button></form>
+  {% if can_run %}<form class="inline" method="post" action="/inbound/process"><button class="secondary">Process now</button></form>{% endif %}
 </div>
-<form class="card" method="post" action="/inbound">
+{% if can_edit %}<form class="card" method="post" action="/inbound">
   <div class="filters">
     <input name="first_name" placeholder="First name"><input name="last_name" placeholder="Last name">
     <input name="email" type="email" placeholder="Email"><input name="phone" placeholder="Phone">
@@ -23,7 +23,7 @@
   <div class="filters"><input name="timeline" placeholder="Timeline (if stated)"><input name="budget" placeholder="Budget (if stated)">
     <label class="small"><input type="checkbox" name="consent_marketing"> They opted in to marketing email</label>
     <button>Record inquiry</button></div>
-</form>
+</form>{% endif %}
 <div class="card table-wrap"><table>
   <tr><th>Received</th><th>Channel</th><th>From</th><th>Message</th><th>Status</th></tr>
   {% for r in rows %}

@@ -18,13 +18,14 @@
       {% if o.expected_close and o.stage not in ['won', 'lost'] %}<div class="small">Close by {{ o.expected_close }}</div>{% endif %}
       <div class="small muted">{{ 'Opened by the AI' if o.origin == 'ai' else 'Opened by a person' }}</div>
       {% if o.next_step %}<div class="small">Next: {{ o.next_step }}</div>{% endif %}
-      <form method="post" action="/opportunities/{{ o.id }}" style="margin-top:6px">
+      {% if can_edit %}<form method="post" action="/opportunities/{{ o.id }}" style="margin-top:6px">
+        <input type="hidden" name="shown_stage" value="{{ o.stage }}"><input type="hidden" name="shown_close" value="{{ o.expected_close or '' }}">
         <select name="stage">{% for st in STAGES %}<option {{ 'selected' if st == o.stage }}>{{ st }}</option>{% endfor %}</select>
         <input name="est_value" placeholder="Value $" size="7"><input name="next_step" placeholder="Next step" size="12">
         <input name="lost_reason" placeholder="Reason, if lost" size="12" maxlength="200">
         <input name="expected_close" type="date" title="Expected close date" value="{{ o.expected_close or '' }}">
         <button class="secondary">Save</button>
-      </form>
+      </form>{% endif %}
     </div>
     {% endfor %}
   </div>
