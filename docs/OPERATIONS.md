@@ -210,6 +210,15 @@ and what was done.
   nothing logged for 10 days get a "Stalled" task; leads whose three outreach emails went unanswered for 7 days
   become *no response* and move to nurture; meetings that ended get a "Record the outcome" task. Each task is
   created once. "Stop outreach" on a lead page cancels its queued emails.
+- **Re-engagement** (`[outreach] reengage_after_days`, 90; 0 turns it off): a lead parked in nurture because its
+  whole sequence went unanswered gets ONE short check-in that many days after the last email, in the same thread,
+  promising not to write again. It waits for your approval (campaign authorizations never approve it) and counts
+  toward the sending limits. Nobody who said no, unsubscribed, bounced or is on the do-not-contact list gets one.
+  Rejecting it parks the lead again; it is never drafted a second time.
+- **Customer handover**: moving a deal to won converts the lead and gives the deal's owner one "Customer handover"
+  task with the service, the accepted quote (or the deal's value), the customer contact, the last meeting held and
+  the onboarding checklist (scope and start date, contract or invoice, delivery lead and kickoff call, access).
+  Nothing is sent to the customer. Reopening and winning the deal again adds no second task.
 - **Reports** (daily and weekly): companies researched, decision-makers, usable emails, outreach drafted and
   sent, bounces and unsubscribes, replies, interested replies, meetings booked and held, and reply / interest /
   meeting rates, all from records. Simulated test replies and meetings are listed separately and never counted

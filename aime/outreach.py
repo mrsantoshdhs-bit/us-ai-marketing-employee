@@ -49,7 +49,8 @@ def policy(settings: Settings) -> dict:
     return {"enabled": bool(cfg.get("b2b_enabled", False)), "drafts_per_run": int(cfg.get("drafts_per_run", 10)),
             "min_grade": str(cfg.get("min_grade", "B")), "intervals": list(cfg.get("intervals_days", [0, 4, 10])),
             "max_touches": int(cfg.get("max_touches", 3)),
-            "include_inboxes": bool(cfg.get("include_company_inboxes", True))}
+            "include_inboxes": bool(cfg.get("include_company_inboxes", True)),
+            "reengage_after_days": int(cfg.get("reengage_after_days", 0))}
 
 
 def short_quote(text: str, keywords: list[str] | None = None, max_len: int = 140) -> str:
@@ -143,14 +144,30 @@ def draft_outreach(settings: Settings, step: int, lead: Lead, contact, evidence:
     return subject, body + outreach_footer(settings, contact)
 
 
-def eligible(session: Session, settings: Settings, lead: Lead, for_send: bool = False) -> tuple[bool, str]:
-    """Can this lead's primary contact receive B2B outreach? Returns (ok, reason when not)."""
+def draft_reengage(settings: Settings, lead: Lead, contact) -> tuple[str, str]:
+    """The one re-engagement email, months after a sequence nobody answered: no new claim, no quote, no link, and a
+    promise not to write again."""
+    company = lead.company.name
+    topic = TOPICS.get(lead.primary_service or "", "your operations")
+    inbox = contact.role_category == "inbox" or not contact.first_name
+    greeting = f"Hello {company} team," if inbox else f"Hi {contact.first_name.split()[0]},"
+    subject = f"Checking back in: {topic} at {company}"
+    body = (f"{greeting}\n\nA few months ago I wrote about {topic} at {company}. Priorities change, so I wanted to "
+            f"check in once: if {topic} is on your list now, I would be glad to share how we would approach it. If "
+            f"not, there is no need to reply, and I will not write again.\n\n{_signature(settings)}")
+    return subject, body + outreach_footer(settings, contact)
+
+
+def eligible(session: Session, settings: Settings, lead: Lead, for_send: bool = False,
+             reengage: bool = False) -> tuple[bool, str]:
+    """Can this lead's primary contact receive B2B outreach? Returns (ok, reason when not). `reengage`: the one
+    re-engagement email, which also reaches a lead parked in nurture after an unanswered sequence."""
     pol = policy(settings)
     contact = lead.contact
     company: Company = lead.company
     if not pol["enabled"]:
         return False, "B2B outreach is turned off ([outreach] b2b_enabled)"
-    if lead.status != "qualified":
+    if lead.status != "qualified" and not (reengage and lead.status == "nurture"):
         return False, f"lead is {lead.status}"
     if (lead.grade or "D") > pol["min_grade"]:
         return False, f"grade {lead.grade} is below {pol['min_grade']}"
@@ -166,7 +183,7 @@ def eligible(session: Session, settings: Settings, lead: Lead, for_send: bool = 
         return False, "company inboxes are excluded ([outreach] include_company_inboxes)"
     if contact.consent_status == "opted_out" or is_suppressed(session, contact.email, company.domain):
         return False, "on the do-not-contact list"
-    if lead.outreach_status in STOP_STATUSES:
+    if lead.outreach_status in STOP_STATUSES and not (reengage and lead.outreach_status == "no_response"):
         return False, f"outreach stopped ({lead.outreach_status})"
     return True, ""
 
@@ -187,7 +204,7 @@ def record_delivery(session: Session, f: FollowUp, sent_at, delivered_to: str | 
     f.delivery_status = f.delivery_status if f.delivery_status in ("bounced", "replied") else "sent"
     lead = f.lead
     lead.last_activity_at = sent_at
-    if f.kind == "outreach" and lead.outreach_status in (None, "drafted", "approved"):
+    if f.kind == "outreach" and lead.outreach_status in (None, "drafted", "approved", "reengage"):
         set_status(session, lead, "contacted", actor)
 
 

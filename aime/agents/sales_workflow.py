@@ -18,7 +18,7 @@ from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent, RetryPolicy
@@ -30,7 +30,8 @@ from aime.email_templates import draft_reply
 from aime.integrations.email_smtp import EmailNotReady, EmailSender, compliance_problem, new_message_id
 from aime.knowledge.services import service_name
 from aime.models import Activity, Alert, FollowUp, InboundEmail, InboundInquiry, Lead, Opportunity, Signal
-from aime.outreach import STOP_STATUSES, draft_outreach, eligible, gather_evidence, record_delivery, set_status
+from aime.outreach import (STOP_STATUSES, draft_outreach, draft_reengage, eligible, gather_evidence, record_delivery,
+                           set_status)
 from aime.pipeline import pipeline_checks
 from aime.outreach import policy as outreach_policy
 from aime.qc.email_checks import run_email_checks
@@ -54,6 +55,7 @@ class SalesOutput(BaseModel):
     tasks_created: int = 0
     drafts_created: int = 0
     outreach_drafts: int = 0
+    reengage_drafts: int = 0
     emails_sent: int = 0
     cancelled: int = 0
     pipeline: dict[str, int] = Field(default_factory=dict)
@@ -137,6 +139,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         for lead in session.execute(parked).scalars().all():
             if self._may_answer(session, lead):
                 self._ensure_sequence(session, lead, now, cfg, out)
+        self._reengage(session, now, out, budget, inp.lead_ids)
         self._progress_sequences(session, now, cfg, out)
         self._send_approved(session, now, cfg, out)
         out.pipeline = pipeline_checks(session, self.settings, now, self.name)
@@ -234,6 +237,46 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         out.outreach_drafts += 1
         log_activity(session, f"Drafted outreach email #{step} to {contact.email} (awaiting approval; checks "
                      f"{qc['status']})", self.name, type_="email_draft", company_id=lead.company_id, lead_id=lead.id)
+
+    def _reengage(self, session: Session, now: datetime, out: SalesOutput, budget: int,
+                  lead_ids: list[int] | None = None) -> None:
+        """One re-engagement email per lead, ever: only a lead whose whole outreach sequence went unanswered
+        (outreach stage no_response, parked in nurture), [outreach] reengage_after_days after the last email, and
+        still reachable. It waits for a person like every outreach email; campaigns never approve it."""
+        pol = outreach_policy(self.settings)
+        days = pol["reengage_after_days"]
+        if days <= 0 or budget <= 0:
+            return
+        stmt = select(Lead).where(Lead.status == "nurture", Lead.outreach_status == "no_response").order_by(Lead.id)
+        if lead_ids:
+            stmt = stmt.where(Lead.id.in_(lead_ids))
+        for lead in session.execute(stmt).scalars().all():
+            if out.reengage_drafts >= budget:
+                return
+            last = session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
+                                                          FollowUp.sent_at.is_not(None))
+                                   .order_by(FollowUp.sent_at.desc())).scalars().first()
+            if last is None or now - last.sent_at < timedelta(days=days):
+                continue
+            if session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, or_(
+                    FollowUp.purpose == "reengage",
+                    and_(FollowUp.channel == "email", FollowUp.status.in_(OPEN_FOLLOWUP))))).first():
+                continue  # re-engaged once already, or an email is still open
+            if not eligible(session, self.settings, lead, reengage=True)[0]:
+                continue  # opted out, suppressed, bounced, competitor, or the address is no longer published
+            contact = lead.contact
+            subject, body = draft_reengage(self.settings, lead, contact)
+            step = pol["max_touches"] + 1
+            qc = run_email_checks(subject, body, [], contact, is_suppressed(session, contact.email, lead.company.domain),
+                                  step=step)
+            session.add(FollowUp(lead_id=lead.id, contact_id=contact.id, company_id=lead.company_id, channel="email",
+                                 kind="outreach", purpose="reengage", step=step, due_at=now,
+                                 status="awaiting_approval", subject=subject, body=body, to_email=contact.email,
+                                 evidence=[], quality={"qc": qc}, in_reply_to=last.message_id))
+            set_status(session, lead, "reengage", self.name, f"no reply {(now - last.sent_at).days} days after the last email")
+            log_activity(session, f"Drafted the re-engagement email to {contact.email} (awaiting approval; checks "
+                         f"{qc['status']})", self.name, type_="email_draft", company_id=lead.company_id, lead_id=lead.id)
+            out.reengage_drafts += 1
 
     def _ensure_sequence(self, session: Session, lead: Lead, now: datetime, cfg: dict, out: SalesOutput) -> None:
         exists = session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email")).first()
@@ -353,6 +396,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             contact = f.contact
             lead = f.lead
             test_auth = None  # the authorization a given test contact's email goes out under
+            reengaging = f.purpose == "reengage" and lead.outreach_status == "reengage"  # the one email to a parked lead
             gone = automation.campaign_approval_problem(session, f, now, self.settings)  # holds while the campaign does
             if gone:
                 automation.return_to_person(f, gone)
@@ -375,7 +419,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                     if (f.to_email or "").lower() != (contact.email or "").lower():
                         ok, why = False, "the address changed after approval; draft a new email"
                 else:
-                    ok, why = eligible(session, self.settings, lead, for_send=True)
+                    ok, why = eligible(session, self.settings, lead, for_send=True, reengage=reengaging)
                     if ok and (lead.contact_id != f.contact_id or (f.to_email or "").lower() != (contact.email or "").lower()):
                         ok, why = False, "the contact or address changed after approval; draft a new email"
                     if not ok and why.startswith("B2B outreach is turned off"):  # a pause, not a decision about this email
@@ -401,7 +445,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 f.status, f.blocked_reason = "cancelled", f"Not sent: the sequence stopped ({lead.outreach_status})"
                 out.cancelled += 1
                 continue
-            answerable = lead.status == "qualified" or (f.kind is None and self._may_answer(session, lead))
+            answerable = (lead.status == "qualified" or reengaging
+                          or (f.kind is None and self._may_answer(session, lead)))
             if not answerable and f.kind != "response" and test_auth is None:
                 f.status = "cancelled"
                 f.blocked_reason = f"Lead is {lead.status}"
