@@ -295,22 +295,28 @@ def test_defect_inbound_handoff_is_lost_when_the_crm_step_is_retried(make_ctx, m
         f"inquirers left unscored and unanswered; steps: {[st['agent'] for st in out.steps]}"
 
 
-def test_ok_inbound_leads_missed_by_their_job_are_picked_up_by_the_daily_jobs(make_ctx, monkeypatch):
-    """How far the lost handoff above reaches: the next crm_maintenance (daily) scores them, the next followups drafts."""
+def _inbound_job_failed_after_its_commit(make_ctx, monkeypatch):
+    """The CRM step commits the new leads, then fails for good: the database stays locked through all its retries."""
     ctx = make_ctx()
     ingest_samples(ctx)
-    real, calls = crm_module.check_website, []
-
-    def locked_once(*a, **k):
-        calls.append(1)
-        if len(calls) == 1:
+    with monkeypatch.context() as m:
+        def locked(*a, **k):
             raise locked_db()
-        return real(*a, **k)
-    monkeypatch.setattr(crm_module, "check_website", locked_once)
-    job_inbound(ctx)
-    assert count(ctx, FollowUp) == 0
-    job_inbound(ctx)  # the next half-hourly run does not help
-    assert count(ctx, FollowUp) == 0
+        m.setattr(crm_module, "check_website", locked)
+        assert job_inbound(ctx).failed
+    assert count(ctx, Lead, Lead.source == "inbound") == 3 and count(ctx, FollowUp) == 0
+    return ctx
+
+
+def test_ok_inbound_leads_missed_by_their_job_are_picked_up_by_the_next_run(make_ctx, monkeypatch):
+    ctx = _inbound_job_failed_after_its_commit(make_ctx, monkeypatch)
+    assert not job_inbound(ctx).failed
+    assert count(ctx, Lead, Lead.source == "inbound", Lead.last_scored_at.is_(None)) == 0
+    assert count(ctx, FollowUp, FollowUp.channel == "email", FollowUp.status == "awaiting_approval") >= 2
+
+
+def test_ok_inbound_leads_missed_by_their_job_are_picked_up_by_the_daily_jobs(make_ctx, monkeypatch):
+    ctx = _inbound_job_failed_after_its_commit(make_ctx, monkeypatch)
     assert run_job(ctx, "crm_maintenance")["status"] == "success"
     assert run_job(ctx, "followups")["status"] == "success"
     assert count(ctx, Lead, Lead.source == "inbound", Lead.last_scored_at.is_(None)) == 0
@@ -437,6 +443,34 @@ def test_defect_company_research_does_not_retry_after_a_passing_failure(make_ctx
     with ctx.db.session() as s:
         status = s.get(Company, cid).research_status
     assert res.output.companies_researched == 1 and status == "done", f"status stays {status!r}"
+
+
+def test_ok_company_research_a_site_that_keeps_failing_waits_for_the_normal_recheck(make_ctx):
+    ctx = _site_down_ctx(make_ctx)
+    cid = add_company(ctx)
+    for _ in range(3):
+        assert [f.id for f in CompanyResearchAgent(ctx).run({}).output.failed] == [cid]
+    assert CompanyResearchAgent(ctx).run({}).output.failed == []  # not in every batch for ever
+    with ctx.db.session() as s:
+        company = s.get(Company, cid)
+        assert company.research_status == "failed" and company.researched_at
+
+
+def test_ok_company_research_failed_reads_go_after_companies_not_read_yet(make_ctx):
+    ctx = _site_down_ctx(make_ctx)
+    failed = add_company(ctx)
+    CompanyResearchAgent(ctx).run({})
+    fresh = add_company(ctx, name="Fresh Co", domain="fresh-co.example")
+    res = CompanyResearchAgent(ctx).run({"limit": 1})
+    assert [f.id for f in res.output.failed] == [fresh] and failed != fresh
+
+
+def test_ok_company_research_every_site_failing_fails_the_run(make_ctx):
+    ctx = _site_down_ctx(make_ctx)
+    for i in range(3):
+        add_company(ctx, name=f"Down Co {i}", domain=f"down-{i}.example")
+    res = CompanyResearchAgent(ctx).run({})
+    assert not res.ok and "None of the 3" in res.error
 
 
 def test_defect_report_counts_unread_sites_as_companies_researched(make_ctx):
