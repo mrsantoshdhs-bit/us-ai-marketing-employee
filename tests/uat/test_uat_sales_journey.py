@@ -1650,3 +1650,14 @@ def test_ok_a_calendly_booking_by_a_returning_customer_goes_to_their_open_lead(o
     _, _, new = won_customer(org)
     with org.db.session() as s:
         assert match_lead(s, DANA["email"])[0].id == new.id
+
+
+def test_ok_a_double_click_on_mark_done_does_not_show_an_error(org):
+    lid = make_lead(org, owner="eva")
+    fid = make_draft(org, lid, channel="task", status="pending", kind=None, subject="Call them")
+    eva = client(org, "eva")
+    html = {"accept": "text/html"}
+    assert eva.post(f"/followups/{fid}/done", headers={**ORIGIN, **html}, follow_redirects=False).status_code == 303
+    assert eva.post(f"/followups/{fid}/done", headers={**ORIGIN, **html}, follow_redirects=False).status_code == 303
+    with org.db.session() as s:
+        assert s.get(FollowUp, fid).status == "done"

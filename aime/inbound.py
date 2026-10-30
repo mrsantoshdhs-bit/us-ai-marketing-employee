@@ -99,10 +99,12 @@ def validate_inquiry(p: InboundPayload) -> str | None:
 def record_inquiry(session: Session, payload: dict, channel: str) -> tuple[InboundInquiry | None, bool]:
     """Store a raw inquiry once (deduplicated by email+company+message). Returns (row, created)."""
     p = InboundPayload.model_validate(payload)
-    take_write_lock(session)  # the same inquiry sent twice at once: the second one finds the first, not its unique key
     fp = fingerprint("external", p.external_id) if p.external_id else fingerprint(p.email, p.company, p.message)
-    existing = session.execute(select(InboundInquiry).where(InboundInquiry.fingerprint == fp)).scalars().first()
-    if existing:
+    query = select(InboundInquiry).where(InboundInquiry.fingerprint == fp)
+    if existing := session.execute(query).scalars().first():  # no lock for a known one: a sync re-reads many of them
+        return existing, False
+    take_write_lock(session)  # the same inquiry sent twice at once: the second one finds the first, not its unique key
+    if existing := session.execute(query).scalars().first():
         return existing, False
     row = InboundInquiry(channel=channel, payload=p.model_dump(), fingerprint=fp, is_sample=p.is_sample)
     session.add(row)

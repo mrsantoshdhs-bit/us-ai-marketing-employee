@@ -255,6 +255,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.exception_handler(OverflowError)
     async def number_too_large(request: Request, exc: OverflowError):
         """A number past what the database can hold (the driver raises this at the query): nothing can have that id."""
+        log.warning("Number out of range on %s %s: %s", request.method, request.url.path, exc)
         if wants_page(request):
             return error_page(request, 404, ERROR_WORDS["Not Found"])
         return JSONResponse({"detail": "Not found"}, status_code=404)
@@ -262,7 +263,17 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.exception_handler(OperationalError)
     async def database_busy(request: Request, exc: OperationalError):
         """A long job holding the write lock past the busy timeout: the transaction was rolled back, and the person is
-        told so in plain words instead of "Internal Server Error"."""
+        told so in plain words instead of "Internal Server Error". Only a lock is "busy": any other database error (a
+        missing table, a full disk) is a fault that trying again will not cure, and it is logged as one."""
+        if not re.search(r"locked|busy", str(exc.orig), re.I):
+            log.error("Database error on %s %s", request.method, request.url.path, exc_info=exc)
+            fault = "The database reported an error, so this was not saved. It has been logged: tell your administrator."
+            if wants_page(request):
+                try:
+                    return error_page(request, 500, fault)
+                except OperationalError:
+                    return HTMLResponse(f"<!doctype html><title>Error</title><p>{fault}</p>", status_code=500)
+            return JSONResponse({"detail": fault}, status_code=500)
         log.warning("Database not available for %s %s: %s", request.method, request.url.path, exc.orig)
         reason = "The database is busy with other work, so this was not saved. Nothing was changed: try again in a minute."
         if wants_page(request):
@@ -979,6 +990,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 f.status, f.send_started_at = "approved", None
                 f.blocked_reason = "Requeued after a person confirmed it was not delivered"
                 msg = "Requeued"
+            elif action == "done" and f.channel == "task" and f.status == "done":
+                return back("/followups", "Already done: nothing changed")  # the second request of a double click
             elif action == "approve" and f.status == "approved" and wants_page(request):
                 # the second request of a double click: no second approval, no new time, and an email waiting for
                 # "Confirm again" stays waiting (needs_reconfirmation): only that button releases it

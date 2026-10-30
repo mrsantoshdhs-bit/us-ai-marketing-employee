@@ -33,7 +33,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from aime.crm_ops import log_activity, suppress
-from aime.inbox import own_text, rest_of_reply
+from aime.inbox import below_header_copy, own_text, rest_of_reply
 from aime.llm.base import LLMError
 from aime.models import Alert, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity
 from aime.notify import notify_event
@@ -44,9 +44,13 @@ from aime.timeutil import utcnow
 
 log = logging.getLogger("aime.inbox")
 
-_OBJECT = (r"(me|us|my (e-?mail|address|name|details|contact details|info|information)|"
-           r"our (e-?mails?|address(es)?|details|company|name))")
+_OBJECT = (r"(me|us|my (e-?mail( address)?|address|name|details|contact details|info|information)|"
+           r"our (e-?mails?( address(es)?)?|address(es)?|details|company|name))")
 _LIST = r"((mailing|e-?mail|contact|marketing|distribution|sales|prospect|outreach) )?(list|lists|database)"
+# Wider than the opt-out wording on purpose: only used to stop treating an email as a plain automatic reply.
+REMOVAL_WORDS = re.compile(r"\b(remov(e|ed|al)|unsubscrib\w*|delet(e|ed)|stop|opt(ed|ing)?[- ]?out|"
+                           r"(do not|don'?t|never) (e-?mail|contact|message|send|write)|take (me|us|my|our)|"
+                           r"(off|from) (your|the|this) \w*\s?list)\b", re.I)
 PATTERNS: list[tuple[str, re.Pattern]] = [
     # Opt-outs in everyday wording and with typos ("unsubcribe", "remove my email from your list", "no more emails").
     # "drop me a line", "take us through it" and "one from the list you sent" are not opt-outs.
@@ -54,22 +58,23 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
         r"\b(un-?su[bs]{1,2}c?r?i?b?e?d?|"
         rf"(remove|delete|erase|unlist) {_OBJECT}|"
         rf"drop {_OBJECT}(?! (a|an|the|some|any|your|our|my|one|in|by|at|to)\b)|"
-        rf"(take|get) {_OBJECT} (off|out of|out from)(?! (topic|guard)\b)|"
+        rf"(take|get) {_OBJECT} (off|out( of| from)?)(?! (topic|guard|to|for|on|and)\b)|"
         rf"{_OBJECT} (off|from|out of) (your|the|this|all|any) ({_LIST}|crm|system|records?)|"
-        rf"(remove|delete|erase|strike|cross|scrub|purge|exclude)\b[^.?!\n]{{0,40}}\b(off|from|out of) (your|the|this|all|any) "
-        rf"{_LIST}(?! of\b)|"
+        rf"(remov(e|ed|ing)|delet(e|ed|ing)|eras(e|ed|ing)|drop(ped|ping)?|strike|struck|cross(ed)?|scrub(bed)?|purg(e|ed)|"
+        rf"exclud(e|ed))\b[^.?!\n]{{0,40}}\b(off|from|out of) (your|the|this|all|any) {_LIST}(?! (of|you|we|that)\b)|"
+        rf"from (your|this) {_LIST}\W+(please )?(remov|delet|drop|unsub)\w*|"
         rf"(off|out of) (your|the|this) {_LIST}(?! of\b)|"
         r"from (your|the|this) (mailing|e-?mail|marketing|distribution) list|"
         r"(stop|quit|cease) (e-?mailing|contacting|sending|messaging|mailing|writing to|spamming|bothering|pestering)|"
         r"(stop|quit|cease) (all |the |these |those |your )?(e-?mails|messages|spam)|"
         r"no (more|further) (e-?mails|messages|contact|mail)|"
-        r"(do not|don't|never)( ever)? (e-?mail|contact|message|write to|reach out to) (me|us)|do not (email|contact)|"
-        r"(do not|don't|never)( ever)? send(ing)? (me |us )?(any |anymore )?((more|further|other) )?(e-?mails?|messages?|mail)|"
-        r"(do not|don't|no longer)( \w+)? (wish|want|like|need) to (receive|get)( \w+){0,3} "
+        r"(do not|don'?t|never)( ever)? (e-?mail|contact|message|write to|reach out to) (me|us)|do not (email|contact)|"
+        r"(do not|don'?t|never)( ever)? send(ing)? (me |us )?(any |anymore )?((more|further|other) )?(e-?mails?|messages?|mail)|"
+        r"(do not|don'?t|no longer)( \w+)? (wish|want|like|need) to (receive|get)( \w+){0,3} "
         r"(e-?mails?|messages?|mail|communications?|newsletters?)|"
-        r"(do not|don't|no longer)( \w+)? (wish|want|like|need) to hear (back )?from (you|your)|"
-        r"(do not|don't|no longer)( \w+)? (wish|want) to be (contacted|e-?mailed|on your)|"
-        r"(do not|don't|no longer)( \w+)? (want|need) (any |your |these |those |more |further ){1,3}(e-?mails|messages)|"
+        r"(do not|don'?t|no longer)( \w+)? (wish|want|like|need) to hear (back )?from (you|your)|"
+        r"(do not|don'?t|no longer)( \w+)? (wish|want) to be (contacted|e-?mailed|on your)|"
+        r"(do not|don'?t|no longer)( \w+)? (want|need) (any |your |these |those |more |further ){1,3}(e-?mails|messages)|"
         r"opt (me |us )?out|opt[- ]?out|leave (me|us) alone)\b", re.I)),
     ("not_interested", re.compile(r"\b(not interested|no thanks|no, thank you|not a (good )?fit|we'?re all set|"
                                   r"not (looking|in the market)|pass on this|no need|not for us|we'?re good)\b", re.I)),
@@ -149,6 +154,10 @@ def classify(row: InboundEmail) -> tuple[str, str, list[str]]:
         if confidence == "high":
             # Nothing was written above the quote: the words were found below or inside it, so a person checks first.
             return category, "medium", [*reasons, "reply written below the quoted email"]
+        if category == "other" and (below_copy := below_header_copy(row.body_text)):
+            below, _, why = _classify(row, below_copy)  # Outlook keeps the earlier email on top; an opt-out may follow it
+            if below == "unsubscribe":
+                return "unsubscribe", "medium", [*why, "written below a copied email header"]
         return category, confidence, reasons
     rest = rest_of_reply(row.body_text or "") if not row.auto_submitted else ""
     if rest and category != "unsubscribe":
@@ -247,6 +256,8 @@ def _classify(row: InboundEmail, text: str | None = None) -> tuple[str, str, lis
             reasons.append(f'complaint: "{complaint.group(0)}"')
         return "unsubscribe", "medium" if complaint else "high", reasons
     if row.auto_submitted:
+        if REMOVAL_WORDS.search(said):  # ticketing systems and gateways mark people's mail as automatic too
+            return "out_of_office", "low", ["marked as an automatic reply, but it speaks of being removed: a person checks"]
         return "out_of_office", "high", ["automatic reply"]
     human = [k for k in ("not_interested", "interested", "objection", "referral") if k in hits]
     if OOO.search(f"{subject}\n{text[:400]}") and not human and not negated and "?" not in text:

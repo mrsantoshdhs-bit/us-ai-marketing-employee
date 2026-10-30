@@ -260,6 +260,14 @@ def own_text(body: str) -> str:
     return _own_lines(body.replace("\r\n", "\n").split("\n"))[:NEW_TEXT_LIMIT]
 
 
+def below_header_copy(body: str) -> str:
+    """The sender's words below a copied header block, when nothing was written above it. The earlier email is in there
+    too, so this is only read for an opt-out, never for anything to act on."""
+    lines = body.replace("\r\n", "\n").split("\n")
+    last = max((i for i, line in enumerate(lines) if HEADER_COPY.match(line.strip())), default=None)
+    return "" if last is None else _own_lines(lines[last + 1:])[:NEW_TEXT_LIMIT]
+
+
 def rest_of_reply(body: str) -> str:
     """The sender's own words that new_text leaves out: past its limit, or written below the quote. An opt-out there
     is still an opt-out."""

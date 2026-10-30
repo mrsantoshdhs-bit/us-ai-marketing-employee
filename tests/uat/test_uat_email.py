@@ -1634,3 +1634,79 @@ def test_ok_an_alert_is_raised_days_after_a_booking_link_with_no_notice_and_clos
     deliver(ctx, notice())
     with ctx.db.session() as s:
         assert s.execute(select(Alert).where(Alert.key == "calendly:no_notices")).scalar_one().resolved_at is not None
+
+
+# ================================================================== found by code review of the fixes: never lose an opt-out
+EVERYDAY_OPT_OUTS = [
+    "I want to be removed from your list",
+    "Please have me removed from your list.",
+    "I want to be dropped from your list",
+    "have us deleted from the list",
+    "deleted from your list",
+    "dont email me",
+    "dont contact us",
+    "Dont email me again",
+    "take me out",
+    "take my name out",
+    "Please take my email address off",
+    "from your list please remove",
+    "remove me",
+    "take us off your list",
+    "Don't contact me.",
+]
+
+
+@pytest.mark.parametrize("text", EVERYDAY_OPT_OUTS)
+def test_ok_everyday_opt_out_is_honoured(text):
+    assert words(text)[0] == "unsubscribe", words(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Take me out for a coffee when you are in Austin, I would like to talk.",
+    "I removed Bob from the list you sent, the rest look fine.",
+    "Please take me through a demo.",
+    "Happy to chat, I got this from your list of services.",
+])
+def test_ok_wording_near_an_opt_out_is_not_one(text):
+    assert words(text)[0] != "unsubscribe", words(text)
+
+
+@pytest.mark.parametrize("text,header", [
+    ("I want to be removed from your list", "Precedence: bulk"),
+    ("dont contact us", "Auto-Submitted: auto-generated"),
+    ("Please take my email address off", "X-Autoreply: yes"),
+    ("I would like to stop hearing from you", "Precedence: bulk"),
+])
+def test_ok_an_opt_out_marked_as_automatic_never_lets_the_sequence_continue(make_ctx, text, header):
+    """Ticketing systems and gateways put these headers on people's mail."""
+    ctx, _, sent = contacted(make_ctx)
+    name, value = header.split(": ")
+    raw = in_thread(sent, text)
+    raw = raw.replace(b"\r\n\r\n", f"\r\n{name}: {value}\r\n\r\n".encode(), 1).replace(b"\n\n", f"\n{name}: {value}\n\n".encode(), 1) \
+        if b"\r\n\r\n" not in raw else raw.replace(b"\r\n\r\n", f"\r\n{name}: {value}\r\n\r\n".encode(), 1)
+    deliver(ctx, raw)
+    r = latest_reply(ctx)
+    assert r.status == "needs_review" or r.category == "unsubscribe", (r.category, r.confidence, r.status)
+    assert lead_of(ctx).outreach_status != "contacted"
+
+
+def test_ok_a_real_automatic_reply_still_continues_the_sequence(make_ctx):
+    ctx, _, sent = contacted(make_ctx)
+    raw = in_thread(sent, "I am out of the office until Monday with limited access to email.")
+    sep = b"\r\n\r\n" if b"\r\n\r\n" in raw else b"\n\n"
+    deliver(ctx, raw.replace(sep, sep[:len(sep) // 2] + b"Auto-Submitted: auto-replied" + sep, 1))
+    r = latest_reply(ctx)
+    assert (r.category, r.confidence, r.status) == ("out_of_office", "high", "actioned")
+    assert lead_of(ctx).outreach_status == "contacted"
+
+
+@pytest.mark.parametrize("text", ["Please unsubscribe me", "I want to be removed from your list"])
+def test_ok_an_opt_out_below_an_outlook_header_block_is_honoured(text):
+    body = f"From: Sales <sales@us.example>\nSent: Mon, Oct 26, 2026\nSubject: hello\n\nHi Bob, a short pitch.\n\n{text}\n"
+    category, confidence, reasons = words(body)
+    assert (category, confidence) == ("unsubscribe", "medium"), (category, confidence, reasons)
+
+
+def test_ok_interest_below_an_outlook_header_block_is_not_read_as_anything_automatic():
+    body = "From: Sales <sales@us.example>\nSent: Mon, Oct 26, 2026\nSubject: hello\n\nHi Bob, a short pitch.\n\nSounds good.\n"
+    assert words(body)[1] == "low"

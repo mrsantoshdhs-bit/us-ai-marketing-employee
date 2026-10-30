@@ -5,6 +5,7 @@ today's code (each one is a reproducible defect). Routes are enumerated from app
 
 from __future__ import annotations
 
+import os
 import base64
 import functools
 import hashlib
@@ -1202,6 +1203,7 @@ def test_ok_secrets_never_on_any_page_or_api_for_any_role(vault, caplog):
                 assert not _leaks(value or "")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows DPAPI: production runs on Windows")
 def test_ok_secrets_are_encrypted_at_rest(vault):
     ctx, _, ids = vault
     session_secret(ctx.settings.data_dir)  # created at the first use
@@ -1780,3 +1782,17 @@ def test_ok_a_second_approve_does_not_release_an_email_waiting_for_confirm_again
     with ctx.db.session() as s:
         assert s.get(FollowUp, ids["fu_a"]).approved_at == confirmed
         assert s.execute(select(func.count(AuditEvent.id)).where(AuditEvent.action == "approval_confirmed_again")).scalar_one() == 1
+
+
+def test_ok_a_database_fault_is_not_reported_as_busy(vault):
+    """Only a lock timeout is "try again in a minute". A missing table is a fault, and it is logged as one."""
+    ctx = vault[0] if isinstance(vault, tuple) else vault
+    with ctx.db.engine.begin() as con:
+        con.exec_driver_sql("ALTER TABLE opportunities RENAME TO opportunities_gone")
+    try:
+        c = TestClient(create_app(ctx), base_url="http://testserver", raise_server_exceptions=False)
+        r = c.get("/api/stats")
+        assert r.status_code != 503 and "busy" not in r.text.lower(), (r.status_code, r.text[:200])
+    finally:
+        with ctx.db.engine.begin() as con:
+            con.exec_driver_sql("ALTER TABLE opportunities_gone RENAME TO opportunities")
