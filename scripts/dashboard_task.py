@@ -49,6 +49,9 @@ def ensure_output(log_path: Path) -> None:
 
 
 def main() -> int:
+    from aime.process_priority import use_normal_priority
+
+    use_normal_priority()  # Task Scheduler starts tasks at low priority; the dashboard answers people
     from aime import maintenance
     from aime.config import Settings
 

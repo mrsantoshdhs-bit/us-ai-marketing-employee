@@ -2,6 +2,7 @@
 
 Each render runs twice in an isolated temporary profile: once to dump the DOM (a small script in the template
 measures text overflow, overlaps, smallest font, contrast and empty space) and once to take the screenshot.
+The second start reuses the profile: it skips the first-run set-up, which takes most of a start on a busy PC.
 If the layout fails, the next style is tried; if no browser is available, callers fall back to the Pillow card.
 
 On Windows a Chromium browser starting with a new profile checks whether the account's password is blank by
@@ -16,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import tomllib
@@ -50,6 +52,8 @@ BROWSER_CANDIDATES = [
 # The browser's own answer to "is the Windows password blank?" ("Local State" › password_manager › os_password_*),
 # shared by every render of this Windows user (the scheduled tasks, the dashboard and test runs alike).
 OS_PASSWORD_STATE = Path(tempfile.gettempdir()) / "aime-browser-os-password.json"
+# Seconds for one browser start. A first start took 16-76 s on this PC with other work running: 60 s was too tight.
+BROWSER_TIMEOUT = 120
 
 
 @dataclass
@@ -107,10 +111,39 @@ def _browser_args(browser: Path, profile: Path, w: int, h: int) -> list[str]:
     return args
 
 
+def _stop_tree(proc: subprocess.Popen) -> None:
+    """Stop an overrunning browser with everything it started: killing only the first process leaves its renderers."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=30,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    proc.kill()
+    try:
+        proc.wait(10)
+    except subprocess.SubprocessError:
+        pass
+
+
 def _run(args: list[str], timeout: float) -> subprocess.CompletedProcess:
-    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    return subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
-                          creationflags=flags)
+    """Wait for the browser itself, with its output in a file. Waiting on a pipe also waits for every helper that
+    inherited it, and those can outlive the browser: a finished render then counted as a timeout."""
+    with tempfile.TemporaryFile() as out:
+        if os.name == "nt":
+            proc = subprocess.Popen(args, stdout=out, stderr=subprocess.DEVNULL,
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            proc = subprocess.Popen(args, stdout=out, stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            code = proc.wait(timeout)
+        except subprocess.TimeoutExpired:
+            _stop_tree(proc)
+            raise
+        out.seek(0)
+        return subprocess.CompletedProcess(args, code, out.read().decode("utf-8", "replace"), "")
 
 
 def seed_profile(profile: Path) -> None:
@@ -193,7 +226,7 @@ def find_blank_patches(png: Path, white_boxes: list | None = None, black_boxes: 
     return found
 
 
-def render_one(browser: Path, html: str, out_png: Path, w: int, h: int, timeout: float = 60) -> dict:
+def render_one(browser: Path, html: str, out_png: Path, w: int, h: int, timeout: float = BROWSER_TIMEOUT) -> dict:
     """Measure, then screenshot. Returns the layout metrics (empty if the page could not be measured).
     The throwaway browser profile is removed afterwards; a file a browser helper still holds open is left for the
     system's temp cleanup instead of failing the render."""
@@ -202,7 +235,8 @@ def render_one(browser: Path, html: str, out_png: Path, w: int, h: int, timeout:
         page = work / "card.html"
         page.write_text(html, encoding="utf-8")
         url = page.resolve().as_uri()
-        dump = _run_browser(browser, work / "p1", w, h, ["--dump-dom", url], timeout)
+        profile = work / "p1"
+        dump = _run_browser(browser, profile, w, h, ["--dump-dom", url], timeout)
         m = re.search(r'<pre id="aime-qc">(.*?)</pre>', dump.stdout or "", re.S)
         try:
             metrics = json.loads(m.group(1).replace("&quot;", '"').replace("&amp;", "&")) if m else {}
@@ -211,9 +245,10 @@ def render_one(browser: Path, html: str, out_png: Path, w: int, h: int, timeout:
         shot = work / "shot.png"
         for attempt in (2, 3):  # a blank patch is a rendering glitch, not a layout fault: take the shot once more
             shot.unlink(missing_ok=True)
-            _run_browser(browser, work / f"p{attempt}", w, h, [f"--screenshot={shot}", url], timeout)
+            _run_browser(browser, profile, w, h, [f"--screenshot={shot}", url], timeout)
             if not (shot.exists() and shot.stat().st_size > 0):
-                break
+                profile = work / f"p{attempt}"  # a helper may still hold the profile: the next try gets a new one
+                continue
             patches = find_blank_patches(shot, metrics.get("white_boxes"), metrics.get("black_boxes")) if metrics else []
             if metrics:
                 metrics["blank_patches"] = patches
@@ -226,7 +261,7 @@ def render_one(browser: Path, html: str, out_png: Path, w: int, h: int, timeout:
 
 
 def render_designed_image(brief: VisualBrief, styles: list[str], out_png: Path, base_dir: Path, monogram: str,
-                          browser_path: str | None = None, timeout: float = 60) -> RenderResult:
+                          browser_path: str | None = None, timeout: float = BROWSER_TIMEOUT) -> RenderResult:
     """Try styles in order; keep the first whose layout passes every check."""
     browser = find_browser(browser_path)
     if browser is None:

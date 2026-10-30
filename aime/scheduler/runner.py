@@ -20,7 +20,7 @@ from pathlib import Path
 from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
 
-from aime import automation, maintenance
+from aime import automation, maintenance, process_priority
 from aime.config import Settings
 from aime.context import AppContext
 from aime.models import AgentRun, JobRun, JobState
@@ -97,7 +97,8 @@ def is_due(spec: JobSpec, state: JobState | None, now: datetime, tz, tick_minute
         if state is None or state.last_attempt_at is None:
             return True, "never run"
         elapsed = now - state.last_attempt_at
-        slack = timedelta(minutes=min(2, tick_minutes / 4))
+        # A busy PC starts a tick minutes late; the next one, on time, must not find the job "not due yet" and skip it.
+        slack = timedelta(minutes=min(tick_minutes / 2, spec.every_minutes / 2))
         if elapsed >= timedelta(minutes=spec.every_minutes) - slack:
             return True, f"interval elapsed ({int(elapsed.total_seconds() // 60)} min)"
         remaining = timedelta(minutes=spec.every_minutes) - elapsed
@@ -367,7 +368,8 @@ def tick(ctx: AppContext, trigger: str = "scheduler", now: datetime | None = Non
                 result["reason"] = reason
                 ran.append(result)
         write_heartbeat(ctx.settings, {"trigger": trigger, "pid": os.getpid(), "state": "idle", "recovered": recovered,
-                                       "ran": [{"job": r["job"], "status": r["status"]} for r in ran]})
+                                       "ran": [{"job": r["job"], "status": r["status"]} for r in ran],
+                                       "priority": process_priority.current()})
     finally:
         lock.release()
     return {"status": "ok", "ran": ran}

@@ -13,6 +13,10 @@ sys.path.insert(0, str(ROOT))
 DATA = Path(os.environ.get("AIME_DATA_DIR") or ROOT / "data")
 
 try:
+    from aime.process_priority import use_normal_priority
+
+    use_normal_priority()  # before the slow imports: Task Scheduler starts tasks at low priority
+
     # Checked before importing the app, so an upgrade in progress cannot crash scheduled runs.
     from aime import maintenance
 
