@@ -760,9 +760,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 o.est_value = value
             if close_by is not None:
                 o.expected_close = close_by
-            if stage == "won" and o.lead_id:
-                lead = s.get(Lead, o.lead_id)
-                lead.status = "converted"
+            if stage == "won":
+                from aime.customer import handover
+                handover(s, o, who(request))  # lead converted, one onboarding task for the deal's owner
             if stage == "lost":
                 o.lost_reason = reason
             change = f"Opportunity stage {old} → {stage}" + (f" ({o.lost_reason})" if stage == "lost" else "")
@@ -857,6 +857,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 f.status = "rejected"
                 if f.kind == "outreach" and f.step == 1 and f.lead.outreach_status in ("drafted", "approved"):
                     set_outreach_status(s, f.lead, "stopped", who(request), "first email rejected")
+                if f.purpose == "reengage" and f.lead.outreach_status == "reengage":  # parked again; never redrafted
+                    set_outreach_status(s, f.lead, "no_response", who(request), "re-engagement email rejected")
                 msg = "Rejected"
             elif action == "done" and f.channel == "task":
                 f.status = "done"

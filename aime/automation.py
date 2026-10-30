@@ -344,6 +344,8 @@ def campaign_for(session: Session, f: FollowUp, mode: str, now: datetime,
     """The authorization that lets `f` go out without a person, or (None, why a person must approve it)."""
     from aime.reply_intel import QUESTION_PLACEHOLDER
 
+    if f.purpose == "reengage":
+        return None, "a re-engagement email to a lead who never answered always needs a person's approval"
     to = recipient(f)
     active = active_authorizations(session, now)
     camps = [a for a in active if to in (a.recipients or [])]

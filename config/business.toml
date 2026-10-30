@@ -89,6 +89,10 @@ sends_per_run = 5
 # Every email from the sales mailbox (outreach, follow-ups, answers) in a rolling 24 hours: protects the mailbox's
 # reputation whatever the mix. Emails over it wait, they are not cancelled.
 mailbox_daily_limit = 50
+# Re-engagement: a lead whose whole sequence went unanswered (moved to nurture) gets ONE short check-in this many
+# days after the last email, then never again (0 = never). Not for anyone who said no, unsubscribed or bounced. It
+# waits for a person's approval like every outreach email; campaign authorizations never approve it.
+reengage_after_days = 90
 
 [meetings]
 # A4 meeting booking (off unless CALENDAR_PROVIDER and MEETING_BOOKING_ENABLED are set in .env).
