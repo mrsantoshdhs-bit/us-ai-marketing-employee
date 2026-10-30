@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import DatabaseError
 
+from aime import maintenance
 from aime.backup import integrity_check, offsite_status, offsite_sync
 from aime.context import AppContext
 from aime.db import kv_get
@@ -13,6 +15,7 @@ from aime.integrations.linkedin import configured_author_urn
 from aime.models import (Company, Contact, ContentItem, FollowUp, InboundInquiry, Lead, OAuthToken,
                          PublishAttempt, User)
 from aime.monitoring import read_heartbeat
+from aime.redact import redact
 from aime.secure_store import is_protected
 from aime.timeutil import utcnow
 
@@ -28,7 +31,38 @@ def run_checks(ctx: AppContext) -> list[dict]:
 
     ic = integrity_check(ctx.db)
     add("SQLite integrity", ic["ok"], f"integrity={ic['integrity']}, foreign-key violations={ic['foreign_key_violations']}")
+    try:
+        _record_checks(ctx, add)
+        _setup_checks(ctx, add)
+    except DatabaseError as exc:  # a damaged file: say so, and still report what needs no database
+        add("Database readable", False, f"Records cannot be read, so their checks did not run: {redact(str(exc.orig))[:200]}")
 
+    _, author_ok = configured_author_urn(ctx.settings)
+    add("LinkedIn author setting valid", author_ok,
+        "LINKEDIN_AUTHOR_URN is empty or a valid URN" if author_ok
+        else "LINKEDIN_AUTHOR_URN is not a valid LinkedIn URN (value hidden); fix or clear it in .env")
+    mode = str(ctx.settings.section("publish_policy").get("mode", "shadow")).lower()
+    add("Auto-publish policy is shadow-only", mode == "shadow",
+        "records decisions only; never publishes" if mode == "shadow"
+        else f"publish_policy.mode={mode!r} is not supported and is treated as shadow", "warning")
+
+    hb = read_heartbeat(ctx.settings)
+    if hb is None:
+        add("Scheduler heartbeat", False, "No tick recorded yet", "warning")
+    else:
+        at = datetime.fromisoformat(hb["at"].rstrip("Z"))
+        age = utcnow() - at
+        limit = timedelta(minutes=int(ctx.settings.schedule.get("tick_minutes", 15)) * 2 + 5)
+        state = hb.get("state")
+        # A maintenance beat explains the silence only while its window lasts: after that, ticks have simply stopped.
+        paused = state == "maintenance" and maintenance.active(ctx.settings.data_dir) is not None
+        add("Scheduler heartbeat fresh", age <= limit or paused,
+            f"last tick {int(age.total_seconds() // 60)} min ago, state={state}", "warning")
+    return checks
+
+
+def _record_checks(ctx: AppContext, add) -> None:
+    """Data isolation and compliance invariants, read from the records."""
     with ctx.db.session() as s:
         n = lambda m, *w: s.execute(select(func.count(m.id)).where(*w)).scalar_one()  # noqa: E731
         role = kv_get(s, "db_role")
@@ -92,11 +126,10 @@ def run_checks(ctx: AppContext) -> list[dict]:
         add("No duplicate company domains", not dup_domains, f"{len(dup_domains)} duplicated domain(s)", "warning")
         plain_tokens = [t.provider for t in s.execute(select(OAuthToken)).scalars() if not is_protected(t.access_token)]
         add("OAuth tokens encrypted at rest", not plain_tokens, f"unencrypted: {', '.join(plain_tokens) or 'none'}")
-    _, author_ok = configured_author_urn(ctx.settings)
-    add("LinkedIn author setting valid", author_ok,
-        "LINKEDIN_AUTHOR_URN is empty or a valid URN" if author_ok
-        else "LINKEDIN_AUTHOR_URN is not a valid LinkedIn URN (value hidden); fix or clear it in .env")
 
+
+def _setup_checks(ctx: AppContext, add) -> None:
+    """Sign-in accounts, backups and the sales mailbox (their state is kept in the database)."""
     with ctx.db.session() as s:
         last, off = kv_get(s, "backup.last_verified"), kv_get(s, "backup.last_offsite")
         users = s.execute(select(func.count(User.id)).where(User.active.is_(True))).scalar_one()
@@ -116,8 +149,10 @@ def run_checks(ctx: AppContext) -> list[dict]:
             "warning")
     else:
         hours = (utcnow() - datetime.fromisoformat(last["at"])).total_seconds() / 3600
-        add("Recent verified backup", hours <= BACKUP_MAX_AGE_HOURS,
-            f"{last['file']}: {last['rows']} rows, verified {hours:.0f} h ago")
+        present = (ctx.settings.backups_dir / last["file"]).exists()  # the record of a check is not the file itself
+        add("Recent verified backup", hours <= BACKUP_MAX_AGE_HOURS and present,
+            f"{last['file']}: {last['rows']} rows, verified {hours:.0f} h ago"
+            + ("" if present else "; that file is no longer in the backups folder"))
     off_ready, off_reason = offsite_status(ctx.settings)
     if not off_ready:
         add("Off-machine encrypted backup", False, f"Off-machine backup {off_reason}", "warning")
@@ -141,19 +176,3 @@ def run_checks(ctx: AppContext) -> list[dict]:
             "outreach can be sent but replies, unsubscribes and bounces are not read: on the Mailboxes page enable a "
             "mailbox and turn on Read replies (or set IMAP_HOST in .env)",
             "warning")
-    mode = str(ctx.settings.section("publish_policy").get("mode", "shadow")).lower()
-    add("Auto-publish policy is shadow-only", mode == "shadow",
-        "records decisions only; never publishes" if mode == "shadow"
-        else f"publish_policy.mode={mode!r} is not supported and is treated as shadow", "warning")
-
-    hb = read_heartbeat(ctx.settings)
-    if hb is None:
-        add("Scheduler heartbeat", False, "No tick recorded yet", "warning")
-    else:
-        at = datetime.fromisoformat(hb["at"].rstrip("Z"))
-        age = utcnow() - at
-        limit = timedelta(minutes=int(ctx.settings.schedule.get("tick_minutes", 15)) * 2 + 5)
-        state = hb.get("state")
-        add("Scheduler heartbeat fresh", age <= limit or state == "maintenance",
-            f"last tick {int(age.total_seconds() // 60)} min ago, state={state}", "warning")
-    return checks

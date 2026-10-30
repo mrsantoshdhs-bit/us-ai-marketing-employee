@@ -63,12 +63,12 @@ class DataRoleMismatch(RuntimeError):
 
 
 def _has_data(db: Database) -> bool:
+    """Any record in any table: posts, tokens or history are worth a backup even with no company on file."""
     from sqlalchemy import inspect, text
 
-    if "companies" not in inspect(db.engine).get_table_names():
-        return False
+    tables = inspect(db.engine).get_table_names()
     with db.engine.connect() as conn:
-        return bool(conn.execute(text("SELECT 1 FROM companies LIMIT 1")).first())
+        return any(conn.execute(text(f'SELECT 1 FROM "{t}" LIMIT 1')).first() for t in tables)  # noqa: S608
 
 
 def create_context(settings: Settings | None = None, http_transport: httpx.BaseTransport | None = None) -> AppContext:
