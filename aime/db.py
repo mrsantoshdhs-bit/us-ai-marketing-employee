@@ -71,7 +71,7 @@ def take_write_lock(session: Session) -> None:
     """Take the database's write lock now, before reading what a click is about. Two people clicking at once then run
     one after the other, and the second one reads what the first one saved: nobody decides on a page that is already
     out of date. The lock ends with the session's commit; another writer waits for it (busy_timeout)."""
-    session.execute(text(f"UPDATE {KeyValue.__tablename__} SET key = key WHERE 0"))
+    session.execute(text("UPDATE kv_store SET key = key WHERE 0"))
 
 
 def first(session: Session, stmt: Any) -> Any:
