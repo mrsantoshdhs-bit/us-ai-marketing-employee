@@ -25,6 +25,7 @@ PROVIDER_SPF = {"gmail": GOOGLE_SPF, "google": GOOGLE_SPF, "office365": "include
                 "outlook": "include:spf.protection.outlook.com"}
 # Where providers publish DKIM keys: Google, Microsoft 365, cPanel/Exim ("default"), and other common selectors.
 DKIM_SELECTORS = ("google", "selector1", "selector2", "default", "dkim", "mail", "k1", "s1", "s2", "zmail")
+OAUTH_SIGN_IN = "signs in with OAuth: use Test on the Mailboxes page (or the Integrations page) to sign in"
 
 
 def is_gmail(host: str | None) -> bool:
@@ -36,6 +37,15 @@ class Check:
     name: str
     status: str  # pass | warn | fail | skip
     detail: str
+
+
+def panel_mailbox_check(a) -> Check:
+    """The Mailboxes-page mailbox the other checks use in place of the .env mail settings."""
+    if a.is_primary:
+        return Check("Mailbox", "pass", f"{a.email} (Mailboxes panel): the sending mailbox"
+                                        + (", reads replies" if a.read_replies else ""))
+    return Check("Mailbox", "warn", f"{a.email} (Mailboxes panel) reads replies but is not Primary: nothing can be sent "
+                                    "until a mailbox is made Primary on the Mailboxes page")
 
 
 def check_settings(s) -> list[Check]:
@@ -50,8 +60,9 @@ def check_settings(s) -> list[Check]:
             "ON with no test recipients: approved emails go to real recipients", "warn")
     else:
         out.append(Check("Sending switch", "pass", "OFF (OUTBOUND_EMAIL_ENABLED=false): nothing can be sent"))
-    add("SMTP settings", bool(s.smtp_host and s.smtp_from and s.smtp_username and s.smtp_password),
-        f"{s.smtp_host}:{s.smtp_port}, from {s.smtp_from}, password set",
+    oauth = s.mail_auth == "oauth"  # Microsoft 365: signs in with a token, no password is stored
+    add("SMTP settings", bool(s.smtp_host and s.smtp_from and s.smtp_username and (s.smtp_password or oauth)),
+        f"{s.smtp_host}:{s.smtp_port}, from {s.smtp_from}, " + ("signs in with OAuth" if oauth else "password set"),
         "SMTP_HOST, SMTP_FROM, SMTP_USERNAME and SMTP_PASSWORD are needed (see docs/SALES_SETUP.md)")
     if s.smtp_host and "gmail" in s.smtp_host.lower():
         add("Gmail SMTP", s.smtp_port == 587 and s.smtp_use_tls, "smtp.gmail.com:587 with STARTTLS",
@@ -61,7 +72,8 @@ def check_settings(s) -> list[Check]:
                                                      "servers send as the signed-in mailbox unless it is an allowed "
                                                      "alias ('Send mail as' in Gmail)"))
     user, password = s.imap_credentials
-    add("IMAP settings", bool(s.imap_host and user and password), f"{s.imap_host}:{s.imap_port}, folder {s.imap_folder}",
+    add("IMAP settings", bool(s.imap_host and user and (password or oauth)),
+        f"{s.imap_host}:{s.imap_port}, folder {s.imap_folder}",
         "IMAP_HOST (your mail server's IMAP host, e.g. imap.gmail.com or mail.<your domain>) is needed to read "
         "replies; it reuses the SMTP username and password")
     if s.smtp_from and user and s.smtp_from.lower() != user.lower():
@@ -184,6 +196,8 @@ def check_domain(domain: str, resolve: Callable[[str, str], list[str]], smtp_hos
 
 
 def check_smtp(s, smtp_factory=smtplib.SMTP) -> Check:
+    if s.mail_auth == "oauth":
+        return Check("SMTP sign-in", "skip", OAUTH_SIGN_IN)
     if not (s.smtp_host and s.smtp_username and s.smtp_password):
         return Check("SMTP sign-in", "skip", "SMTP host, username or password not set")
     if not s.smtp_use_tls:
@@ -205,6 +219,8 @@ def check_smtp(s, smtp_factory=smtplib.SMTP) -> Check:
 
 
 def check_imap(s, imap_factory=imaplib.IMAP4_SSL) -> Check:
+    if s.mail_auth == "oauth":
+        return Check("IMAP read-only", "skip", OAUTH_SIGN_IN)
     user, password = s.imap_credentials
     if not (s.imap_host and user and password):
         return Check("IMAP read-only", "skip", "IMAP host, username or password not set")
