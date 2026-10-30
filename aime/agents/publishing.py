@@ -25,7 +25,7 @@ from aime.agents.base import BaseAgent, RetryPolicy
 from aime.agents.contracts import BlockedItem
 from aime.calendar_slots import free_slots
 from aime.crm_ops import log_activity
-from aime.monitoring import alert_once
+from aime.monitoring import alert_once, resolve_alerts
 from aime.integrations.linkedin import (LinkedInAPIError, LinkedInAuthStatus, LinkedInClient, access_token,
                                         format_commentary, get_auth_status, get_token, normalize_commentary,
                                         post_url)
@@ -117,6 +117,16 @@ class AuthorizedPublishingAgent(BaseAgent[PublishInput, PublishOutput]):
         token = access_token(get_token(session))
         published_now = 0
         for item in due:
+            if item.image_path and not item.image_urn and not (self.settings.assets_dir / item.image_path).exists():
+                # What is published must be what was approved: never the text without its image.
+                item.status, item.approved_by, item.approved_at = "awaiting_approval", None, None
+                item.publish_blocked_reason = "Its image file is missing; re-create the image and approve it again"
+                out.blocked.append(BlockedItem(id=item.id, reason=item.publish_blocked_reason))
+                log_activity(session, f"Post #{item.id} held: image file missing, approval withdrawn", self.name,
+                             type_="status_change")
+                self._alert_once(session, f"Post #{item.id} '{item.title[:60]}': {item.publish_blocked_reason}")
+                session.commit()
+                continue
             if now - item.scheduled_for > max_overdue:
                 slots = free_slots(session, self.settings, now)
                 if slots:
@@ -178,7 +188,7 @@ class AuthorizedPublishingAgent(BaseAgent[PublishInput, PublishOutput]):
                 try:
                     item.image_urn = self.client.upload_image(token, auth.author_urn, path)
                     session.commit()
-                except (LinkedInAPIError, httpx.HTTPError) as exc:
+                except (LinkedInAPIError, httpx.HTTPError, OSError) as exc:
                     # No post exists yet, so releasing the claim cannot cause a duplicate.
                     self._release(session, item, attempt, f"Image upload failed: {exc}", out,
                                   auth_problem=isinstance(exc, LinkedInAPIError) and exc.status in (401, 403))
@@ -225,6 +235,8 @@ class AuthorizedPublishingAgent(BaseAgent[PublishInput, PublishOutput]):
             attempt.outcome = "success" if via == "api_201" else "reconciled"
             attempt.external_id = urn
             attempt.finished_at = now
+        if via == "api_201":  # LinkedIn accepted the connection
+            resolve_alerts(session, ("linkedin:auth",), set())
         (out.published if via in ("api_201", "duplicate_response") else out.reconciled).append(item.id)
         session.commit()
 
@@ -239,9 +251,14 @@ class AuthorizedPublishingAgent(BaseAgent[PublishInput, PublishOutput]):
         if auth_problem:
             item.status = "approved"
             item.publish_blocked_reason = "LinkedIn rejected the authorization; reconnect LinkedIn"
+            alert_once(session, "error", self.name, "LinkedIn rejected the authorization (revoked or no longer valid): "
+                       "approved posts wait until you reconnect LinkedIn on the Integrations page", self.settings,
+                       key="linkedin:auth")
         elif item.publish_attempts >= MAX_ATTEMPTS:
             item.status = "failed"
             item.publish_blocked_reason = f"Failed {item.publish_attempts} times; review and re-approve"
+            self._alert_once(session, f"Post #{item.id} '{item.title[:60]}' will not go out by itself: "
+                             f"{item.publish_blocked_reason}. Last answer: {error[:200]}", level="error")
         else:
             item.status = "approved"
         out.failed.append(BlockedItem(id=item.id, reason=error[:200]))

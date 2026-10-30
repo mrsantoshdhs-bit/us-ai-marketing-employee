@@ -217,12 +217,16 @@ class LinkedInClient:
                                json={"initializeUploadRequest": {"owner": owner_urn}})
             if init.status_code != 200:
                 raise LinkedInAPIError(init.status_code, init.text)
-            value = init.json()["value"]
-            upload = client.put(value["uploadUrl"], content=path.read_bytes(),
+            try:
+                value = init.json()["value"]
+                upload_url, image = value["uploadUrl"], value["image"]
+            except (ValueError, KeyError, TypeError) as exc:  # a 200 that is not LinkedIn's answer (a gateway page)
+                raise LinkedInAPIError(init.status_code, f"Unexpected image-upload answer ({type(exc).__name__})") from exc
+            upload = client.put(upload_url, content=path.read_bytes(),
                                 headers={"Authorization": f"Bearer {token}"})
             if upload.status_code not in (200, 201):
                 raise LinkedInAPIError(upload.status_code, upload.text)
-            return value["image"]
+            return image
 
     def create_post(self, token: str, author_urn: str, commentary: str,
                     image_urn: str | None = None, image_title: str | None = None, alt_text: str | None = None) -> str:
@@ -257,7 +261,10 @@ class LinkedInClient:
             resp = client.get(url, headers=self._rest_headers(token))
         if resp.status_code != 200:
             raise LinkedInAPIError(resp.status_code, resp.text)
-        return resp.json().get("elements", [])
+        try:
+            return resp.json().get("elements", [])
+        except (ValueError, AttributeError) as exc:  # a 200 that is not LinkedIn's answer (a gateway page)
+            raise LinkedInAPIError(resp.status_code, f"Unexpected posts answer ({type(exc).__name__})") from exc
 
 
 def post_url(post_urn: str) -> str:
