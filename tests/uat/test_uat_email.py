@@ -1209,6 +1209,100 @@ def test_ok_no_follow_up_after_a_human_reply(make_ctx, reply):
     assert not [d for d in drafts(ctx) if d.kind == "outreach" and d.step > 1]
 
 
+def test_ok_an_ai_opening_never_goes_out_under_a_campaign(make_ctx):
+    good = "Thanks for telling us how your team loses track of leads between spreadsheets."
+    ctx = inquiry_ctx(make_ctx, good, require_human_approval=False)
+    authorize(ctx, recipients=DANA, kinds=("inquiry",))
+    run(ctx, sender_for(ctx))
+    f = dana_draft(ctx)
+    assert good in f.body and f.status == "awaiting_approval" and FakeSMTP.sent == []
+
+
+@pytest.mark.parametrize("text,category", [
+    ("Please don’t email me again", "unsubscribe"),  # a phone's curly apostrophe
+    ("Take me\noff your list", "unsubscribe"),  # a wrapped line
+    ("STOP", "unsubscribe"),
+    ("Please drop me from your list.", "unsubscribe"),
+    ("Spam.", "unsubscribe"),
+    ("You are spamming me", "unsubscribe"),
+    ("I will forward this to my lawyer.", "unsubscribe"),
+    ("You violated CAN-SPAM with this.", "unsubscribe"),
+    ("Is this CAN-SPAM compliant?", "question"),
+    ("I picked one from your list.", "other"),
+    ("Are we off the list of vendors?", "question"),
+])
+def test_ok_opt_outs_and_complaints_are_told_from_ordinary_mentions(text, category):
+    assert words(text)[0] == category, words(text)
+
+
+def test_ok_a_legal_word_without_an_accusation_is_not_automated():
+    assert words("Sounds interesting. Is your platform GDPR compliant?")[:2] == ("interested", "medium")
+
+
+def test_ok_an_opt_out_below_the_quote_next_to_interest_goes_to_a_person_and_suppresses_nothing(make_ctx):
+    """Their company's footer can say "unsubscribe" below the quote: in doubt, the sequence stops and a person reads it."""
+    ctx, _, sent = contacted(make_ctx)
+    body = ("Sounds interesting, can we talk Thursday?\n\nOn Tue, Oct 27, 2026 Sales <sales@us.example> wrote:\n> Hi\n\n"
+            "To unsubscribe from our newsletter write to news@brightline.example\n")
+    deliver(ctx, in_thread(sent, body))
+    r = latest_reply(ctx)
+    assert (r.category, r.confidence, r.status) == ("interested", "low", "needs_review")
+    assert DAVID not in suppressed_values(ctx) and lead_of(ctx).outreach_status == "interested"
+
+
+def test_ok_a_reply_without_a_header_that_reads_like_an_absence_note_goes_to_a_person(make_ctx):
+    ctx, _, sent = contacted(make_ctx)
+    deliver(ctx, in_thread(sent, "I am on vacation until the 5th."))
+    r = latest_reply(ctx)
+    assert (r.category, r.status) == ("out_of_office", "needs_review") and lead_of(ctx).outreach_status == "replied"
+
+
+def test_ok_german_and_french_quotes_keep_our_footer_out_of_the_reply():
+    for head in ("Am 27.10.2026 um 11:00 schrieb Sales <sales@us.example>:", "Le 27 oct. 2026 à 11:00, Sales a écrit :",
+                 "Von: Sales <sales@us.example>"):
+        assert new_text(f"Gerne.\n\n{head}\nHi David,\nWould a call be useful?") == "Gerne."
+    wrapped = 'Yes.\nHi David,\nTo stop receiving emails from us, reply with\n"unsubscribe" or write to hello@us.example.'
+    assert new_text(wrapped) == "Yes.\nHi David,"
+    assert words(wrapped)[0] != "unsubscribe"
+
+
+def test_ok_a_refusal_that_is_not_about_the_address_goes_back_to_a_person_and_suppresses_nothing(make_ctx):
+    ctx, _, fid = drafted(make_ctx)
+    ScriptedSMTP.reset()
+    approve(web(ctx), fid)
+    ScriptedSMTP.script = [smtplib.SMTPRecipientsRefused({DAVID: (550, b"5.7.1 blocked by policy")})]
+    run(ctx, sender_for(ctx, ScriptedSMTP))
+    f = followup(ctx, fid)
+    assert f.status == "awaiting_approval" and f.approved_at is None and "refused" in f.blocked_reason
+    assert DAVID not in suppressed_values(ctx) and len(ScriptedSMTP.attempts) == 1
+    with ctx.db.session() as s:
+        assert s.execute(select(Alert).where(Alert.message.contains(f"Follow-up #{fid}"))).scalars().first()
+
+
+def test_ok_a_temporary_refusal_is_tried_again(make_ctx):
+    ctx, _, fid = drafted(make_ctx)
+    ScriptedSMTP.reset()
+    approve(web(ctx), fid)
+    ScriptedSMTP.script = [smtplib.SMTPRecipientsRefused({DAVID: (450, b"4.2.1 try later")})]
+    run(ctx, sender_for(ctx, ScriptedSMTP))
+    assert followup(ctx, fid).status == "approved" and DAVID not in suppressed_values(ctx)
+    run(ctx, sender_for(ctx, ScriptedSMTP), NOW + timedelta(minutes=20))
+    assert followup(ctx, fid).status == "sent"
+
+
+def test_ok_a_dead_address_is_handled_as_a_bounce(make_ctx):
+    ctx, _, fid = drafted(make_ctx)
+    ScriptedSMTP.reset()
+    approve(web(ctx), fid)
+    ScriptedSMTP.script = [smtplib.SMTPRecipientsRefused({DAVID: (550, b"5.1.1 no such user")})]
+    run(ctx, sender_for(ctx, ScriptedSMTP))
+    f = followup(ctx, fid)
+    assert (f.status, f.delivery_status) == ("cancelled", "bounced") and DAVID in suppressed_values(ctx)
+    assert lead_of(ctx).outreach_status == "bounced"
+    with ctx.db.session() as s:
+        assert s.execute(select(Contact).where(Contact.email == DAVID)).scalar_one().email_status == "bounced"
+
+
 def test_defect_a_rejected_follow_up_is_drafted_again_on_the_next_run(make_ctx):
     """_progress_sequences looks only at the last sent step and at open drafts. Rejecting step 2 leaves neither, so an
     identical step 2 is back in the queue on the next run, every time. Docs: a rejection decides the email."""
@@ -1524,3 +1618,19 @@ def test_defect_booking_link_sent_but_no_notice_ever_read_and_nobody_is_warned(m
         r["detail"] for r in rows if "calendly" in r.get("name", "").lower()]
     warned = [t for t in texts if re.search(r"(?i)calendly.*(notice|notification)|(notice|notification).*calendly", t)]
     assert warned, texts
+
+
+def test_ok_an_alert_is_raised_days_after_a_booking_link_with_no_notice_and_closes_when_one_is_read(make_ctx, monkeypatch):
+    ctx, _ = _booking_link_sent_and_booked_elsewhere(make_ctx)
+    run_inbox(ctx)
+    with ctx.db.session() as s:
+        assert not s.execute(select(Alert).where(Alert.key == "calendly:no_notices")).scalars().first()  # too early
+        f = s.execute(select(FollowUp).where(FollowUp.purpose == "booking_link")).scalar_one()
+        f.sent_at = utcnow() - timedelta(days=4)
+    run_inbox(ctx)
+    with ctx.db.session() as s:
+        a = s.execute(select(Alert).where(Alert.key == "calendly:no_notices")).scalar_one()
+        assert a.level == "warning" and a.resolved_at is None
+    deliver(ctx, notice())
+    with ctx.db.session() as s:
+        assert s.execute(select(Alert).where(Alert.key == "calendly:no_notices")).scalar_one().resolved_at is not None

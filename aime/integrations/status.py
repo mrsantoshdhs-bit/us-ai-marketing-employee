@@ -66,8 +66,14 @@ def integration_statuses(ctx: AppContext, session: Session, include_scheduler: b
     reading, where = mail_accounts.reading_status(session, s)
     rows.append({"name": "Sales mailbox (replies, bounces)", "state": "CONFIGURED" if reading else "NOT CONFIGURED",
                  "detail": where, "action": ""})
+    from aime.reply_intel import booking_links_without_notice
+
+    links, _oldest = booking_links_without_notice(session)
+    unconfirmed = f"{links} booking link(s) sent, but no Calendly notice has ever reached the monitored mailbox" if links else ""
     rows.append({"name": "Booking link (Calendly)", "state": "CONFIGURED" if s.calendly_url else "NOT CONFIGURED",
-                 "detail": s.calendly_url or "CALENDLY_URL empty: replies ask for times instead", "action": ""})
+                 "detail": (f"{s.calendly_url}: {unconfirmed}" if unconfirmed else s.calendly_url)
+                 or "CALENDLY_URL empty: replies ask for times instead",
+                 "action": "Forward Calendly's notifications to the monitored mailbox" if unconfirmed else ""})
 
     llm_ok = llm_reachable(ctx)  # probed now (cached 60 s), not the value cached when this process started
     rows.append({"name": "Local LLM (Ollama)", "state": "AVAILABLE" if llm_ok else "UNAVAILABLE",

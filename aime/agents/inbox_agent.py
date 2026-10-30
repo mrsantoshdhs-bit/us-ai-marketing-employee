@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import imaplib
 import re
+from datetime import timedelta
 
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -20,7 +21,12 @@ from aime.db import kv_get, kv_set
 from aime.inbox import Mailbox, ParsedEmail, new_text, parse_message
 from aime.meetings import check_double_bookings
 from aime.models import Alert, Company, Contact, FollowUp, InboundEmail, Lead
-from aime.reply_intel import CALENDLY_NOTICE, process_pending
+from aime.monitoring import alert_once, resolve_alerts
+from aime.reply_intel import BOOKING_NOTICE_DAYS, CALENDLY_NOTICE, booking_links_without_notice, process_pending
+from aime.timeutil import utcnow
+
+
+NOTICE_ALERT = "calendly:no_notices"
 
 
 class InboxInput(BaseModel):
@@ -191,6 +197,17 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         kv_set(session, state_key, state)
         session.commit()
 
+    def _watch_booking_notices(self, session: Session) -> None:
+        """Booking links went out days ago and no Calendly notice was ever read: bookings are not being recorded."""
+        count, oldest = booking_links_without_notice(session)
+        active = set()
+        if oldest is not None and utcnow() - oldest >= timedelta(days=BOOKING_NOTICE_DAYS):
+            active.add(NOTICE_ALERT)
+            alert_once(session, "warning", self.name, f"{count} booking link(s) sent, but no Calendly notice has ever "
+                       "reached the monitored mailbox, so bookings are not recorded. Forward Calendly's notifications to "
+                       "it (docs/SALES_SETUP.md section 6).", self.settings, key=NOTICE_ALERT)
+        resolve_alerts(session, (NOTICE_ALERT,), active)
+
     def execute(self, inp: InboxInput, session: Session) -> InboxOutput:
         out = InboxOutput()
         from aime.models import MailAccount
@@ -210,6 +227,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                 failed.append(exc)
         out.categories = process_pending(session, self.settings, self.name, llm=self.ctx.llm)
         check_double_bookings(session, self.settings)  # after the whole batch: a reschedule's two notices are one change
+        self._watch_booking_notices(session)
         self._meetings(session, out)
         out.needs_review = len(session.execute(select(InboundEmail.id).where(InboundEmail.status == "needs_review")).all())
         if failed:

@@ -346,6 +346,8 @@ def campaign_for(session: Session, f: FollowUp, mode: str, now: datetime,
 
     if f.purpose == "reengage":
         return None, "a re-engagement email to a lead who never answered always needs a person's approval"
+    if (f.generator or "").startswith("AI"):
+        return None, "its opening was written by the local AI model: a person reads it first"
     to = recipient(f)
     active = active_authorizations(session, now)
     camps = [a for a in active if to in (a.recipients or [])]
@@ -449,6 +451,8 @@ def campaign_approval_problem(session: Session, f: FollowUp, now: datetime, sett
     if (f.approved_by or "").startswith("campaign"):
         if settings is not None and settings.require_human_approval:
             return "REQUIRE_HUMAN_APPROVAL=true: every email needs a person"
+        if (f.generator or "").startswith("AI"):
+            return "its opening was written by the local AI model: a person reads it first"
         day, total = sent_counts(session, a, now)
         if day >= a.daily_limit or total >= a.total_limit:
             return "its campaign's daily or total limit is reached"

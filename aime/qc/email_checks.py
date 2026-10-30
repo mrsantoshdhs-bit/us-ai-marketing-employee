@@ -20,6 +20,9 @@ SPAM_RE = re.compile(r"\b(free|guarantee[ds]?|risk[- ]free|act now|limited time|
                      r"no obligation|special promotion|click here|100%|once in a lifetime|exclusive deal|"
                      r"amazing|incredible|best in class|#1)\b|\${2,}|!{2,}", re.I)
 CLAIM_RE = re.compile(r"\b(we (increased|doubled|tripled|saved|cut|helped)|clients like|customers like|trusted by|"
+                      r"we('ve| have)( already| also)? (worked|partnered|done|built|delivered|served|helped)|"
+                      r"we (already )?(worked|partnered|delivered|served|built this|did this)|"
+                      r"(clients|customers) (include|such as)|"
                       r"leading|leader in|award[- ]winning|proven to|industry[- ]best|world[- ]class)\b", re.I)
 QUOTE_RE = re.compile(r'"([^"]{8,})"')
 LINK_RE = re.compile(r"https?://|www\.", re.I)
@@ -67,6 +70,13 @@ def run_email_checks(subject: str, body: str, evidence: list[dict], contact, sup
     numbers = re.findall(r"\d[\d,.%]*", re.sub(r"\b\d{1,3}-minute\b", "", plain))  # our meeting length is not a claim
     results.append(CheckResult("numbers", "uncertain" if numbers else "pass",
                                f"check the source for: {', '.join(numbers[:5])}" if numbers else "none outside quotes"))
+
+    # Every draft names the lead's own company, except the closing one ("Closing the loop on ...", aime/outreach.py).
+    company = getattr(getattr(contact, "company", None), "name", None)
+    if company and not subject.lower().startswith("closing the loop"):
+        named = _normalize(company) in _normalize(f"{subject}\n{main}")
+        results.append(CheckResult("company name", "pass" if named else "uncertain",
+                                   f"names {company}" if named else f"{company} is not named: is this the right company?"))
 
     sources = [_normalize(e.get("source_text") or e.get("fact") or "") for e in evidence or []]
     quotes = QUOTE_RE.findall(main)

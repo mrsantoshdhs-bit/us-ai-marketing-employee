@@ -209,11 +209,13 @@ def record_delivery(session: Session, f: FollowUp, sent_at, delivered_to: str | 
 
 
 def stop_sequence(session: Session, lead: Lead, status: str, reason: str, actor: str) -> int:
-    """Cancel every open email of this lead's sequence and record why. Returns how many were cancelled."""
+    """Cancel every open email of this lead's sequence and record why. Returns how many were cancelled. A later reply
+    never changes the "unsubscribed" stage: the opt-out still stands."""
     cancelled = 0
     for f in session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
                                                     FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
         f.status, f.blocked_reason = "cancelled", reason[:300]
         cancelled += 1
-    set_status(session, lead, status, actor, reason)
+    if lead.outreach_status != "unsubscribed":
+        set_status(session, lead, status, actor, reason)
     return cancelled
