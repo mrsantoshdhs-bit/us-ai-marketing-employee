@@ -4,7 +4,8 @@ The OS scheduler (Windows Task Scheduler) only calls `tick` every few minutes; a
 decisions live here, so missed runs (PC asleep/off) are caught up on the next tick.
 A failed daily/weekly job is retried twice for the same slot, after 30 and then 60 minutes; a run that was
 killed or crashed counts as a failure. Every job is idempotent or guarded by durable state, so retries never
-duplicate external actions.
+duplicate external actions. A recorded time in the future (the PC's clock was wrong when it was written, and has
+since been corrected) is ignored, so it cannot hold jobs back until the clock catches up.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from aime import automation, maintenance, process_priority
 from aime.config import Settings
 from aime.context import AppContext
 from aime.models import AgentRun, JobRun, JobState
-from aime.monitoring import alert_once, write_heartbeat
+from aime.monitoring import alert_once, read_heartbeat, resolve_alerts, write_heartbeat
 from aime.redact import redact
 from aime.runtime import current_job_run_id
 from aime.timeutil import as_aware_utc, local_tz, to_naive_utc, utcnow
@@ -35,6 +36,7 @@ RETRY_BACKOFF = timedelta(minutes=30)
 MAX_DAILY_RETRIES = 3
 ABANDON_AFTER = timedelta(hours=2)  # Task Scheduler kills a tick after 1 hour
 ORPHAN_AFTER = timedelta(minutes=10)  # a 'running' row whose job lock has no live owner is abandoned after this
+CLOCK_SKEW = timedelta(minutes=5)  # a recorded time further ahead of now than this comes from a clock that was wrong
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
@@ -86,17 +88,31 @@ def _last_slot(spec: JobSpec, local_now: datetime, tz) -> datetime:
     return slot
 
 
+def _next_slot(spec: JobSpec, slot: datetime) -> datetime:
+    following = slot + timedelta(days=1)
+    while spec.weekdays and following.weekday() not in spec.weekdays:
+        following += timedelta(days=1)
+    return following
+
+
 def retry_backoff(consecutive_failures: int) -> timedelta:
     return RETRY_BACKOFF * (2 ** max(0, consecutive_failures - 1))
+
+
+def _recorded(stamp: datetime | None, now: datetime) -> datetime | None:
+    """A time from a job's state, unless it lies in the future: then the clock was wrong when it was written."""
+    return stamp if stamp is not None and stamp <= now + CLOCK_SKEW else None
 
 
 def is_due(spec: JobSpec, state: JobState | None, now: datetime, tz, tick_minutes: int = 15) -> tuple[bool, str]:
     if not spec.enabled or (state is not None and not state.enabled):
         return False, "disabled"
+    last_attempt = _recorded(state.last_attempt_at, now) if state else None
+    last_success = _recorded(state.last_success_at, now) if state else None
     if spec.every_minutes:
-        if state is None or state.last_attempt_at is None:
+        if last_attempt is None:
             return True, "never run"
-        elapsed = now - state.last_attempt_at
+        elapsed = now - last_attempt
         # A busy PC starts a tick minutes late; the next one, on time, must not find the job "not due yet" and skip it.
         slack = timedelta(minutes=min(tick_minutes / 2, spec.every_minutes / 2))
         if elapsed >= timedelta(minutes=spec.every_minutes) - slack:
@@ -105,13 +121,13 @@ def is_due(spec: JobSpec, state: JobState | None, now: datetime, tz, tick_minute
         return False, f"next in {int(remaining.total_seconds() // 60)} min"
     last_slot = _last_slot(spec, as_aware_utc(now).astimezone(tz), tz)
     last_slot_utc = to_naive_utc(last_slot)
-    if state and state.last_success_at and state.last_success_at >= last_slot_utc:
+    if last_success and last_success >= last_slot_utc:
         return False, "already succeeded for the latest slot"
-    if state and state.last_attempt_at and state.last_attempt_at >= last_slot_utc:
+    if last_attempt and last_attempt >= last_slot_utc:
         if state.consecutive_failures >= MAX_DAILY_RETRIES:
             return False, "failed repeatedly; waiting for the next slot"
         wait = retry_backoff(state.consecutive_failures)
-        if now - state.last_attempt_at < wait:
+        if now - last_attempt < wait:
             return False, f"retry backoff ({int(wait.total_seconds() // 60)} min)"
         return True, f"retry {state.consecutive_failures + 1}/{MAX_DAILY_RETRIES} for slot {last_slot:%Y-%m-%d %H:%M}"
     return True, f"slot {last_slot:%Y-%m-%d %H:%M} pending"
@@ -122,16 +138,21 @@ def next_run(spec: JobSpec, state: JobState | None, now: datetime, tz) -> dateti
     before `now` means it runs at the next check-in. None when the job is disabled."""
     if not spec.enabled or (state is not None and not state.enabled):
         return None
+    last_attempt = _recorded(state.last_attempt_at, now) if state else None
+    last_success = _recorded(state.last_success_at, now) if state else None
     if spec.every_minutes:
-        if state is None or state.last_attempt_at is None:
+        if last_attempt is None:
             return now
-        return state.last_attempt_at + timedelta(minutes=spec.every_minutes)
+        return last_attempt + timedelta(minutes=spec.every_minutes)
     last_slot = _last_slot(spec, as_aware_utc(now).astimezone(tz), tz)
-    if state and state.last_success_at and state.last_success_at >= to_naive_utc(last_slot):
-        following = last_slot + timedelta(days=1)
-        while spec.weekdays and following.weekday() not in spec.weekdays:
-            following += timedelta(days=1)
-        return to_naive_utc(following)
+    last_slot_utc = to_naive_utc(last_slot)
+    if last_success and last_success >= last_slot_utc:
+        return to_naive_utc(_next_slot(spec, last_slot))
+    if last_attempt and last_attempt >= last_slot_utc:
+        failures = state.consecutive_failures or 0
+        if failures >= MAX_DAILY_RETRIES:
+            return to_naive_utc(_next_slot(spec, last_slot))
+        return max(now, last_attempt + retry_backoff(failures))
     return now
 
 
@@ -232,8 +253,8 @@ def recover(ctx: AppContext, now: datetime | None = None) -> dict:
             r.status, r.error = "abandoned", "Process ended before the job finished (crash, sleep, or kill)"
             st = s.get(JobState, r.job) or JobState(job=r.job, consecutive_failures=0, enabled=True)
             if st.last_attempt_at is None or st.last_attempt_at <= r.started_at:  # no later attempt recorded
+                st.consecutive_failures = _same_slot_failures(ctx, r.job, st, r.started_at) + 1
                 st.last_attempt_at, st.last_status = r.started_at, "abandoned"
-                st.consecutive_failures = (st.consecutive_failures or 0) + 1
             s.add(st)
         ids = [r.id for r in dead]
         agents = s.execute(update(AgentRun).where(AgentRun.status == "running", (AgentRun.started_at < cutoff)
@@ -250,7 +271,7 @@ def _same_slot_failures(ctx: AppContext, name: str, state: JobState, started: da
         return previous
     tz = local_tz(ctx.settings.schedule.get("timezone"))
     slot = to_naive_utc(_last_slot(spec, as_aware_utc(started).astimezone(tz), tz))
-    return previous if state.last_attempt_at >= slot else 0
+    return previous if slot <= state.last_attempt_at <= started + CLOCK_SKEW else 0
 
 
 def _record(ctx: AppContext, name: str, run_id: int | None, started: datetime, status: str, detail: dict,
@@ -343,6 +364,28 @@ def due_jobs(ctx: AppContext, now: datetime | None = None) -> list[tuple[JobSpec
         return [(spec, *is_due(spec, states.get(spec.name), now, tz, tick)) for spec in load_job_specs(ctx.settings)]
 
 
+def _note_gap(ctx: AppContext, previous: dict | None, now: datetime) -> None:
+    """Leave a record of a stretch without check-ins, from the last beat of the previous tick. Doctor and the monitor
+    run inside a tick, after it refreshed the heartbeat, so they never see the stop; the live "Off duty" status and
+    the watchdog's notification end with the outage. Info level: a record, no notification (a PC may sleep at night),
+    and only the latest stretch stays open. Keeping this record must never stop the tick."""
+    try:
+        since = datetime.fromisoformat(previous["at"].rstrip("Z"))
+    except (TypeError, KeyError, ValueError, AttributeError):
+        return  # no earlier check-in, or an unreadable one
+    gap = now - since
+    if gap <= timedelta(minutes=int(ctx.settings.schedule.get("tick_minutes", 15)) * 2 + 5):
+        return
+    message = (f"No scheduled check-in for {gap.total_seconds() / 3600:.1f} h, from {since:%Y-%m-%d %H:%M} to "
+               f"{now:%Y-%m-%d %H:%M} UTC: nothing ran in that time. The PC may have been asleep, off or signed out.")
+    try:
+        with ctx.db.session() as s:
+            resolve_alerts(s, ("scheduler:gap",), set())
+            alert_once(s, "info", "scheduler", message, ctx.settings, key="scheduler:gap")
+    except Exception:  # keep the scheduler alive no matter what
+        log.exception("Could not record: %s", message)
+
+
 def tick(ctx: AppContext, trigger: str = "scheduler", now: datetime | None = None) -> dict:
     window = maintenance.active(ctx.settings.data_dir)
     if window:
@@ -354,7 +397,9 @@ def tick(ctx: AppContext, trigger: str = "scheduler", now: datetime | None = Non
         return {"status": "skipped", "reason": "another tick is running", "ran": []}
     ran: list[dict] = []
     try:
+        previous = read_heartbeat(ctx.settings)
         write_heartbeat(ctx.settings, {"trigger": trigger, "pid": os.getpid(), "state": "running"})
+        _note_gap(ctx, previous, now or utcnow())
         recovered = recover(ctx, now)
         for spec, due, reason in due_jobs(ctx, now):
             if due:

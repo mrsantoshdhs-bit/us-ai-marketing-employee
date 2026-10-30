@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, event, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from aime.timeutil import utcnow
@@ -603,6 +603,7 @@ class AgentRun(Base):
     error: Mapped[str | None] = mapped_column(Text)
     # the language model in this run (aime.llm.usage): calls, tokens as the model reported them, time, cost
     llm_calls: Mapped[int] = mapped_column(Integer, default=0)
+    llm_failures: Mapped[int] = mapped_column(Integer, default=0)  # of those calls, the ones that failed
     llm_tokens: Mapped[int] = mapped_column(Integer, default=0)
     llm_ms: Mapped[int] = mapped_column(Integer, default=0)
     llm_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
@@ -642,10 +643,18 @@ class Alert(Base):
     message: Mapped[str] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime)  # a dismissal keeps it quiet for 24 hours from here
     # What the alert is about (e.g. "doctor:<check>", "llm:down"): an open alert with a key is updated instead of
     # repeated, and closed by aime.monitoring.resolve_alerts once the problem is gone (resolved_at set then).
     key: Mapped[str | None] = mapped_column(String(120))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+@event.listens_for(Alert.acknowledged, "set")
+def _stamp_dismissal(alert: Alert, value: bool, previous, _initiator) -> None:
+    """Every way an alert gets dismissed (a person, resolve_alerts) records when."""
+    if value and previous is not True:
+        alert.acknowledged_at = utcnow()
 
 
 class Report(Base):
