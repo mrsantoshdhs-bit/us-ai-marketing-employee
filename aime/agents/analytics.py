@@ -15,7 +15,7 @@ from aime.agents.base import BaseAgent
 from aime.integrations.status import integration_statuses
 from aime.knowledge.industries import industry_label
 from aime.knowledge.services import service_name
-from aime.metrics_import import import_metrics_dir
+from aime.metrics_import import import_metrics_dir, latest_metric_ids
 from aime.models import (Activity, AgentRun, Alert, Company, Contact, ContentItem, ContentMetric, FollowUp, InboundEmail,
                          InboundInquiry, Meeting,
                          Lead, Opportunity, Report, Signal)
@@ -43,9 +43,10 @@ def sales_kpis(count, since) -> dict:
     """Sales pipeline counts from records only. Simulated replies and meetings are kept apart."""
     researched = (Contact.source.in_(("website", "sec_filing")),)
     real = (InboundEmail.is_simulated.is_(False),)
+    read = Company.research_status.in_(("done", "no_people"))  # a site that could not be read is not research
     out = {
-        "companies_researched_period": count(Company, Company.researched_at >= since),
-        "companies_researched_total": count(Company, Company.researched_at.is_not(None)),
+        "companies_researched_period": count(Company, read, Company.researched_at >= since),
+        "companies_researched_total": count(Company, read, Company.researched_at.is_not(None)),
         "decision_makers_period": count(Contact, *researched, Contact.last_name.is_not(None), Contact.created_at >= since),
         "decision_makers_total": count(Contact, *researched, Contact.last_name.is_not(None)),
         "usable_emails_total": count(Contact, *researched, Contact.email_status.in_(("published", "role_address")),
@@ -226,6 +227,8 @@ class AnalyticsReportingAgent(BaseAgent[ReportInput, ReportOutput]):
         imported = 0
         if inp.import_metrics:
             imported, batch = import_metrics_dir(session, s.imports_dir / "linkedin_metrics")
+            for problem in batch.rejected:
+                session.add(Alert(level="warning", source=self.name, message=f"Metrics file not imported: {problem}"[:500]))
             session.commit()  # metrics are saved before their files leave the import folder
             batch.archive()
 
@@ -267,7 +270,8 @@ class AnalyticsReportingAgent(BaseAgent[ReportInput, ReportOutput]):
             ("Qualified leads", kpis["qualified_period"], kpis["leads_qualified"]),
             ("Inbound inquiries", kpis["inbound_period"], kpis["inbound_total"]),
             ("Opportunities", kpis["opportunities_new_period"], kpis["opportunities_open"]),
-            ("Emails sent (approved replies)", kpis["emails_sent_period"], kpis["emails_sent_total"]),
+            ("Emails sent (approved replies)", kpis["emails_sent_period"] - kpis["outreach_sent_period"],
+             kpis["emails_sent_total"] - kpis["outreach_sent_total"]),  # outreach has its own row below
             ("Posts created", kpis["content_created_period"], count(ContentItem)),
             ("Posts published (confirmed by LinkedIn)", kpis["content_published_period"], kpis["content_published_total"]),
             ("Agent runs / failures", f"{kpis['agent_runs_period']} / {kpis['agent_failures_period']}", "—"),
@@ -300,11 +304,11 @@ class AnalyticsReportingAgent(BaseAgent[ReportInput, ReportOutput]):
         alerts = session.execute(select(Alert).where(Alert.created_at >= since).order_by(Alert.created_at.desc())
                                  .limit(20)).scalars().all()
         engagement = []
-        for item, imp, rea, com in session.execute(
-                select(ContentItem, func.sum(ContentMetric.impressions), func.sum(ContentMetric.reactions),
-                       func.sum(ContentMetric.comments)).join(ContentMetric, ContentMetric.content_id == ContentItem.id)
-                .group_by(ContentItem.id).order_by(func.sum(ContentMetric.reactions).desc()).limit(5)).all():
-            engagement.append({"title": item.title, "impressions": imp or 0, "reactions": rea or 0, "comments": com or 0})
+        for item, metric in session.execute(
+                select(ContentItem, ContentMetric).join(ContentMetric, ContentMetric.content_id == ContentItem.id)
+                .where(ContentMetric.id.in_(latest_metric_ids())).order_by(ContentMetric.reactions.desc()).limit(5)).all():
+            engagement.append({"title": item.title, "impressions": metric.impressions, "reactions": metric.reactions,
+                               "comments": metric.comments})
 
         previous, breakdowns = [], {}
         if inp.kind == "weekly":
