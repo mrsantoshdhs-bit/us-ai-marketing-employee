@@ -37,11 +37,10 @@ from aime.calendar_slots import candidate_slots
 from aime.content import add_brand_line, compose_template, quality_check
 from aime.db import kv_set
 from aime.doctor import run_checks
-from aime.integrations.linkedin import format_commentary
 from aime.integrations.status import _LLM_PROBE
 from aime.knowledge.industries import INDUSTRIES
 from aime.knowledge.services import SERVICES
-from aime.models import (Activity, AgentRun, Alert, Campaign, Company, Contact, ContentItem, ContentMetric, FollowUp,
+from aime.models import (AgentRun, Alert, Campaign, Company, Contact, ContentItem, ContentMetric, FollowUp,
                          InboundEmail, InboundInquiry, JobRun, JobState, Lead, MarketingPlan, Meeting, OAuthToken,
                          Opportunity, PublishAttempt, Report, User)
 from aime.monitoring import alert_once, check_health, read_heartbeat, write_heartbeat
@@ -1128,7 +1127,7 @@ def test_defect_conversion_rate_on_home_can_exceed_100_percent(ctx):
     """The funnel divides meetings (records) by interested leads (people): one lead with two meetings shows 200%."""
     with ctx.db.session() as s:
         ld = _lead(s, "Twice", outreach_status="interested")
-        for i in range(2):
+        for _i in range(2):
             s.add(Meeting(lead_id=ld.id, invitee_email="x@twice.example", starts_at=utcnow(), ends_at=utcnow(), source="manual"))
     _, view = _cards(ctx)
     rate = next(st["rate"] for st in view["pipeline_stages"] if st["label"] == "Meeting booked")

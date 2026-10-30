@@ -42,7 +42,7 @@ from tests.test_company_research import SITE, add_company, make_handler
 from tests.test_contact_validation import FakeChecker
 from tests.test_inbound_sales import TUESDAY_11AM_ET, FakeSMTP
 from tests.test_inbox import MAIL, FakeIMAP, mail
-from tests.test_outreach import SENDING, approve_all, drafts, lead_of, researched
+from tests.test_outreach import SENDING, approve_all, drafts, researched
 from tests.test_publishing import AUTH, add_post, add_token, linkedin_api
 
 

@@ -145,7 +145,7 @@ PERF_COLUMNS = ("name", "leads_owned", "assigned", "emails", "pos", "neg", "meet
 def perf(html, who):
     for cells in table_rows(html):
         if cells and cells[0] == who:
-            return dict(zip(PERF_COLUMNS, cells))
+            return dict(zip(PERF_COLUMNS, cells, strict=False))
     raise AssertionError(f"no row for {who} in the performance table")
 
 
@@ -397,7 +397,7 @@ def test_ok_qualification_outcomes_match_on_the_page(org):
         assert dana.id in drafts and vi.id in drafts  # both asked us: both get an answer waiting for a person
         assert lou.id not in drafts
         expect = {x.id: (x.score, x.status, x.grade) for x in by_email.values()}
-    for lid, (score, status, grade) in expect.items():
+    for lid, (score, status, _grade) in expect.items():
         page = boss.get(f"/leads/{lid}").text
         assert f"Score {score}/100" in page and status in page
     assert "Maple Ltd" not in boss.get("/leads?status=qualified").text

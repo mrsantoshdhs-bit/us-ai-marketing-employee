@@ -331,7 +331,7 @@ def test_ok_outreach_day_starts_at_new_york_midnight_across_the_clock_change(mak
     ids = seed_approved(ctx, 4)
     with ctx.db.session() as s:
         for fid, at in zip(ids, (datetime(2026, 11, 2, 4, 59), datetime(2026, 11, 2, 5, 1),  # around Mon 00:00 EST
-                                 datetime(2026, 11, 1, 3, 59), datetime(2026, 11, 1, 4, 1))):  # around Sun 00:00 EDT
+                                 datetime(2026, 11, 1, 3, 59), datetime(2026, 11, 1, 4, 1)), strict=False):  # around Sun 00:00 EDT
             f = s.get(FollowUp, fid)
             f.status, f.sent_at = "sent", at
         s.flush()
