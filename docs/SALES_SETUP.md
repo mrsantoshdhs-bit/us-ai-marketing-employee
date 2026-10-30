@@ -49,6 +49,9 @@ python -m aime email-check --connect   # also signs in to SMTP (sends nothing) a
 ```
 
 Each problem is explained with the fix (for example the DNS record to add, or "Gmail needs an app password").
+A mailbox set up on the Mailboxes page (Super Admin) is checked in place of the `.env` mail settings: the Primary
+one, else the first one that reads replies. The first line says which, and warns while none is Primary (nothing can
+be sent then).
 Passwords are never printed. The dashboard's **Integrations** page and `python -m aime doctor` show the same
 state.
 

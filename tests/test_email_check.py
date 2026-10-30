@@ -88,6 +88,29 @@ def test_missing_settings_are_reported_without_signing_in(make_ctx, capsys):
     assert "[PASS] Sending switch: OFF" in out and "[SKIP] Mailbox sign-in" in out
 
 
+def test_a_mailboxes_panel_mailbox_is_checked_in_place_of_env(make_ctx, capsys, monkeypatch):
+    """Production keeps its mailbox on the Mailboxes page, not in .env: the check must not report it as missing."""
+    from aime import mail_accounts as ma
+
+    monkeypatch.setattr("aime.email_check.dns_resolver", lambda: resolver(GOOD_DNS))
+    ctx = make_ctx(**{k: v for k, v in MAILBOX.items() if not k.startswith(("smtp_", "imap_"))})
+    with ctx.db.session() as s:
+        box = ma.save(s, "admin", {"provider": "gmail", "email": "sales@dhs.example", "secret": APP_PW})
+        ma.change(s, "admin", box.id, "enable")
+        ma.change(s, "admin", box.id, "read_on")
+        box_id = box.id
+    args = Namespace(connect=False, send_test=False, domain=None)
+    assert cmd_email_check(args, ctx) == 0
+    out = capsys.readouterr().out
+    assert "[WARN] Mailbox: sales@dhs.example (Mailboxes panel) reads replies but is not Primary" in out
+    assert "[PASS] SMTP settings: smtp.gmail.com:587, from sales@dhs.example, password set" in out
+    assert "[PASS] IMAP settings" in out and "[PASS] DKIM" in out and APP_PW not in out
+    with ctx.db.session() as s:
+        ma.change(s, "admin", box_id, "primary")
+    assert cmd_email_check(args, ctx) == 0
+    assert "[PASS] Mailbox: sales@dhs.example (Mailboxes panel): the sending mailbox, reads replies" in capsys.readouterr().out
+
+
 def test_ready_mailbox_passes_and_nothing_is_sent(make_ctx):
     reset()
     ctx = make_ctx(**MAILBOX)

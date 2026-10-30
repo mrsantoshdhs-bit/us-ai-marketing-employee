@@ -300,10 +300,17 @@ def _ask_password(prompt_fn) -> str | None:
 
 
 def cmd_email_check(args, ctx) -> int:
-    """Sales mailbox readiness: settings, SPF/DKIM/DMARC, SMTP and read-only IMAP sign-in, optional test email."""
-    from aime.email_check import run_email_check
+    """Sales mailbox readiness: settings, SPF/DKIM/DMARC, SMTP and read-only IMAP sign-in, optional test email. A
+    mailbox on the Mailboxes page is checked in place of the .env mail settings, as sending and reading use it."""
+    from aime import mail_accounts
+    from aime.email_check import panel_mailbox_check, run_email_check
 
-    checks = run_email_check(ctx.settings, connect=args.connect, send=args.send_test, domain=args.domain)
+    settings, first = ctx.settings, []
+    with ctx.db.session() as s:
+        box = mail_accounts.primary(s) or next(iter(mail_accounts.readable(s)), None)
+        if box is not None:
+            settings, first = mail_accounts.settings_for(ctx.settings, box), [panel_mailbox_check(box)]
+    checks = first + run_email_check(settings, connect=args.connect, send=args.send_test, domain=args.domain)
     for c in checks:
         print(f"[{c.status.upper():<4}] {c.name}: {c.detail}")
     failed = [c for c in checks if c.status == "fail"]
