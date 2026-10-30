@@ -6,11 +6,13 @@ tested; real mailbox reading starts once IMAP_HOST and the credentials are set.
 
 from __future__ import annotations
 
+import hashlib
 import imaplib
 import re
 
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent, RetryPolicy
@@ -127,6 +129,68 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
 
         return auth_results(raw)
 
+    def _store(self, session: Session, key: str, raw: bytes, own: set[str], out: InboxOutput) -> None:
+        p = parse_message(raw, own)
+        if p.from_email in own:
+            out.skipped_own += 1
+            return
+        if p.message_id and session.execute(select(InboundEmail.id).where(
+                InboundEmail.message_id == p.message_id)).first():
+            return
+        if self.settings.inbox_scope != "all" and not sales_related(session, p):
+            out.skipped_unrelated += 1  # read once (the mailbox position moves on), never stored
+            return
+        session.add(InboundEmail(
+            mailbox_uid=key, message_id=p.message_id,
+            in_reply_to=p.bounced_message_id if p.is_bounce and p.bounced_message_id else p.in_reply_to,
+            references=p.references, from_email=p.from_email, from_name=p.from_name, to_email=p.to_email,
+            subject=p.subject, received_at=p.received_at, body_text=p.body_text, new_text=new_text(p.body_text),
+            auto_submitted=p.auto_submitted, bounced_addresses=p.bounced_addresses, status="new",
+            auth_results=self._authentication(raw, p)))
+        out.stored += 1
+
+    def _keep_unreadable(self, session: Session, key: str, raw: bytes, own: set[str], exc: Exception,
+                         out: InboxOutput) -> None:
+        """An email that could not be read must neither stop the others nor disappear: it is kept without its text, so
+        it is handled like an empty reply (the sequence of a known sender stops) and a person opens it in the mailbox."""
+        found = re.search(rb"(?im)^from:[^\r\n]*?([\w.+-]+@[\w-]+(?:\.[\w-]+)+)", raw)
+        sender = found.group(1).decode("ascii", "replace").lower() if found else "unknown@unreadable.invalid"
+        if sender in own:
+            out.skipped_own += 1
+            return
+        stand_in = f"<unreadable-{hashlib.sha256(raw).hexdigest()[:32]}@aime.invalid>"
+        if session.execute(select(InboundEmail.id).where(InboundEmail.message_id == stand_in)).first():
+            return
+        self.log.warning("Email %s could not be read (%s)", key, type(exc).__name__)
+        session.add(InboundEmail(mailbox_uid=key, message_id=stand_in, from_email=sender, status="new", new_text="",
+                                 subject=f"(could not be read: open it in the mailbox, {key})"[:300], body_text=""))
+        session.add(Alert(level="warning", source=self.name,
+                          message=f"An email from {sender} could not be read ({type(exc).__name__}): please open it in "
+                                  f"the mailbox ({key}). It is on Replies."[:500]))
+        out.stored += 1
+
+    def _read_mailbox(self, session: Session, box: Mailbox, state_key: str, token, own: set[str], out: InboxOutput) -> None:
+        before = kv_get(session, state_key)
+        raws, state = box.fetch_new(before, token=token)
+        out.fetched += len(raws)
+        for key, raw in raws:
+            try:
+                self._store(session, key, raw, own, out)
+                session.commit()
+            except SQLAlchemyError:  # the database, not the email: the position stays, and it is read again next run
+                session.rollback()
+                raise
+            except Exception as exc:  # noqa: BLE001 -- whatever a stranger's email does, the good ones are still handled
+                session.rollback()
+                self._keep_unreadable(session, key, raw, own, exc, out)
+                session.commit()
+        for uid in state.get("skipped_uids") or []:  # the server would not give this one after several tries
+            if uid not in ((before or {}).get("skipped_uids") or []):
+                session.add(Alert(level="warning", source=self.name, message=f"An email (UID {uid}) could not be fetched "
+                                  f"after several tries and was skipped ({state_key}): please look for it in the mailbox."))
+        kv_set(session, state_key, state)
+        session.commit()
+
     def execute(self, inp: InboxInput, session: Session) -> InboxOutput:
         out = InboxOutput()
         from aime.models import MailAccount
@@ -136,34 +200,21 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         sources = self._sources(session) if self.settings.network_enabled else []
         if sources:
             out.mailbox = "; ".join(name for name, *_ in sources) + " (read-only)"
-        for _name, box, state_key, token in sources:
-            raws, state = box.fetch_new(kv_get(session, state_key), token=token)
-            out.fetched += len(raws)
-            for key, raw in raws:
-                p = parse_message(raw, own)
-                if p.from_email in own:
-                    out.skipped_own += 1
-                    continue
-                if p.message_id and session.execute(select(InboundEmail.id).where(
-                        InboundEmail.message_id == p.message_id)).first():
-                    continue
-                if self.settings.inbox_scope != "all" and not sales_related(session, p):
-                    out.skipped_unrelated += 1  # read once (the mailbox position moves on), never stored
-                    continue
-                session.add(InboundEmail(
-                    mailbox_uid=key, message_id=p.message_id,
-                    in_reply_to=p.bounced_message_id if p.is_bounce and p.bounced_message_id else p.in_reply_to,
-                    references=p.references, from_email=p.from_email, from_name=p.from_name, to_email=p.to_email,
-                    subject=p.subject, received_at=p.received_at, body_text=p.body_text, new_text=new_text(p.body_text),
-                    auto_submitted=p.auto_submitted, bounced_addresses=p.bounced_addresses, status="new",
-                    auth_results=self._authentication(raw, p)))
-                out.stored += 1
-            kv_set(session, state_key, state)
-            session.commit()
+        failed = []  # a mailbox that cannot be read fails the run, but only after the others' mail has been handled
+        for name, box, state_key, token in sources:
+            try:
+                self._read_mailbox(session, box, state_key, token, own, out)
+            except Exception as exc:  # noqa: BLE001 -- raised again below
+                session.rollback()
+                self.log.warning("Mailbox %s could not be read (%s)", name, type(exc).__name__)
+                failed.append(exc)
         out.categories = process_pending(session, self.settings, self.name, llm=self.ctx.llm)
         check_double_bookings(session, self.settings)  # after the whole batch: a reschedule's two notices are one change
         self._meetings(session, out)
         out.needs_review = len(session.execute(select(InboundEmail.id).where(InboundEmail.status == "needs_review")).all())
+        if failed:
+            session.commit()
+            raise failed[0]
         return out
 
 

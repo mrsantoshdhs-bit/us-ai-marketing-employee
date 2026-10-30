@@ -72,7 +72,7 @@ class OllamaProvider(LLMProvider):
                 names = {m.get("name") for m in resp.json().get("models", [])}
                 base = self.model.split(":")[0]
                 return self.model in names or any((n or "").split(":")[0] == base for n in names)
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError, AttributeError):  # down, or answering with something else than JSON
             return False
 
     def generate(self, prompt: str, system: str | None = None, max_tokens: int = 500, temperature: float = 0.7) -> str:
@@ -90,10 +90,14 @@ class OllamaProvider(LLMProvider):
                 resp = client.post(f"{self.url}/api/generate", json=body)
                 resp.raise_for_status()
                 data = resp.json()
-                text = data.get("response", "")
-        except httpx.HTTPError as exc:
+                if not isinstance(data, dict):
+                    raise ValueError("the answer is not a JSON object")
+                text = data.get("response") or ""
+                if not isinstance(text, str):
+                    raise ValueError("the answer has no text")
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:  # ValueError: a 200 that is not the expected JSON
             usage.record(0, 0, int((time.perf_counter() - t0) * 1000), ok=False)
-            raise LLMError(f"Ollama request failed: {exc}") from exc
+            raise LLMError(f"Ollama request failed: {exc}"[:300]) from exc
         usage.record(data.get("prompt_eval_count") or 0, data.get("eval_count") or 0,
                      int((time.perf_counter() - t0) * 1000), ok=bool(text.strip()))
         if not text.strip():

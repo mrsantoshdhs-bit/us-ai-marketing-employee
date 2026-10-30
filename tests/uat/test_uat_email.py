@@ -967,6 +967,45 @@ def test_defect_a_blank_sender_name_stops_all_reply_processing(make_ctx):
     assert f"jane@{SITE}" in suppressed_values(ctx)
 
 
+def test_ok_an_email_that_cannot_be_parsed_is_kept_for_a_person_and_the_next_one_is_handled(make_ctx, monkeypatch):
+    ctx, _, sent = contacted(make_ctx)
+    import aime.agents.inbox_agent as ia
+    real = ia.parse_message
+
+    def fussy(raw, own=frozenset()):
+        if b"poison" in raw:
+            raise RuntimeError("cannot parse")
+        return real(raw, own)
+    monkeypatch.setattr(ia, "parse_message", fussy)
+    FakeIMAP.messages = {1: b"From: Strange <strange@nowhere.example>\r\nSubject: poison\r\n\r\nhello\r\n",
+                         2: in_thread(sent, "Please remove me from your list.")}
+    assert run_inbox(ctx).stored == 2
+    with ctx.db.session() as s:
+        bad = s.execute(select(InboundEmail).where(InboundEmail.from_email == "strange@nowhere.example")).scalar_one()
+        assert bad.status == "needs_review" and "could not be read" in bad.subject
+        assert s.execute(select(Alert).where(Alert.message.contains("could not be read"))).scalars().first()
+    assert DAVID in suppressed_values(ctx)
+    assert run_inbox(ctx).fetched == 0  # the position moved on
+
+
+@pytest.mark.parametrize("text,suppressed,stage", [("Please remove me from your list.", True, "unsubscribed"),
+                                                   ("Who are you?", False, "replied")])
+def test_ok_a_failure_while_handling_one_reply_goes_to_a_person_and_protects_the_contact(make_ctx, monkeypatch, text,
+                                                                                         suppressed, stage):
+    ctx, _, sent = contacted(make_ctx)
+    import aime.reply_intel as ri
+
+    def broken(*a, **k):
+        raise RuntimeError("handling failed")
+    monkeypatch.setattr(ri, "suggest" if "Who" in text else "close_opportunities", broken)
+    deliver(ctx, in_thread(sent, text))
+    r = latest_reply(ctx)
+    assert r.status == "needs_review" and "could not be handled" in " ".join(r.reasons)
+    assert (DAVID in suppressed_values(ctx)) is suppressed and lead_of(ctx).outreach_status == stage
+    with ctx.db.session() as s:
+        assert s.execute(select(Alert).where(Alert.level == "error", Alert.message.contains("could not be handled"))).scalars().first()
+
+
 # =========================================================================== AI drafts and hallucination
 
 def inquiry_ctx(make_ctx, answer=None, **over):

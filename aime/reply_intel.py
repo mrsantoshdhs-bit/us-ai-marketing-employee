@@ -20,6 +20,7 @@ reasons and a "possible interest" alert, and the Sales Manager decides (Replies 
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 
@@ -35,6 +36,8 @@ from aime.integrations.email_smtp import POSTAL_PLACEHOLDER
 from aime.outreach import stop_sequence
 from aime.stages import move, opened
 from aime.timeutil import utcnow
+
+log = logging.getLogger("aime.inbox")
 
 PATTERNS: list[tuple[str, re.Pattern]] = [
     # Opt-outs in everyday wording and with typos ("unsubcribe", "remove my email from your list", "no more emails").
@@ -258,8 +261,10 @@ def suggest(settings, category: str, row: InboundEmail, contact: Contact | None,
     """The reply a person approves (or edits) before it goes out, in the prospect's thread. An interested reply gets
     the booking link, mentioning the day they asked for and what the call is about; one from a lead that has already
     booked (`meeting`) confirms that meeting instead of offering a second booking."""
-    name = (row.from_name or "").split()[0] if row.from_name else (contact.first_name if contact and contact.first_name else "there")
-    subject = row.subject if row.subject.lower().startswith("re:") else f"Re: {row.subject}"
+    words = (row.from_name or "").split() or ((contact.first_name or "").split() if contact else [])
+    name = words[0] if words else "there"
+    subject = row.subject or ""
+    subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
     sign = _signature(settings)
     if category == "interested":
         from aime.knowledge.services import service_name
@@ -460,32 +465,63 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
                  actor, type_="reply", body=(row.new_text or "")[:2000], company_id=row.company_id, lead_id=row.lead_id)
 
 
+def _hold_for_a_person(session: Session, row: InboundEmail, read: tuple | None, exc: Exception, actor: str) -> None:
+    """Handling this email failed. It must not stop the others and must not be lost: it goes to review with an alert,
+    and what protects the person is still done. An opt-out is suppressed; any human reply stops the sequence."""
+    session.rollback()
+    category, reasons = (read[0], list(read[2])) if read else ("other", [])
+    log.error("Reply %s could not be handled", row.id, exc_info=exc)
+    try:
+        if category == "unsubscribe":
+            suppress(session, row.from_email, "Unsubscribe request by email (a person checks it)")
+        if category not in ("bounce", "calendly", "out_of_office"):
+            _, _, lead = match(session, row)
+            if lead:
+                stop_sequence(session, lead, "unsubscribed" if category == "unsubscribe" else "replied",
+                              "Reply could not be handled automatically", actor)
+        session.commit()
+    except Exception:  # noqa: BLE001 -- the review below still has to happen
+        session.rollback()
+        log.exception("Reply %s: could not stop the sequence", row.id)
+    row.category, row.confidence, row.status = category, "low", "needs_review"
+    row.reasons = [*reasons, f"could not be handled automatically ({type(exc).__name__})"]
+    row.action_note, row.processed_at = "Could not be handled automatically: a person reads it", utcnow()
+    session.add(Alert(level="error", source="inbox", message=f"A reply from {row.from_email} could not be handled "
+                      f"automatically ({type(exc).__name__}): please read it on Replies."[:500]))
+    session.commit()
+
+
 def process_pending(session: Session, settings, actor: str, llm=None) -> dict:
     stats: dict[str, int] = {}
     ai_budget = AI_PER_RUN
     for row in session.execute(select(InboundEmail).where(InboundEmail.status == "new").order_by(InboundEmail.id)).scalars().all():
-        row.category, row.confidence, row.reasons = classify(row)
-        row.intent = intent_of(row)
-        row.sentiment, row.recommended_status = sentiment_and_recommendation(row.category, row.intent)
-        opinion = None
-        if llm is not None and ai_budget > 0 and row.category in ("question", "other") and row.confidence != "high":
-            ai_budget -= 1
-            started = time.perf_counter()
-            opinion = ai_second_opinion(llm, row)
-            if time.perf_counter() - started > AI_SLOW_SECONDS:  # a stuck model must not hold up the inbox job
-                ai_budget = 0
-            if opinion:
-                ai_cat, ai_meeting = opinion
-                row.reasons = list(row.reasons or []) + [
-                    f"AI ({getattr(llm, 'label', 'local model')}) suggests: {ai_cat.replace('_', ' ')}"
-                    + (", asks for a meeting" if ai_meeting else "") + " (please check)"]
-        act(session, settings, row, actor)
-        if opinion and (opinion[0] == "interested" or opinion[1]) and row.status == "needs_review":
-            where = f" ({row.lead.company.name})" if row.lead else ""
-            msg = (f"{'SIMULATED: ' if row.is_simulated else ''}Possible interest{', a meeting request' if opinion[1] else ''} "
-                   f"from {row.from_email}{where}: the AI reads it so, the rules were unsure. Please review it on Replies.")
-            session.add(Alert(level="info", source="inbox", message=msg[:500]))
-            notify_event(settings, msg)
+        read = None
+        try:
+            read = classify(row)
+            row.category, row.confidence, row.reasons = read
+            row.intent = intent_of(row)
+            row.sentiment, row.recommended_status = sentiment_and_recommendation(row.category, row.intent)
+            opinion = None
+            if llm is not None and ai_budget > 0 and row.category in ("question", "other") and row.confidence != "high":
+                ai_budget -= 1
+                started = time.perf_counter()
+                opinion = ai_second_opinion(llm, row)
+                if time.perf_counter() - started > AI_SLOW_SECONDS:  # a stuck model must not hold up the inbox job
+                    ai_budget = 0
+                if opinion:
+                    ai_cat, ai_meeting = opinion
+                    row.reasons = list(row.reasons or []) + [
+                        f"AI ({getattr(llm, 'label', 'local model')}) suggests: {ai_cat.replace('_', ' ')}"
+                        + (", asks for a meeting" if ai_meeting else "") + " (please check)"]
+            act(session, settings, row, actor)
+            if opinion and (opinion[0] == "interested" or opinion[1]) and row.status == "needs_review":
+                where = f" ({row.lead.company.name})" if row.lead else ""
+                msg = (f"{'SIMULATED: ' if row.is_simulated else ''}Possible interest{', a meeting request' if opinion[1] else ''} "
+                       f"from {row.from_email}{where}: the AI reads it so, the rules were unsure. Please review it on Replies.")
+                session.add(Alert(level="info", source="inbox", message=msg[:500]))
+                notify_event(settings, msg)
+            session.commit()
+        except Exception as exc:  # noqa: BLE001 -- one email must never stop the ones behind it, opt-outs included
+            _hold_for_a_person(session, row, read, exc, actor)
         stats[row.category] = stats.get(row.category, 0) + 1
-        session.commit()
     return stats
