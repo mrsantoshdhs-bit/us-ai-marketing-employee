@@ -37,7 +37,7 @@ def parse(form: dict) -> dict:
 
 
 def condition(audience: dict):
-    parts = [Lead.status.not_in(("merged", "disqualified"))]
+    parts = [Lead.status.not_in(("merged", "disqualified", "converted"))]  # a customer already won is no open lead
     a = audience or {}
     if a.get("industries"):
         parts.append(Company.industry.in_(a["industries"]))

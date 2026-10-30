@@ -215,6 +215,7 @@ class BaseAgent(ABC, Generic[InT, OutT]):
                 if used is not None and used.calls:
                     rate = float(getattr(self.settings, "llm_cost_per_1k_tokens", 0.0) or 0.0)
                     row.llm_calls, row.llm_tokens, row.llm_ms = used.calls, used.tokens, used.ms
+                    row.llm_failures = used.failures
                     row.llm_cost_usd = round(used.tokens / 1000 * rate, 6)
         except Exception:
             self.log.exception("Could not record agent finish")

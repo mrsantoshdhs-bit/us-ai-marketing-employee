@@ -78,10 +78,11 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             self._process_inbound(session, out)
             session.commit()  # inquiries are saved before their files leave the inbox
             batch.archive()
+            out.inbound_lead_ids = self._inbound_lead_ids(session, out.inbound_lead_ids)
         if "verify_websites" in ops and self.settings.network_enabled:
             self._verify_websites(session, out, inp.company_ids, inp.website_check_limit)
         if "dedupe" in ops:
-            out.merged = self._dedupe(session)
+            out.merged += self._dedupe(session)  # added to the merges the website checks made
         if "hygiene" in ops:
             out.hygiene = self._hygiene(session)
         if "stale" in ops:
@@ -165,6 +166,15 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             inq.status, inq.lead_id, inq.processed_at = "processed", lead.id, utcnow()
             out.inbound_processed += 1
             out.inbound_lead_ids.append(lead.id)
+
+    def _inbound_lead_ids(self, session: Session, processed_now: list[int]) -> list[int]:
+        """The leads the job must hand on: this run's, and any earlier inquiry's lead that was never scored. A retry
+        of this agent (a locked database after the commit above), or a job killed before its next step, finds no
+        pending inquiry, yet those people are still waiting for an answer."""
+        waiting = session.execute(select(Lead.id).join(InboundInquiry, InboundInquiry.lead_id == Lead.id).where(
+            InboundInquiry.status == "processed", Lead.last_scored_at.is_(None),
+            Lead.status.in_(("new", "qualified", "nurture"))).order_by(Lead.id)).scalars().all()
+        return list(dict.fromkeys([*processed_now, *waiting]))
 
     # ------------------------------------------------------------------ website verification
     def _verify_websites(self, session: Session, out: CRMOutput, company_ids: list[int] | None,

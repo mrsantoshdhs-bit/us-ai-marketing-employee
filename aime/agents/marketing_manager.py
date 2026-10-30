@@ -15,6 +15,7 @@ from aime.knowledge.content_bank import ANGLES, CTAS
 from aime.knowledge.geo import STATE_PRIORITY, normalize_state
 from aime.knowledge.industries import INDUSTRIES
 from aime.knowledge.services import SERVICES
+from aime.metrics_import import latest_metric_ids
 from aime.models import Campaign, Company, ContentItem, ContentMetric, Lead, MarketingPlan, MarketSegment, ResearchTopic
 from aime.timeutil import local_tz, utcnow
 
@@ -54,6 +55,16 @@ class MarketingManagerAgent(BaseAgent[PlanInput, PlanOutput]):
         tz = local_tz(s.schedule.get("timezone"))
         today = inp.plan_date or datetime.now(tz).date()
         rationale: list[str] = []
+
+        # One plan a day: another run (a manual "Run now", a retry) must not move the rotation on and skip states.
+        existing = session.execute(select(MarketingPlan).where(MarketingPlan.plan_date == today)
+                                   .order_by(MarketingPlan.id.desc())).scalars().first()
+        if existing:
+            return PlanOutput(plan_id=existing.id, plan_date=today, focus_states=existing.focus_states,
+                              focus_industries=existing.focus_industries,
+                              briefs=[ContentBrief.model_validate(b) for b in existing.briefs or []],
+                              campaign_id=existing.campaign_id,
+                              rationale=[*(existing.rationale or []), "Today's plan already exists; kept as it is."])
 
         industries = [i for i in targeting.get("industries", []) if i in INDUSTRIES] or list(INDUSTRIES)
         services = [x for x in targeting.get("services", []) if x in SERVICES] or list(SERVICES)
@@ -111,7 +122,8 @@ class MarketingManagerAgent(BaseAgent[PlanInput, PlanOutput]):
             .group_by(ResearchTopic.service)).all())
         engagement = dict(session.execute(
             select(ContentItem.service, func.avg(ContentMetric.reactions + 2 * ContentMetric.comments))
-            .join(ContentMetric, ContentMetric.content_id == ContentItem.id).group_by(ContentItem.service)).all())
+            .join(ContentMetric, ContentMetric.content_id == ContentItem.id)
+            .where(ContentMetric.id.in_(latest_metric_ids())).group_by(ContentItem.service)).all())
         epoch = datetime(2000, 1, 1)
 
         def svc_key(svc: str):

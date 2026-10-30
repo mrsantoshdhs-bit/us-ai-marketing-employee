@@ -18,10 +18,12 @@ import subprocess
 import tempfile
 import time
 import zipfile
+import zlib
 from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import text
+from sqlalchemy.exc import DatabaseError
 
 from aime.db import Database
 
@@ -73,18 +75,29 @@ def prune_manual_backups(backup_dir: Path, keep: int, min_age_days: int = 30, no
 
 
 def prune_backups(backup_dir: Path, label: str = "auto", keep: int = 14) -> int:
+    """Keep the newest `keep` copies of a label. The last copy that still verifies is never removed, however old:
+    after a run of damaged backups (a failing disk, a corrupt database) it is the only way back."""
     files = sorted(backup_dir.glob(f"aime-{label}-*.db"))
+    expired, kept = (files[:-keep], files[-keep:]) if keep > 0 else (files, [])
+    last_good = None
+    if expired and not any(verify_backup(p)["ok"] for p in reversed(kept)):  # newest first: normally the first answers
+        last_good = next((p for p in reversed(expired) if verify_backup(p)["ok"]), None)
     removed = 0
-    for old in files[:-keep] if keep > 0 else files:
-        old.unlink()
-        removed += 1
+    for old in expired:
+        if old != last_good:
+            old.unlink()
+            removed += 1
     return removed
 
 
 def integrity_check(db: Database) -> dict:
-    with db.engine.connect() as conn:
-        integrity = conn.execute(text("PRAGMA integrity_check")).scalar()
-        fk = conn.execute(text("PRAGMA foreign_key_check")).fetchall()
+    """A file too damaged to answer is a failed check, not an exception: that is what this check is there to report."""
+    try:
+        with db.engine.connect() as conn:
+            integrity = conn.execute(text("PRAGMA integrity_check")).scalar()
+            fk = conn.execute(text("PRAGMA foreign_key_check")).fetchall()
+    except DatabaseError as exc:
+        return {"integrity": f"unreadable: {exc.orig}", "foreign_key_violations": 0, "ok": False}
     return {"integrity": integrity, "foreign_key_violations": len(fk), "ok": integrity == "ok" and not fk}
 
 
@@ -315,16 +328,19 @@ def restore_drill(settings, source: Path | None = None, extract_to: Path | None 
         work = Path(tmp)
         expected = None
         if source.suffix in (".aimebak", ".zip"):
-            data = source.read_bytes()
-            if source.suffix == ".aimebak":
-                data = decrypt_bytes(data, settings.backup_passphrase)
-            with zipfile.ZipFile(io.BytesIO(data)) as zf:
-                manifest = json.loads(zf.read("manifest.json"))
-                for name, digest in manifest["files"].items():
-                    if _sha256(zf.read(name)) != digest:
-                        return {"ok": False, "source": source.name, "detail": f"checksum mismatch in {name}"}
-                zf.extractall(work)
-            expected = manifest["db"]["counts"]
+            try:
+                data = source.read_bytes()
+                if source.suffix == ".aimebak":
+                    data = decrypt_bytes(data, settings.backup_passphrase)
+                with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                    manifest = json.loads(zf.read("manifest.json"))
+                    for name, digest in manifest["files"].items():
+                        if _sha256(zf.read(name)) != digest:
+                            return {"ok": False, "source": source.name, "detail": f"checksum mismatch in {name}"}
+                    zf.extractall(work)
+                expected = manifest["db"]["counts"]
+            except (zipfile.BadZipFile, zlib.error, EOFError, OSError, KeyError, TypeError, ValueError) as exc:
+                return {"ok": False, "source": source.name, "detail": f"damaged bundle ({type(exc).__name__}: {exc})"}
             restored = work / "aime.db"
         else:
             restored = work / "aime.db"

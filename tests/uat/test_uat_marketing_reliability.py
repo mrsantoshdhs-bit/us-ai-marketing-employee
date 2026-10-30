@@ -609,6 +609,27 @@ def test_defect_post_giving_up_after_repeated_rejection_raises_no_alert(make_ctx
     assert alerts(ctx, f"%#{cid}%"), "a post that will never go out by itself must raise an alert"
 
 
+def test_ok_revoked_token_alert_closes_after_the_next_accepted_post(make_ctx):
+    fake = FakeLI([401, "ok"])
+    ctx = li_ctx(make_ctx, fake)
+    cid = add_post(ctx)
+    publish(ctx)
+    assert len(alerts(ctx, "%reconnect LinkedIn%")) == 1 and not alerts(ctx, "%reconnect LinkedIn%")[0].resolved_at
+    assert publish(ctx).published == [cid]
+    assert alerts(ctx, "%reconnect LinkedIn%")[0].resolved_at
+
+
+def test_ok_missing_image_withdraws_the_approval_and_alerts(make_ctx):
+    fake = FakeLI()
+    ctx = li_ctx(make_ctx, fake)
+    cid = add_post(ctx, image_path="gone.png")
+    out = publish(ctx)
+    item = post(ctx, cid)
+    assert [b.id for b in out.blocked] == [cid] and fake.post_calls == 0
+    assert item.status == "awaiting_approval" and item.approved_at is None and item.publish_attempts == 0
+    assert alerts(ctx, f"Post #{cid}%image file is missing%")
+
+
 def test_defect_approved_image_missing_publishes_text_only(make_ctx):
     """A person approved post + image. If the file is gone at publish time the post silently goes out without it."""
     fake = FakeLI()
@@ -812,6 +833,40 @@ def test_defect_csv_row_with_stray_comma_kills_the_research_run(ctx):
     _csv(ctx, "list.csv", "name,website,state\nAcme, Inc,https://acme-devshop.example,TX\nNorthwind,https://northwind-analytics.example,NY\n")
     res = _import(ctx)
     assert res.ok, f"one bad row must not fail the research job: {res.error}"
+
+
+def test_ok_csv_bad_rows_keep_the_good_rows_and_the_owner_is_told(ctx):
+    _csv(ctx, "list.csv", "name,website,state\nAcme, Inc,https://acme-devshop.example,TX\nNorthwind,https://northwind-analytics.example,NY\n"
+                          "Nostate,https://pixelpine.example,\n,https://brightpath-realty.example,TX\n")
+    res = _import(ctx)
+    assert res.ok, res.error
+    with ctx.db.session() as s:
+        assert [c.name for c in s.execute(select(Company)).scalars()] == ["Northwind"]
+    assert list((ctx.settings.imports_dir / "processed").glob("*list.csv"))
+    notice = alerts(ctx, "Import file partly imported:%")[0].message
+    assert "3 of 4" in notice and "row 2" in notice and "row 5" in notice and "without a US state" in notice
+
+
+def test_ok_csv_with_only_unusable_rows_goes_to_rejected_and_a_corrected_copy_imports(ctx):
+    _csv(ctx, "list.csv", "name,website\nNorthwind,https://northwind-analytics.example\n")
+    assert _import(ctx).ok
+    assert list((ctx.settings.imports_dir / "rejected").glob("*list.csv"))
+    assert not list((ctx.settings.imports_dir / "processed").glob("*list.csv"))
+    assert alerts(ctx, "Import file not imported:%without a US state%")
+    _csv(ctx, "list.csv", "name,website,state\nNorthwind,https://northwind-analytics.example,NY\n")
+    assert _import(ctx).ok
+    with ctx.db.session() as s:
+        assert s.execute(select(Company)).scalars().one().name == "Northwind"
+
+
+def test_ok_csv_is_imported_while_every_public_source_is_down(make_ctx):
+    def down(request):
+        raise httpx.ConnectError("no route", request=request)
+    ctx = make_ctx(handler=down, network_enabled=True)
+    _csv(ctx, "list.csv", "name,website,state\nNorthwind,https://northwind-analytics.example,NY\n")
+    res = USBusinessResearchAgent(ctx).run({})
+    assert res.ok and res.output.companies_created == 1, res.error  # it found something, and says what it could not read
+    assert alerts(ctx, "Research source(s) not read%")
 
 
 def test_defect_csv_without_state_is_archived_with_nothing_imported_and_no_notice(ctx):
@@ -1318,6 +1373,18 @@ def test_ok_retry_backoff_30_then_60_then_waits_for_next_slot(ctx, monkeypatch, 
         assert s.get(JobState, "research").consecutive_failures == 1
 
 
+def test_ok_next_run_shows_the_backoff_of_a_failed_job(ctx):
+    tz = ZoneInfo("UTC")
+    spec = JobSpec("research", None, datetime(2026, 1, 1, 7, 0).time(), "")
+    now = datetime(2026, 10, 27, 10, 0)
+    waiting = JobState(job="research", last_attempt_at=now - timedelta(minutes=10), last_status="failed", consecutive_failures=1, enabled=True)
+    assert next_run(spec, waiting, now, tz) == now + timedelta(minutes=20)
+    ready = JobState(job="research", last_attempt_at=now - timedelta(hours=1), last_status="failed", consecutive_failures=1, enabled=True)
+    assert next_run(spec, ready, now, tz) == now
+    wrong_clock = JobState(job="research", last_attempt_at=now + timedelta(days=30), last_success_at=now + timedelta(days=30), consecutive_failures=0, enabled=True)
+    assert is_due(spec, wrong_clock, now, tz)[0] and next_run(spec, wrong_clock, now, tz) == now
+
+
 def test_ok_failure_alert_raised_then_closed_when_job_recovers(ctx, monkeypatch):
     def boom(ctx, job="inbound"):
         raise RuntimeError("down: password=hunter2")
@@ -1671,6 +1738,21 @@ def test_defect_api_health_says_ok_while_ticks_are_stopped(ctx):
     assert body["ok"] is False, "a health check must not say ok while nothing has run for three days"
 
 
+def test_ok_outage_record_is_quiet_and_only_the_latest_stays_open(ctx, monkeypatch, clock):
+    fast_jobs(monkeypatch)
+    clock(datetime(2026, 10, 27, 14, 0))
+    tick(ctx)
+    clock.forward(timedelta(minutes=30))
+    tick(ctx)  # an ordinary check-in is no outage
+    assert not alerts(ctx, "No scheduled check-in%")
+    for hours in (14, 9):
+        clock.forward(timedelta(hours=hours))
+        tick(ctx)
+    found = alerts(ctx, "No scheduled check-in%")
+    assert [a.level for a in found] == ["info", "info"] and "9.0 h" in found[1].message
+    assert found[0].resolved_at and not found[1].resolved_at
+
+
 def test_defect_outage_leaves_no_alert_once_ticks_resume(ctx, monkeypatch, clock):
     """Monitor and doctor only run inside a tick, which refreshes the heartbeat first, so the stale check can never
     fire on schedule. After a night's outage (lockout, sleep) nothing on record says work stopped. By design the live
@@ -1696,6 +1778,17 @@ def test_ok_alert_dismissal_and_episode_rules(ctx):
         s.get(Alert, row.id).acknowledged = True
     with ctx.db.session() as s:
         assert not alert_once(s, "warning", "monitor", "third", ctx.settings, key="k:1")
+
+
+def test_ok_dismissed_alert_can_return_24_hours_after_the_dismissal(ctx, clock):
+    with ctx.db.session() as s:
+        alert_once(s, "warning", "monitor", "old", ctx.settings, key="k:3")
+    clock.forward(timedelta(hours=23))
+    with ctx.db.session() as s:
+        s.execute(select(Alert)).scalars().one().acknowledged = True
+    clock.forward(timedelta(hours=25))
+    with ctx.db.session() as s:
+        assert alert_once(s, "warning", "monitor", "again", ctx.settings, key="k:3")
 
 
 def test_defect_dismissed_alert_returns_before_24_hours(ctx, clock):
@@ -1759,6 +1852,18 @@ def test_defect_retention_deletes_the_only_good_backup(ctx, monkeypatch):
     res = run_job(ctx, "db_maintenance")
     assert res["status"] in ("failed", "partial")  # partial: the off-machine step, not configured here, counts as done
     assert good.exists(), "the only good backup was pruned to make room for a backup that failed verification"
+
+
+def test_ok_prune_keeps_the_last_good_backup_when_every_newer_one_is_damaged(ctx):
+    d = ctx.settings.backups_dir
+    d.mkdir(parents=True, exist_ok=True)
+    good = d / "aime-auto-20260101-000000.db"
+    shutil.copy2(backup.backup_sqlite_file(_db_path(ctx), d, label="seed"), good)
+    _garbage(d / "aime-auto-20251231-000000.db")  # older than the good copy: goes
+    for i in range(3):
+        _garbage(d / f"aime-auto-202601{i + 2:02d}-000000.db")
+    assert backup.prune_backups(d, keep=2) == 2
+    assert good.exists() and len(list(d.glob("aime-auto-*.db"))) == 3
 
 
 def test_ok_verify_and_drill_reject_bad_backups(ctx):
