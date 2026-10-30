@@ -133,7 +133,7 @@ class HNHiringSource(Source):
                 hits = [h for h in resp.json().get("hits", [])
                         if (h.get("title") or "").lower().startswith("ask hn: who is hiring")]
             self.cache_put("threads", hits)
-        except httpx.HTTPError:
+        except (httpx.HTTPError, ValueError, AttributeError):  # also a 200 whose body is not the API's JSON
             hits = self.cache_get("threads", max_age_hours=24 * 40)  # API down: use the last known list
             if hits is None:
                 raise
@@ -153,7 +153,7 @@ class HNHiringSource(Source):
                 resp = client.get(f"{API}/items/{story_id}")
                 resp.raise_for_status()
                 children = resp.json().get("children", [])
-        except httpx.HTTPError:
+        except (httpx.HTTPError, ValueError, AttributeError):  # also a 200 whose body is not the API's JSON
             stale = self.cache_get(f"items_{story_id}", max_age_hours=24 * 40)
             if stale is not None:
                 return stale

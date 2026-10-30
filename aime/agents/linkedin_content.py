@@ -70,8 +70,9 @@ class LinkedInContentAgent(BaseAgent[ContentInput, ContentOutput]):
         if inp.research_topics and self.settings.network_enabled:
             try:
                 out.topics_researched = self._research_topics(session)
-            except httpx.HTTPError as exc:
-                out.topic_research_error = str(exc)[:200]
+            except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                # Topics are optional context: neither an error nor a 200 that is not the API's JSON costs the posts.
+                out.topic_research_error = f"{type(exc).__name__}: {exc}"[:200]
             session.commit()  # release the SQLite write lock before slow LLM calls
 
         pending = session.execute(select(func.count(ContentItem.id)).where(

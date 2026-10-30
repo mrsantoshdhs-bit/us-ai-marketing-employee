@@ -3,7 +3,8 @@ snapshot, and creates evidence-backed decision-maker contacts. It never contacts
 
 Order: companies with qualified leads first, then by lead score. Only websites already verified as the
 company's own are read; SEC-registered companies are also checked for officers. Each company is
-re-researched after `recheck_days`. One company's failure is recorded and the batch continues.
+re-researched after `recheck_days`. One company's failure is recorded and the batch continues; a failed read is
+tried again at the next run, after the companies not read yet (see `_note_failed_read`).
 """
 
 from __future__ import annotations
@@ -14,14 +15,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from aime.agents.base import BaseAgent, RetryPolicy
+from aime.agents.base import AgentError, BaseAgent, RetryPolicy
 from aime.agents.contracts import BlockedItem
 from aime.company_research import (WITHDRAWN, build_snapshot, cik_of, is_plausible_website, save_contact,
                                    withdraw_missing)
 from aime.contact_validation import STATUS_OK, MailDomainChecker, assign_published_emails, recheck_emails
 from aime.crm_ops import log_activity, primary_lead
 from aime.matching import competitor_evidence
-from aime.models import Company, Contact, Lead
+from aime.models import Company, Contact, Lead, ResearchSnapshot
 from aime.people import extract_people, merge_findings
 from aime.redact import redact
 from aime.site_reader import SiteReader
@@ -30,6 +31,8 @@ from aime.timeutil import utcnow
 
 BLOCKED_STATUSES = ("robots_disallowed", "robots_unavailable", "http_401", "http_403", "http_429", "http_503")
 CONFIDENCE_RANK = {"high": 2, "medium": 1}
+FAILED_READS_BEFORE_WAITING = 3  # after this many in a row a company waits for the normal re-check
+ALL_FAILED_MEANS_FAILURE = 3  # this many failures and no success in a run: no longer about one site (the network?)
 
 
 class ResearchInput(BaseModel):
@@ -87,13 +90,26 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                 session.rollback()
                 company = session.get(Company, company.id)
                 reason = redact(f"{type(exc).__name__}: {exc}")[:300]
-                company.research_status, company.researched_at = "failed", utcnow()
                 session.add(build_snapshot(company, [], [], "failed", error=reason))
-                out.failed.append(BlockedItem(id=company.id, reason=reason))
+                self._note_failed_read(session, company, out, reason)
             session.commit()
         out.emails_rechecked = self._recheck_unknown_emails(session, int(cfg.get("email_rechecks_per_run", 20)))
         session.commit()
+        if len(out.failed) >= ALL_FAILED_MEANS_FAILURE and not out.companies_researched:
+            raise AgentError(f"None of the {len(out.failed)} companies could be researched; first: {out.failed[0].reason}")
         return out
+
+    def _note_failed_read(self, session: Session, company: Company, out: ResearchOutput, reason: str) -> None:
+        """Nothing was read, so this is no research: researched_at stays as it was and the next run tries again, or
+        one passing 500 would hide the company for `recheck_days`. A site that keeps failing then waits for the normal
+        re-check, so it cannot take a place in every batch."""
+        company.research_status = "failed"
+        out.failed.append(BlockedItem(id=company.id, reason=reason))
+        session.flush()
+        latest = session.execute(select(ResearchSnapshot.status).where(ResearchSnapshot.company_id == company.id)
+                                 .order_by(ResearchSnapshot.id.desc()).limit(FAILED_READS_BEFORE_WAITING)).scalars().all()
+        if len(latest) == FAILED_READS_BEFORE_WAITING and set(latest) == {"failed"}:
+            company.researched_at = utcnow()
 
     def _recheck_unknown_emails(self, session: Session, limit: int) -> int:
         """Published emails whose mail-server check failed (DNS timeout) are checked again, a few companies a run."""
@@ -115,7 +131,8 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
 
         def priority(c: Company) -> tuple:
             lead = leads.get(c.id)
-            return (0 if lead and lead.status == "qualified" else 1, -(lead.score if lead else 0), c.id)
+            return (c.research_status == "failed", 0 if lead and lead.status == "qualified" else 1,
+                    -(lead.score if lead else 0), c.id)
         return sorted(companies, key=priority)
 
     def _research(self, session: Session, company: Company, out: ResearchOutput, max_pages: int) -> None:
@@ -176,8 +193,11 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             lead.contact_id = best_contact(researched).id
         elif lead and lead.contact and lead.contact.source == WITHDRAWN:
             lead.contact_id = None
-        company.research_status, company.researched_at = status, utcnow()
-        out.companies_researched += 1
+        if status == "failed":
+            self._note_failed_read(session, company, out, f"Website could not be read ({pages[0].status})")
+        else:
+            company.research_status, company.researched_at = status, utcnow()
+            out.companies_researched += 1
         read = sum(1 for p in pages if p.ok)
         log_activity(session, f"Company research: {read} page(s) read, {len(people)} decision-maker(s) named"
                      + (f" ({status})" if status != "done" else ""), self.name, type_="research",
