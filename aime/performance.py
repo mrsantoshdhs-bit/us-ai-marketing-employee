@@ -3,7 +3,10 @@
 Who a record counts for: a reply, a meeting or a sent email counts for the owner of its lead's deal, else the lead's
 owner. A won deal counts once: for the person who moved it to won (else its owner), and by origin as AI-sourced
 (opened by the agents) or human-sourced, so AI and human contributions are never added twice. Nothing is
-estimated: a deal without a value adds nothing to revenue, and a rate with nothing to divide is shown as none."""
+estimated: a deal without a value adds nothing to revenue, and a rate with nothing to divide is shown as none.
+The Total adds what the report shows: a report narrowed to some people leaves out everyone else and the unassigned
+records. The report on everyone adds what nobody in it can be credited with to the unassigned row, so that revenue
+stays in the Total when a salesperson leaves."""
 
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aime.models import Assignment, FollowUp, InboundEmail, Lead, Meeting, Opportunity, User
+from aime.visibility import EVERYTHING, Scope, lead_condition, record_condition
 
 POSITIVE = ("interested",)
 NEGATIVE = ("not_interested", "unsubscribe")
@@ -40,6 +44,9 @@ class Row:
         closed = self.won + self.lost
         return self.won / closed if closed else None
 
+    def has_numbers(self) -> bool:
+        return any(value for name, value in vars(self).items() if name != "username")
+
 
 @dataclass
 class Report:
@@ -57,11 +64,15 @@ def owners_by_lead(session: Session) -> dict[int, str | None]:
     return lead_owner
 
 
-def build(session: Session, start: datetime, end: datetime, people: list[str] | None = None,
-          source: str | None = None) -> Report:
-    """People: the usernames to report on (None: every user). Source: only leads from this source (e.g. inbound)."""
+def build(session: Session, start: datetime, end: datetime, people: list[str] | None = None, source: str | None = None,
+          scope: Scope = EVERYTHING, include_unassigned: bool = True) -> Report:
+    """People: the usernames to report on (None: every user). Source: only leads from this source (e.g. inbound).
+    Scope: what the reader may see, for the AI employee's figures, which belong to no one person. Include_unassigned:
+    whether records nobody owns count in the Total."""
+    known = set(session.execute(select(User.username)).scalars())
+    everyone = people is None and include_unassigned
     if people is None:
-        people = list(session.execute(select(User.username).order_by(User.username)).scalars())
+        people = sorted(known)
     rows = {p: Row(p) for p in people}
     other = Row("(unassigned)")
     owner_of = owners_by_lead(session)
@@ -74,10 +85,11 @@ def build(session: Session, start: datetime, end: datetime, people: list[str] | 
             return None
         who = owner if owner is not None else owner_of.get(lead_id)
         if who is None:
-            return other
-        return rows.get(who)  # someone outside the report: not counted here
+            return other if include_unassigned else None
+        return rows.get(who) or (other if everyone else None)  # someone outside the report: not counted here
 
-    for lead_id, owner in session.execute(select(Lead.id, Lead.owner).where(Lead.owner.is_not(None))).all():
+    for lead_id, owner in session.execute(select(Lead.id, Lead.owner).where(
+            Lead.owner.is_not(None), Lead.status.not_in(("merged", "disqualified")))).all():
         if (r := row_for(lead_id, owner)) is not None:
             r.leads_owned += 1
     for a in session.execute(select(Assignment).where(Assignment.created_at >= start, Assignment.created_at < end,
@@ -107,7 +119,8 @@ def build(session: Session, start: datetime, end: datetime, people: list[str] | 
             ai_opened += o.origin == "ai"
     for o in session.execute(select(Opportunity).where(Opportunity.stage.in_(("won", "lost")),
                                                        Opportunity.closed_at >= start, Opportunity.closed_at < end)).scalars():
-        r = row_for(o.lead_id, (o.won_by if o.stage == "won" and o.won_by in rows else None) or o.owner)
+        # the person who won it, whoever reads the report; a win by no person (an agent, sign-in off): its owner
+        r = row_for(o.lead_id, o.won_by if o.stage == "won" and o.won_by in known else o.owner)
         if r is None:
             continue
         if o.stage == "won":
@@ -120,14 +133,16 @@ def build(session: Session, start: datetime, end: datetime, people: list[str] | 
             r.lost += 1
     shown = list(rows.values())
     total = Row("Total")
-    for r in [*shown, other]:
+    for r in [*shown, other] if include_unassigned else shown:
         for name in ("leads_owned", "assigned", "emails_sent", "positive_replies", "negative_replies", "meetings",
                      "deals_opened", "won", "lost", "won_value", "won_value_ai_sourced"):
             setattr(total, name, getattr(total, name) + getattr(r, name))
     drafts = Counter(session.execute(select(FollowUp.kind).where(
-        FollowUp.channel == "email", FollowUp.created_at >= start, FollowUp.created_at < end)).scalars())
+        FollowUp.channel == "email", FollowUp.created_at >= start, FollowUp.created_at < end,
+        record_condition(scope, FollowUp.lead_id))).scalars())
     classified = session.execute(select(InboundEmail.id).where(
-        InboundEmail.processed_at >= start, InboundEmail.processed_at < end)).all()
+        InboundEmail.processed_at >= start, InboundEmail.processed_at < end,
+        record_condition(scope, InboundEmail.lead_id))).all()
     ai = {"drafts_written": sum(drafts.values()), "drafts_by_kind": dict(drafts), "replies_classified": len(classified),
           "deals_opened": ai_opened, "deals_won_ai_sourced": ai_won,
           "won_value_ai_sourced": total.won_value_ai_sourced,
@@ -142,15 +157,16 @@ def team_members(session: Session) -> dict[int, list[str]]:
     return dict(out)
 
 
-def campaign_stats(session: Session) -> dict[int, dict]:
-    """Per campaign, from the leads it brought (leads.campaign_id): leads, emails sent, positive replies, meetings,
-    deals opened, won, won value. Recorded data only."""
+def campaign_stats(session: Session, scope: Scope = EVERYTHING) -> dict[int, dict]:
+    """Per campaign, from the leads it brought (leads.campaign_id) that the reader may see: leads, emails sent, positive
+    replies, meetings, deals opened, won, won value. Recorded data only."""
     from aime.models import Campaign
 
     out: dict[int, dict] = {c: {"leads": 0, "emails_sent": 0, "positive_replies": 0, "meetings": 0, "deals": 0,
                                  "won": 0, "won_value": 0.0}
                             for c in session.execute(select(Campaign.id)).scalars()}
-    lead_campaign = dict(session.execute(select(Lead.id, Lead.campaign_id).where(Lead.campaign_id.is_not(None))).all())
+    lead_campaign = dict(session.execute(select(Lead.id, Lead.campaign_id).where(Lead.campaign_id.is_not(None),
+                                                                                 lead_condition(scope))).all())
     for cid in lead_campaign.values():
         if cid in out:
             out[cid]["leads"] += 1

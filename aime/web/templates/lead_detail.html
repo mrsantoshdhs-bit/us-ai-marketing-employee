@@ -14,7 +14,7 @@
       <tr><th>Source</th><td>{{ c.source }} · {{ ext(c.source_url) }} {% if c.verified %}<span class="pill ok">verified registry</span>{% else %}<span class="pill">self-reported</span>{% endif %}</td></tr>
       {% if c.phone %}<tr><th>Phone (filed)</th><td>{{ c.phone }}</td></tr>{% endif %}
       {% if c.is_competitor %}<tr><th>Flag</th><td><span class="pill bad">possible competitor</span>
-        <form method="post" action="/companies/{{ c.id }}/not_competitor" style="display:inline"><button>Not a competitor</button></form></td></tr>
+        {% if can_edit %}<form method="post" action="/companies/{{ c.id }}/not_competitor" style="display:inline"><button>Not a competitor</button></form>{% endif %}</td></tr>
       {% elif c.competitor_cleared_by %}<tr><th>Flag</th><td class="small muted">Not a competitor (cleared by {{ c.competitor_cleared_by }})</td></tr>{% endif %}
       <tr><th>Lifecycle</th><td>{{ c.lifecycle_stage }}</td></tr>
       <tr><th>Category</th><td>{{ lead.category or '—' }}</td></tr>
@@ -38,14 +38,14 @@
     <p class="small">Matched services: {% for s in lead.matched_services or [] %}<span class="pill">{{ s|service }}</span> {% else %}none{% endfor %}</p>
     {% if lead.outreach_status or lead.owner %}<p class="small">Outreach: {{ status_pill(lead.outreach_status or 'none') }}{% if lead.outreach_updated_at %} <span class="muted">since {{ lead.outreach_updated_at|local }}</span>{% endif %}{% if lead.owner %} · owner {{ lead.owner }}{% endif %}</p>{% endif %}
     {% if lead.disqualify_reason %}<p class="small"><span class="pill bad">{{ lead.disqualify_reason }}</span></p>{% endif %}
-    <h2>Actions</h2>
+    {% if can_edit %}<h2>Actions</h2>
     <form method="post" action="/leads/{{ lead.id }}/status" class="filters">
       <select name="status">{% for st in LEAD_STATUSES %}<option {{ 'selected' if lead.status == st }}>{{ st }}</option>{% endfor %}</select>
       <input name="note" placeholder="Reason (optional)"><button>Update status</button>
     </form>
     <form method="post" action="/leads/{{ lead.id }}/note" class="filters"><input name="note" placeholder="Add a note" style="flex:1" required><button class="secondary">Add note</button></form>
     {% if lead.contact %}<form method="post" action="/leads/{{ lead.id }}/replied"><button class="secondary">They replied — stop follow-ups</button></form>{% endif %}
-    {% if lead.outreach_status in ['drafted', 'approved', 'contacted'] %}<form method="post" action="/leads/{{ lead.id }}/stop_outreach" style="margin-top:6px"><button class="danger">Stop outreach</button></form>{% endif %}
+    {% if lead.outreach_status in ['drafted', 'approved', 'contacted'] %}<form method="post" action="/leads/{{ lead.id }}/stop_outreach" style="margin-top:6px"><button class="danger">Stop outreach</button></form>{% endif %}{% endif %}
     <h2>Owner</h2>
     <p class="small">{{ lead.owner or 'Unassigned' }}{% for o in opps if o.owner and o.owner != lead.owner %} · deal {{ o.name }}: {{ o.owner }}{% endfor %}</p>
     {% if can_assign %}<form method="post" action="/leads/{{ lead.id }}/assign" class="filters">
@@ -55,12 +55,12 @@
     <h2>Meetings</h2>
     {% for m in meetings %}<div class="row-item small">{% if m.is_simulated %}<span class="pill bad">SIMULATED</span> {% endif %}{{ m.starts_at|et }} · {{ m.title }} · {{ m.status|replace('_', ' ') }} <span class="muted">({{ m.source|replace('_', ' ') }})</span></div>
     {% else %}<p class="muted small">None yet.</p>{% endfor %}
-    <form method="post" action="/leads/{{ lead.id }}/meeting" class="filters small">
+    {% if can_edit %}<form method="post" action="/leads/{{ lead.id }}/meeting" class="filters small">
       <input name="date" placeholder="YYYY-MM-DD" size="10" required><input name="time_et" placeholder="HH:MM ET" size="7" required>
       <input name="minutes" value="30" size="3"><input name="title" placeholder="Title" value="Intro call">
       {% if not (lead.contact and lead.contact.email) %}<input name="invitee_email" placeholder="invitee email" required>{% endif %}
       <button class="secondary">Log a meeting</button>
-    </form>
+    </form>{% endif %}
   </div>
 </div>
 

@@ -17,7 +17,7 @@
       <td class="small">{{ 'due' if due else 'waiting' }}: {{ reason }}</td>
       <td class="small">{{ (st.last_attempt_at if st else None)|local }}</td><td class="small">{{ (st.last_success_at if st else None)|local }}</td>
       <td>{{ status_pill(st.last_status) if st and st.last_status else '—' }}</td><td class="n">{{ st.consecutive_failures if st else 0 }}</td>
-      <td><form method="post" action="/jobs/{{ spec.name }}/run"><button class="secondary">Run now</button></form></td></tr>
+      <td>{% if can_run %}<form method="post" action="/jobs/{{ spec.name }}/run"><button class="secondary">Run now</button></form>{% endif %}</td></tr>
   {% endfor %}
 </table></div>
 <h2>History</h2>

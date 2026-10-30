@@ -132,6 +132,11 @@ def record_visible(session: Session, scope: Scope, kind: str, rid: int) -> bool:
         return True
     if kind == "leads":
         return session.get(Lead, rid) is None or can_see_lead(session, scope, rid)
+    if kind == "companies":
+        from aime.models import Company
+
+        return session.get(Company, rid) is None or session.execute(select(Company.id).where(
+            Company.id == rid, company_condition(scope))).first() is not None
     if kind == "opportunities":
         opp = session.get(Opportunity, rid)
         if opp is None:

@@ -117,6 +117,15 @@ def reassign(session: Session, *, to_owner: str | None, actor: str, reason: str,
     """A person moves a lead (and its open deals) or one deal to someone else, or back to unassigned."""
     from aime.crm_ops import log_activity
 
+    # the same owner again (a double click, browser back and resubmit): nothing moved, so nothing goes on record
+    if opp is not None:
+        unchanged = opp.owner == to_owner
+    else:
+        unchanged = lead.owner == to_owner and not session.execute(select(Opportunity.id).where(
+            Opportunity.lead_id == lead.id, Opportunity.stage.not_in(OPEN),
+            Opportunity.owner.is_distinct_from(to_owner))).first()
+    if unchanged:
+        return f"Already with {to_owner or 'nobody'}: nothing changed"
     if opp is not None:
         old, opp.owner = opp.owner, to_owner
         record(session, lead_id=opp.lead_id, opportunity_id=opp.id, from_owner=old, to_owner=to_owner,

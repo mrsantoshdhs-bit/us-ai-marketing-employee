@@ -49,7 +49,7 @@
     <div class="state-row">
       <span class="state-chip {{ 'ok' if automation.state == 'running' else 'bad' }}"><i></i>{{ automation.state|replace('_', ' ')|title }}</span>
       {% for action, label, ico in [('start', 'Start', 'play'), ('resume', 'Resume', 'play'), ('pause', 'Pause sending', 'pause'), ('stop', 'Stop jobs', 'stop'), ('emergency_stop', 'Emergency stop', 'alert')] %}
-      {% if automation.state in nav_status.transitions[action][0] and (is_admin or action not in ('start', 'resume')) %}
+      {% if automation.state in nav_status.transitions[action][0] and (is_admin if action in ('start', 'resume') else can_edit) %}
       <form class="inline" method="post" action="/automation/state/{{ action }}"><input type="hidden" name="next" value="/command-center#modes">
         <button class="{{ 'danger' if action == 'emergency_stop' else 'secondary' }}">{{ icon(ico) }}{{ label }}</button></form>
       {% endif %}{% endfor %}
@@ -147,7 +147,7 @@
     {% for a in alerts %}
     <div class="row-item"><span class="pill {{ 'bad' if a.level == 'error' else 'warn' }}">{{ a.level }}</span>
       <span class="small">{{ a.message }}</span>
-      <form class="inline" method="post" action="/alerts/{{ a.id }}/ack"><button class="secondary">Acknowledge</button></form></div>
+      {% if can_edit %}<form class="inline" method="post" action="/alerts/{{ a.id }}/ack"><button class="secondary">Acknowledge</button></form>{% endif %}</div>
     {% else %}<div class="empty-state"><b>No open alerts</b>Problems the monitor finds appear here.</div>{% endfor %}
   </div>
 

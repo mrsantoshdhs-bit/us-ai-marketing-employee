@@ -6,7 +6,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import create_engine, event, select, text
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from aime.models import Base, KeyValue
@@ -58,13 +59,23 @@ def kv_get(session: Session, key: str, default: Any = None) -> Any:
 def kv_set(session: Session, key: str, value: Any) -> None:
     row = session.get(KeyValue, key)
     if row is None:
-        session.add(KeyValue(key=key, value={"v": value}))
+        # One statement, not read-then-insert: two people writing a key for the first time (the first approvals on a
+        # new install) must not collide on its primary key.
+        insert = sqlite_insert(KeyValue).values(key=key, value={"v": value})
+        session.execute(insert.on_conflict_do_update(index_elements=["key"], set_={"value": insert.excluded.value}))
     else:
         row.value = {"v": value}
+
+
+def take_write_lock(session: Session) -> None:
+    """Take the database's write lock now, before reading what a click is about. Two people clicking at once then run
+    one after the other, and the second one reads what the first one saved: nobody decides on a page that is already
+    out of date. The lock ends with the session's commit; another writer waits for it (busy_timeout)."""
+    session.execute(text(f"UPDATE {KeyValue.__tablename__} SET key = key WHERE 0"))
 
 
 def first(session: Session, stmt: Any) -> Any:
     return session.execute(stmt).scalars().first()
 
 
-__all__ = ["Database", "kv_get", "kv_set", "first", "select"]
+__all__ = ["Database", "kv_get", "kv_set", "take_write_lock", "first", "select"]

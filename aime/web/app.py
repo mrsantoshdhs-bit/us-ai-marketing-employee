@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import re
 import threading
 import time
@@ -16,11 +17,15 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.exc import OperationalError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -28,7 +33,7 @@ from aime import maintenance
 from aime.agents import AGENTS
 from aime.context import AppContext, get_context
 from aime.crm_ops import is_suppressed, log_activity, suppress
-from aime.db import kv_get, kv_set
+from aime.db import kv_get, kv_set, take_write_lock
 from aime.inbound import InboundPayload, record_inquiry
 from aime.integrations.email_smtp import POSTAL_PLACEHOLDER, EmailSender, compliance_problem
 from aime import mail_accounts
@@ -64,11 +69,12 @@ from aime.stages import move as move_stage
 from aime.web.team_pages import assignment_history
 from aime.web.team_pages import register as register_team_pages
 from aime.web.deal_pages import register as register_deal_pages
-from aime.visibility import (EVERYTHING, company_condition, contact_condition, lead_condition, opportunity_condition,
-                             org_page, record_condition)
-from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate,
-                           current_username, make_cookie, safe_next, session_secret, user_count)
+from aime.visibility import (EVERYTHING, can_see_lead, company_condition, contact_condition, lead_condition,
+                             opportunity_condition, org_page, record_condition)
+from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username, make_cookie,
+                           safe_next, same_text, session_secret, user_count, wants_page)
 
+log = logging.getLogger("aime.web")
 WEB_DIR = Path(__file__).resolve().parent
 STAGES = ["new", "discovery", "proposal", "negotiation", "won", "lost"]
 LEAD_STATUSES = ["new", "qualified", "nurture", "disqualified", "converted", "merged"]
@@ -144,6 +150,14 @@ class InboundLimiter:
 
 MAX_INBOUND_BYTES = 20_000
 FOLLOWUPS_PAGE = 300
+MAX_DEAL_VALUE = 1e9  # as for a quote; also keeps out what float() reads as infinity
+MEETING_YEARS = range(2000, 2101)  # a mistyped year is a typo; near 9999 the time zone conversions overflow
+ERROR_TITLES = {400: "That cannot be done right now", 403: "You cannot do this", 404: "Not found",
+                405: "Use the button on the page", 422: "Something in the form is not right", 503: "The database is busy"}
+# what a bare HTTP status says, in words for a person
+ERROR_WORDS = {"Bad Request": "That cannot be done with this record as it is now. Nothing was changed.",
+               "Not Found": "That page or record does not exist, or it is not one you can see.",
+               "Method Not Allowed": "This address only works from a button on a page. Go back and use the button."}
 # A contact the Sales Manager can actually email: researched, a checked published address, not opted out.
 USABLE_EMAIL = (Contact.source.in_(("website", "sec_filing")), Contact.email_status.in_(("published", "role_address")),
                 Contact.consent_status != "opted_out")
@@ -154,7 +168,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     app = FastAPI(title="AI Marketing Employee", docs_url=None, redoc_url=None)
     app.state.ctx = ctx
     limiter = InboundLimiter()
-    app.add_middleware(AuthMiddleware, get_ctx=lambda: app.state.ctx or get_context())
+    app.add_middleware(AuthMiddleware, get_ctx=lambda: app.state.ctx or get_context(),
+                       error_page=lambda *args: error_page(*args))
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(OriginCheckMiddleware)
     settings = (ctx or get_context()).settings
@@ -175,7 +190,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     def render(request: Request, name: str, **data):
         note = request.query_params.get("msg")
-        data.setdefault("msg", note if note and hmac.compare_digest(note_sig(note), request.query_params.get("n", "")) else None)
+        data.setdefault("msg", note if note and same_text(note_sig(note), request.query_params.get("n", "")) else None)
         data.setdefault("company_name", C().settings.company_name)
         data.setdefault("data_role", C().settings.data_role)
         data.setdefault("maintenance", maintenance.active(C().settings.data_dir))
@@ -183,9 +198,15 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         data.setdefault("sending_on", C().settings.outbound_email_enabled)
         user = data["current_user"]
         data.setdefault("user_name", (user["username"].title() if user else C().settings.sender_name or ""))
-        data.setdefault("is_super_admin", not C().settings.dashboard_auth or bool(user and "configure_system" in user.get("perms", ())))
-        data.setdefault("can_manage_users", not C().settings.dashboard_auth or bool(user and "manage_users" in user.get("perms", ())))
-        data.setdefault("can_view_all", not C().settings.dashboard_auth or bool(user and "view_all" in user.get("perms", ())))
+        may = lambda perm: not C().settings.dashboard_auth or bool(user and perm in user.get("perms", ()))  # noqa: E731
+        data.setdefault("is_super_admin", may("configure_system"))
+        data.setdefault("can_manage_users", may("manage_users"))
+        data.setdefault("can_view_all", may("view_all"))
+        # what the buttons on a page may offer: the same permissions the server enforces on every request (aime.web.auth)
+        data.setdefault("can_edit", may("edit_records"))
+        data.setdefault("can_approve", may("approve_outbound"))
+        data.setdefault("can_assign", may("assign_leads"))
+        data.setdefault("can_run", may("admin_ops"))
         if "user_role" not in data:
             with C().db.session() as s:
                 data["user_role"] = role_label(s, user["role"]) if user else "Preview · no sign-in"
@@ -194,14 +215,62 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 state = am.get_state(s)
                 data["nav_status"] = {"mode": am.get_mode(s), "state": state, "transitions": am.TRANSITIONS,
                                       "duty": employee_duty(C().settings, state), "modes": am.MODES,
-                                      "admin": is_admin(request), "here": str(request.url.path)}
+                                      "admin": is_admin(request), "admin_actions": am.ADMIN_ACTIONS,
+                                      "here": data.get("back_to") or str(request.url.path)}
                 cnt = lambda m, *c: s.execute(select(func.count(m.id)).where(*c)).scalar_one()  # noqa: E731
+                # the sidebar counts what this user's own pages list; alerts are about the whole organisation
+                sc = scope(request)
                 data["nav_counts"] = {
-                    "approvals": cnt(FollowUp, FollowUp.channel == "email", FollowUp.status == "awaiting_approval")
+                    "approvals": cnt(FollowUp, FollowUp.channel == "email", FollowUp.status == "awaiting_approval",
+                                     record_condition(sc, FollowUp.lead_id))
                     + cnt(ContentItem, ContentItem.status == "awaiting_approval"),
-                    "replies": cnt(InboundEmail, InboundEmail.status == "needs_review"),
-                    "alerts": cnt(Alert, Alert.acknowledged.is_(False), Alert.level.in_(("error", "warning")))}
+                    "replies": cnt(InboundEmail, InboundEmail.status == "needs_review",
+                                   record_condition(sc, InboundEmail.lead_id)),
+                    "alerts": cnt(Alert, Alert.acknowledged.is_(False), Alert.level.in_(("error", "warning"))) if sc.all else 0}
         return templates.TemplateResponse(request, name, data)
+
+    def error_page(request: Request, status: int, reason: str):
+        """What a person's browser gets when a click cannot be carried out: a normal page with the reason and a way back
+        (API routes and clients that ask for JSON keep JSON). Someone not signed in gets it without the menu."""
+        stranger = C().settings.dashboard_auth and not getattr(request.state, "user", None)
+        came_from = urlparse(request.headers.get("referer") or "")
+        back_to = came_from.path if came_from.netloc == request.headers.get("host") and came_from.path != request.url.path else "/"
+        page = render(request, "error.html", title=ERROR_TITLES.get(status, "That did not work"), reason=reason,
+                      back_to=safe_next(back_to), bare=stranger, **({"nav_status": None} if stranger else {}))
+        page.status_code = status
+        return page
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException):
+        if wants_page(request) and exc.status_code >= 400:
+            return error_page(request, exc.status_code, ERROR_WORDS.get(exc.detail, exc.detail))
+        return await http_exception_handler(request, exc)
+
+    @app.exception_handler(RequestValidationError)
+    async def form_error(request: Request, exc: RequestValidationError):
+        if wants_page(request):
+            return error_page(request, 422, "Something in the form is missing or not valid. Nothing was changed.")
+        return await request_validation_exception_handler(request, exc)
+
+    @app.exception_handler(OverflowError)
+    async def number_too_large(request: Request, exc: OverflowError):
+        """A number past what the database can hold (the driver raises this at the query): nothing can have that id."""
+        if wants_page(request):
+            return error_page(request, 404, ERROR_WORDS["Not Found"])
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+
+    @app.exception_handler(OperationalError)
+    async def database_busy(request: Request, exc: OperationalError):
+        """A long job holding the write lock past the busy timeout: the transaction was rolled back, and the person is
+        told so in plain words instead of "Internal Server Error"."""
+        log.warning("Database not available for %s %s: %s", request.method, request.url.path, exc.orig)
+        reason = "The database is busy with other work, so this was not saved. Nothing was changed: try again in a minute."
+        if wants_page(request):
+            try:
+                return error_page(request, 503, reason)
+            except OperationalError:
+                return HTMLResponse(f"<!doctype html><title>Busy</title><p>{reason}</p><p><a href=\"/\">Back</a></p>", status_code=503)
+        return JSONResponse({"detail": reason}, status_code=503, headers={"Retry-After": "30"})
 
     who = current_username  # the signed-in Sales Manager, recorded on approvals and activities
 
@@ -214,7 +283,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def login_page(request: Request, next: str = "/", error: str = ""):
         with C().db.session() as s:
             has_users = user_count(s) > 0
-        error = error if error and hmac.compare_digest(note_sig(error), request.query_params.get("n", "")) else ""
+        error = error if error and same_text(note_sig(error), request.query_params.get("n", "")) else ""
         return render(request, "login.html", next=safe_next(next), error=error, has_users=has_users,
                       auth_on=C().settings.dashboard_auth)
 
@@ -335,6 +404,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.post("/inbox/{eid}/{action}")
     def inbox_action(request: Request, eid: int, action: str, category: str = Form("")):
         with C().db.session() as s:
+            take_write_lock(s)
             row = s.get(InboundEmail, eid) or _404()
             if action == "reviewed":
                 row.status = "reviewed"
@@ -406,6 +476,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             if q:
                 stmt = stmt.where(Company.name.ilike(f"%{q}%"))
             total = s.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
+            page = max(1, min(page, 10 ** 12))  # the database refuses an offset past 64 bits
             rows = s.execute(stmt.order_by(Lead.score.desc(), Lead.id.desc()).limit(100).offset((page - 1) * 100)).scalars().all()
             for r in rows:
                 _ = r.company, r.contact
@@ -572,6 +643,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         from aime.meetings import link_meeting
         with C().db.session() as s:
             m = s.get(Meeting, mid) or _404()
+            if not can_see_lead(s, scope(request), lead_id):
+                raise HTTPException(404)  # someone else's lead, or none: as if it did not exist
             lead = s.get(Lead, lead_id)
             if lead is None:
                 return back("/meetings", f"No lead #{lead_id}")
@@ -634,6 +707,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             m = s.get(Meeting, mid) or _404()
             try:
                 local = datetime.fromisoformat(start_local).replace(tzinfo=ZoneInfo(m.timezone or "UTC"))
+                if local.year not in MEETING_YEARS:
+                    raise ValueError
             except ValueError as exc:
                 raise ValueError("Not moved: give the new date and time") from exc
             booking.move(s, C().settings, cal, m, to_naive_utc(local), who(request))
@@ -643,6 +718,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.post("/meetings/{mid}/{action}")
     def meeting_action(request: Request, mid: int, action: str, notes: str = Form("")):
         with C().db.session() as s:
+            take_write_lock(s)
             m = s.get(Meeting, mid) or _404()
             if action not in ("held", "no_show", "cancel") or m.status != "scheduled":
                 raise HTTPException(400, "Action not allowed in the current state")
@@ -687,22 +763,38 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def log_meeting(request: Request, lead_id: int, date: str = Form(...), time_et: str = Form(...),
                     minutes: int = Form(30), title: str = Form("Meeting"), invitee_email: str = Form("")):
         from zoneinfo import ZoneInfo
+        from aime.assignment import record as record_assignment
         with C().db.session() as s:
+            take_write_lock(s)  # a double click: the second one finds the meeting the first one recorded
             lead = s.get(Lead, lead_id) or _404()
-            email = (invitee_email or (lead.contact.email if lead.contact else "") or "").strip().lower()
+            contact_email = ((lead.contact.email if lead.contact else "") or "").strip().lower()
+            email = (invitee_email or contact_email).strip().lower()
             if "@" not in email:
                 return back(f"/leads/{lead_id}", "Enter the invitee's email")
             try:
                 start = datetime.fromisoformat(f"{date}T{time_et}").replace(tzinfo=ZoneInfo("America/New_York"))
+                if start.year not in MEETING_YEARS:
+                    raise ValueError
             except ValueError:
                 return back(f"/leads/{lead_id}", "Enter the date as YYYY-MM-DD and the time as HH:MM (US Eastern)")
             start_utc = start.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
-            info = {"kind": "booked", "invitee_email": email, "invitee_name": lead.contact.display_name if lead.contact else None,
+            info = {"kind": "booked", "invitee_email": email,
+                    "invitee_name": lead.contact.display_name if contact_email == email else None,
                     "starts_at": start_utc, "ends_at": start_utc + timedelta(minutes=max(5, min(minutes, 480))),
                     "event": title[:200] or "Meeting", "tz": "America/New_York"}
-            meeting, note = record_meeting(s, C().settings, info, who(request), source="manual")
+            user = getattr(request.state, "user", None)
+            # as on approving its first email: whoever works an unowned lead keeps it, if their role receives leads;
+            # otherwise the handover below would give the deal to someone else and the lead would vanish from their view
+            if not lead.owner and user and "receive_leads" in user.get("perms", ()):
+                lead.owner = who(request)
+                record_assignment(s, lead_id=lead.id, opportunity_id=None, from_owner=None, to_owner=lead.owner,
+                                  method="meeting", reason="logged a meeting on it", actor=who(request))
+            meeting, note = record_meeting(s, C().settings, info, who(request), source="manual", lead=lead)
             check_double_bookings(s, C().settings)
-        return back(f"/leads/{lead_id}", f"Meeting logged: {note}")
+            s.flush()
+            still_mine = can_see_lead(s, scope(request), lead_id)
+        # a role that does not receive leads hands it over: it can no longer open the lead
+        return back(f"/leads/{lead_id}" if still_mine else "/my", f"Meeting logged: {note}")
 
     @app.post("/companies/{company_id}/not_competitor")
     def not_competitor(request: Request, company_id: int):
@@ -734,7 +826,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/opportunities/{opp_id}")
     def update_opp(request: Request, opp_id: int, stage: str = Form(...), next_step: str = Form(""),
-                   est_value: str = Form(""), lost_reason: str = Form(""), expected_close: str = Form("")):
+                   est_value: str = Form(""), lost_reason: str = Form(""), expected_close: str = Form(""),
+                   shown_stage: str = Form(""), shown_next_step: str = Form(""), shown_close: str = Form("")):
+        """The forms also send what the page showed (shown_*). A stage that moved while the page was open is not moved
+        back by a Save that kept the old one; a pre-filled field the person left alone does not overwrite a newer value.
+        Choosing the stage the deal is at now is not a conflict: that is a second click on the same Save."""
         if stage not in stage_names(C().settings):
             raise HTTPException(400)
         value = None
@@ -743,6 +839,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 value = float(est_value.replace(",", "").replace("$", ""))
             except ValueError:
                 return back("/pipeline", f"Estimated value '{est_value[:40]}' is not a number; nothing was changed")
+            if not 0 <= value < MAX_DEAL_VALUE:  # also false for nan and inf, which float() accepts
+                return back("/pipeline", f"Estimated value '{est_value[:40]}' must be zero or more and below "
+                                         f"{MAX_DEAL_VALUE:,.0f}; nothing was changed")
         close_by = None
         if expected_close.strip():
             try:
@@ -750,15 +849,20 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             except ValueError:
                 return back("/pipeline", "Expected close date is not a date; nothing was changed")
         with C().db.session() as s:
+            take_write_lock(s)  # two people closing one deal at once: the second one reads what the first one saved
             o = s.get(Opportunity, opp_id) or _404()
             old = o.stage
-            o.next_step = next_step or o.next_step
+            if shown_stage and shown_stage != old and stage != old:
+                return back("/pipeline", f"{o.name} moved to {old} while your page was open, so nothing was saved. "
+                                         "Check the deal and save again")
+            if next_step != shown_next_step:
+                o.next_step = next_step or o.next_step
             reason = (" ".join(lost_reason.split())[:200] or o.lost_reason or "No reason given") if stage == "lost" else None
             move_stage(s, o, stage, who(request), reason, settings=C().settings)  # history, close date, credit for a win
             o.probability = probability_of(C().settings, stage)
             if value is not None:
                 o.est_value = value
-            if close_by is not None:
+            if close_by is not None and expected_close.strip() != shown_close:
                 o.expected_close = close_by
             if stage == "won":
                 from aime.customer import handover
@@ -795,6 +899,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def followup_action(request: Request, fid: int, action: str, subject: str = Form(""), body: str = Form(""),
                         qc_override: str = Form("")):
         with C().db.session() as s:
+            # Take the database write lock before reading the email: one person's Reject and another's Approve, or the
+            # two requests of a double click, then run one after the other, and the second sees what the first decided.
+            take_write_lock(s)
             f = s.get(FollowUp, fid) or _404()
             if action in ("approve", "save") and f.channel == "email" and f.status == "awaiting_approval":
                 edited = False
@@ -850,7 +957,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                             log_activity(s, f"Outreach email #{f.id} approved despite {qc_status} quality checks",
                                          who(request), type_="override", company_id=f.company_id, lead_id=f.lead_id)
                     msg = "Approved. It will be sent by the follow-ups job if outbound email is enabled."
-            elif action == "reconfirm" and f.channel == "email" and f.status == "approved" and f.approved_at:
+            elif action == "reconfirm" and f.channel == "email" and am.needs_reconfirmation(s, f):
                 am.reconfirm(s, f, who(request))  # approved before sending was switched on: a person confirms it again
                 msg = "Confirmed again: it goes out on the next follow-ups run"
             elif action == "reject" and f.status in ("awaiting_approval", "approved", "pending"):
@@ -860,7 +967,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 if f.purpose == "reengage" and f.lead.outreach_status == "reengage":  # parked again; never redrafted
                     set_outreach_status(s, f.lead, "no_response", who(request), "re-engagement email rejected")
                 msg = "Rejected"
-            elif action == "done" and f.channel == "task":
+            elif action == "done" and f.channel == "task" and f.status == "pending":
                 f.status = "done"
                 msg = "Task completed"
             elif action == "mark_sent" and f.status == "uncertain":
@@ -872,6 +979,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 f.status, f.send_started_at = "approved", None
                 f.blocked_reason = "Requeued after a person confirmed it was not delivered"
                 msg = "Requeued"
+            elif action == "approve" and f.status == "approved" and wants_page(request):
+                # the second request of a double click: no second approval, no new time, and an email waiting for
+                # "Confirm again" stays waiting (needs_reconfirmation): only that button releases it
+                wait = "; it waits for Confirm again" if am.needs_reconfirmation(s, f) else ""
+                return back("/followups", f"Already approved by {f.approved_by}{wait}: nothing changed")
             else:
                 raise HTTPException(400, "Action not allowed in the current state")
             log_activity(s, f"Follow-up #{f.id} {action}", who(request), type_="followup", company_id=f.company_id,
@@ -928,7 +1040,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         if action == "save" and scheduled_et.strip():
             try:
                 scheduled = datetime.fromisoformat(scheduled_et.strip()).replace(tzinfo=ZoneInfo("America/New_York"))
-            except ValueError:
+                scheduled.astimezone(ZoneInfo("UTC"))
+            except (ValueError, OverflowError):
                 return back(f"/content/{cid}", "The scheduled time is not a valid date and time; nothing was changed")
         with C().db.session() as s:
             # Take the database write lock before reading the post: the publisher's claim then waits until this
@@ -1019,10 +1132,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             plans = s.execute(select(MarketingPlan).order_by(MarketingPlan.id.desc()).limit(7)).scalars().all()
             from aime.audiences import describe, matching
             from aime.performance import campaign_stats
-            results = campaign_stats(s)
+            sc = scope(request)
+            results = campaign_stats(s, sc)  # figures from the leads this user may see, like every other list
+            visible = set(s.execute(select(Lead.id).where(lead_condition(sc))).scalars())
             audiences = {}
             for c in rows:
-                leads = matching(s, c.audience or {})
+                leads = [lead for lead in matching(s, c.audience or {}) if lead.id in visible]
                 audiences[c.id] = {"text": describe(c.audience or {}), "matches": len(leads),
                                    "unattributed": sum(1 for lead in leads if lead.campaign_id is None)}
         return render(request, "campaigns.html", rows=rows, post_counts=post_counts, plans=plans, results=results,
@@ -1036,10 +1151,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         with C().db.session() as s:
             camp = s.get(Campaign, camp_id) or _404()
             camp.audience = parse(dict(form))
-            note = f"Audience saved: {len(matching(s, camp.audience))} matching leads"
+            visible = set(s.execute(select(Lead.id).where(lead_condition(scope(request)))).scalars())
+            leads = [lead for lead in matching(s, camp.audience) if lead.id in visible]  # never rewrites another team's
+            note = f"Audience saved: {len(leads)} matching leads"
             if form.get("attach") == "yes":
                 attached = 0
-                for lead in matching(s, camp.audience):
+                for lead in leads:
                     if lead.campaign_id is None:
                         lead.campaign_id, attached = camp.id, attached + 1
                 log_activity(s, f"Campaign '{camp.name}': {attached} matching leads attributed to it", who(request),
@@ -1054,6 +1171,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             start, end = date.fromisoformat(start_date.strip()), date.fromisoformat(end_date.strip())
         except ValueError:
             return back("/campaigns", "Start and end dates must be valid dates (YYYY-MM-DD); nothing was created")
+        if end < start:
+            return back("/campaigns", "A campaign cannot end before it starts; nothing was created")
         with C().db.session() as s:
             s.add(Campaign(name=name, objective=objective, service=service or None, industry=industry or None,
                            start_date=start, end_date=end, status="active", created_by="human"))
@@ -1072,7 +1191,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.get("/inbound", response_class=HTMLResponse)
     def inbound(request: Request):
         with C().db.session() as s:
-            rows = s.execute(select(InboundInquiry).order_by(InboundInquiry.id.desc()).limit(100)).scalars().all()
+            # an inquiry that became someone's lead is theirs; one with no lead yet counts as unassigned work
+            rows = s.execute(select(InboundInquiry).where(record_condition(scope(request), InboundInquiry.lead_id))
+                             .order_by(InboundInquiry.id.desc()).limit(100)).scalars().all()
         return render(request, "inbound.html", rows=rows)
 
     @app.post("/inbound")
@@ -1111,7 +1232,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         try:
             payload = json.loads(raw)
             InboundPayload.model_validate(payload)
-        except (ValueError, ValidationError) as exc:
+        except (ValueError, ValidationError, RecursionError) as exc:  # RecursionError: JSON nested too deep to read
             raise HTTPException(422, f"Invalid inquiry: {str(exc)[:200]}") from exc
         if C().settings.is_production and payload.get("is_sample"):
             raise HTTPException(422, "Sample records are not accepted by the production database")
@@ -1566,9 +1687,24 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         with C().db.session() as s:
             return {"mailboxes": [mail_accounts.public(a) for a in s.execute(select(MailAccount).order_by(MailAccount.id)).scalars()]}
 
+    async def _mailbox_json(request: Request) -> dict | None:
+        """The request's JSON as fields, or None unless it is an object of plain values: anything else is the client's
+        mistake, answered with a 400, and never reaches mail_accounts.save."""
+        try:
+            body = await request.json()
+        except (ValueError, RecursionError):
+            return None
+        if not isinstance(body, dict) or any(isinstance(v, (dict, list)) for v in body.values()):
+            return None
+        return {k: str(v) if isinstance(v, (bool, int, float)) else v for k, v in body.items()}
+
+    BAD_MAILBOX_JSON = {"detail": "Send the mailbox's fields as one JSON object"}
+
     @app.post("/api/mailboxes")
     async def api_mailbox_create(request: Request):
-        body = await request.json()
+        body = await _mailbox_json(request)
+        if body is None:
+            return JSONResponse(BAD_MAILBOX_JSON, status_code=400)
         with C().db.session() as s:
             try:
                 a = mail_accounts.save(s, who(request), body)
@@ -1579,7 +1715,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.patch("/api/mailboxes/{aid}")
     async def api_mailbox_edit(request: Request, aid: int):
-        body = await request.json()
+        body = await _mailbox_json(request)
+        if body is None:
+            return JSONResponse(BAD_MAILBOX_JSON, status_code=400)
         with C().db.session() as s:
             try:
                 return mail_accounts.public(mail_accounts.save(s, who(request), body, account_id=aid))
@@ -1641,11 +1779,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return RedirectResponse(url, status_code=302)
 
     @app.get("/integrations/linkedin-leads/callback")
-    def linkedin_leads_callback(request: Request, code: str = "", state: str = "", error: str = "",
-                                error_description: str = ""):
+    def linkedin_leads_callback(request: Request, code: str = "", state: str = "", error: str = ""):
         ctx = C()
-        if error:
-            return back("/integrations#linkedin-leads", f"LinkedIn sign-in declined: {error_description or error}")
+        if error:  # never the words in the link: a note on the page is the app's own, and anyone can craft a link
+            return back("/integrations#linkedin-leads", "LinkedIn sign-in was declined or cancelled: nothing was connected")
         with ctx.db.session() as s, ctx.http() as http:
             try:
                 linkedin_leads.finish(s, ctx.settings, http, state, code, who(request))
@@ -1696,10 +1833,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return RedirectResponse(LinkedInClient(ctx.settings).authorization_url(state), status_code=302)
 
     @app.get("/integrations/linkedin/callback")
-    def linkedin_callback(code: str = "", state: str = "", error: str = "", error_description: str = ""):
+    def linkedin_callback(code: str = "", state: str = "", error: str = ""):
         ctx = C()
-        if error:
-            return back("/integrations", f"LinkedIn authorization declined: {error_description or error}")
+        if error:  # never the words in the link: see above
+            return back("/integrations", "LinkedIn authorization was declined or cancelled: nothing was connected")
         with ctx.db.session() as s:
             saved = kv_get(s, "linkedin.oauth_state") or {}
             kv_set(s, "linkedin.oauth_state", None)
@@ -1728,10 +1865,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return RedirectResponse(url, status_code=302)
 
     @app.get("/integrations/oauth/callback")
-    def oauth_callback(request: Request, code: str = "", state: str = "", error: str = "", error_description: str = ""):
+    def oauth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
         ctx = C()
-        if error:
-            return back("/integrations#accounts", f"Sign-in declined: {error_description or error}")
+        if error:  # never the words in the link: see above
+            return back("/integrations#accounts", "Sign-in was declined or cancelled: nothing was connected")
         with ctx.db.session() as s, ctx.http() as http:
             try:
                 row = oauth.finish(s, ctx.settings, http, state, code, actor=who(request))
@@ -1765,7 +1902,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         with ctx.db.session() as s:
             statuses = integration_statuses(ctx, s, include_scheduler=True)
             failing = [r for r in s.execute(select(JobState).where(JobState.consecutive_failures >= 2)).scalars()]
-        return {"ok": not failing, "heartbeat": read_heartbeat(ctx.settings),
+        # no ticks for a long time is not healthy, unless a maintenance window is why
+        stopped = (any(r["name"] == "Scheduler heartbeat" and r["state"] == "STALE" for r in statuses)
+                   and not maintenance.active(ctx.settings.data_dir))
+        return {"ok": not failing and not stopped, "heartbeat": read_heartbeat(ctx.settings),
                 "failing_jobs": [f.job for f in failing], "integrations": statuses}
 
     @app.get("/api/stats")
@@ -1788,7 +1928,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def api_leads(request: Request, status: str = "qualified", limit: int = 50):
         with C().db.session() as s:
             rows = s.execute(select(Lead).where(Lead.status == status, lead_condition(scope(request)))
-                             .order_by(Lead.score.desc()).limit(min(limit, 500))).scalars().all()
+                             .order_by(Lead.score.desc()).limit(max(0, min(limit, 500)))).scalars().all()  # SQLite: negative is no limit
             return [{
                 "id": l.id, "company": l.company.name, "state": l.company.state, "industry": l.company.industry,
                 "website": l.company.website, "score": l.score, "grade": l.grade, "source": l.source,
@@ -1811,8 +1951,10 @@ def health_strip(ctx: AppContext, s) -> list[tuple[str, str, str]]:
         rows.append(("Scheduler", "bad", "no tick recorded yet"))
     else:
         age = int((utcnow() - datetime.fromisoformat(hb["at"].rstrip("Z"))).total_seconds() // 60)
-        rows.append(("Scheduler", "ok" if age <= 35 or hb.get("state") == "maintenance" else "bad",
-                     f"last tick {age} min ago" + (" (maintenance)" if hb.get("state") == "maintenance" else "")))
+        # the beat's state is from when it was written: it explains a silence only while the window is still open
+        pausing = hb.get("state") == "maintenance" and maintenance.active(st.data_dir)
+        rows.append(("Scheduler", "ok" if age <= 35 or pausing else "bad",
+                     f"last tick {age} min ago" + (" (maintenance)" if pausing else "")))
     failed = s.execute(select(func.count(JobRun.id)).where(JobRun.status.in_(("failed", "partial")),
                                                            JobRun.started_at >= utcnow() - timedelta(hours=24))).scalar_one()
     rows.append(("Jobs (24 h)", "ok" if failed == 0 else "warn", f"{failed} failed or partial"))
@@ -1894,7 +2036,7 @@ def analytics_view(ctx: AppContext, s) -> dict:
     sent_w = weeks(FollowUp.sent_at, FollowUp.status == "sent")
     replies_w = weeks(InboundEmail.received_at, InboundEmail.is_simulated.is_(False),
                       InboundEmail.category.in_(HUMAN_REPLIES))
-    meetings_w = weeks(Meeting.created_at, Meeting.is_simulated.is_(False))
+    meetings_w = weeks(Meeting.created_at, Meeting.is_simulated.is_(False), Meeting.status != "cancelled")
     labels = [w for w, _ in leads_w]
     contacted = s.execute(select(func.count(func.distinct(FollowUp.lead_id))).where(
         FollowUp.kind == "outreach", FollowUp.status == "sent")).scalar_one()
@@ -1998,7 +2140,8 @@ def employee_duty(settings, state: str) -> tuple[str, str, str, str]:
         duty = ("Off duty", "warn", "no scheduled run recorded for this database", "AI is off duty")
     else:
         beat = datetime.fromisoformat(hb["at"].rstrip("Z"))
-        if hb.get("state") == "running":
+        # "running" is written as a tick starts: sleep or a crash before its end leaves it, so it holds only so long
+        if hb.get("state") == "running" and now - beat <= ABANDON_AFTER:
             duty = ("Working now", "ok", "running its scheduled jobs", "AI is working for you!")
         elif now - beat <= timedelta(minutes=35):
             duty = ("On duty", "ok", f"last check-in {ago(beat, now)}; it checks in every 15 minutes", "AI is working for you!")
@@ -2073,6 +2216,8 @@ def manager_today(ctx: AppContext, s) -> dict:
                 if r.lead_id not in booked]
     meetings = s.execute(select(Meeting).where(Meeting.status == "scheduled", Meeting.ends_at >= now,
                                                Meeting.is_simulated.is_(False)).order_by(Meeting.starts_at).limit(10)).scalars().all()
+    for m in meetings:
+        _ = m.lead.company if m.lead else None  # the page reads them after this session has closed
 
     # exceptions: only what a person has to decide, each with the reason
     mode = am.get_mode(s)
@@ -2167,7 +2312,7 @@ def system_status(ctx: AppContext, s, team: list[dict], sender: tuple[bool, str]
     at = datetime.fromisoformat(beat["at"].rstrip("Z")) if beat else None
     if beat is None:
         add("Scheduled jobs", "NOT CONFIGURED", "no scheduled run recorded for this database", "/system")
-    elif beat.get("state") == "maintenance":
+    elif beat.get("state") == "maintenance" and maintenance.active(st.data_dir):
         add("Scheduled jobs", "PAUSED", "maintenance window: scheduled runs wait until it ends", "/system")
     elif stopped:
         add("Scheduled jobs", "PAUSED", "stopped in Automation Control: jobs wait until an administrator starts them",
@@ -2439,11 +2584,17 @@ def dashboard_view(ctx: AppContext, s, days: int) -> dict:
     now = utcnow()
     start, prev = now - timedelta(days=days), now - timedelta(days=2 * days)
     cnt = lambda m, *c: s.execute(select(func.count(m.id)).where(*c)).scalar_one()  # noqa: E731
+    # the owner's days ("today starts at local midnight", as on Manager Today); the period itself is the last 7 or 30 x 24 h
+    tz = local_tz(st.schedule.get("timezone"))
+    local_now = as_aware_utc(now).astimezone(tz)
+
+    def by_day(dates) -> list[int]:
+        return charts.daily_counts(dates, days, local_now.date(), tz, keep_oldest=True)
 
     def window(column, *where) -> tuple[int, int, list[int]]:
         dates = s.execute(select(column).where(column >= prev, *where)).scalars().all()
-        current = sum(1 for d in dates if d >= start)
-        return current, len(dates) - current, charts.daily_counts(dates, days)
+        current = [d for d in dates if d >= start]
+        return len(current), len(dates) - len(current), by_day(current)
 
     open_co = (Company.merged_into_id.is_(None),)
     cards = []
@@ -2454,7 +2605,8 @@ def dashboard_view(ctx: AppContext, s, days: int) -> dict:
             ("Emails sent", cnt(FollowUp, FollowUp.channel == "email", FollowUp.status == "sent"),
              window(FollowUp.sent_at, FollowUp.status == "sent"), "mail", "green", "/followups?show=all"),
             ("Meetings booked", cnt(Meeting, Meeting.is_simulated.is_(False), Meeting.status != "cancelled"),
-             window(Meeting.created_at, Meeting.is_simulated.is_(False)), "calendar", "orange", "/meetings")):
+             window(Meeting.created_at, Meeting.is_simulated.is_(False), Meeting.status != "cancelled"), "calendar", "orange",
+             "/meetings")):
         text, trend = change(cur, before)
         cards.append({"label": label, "value": total, "change": text, "trend": trend, "icon": icon, "tone": tone,
                       "href": href, "period": cur, "spark": charts.sparkline(daily, tone, f"{label} per day")})
@@ -2480,11 +2632,10 @@ def dashboard_view(ctx: AppContext, s, days: int) -> dict:
         row["ago"] = ago(row["at"], now)
 
     # Sales performance: ten real series in three views, per day over the chosen period
-    day_labels = [(now.date() - timedelta(days=days - 1 - i)).strftime("%a" if days <= 7 else "%b %d") for i in range(days)]
+    day_labels = [(local_now.date() - timedelta(days=days - 1 - i)).strftime("%a" if days <= 7 else "%b %d") for i in range(days)]
 
     def per_day(column, *where):
-        return charts.daily_counts(s.execute(select(column).where(column >= now - timedelta(days=days), *where))
-                                   .scalars().all(), days)
+        return by_day(s.execute(select(column).where(column >= start, *where)).scalars().all())
 
     real_replies = (InboundEmail.is_simulated.is_(False),)
     # follow-up work a person or the pipeline completed (rebook, record the outcome, chase a stale lead); a
@@ -2520,17 +2671,22 @@ def dashboard_view(ctx: AppContext, s, days: int) -> dict:
 
     contacted = s.execute(select(func.count(func.distinct(FollowUp.lead_id))).where(
         FollowUp.kind == "outreach", FollowUp.status == "sent")).scalar_one()
-    stages_raw = [("New leads", cnt(Lead), "users", "blue", "/leads"),
-                  ("Contacted", contacted, "mail", "purple", "/followups?show=all"),
-                  ("Interested", cnt(Lead, Lead.outreach_status.in_(("interested", "meeting"))), "star", "green", "/pipeline"),
+    leads_with_meeting = s.execute(select(func.count(func.distinct(Meeting.lead_id))).where(
+        Meeting.is_simulated.is_(False), Meeting.status != "cancelled", Meeting.lead_id.is_not(None))).scalar_one()
+    # (label, the number shown, how many leads that is, ...): a rate divides leads by leads, not meetings by people
+    stages_raw = [("New leads", cnt(Lead), None, "users", "blue", "/leads"),
+                  ("Contacted", contacted, None, "mail", "purple", "/followups?show=all"),
+                  ("Interested", cnt(Lead, Lead.outreach_status.in_(("interested", "meeting"))), None, "star", "green", "/pipeline"),
                   ("Meeting booked", cnt(Meeting, Meeting.is_simulated.is_(False), Meeting.status != "cancelled"),
-                   "calendar", "orange", "/meetings"),
-                  ("Closed won", cnt(Opportunity, Opportunity.stage == "won"), "trophy", "green", "/pipeline")]
+                   leads_with_meeting, "calendar", "orange", "/meetings"),
+                  ("Closed won", cnt(Opportunity, Opportunity.stage == "won"), None, "trophy", "green", "/pipeline")]
     stages = []
-    for i, (label, n, icon, tone, href) in enumerate(stages_raw):
-        before = stages_raw[i - 1][1] if i else None
+    for i, (label, n, people, icon, tone, href) in enumerate(stages_raw):
+        got = n if people is None else people
+        before = (lambda row: row[1] if row[2] is None else row[2])(stages_raw[i - 1]) if i else None
+        # one step need not be inside the one before (an inquiry is interested without outreach): no rate over 100%
         stages.append({"label": label, "value": n, "icon": icon, "tone": tone, "href": href,
-                       "rate": (f"{100 * n / before:.0f}% conversion" if before else ("" if i else "all leads"))})
+                       "rate": (f"{100 * got / before:.0f}% conversion" if before and got <= before else ("" if i else "all leads"))})
 
     meetings = []
     for m in s.execute(select(Meeting).where(Meeting.status == "scheduled", Meeting.ends_at >= now,
@@ -2564,7 +2720,7 @@ def dashboard_view(ctx: AppContext, s, days: int) -> dict:
     local_hour = datetime.now().hour
     return dict(
         greeting="Good morning" if local_hour < 12 else "Good afternoon" if local_hour < 17 else "Good evening",
-        period_days=days, period_label=f"{start:%b %d} – {now:%b %d, %Y}", cards=cards,
+        period_days=days, period_label=f"{as_aware_utc(start).astimezone(tz):%b %d} – {local_now:%b %d, %Y}", cards=cards,
         leads_badge={"change": lead_change, "trend": lead_trend, "count": leads_now},
         feed=feed[:6], performance=performance, pipeline_stages=stages, upcoming_list=meetings, insight=insight,
         calendly_url=st.calendly_url,

@@ -15,7 +15,7 @@
 
 <div class="two">
   <div>
-    <h2>Decisions <form class="inline" method="post" action="/policy/evaluate"><button class="secondary">Check posts now</button></form></h2>
+    <h2>Decisions {% if can_edit %}<form class="inline" method="post" action="/policy/evaluate"><button class="secondary">Check posts now</button></form>{% endif %}</h2>
     <div class="card table-wrap"><table>
       <tr><th>Post</th><th>Slot (ET)</th><th>Policy</th><th>You</th><th>Why it would hold</th></tr>
       {% for r in report.rows %}

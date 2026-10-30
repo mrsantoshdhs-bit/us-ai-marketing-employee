@@ -23,7 +23,7 @@ from aime.agents.sales_workflow import SalesWorkflowAgent
 from aime.integrations.email_smtp import EmailSender
 from aime.models import (Activity, Assignment, AuditEvent, Company, Contact, FollowUp, InboundEmail, InboundInquiry, Lead,
                          Meeting, Opportunity, Quote, StageChange, Suppression, Team, User)
-from aime.timeutil import utcnow
+from aime.timeutil import fmt_local, utcnow
 from aime.web.app import create_app
 from aime.web.auth import COOKIE, hash_password, make_cookie, session_secret
 from tests.test_inbound_sales import TUESDAY_11AM_ET, FakeSMTP
@@ -260,7 +260,7 @@ def test_ok_full_journey_from_web_inquiry_to_handover_and_reports(make_ctx):
     # reporting: each page agrees with the database and with each other, for each reader
     assert board_count(mia.get("/pipeline").text, "won") == 1
     assert board_count(eva.get("/pipeline").text, "won") == 1
-    today = utcnow().date().isoformat()
+    today = fmt_local(utcnow(), None, "%Y-%m-%d")  # the report's days are the days on screen
     row = perf(ana.get(f"/performance?start={today}&end={today}").text, "eva")
     assert (row["won"], row["value"], row["meetings"], row["emails"], row["pos"]) == ("1", "$18,000", "1", "1", "1")
     assert perf(eva.get("/my").text, "eva")  # her last 30 days are on My work
@@ -1406,10 +1406,10 @@ def test_defect_a_double_submit_of_the_public_form_answers_500(org):
     although the inquiry is safely on record."""
     app = create_app(org)
     c = client(org, app=app)
-    for n in range(4):  # a race: several rounds, each a new inquiry
+    for n in range(3):  # a race: several rounds, each a new inquiry, within the public API's limit of 20 a minute
         codes = together([lambda n=n: api_inquiry(c, **{**DANA, "message": f"{ASK} round {n}"}) for _ in range(6)])
         assert set(codes) <= {200, 201}, codes
-    assert count(org, InboundInquiry) == 4
+    assert count(org, InboundInquiry) == 3
 
 
 def test_defect_the_first_approvals_on_a_new_install_crash_each_other(org, monkeypatch):
@@ -1548,3 +1548,105 @@ def test_defect_one_user_reopens_as_another_wins_leaves_a_deal_that_is_both(org,
         assert o.won_by == "eva" and o.closed_at
     else:
         assert o.won_by is None and o.closed_at is None and lead_row(org, lid).status != "converted"
+
+
+# ================================================================== what the fixes above must not break
+def test_ok_one_person_editing_a_deal_from_its_pages_is_never_told_of_a_conflict(org):
+    lid = make_lead(org, owner="eva")
+    oid = make_deal(org, lid, value=9000)
+    eva = client(org, "eva")
+    for page, action in ((f"/opportunities/{oid}", f"/opportunities/{oid}"), ("/pipeline", f"/opportunities/{oid}")):
+        fields = form_fields(eva.get(page).text, action)
+        assert fields["shown_stage"] == opp_row(org, oid).stage
+        assert post(eva, action, **{**fields, "next_step": f"From {page}"}).status_code == 303
+        assert opp_row(org, oid).next_step == f"From {page}"
+    fields = form_fields(eva.get("/pipeline").text, f"/opportunities/{oid}")
+    r = post(eva, f"/opportunities/{oid}", **{**fields, "stage": "won"})
+    assert "Opportunity updated" in where(r)
+    assert post(eva, f"/opportunities/{oid}", **{**fields, "stage": "won"}).status_code == 303  # the same click twice
+    o = opp_row(org, oid)
+    assert (o.stage, o.won_by) == ("won", "eva")
+    assert count(org, StageChange, StageChange.opportunity_id == oid, StageChange.to_stage == "won") == 1
+
+
+def test_ok_a_stale_page_says_why_nothing_was_saved_and_keeps_a_colleagues_next_step_and_date(org):
+    lid = make_lead(org, owner="eva")
+    oid = make_deal(org, lid, stage="proposal")
+    eva, mia = client(org, "eva"), client(org, "mia")
+    page = mia.get(f"/opportunities/{oid}").text
+    post(eva, f"/opportunities/{oid}", stage="proposal", next_step="Eva's plan", expected_close="2027-01-15")
+    fields = form_fields(page, f"/opportunities/{oid}")  # the stage has not moved: Mia only attaches a reason nobody needs
+    assert post(mia, f"/opportunities/{oid}", **fields).status_code == 303
+    o = opp_row(org, oid)
+    assert (o.next_step, o.expected_close) == ("Eva's plan", date(2027, 1, 15))  # fields she left alone did not overwrite
+    post(eva, f"/opportunities/{oid}", stage="negotiation")
+    r = post(mia, f"/opportunities/{oid}", **{**fields, "next_step": "Mia's plan"})
+    assert "moved to negotiation while your page was open" in where(r) and "nothing was saved" in where(r)
+    assert opp_row(org, oid).next_step == "Eva's plan"
+
+
+def test_ok_winning_again_after_a_reopen_brings_back_one_handover_task(org):
+    lid = make_lead(org, owner="eva", email="dana@acme.example")
+    oid = make_deal(org, lid)
+    eva = client(org, "eva")
+    post(eva, f"/opportunities/{oid}", stage="won")
+    post(eva, f"/opportunities/{oid}", stage="negotiation")
+    assert lead_row(org, lid).status == "qualified"
+    with org.db.session() as s:
+        assert s.execute(select(FollowUp).where(FollowUp.subject.like("Customer handover:%"))).scalar_one().status == "cancelled"
+    post(eva, f"/opportunities/{oid}", stage="won")
+    assert lead_row(org, lid).status == "converted"
+    with org.db.session() as s:
+        task = s.execute(select(FollowUp).where(FollowUp.subject.like("Customer handover:%"))).scalar_one()
+        assert task.status == "pending" and task.blocked_reason is None
+
+
+def test_ok_a_finished_handover_and_another_won_deal_survive_a_reopen(org):
+    lid = make_lead(org, owner="eva", email="dana@acme.example")
+    first = make_deal(org, lid, name="First")
+    second = make_deal(org, lid, name="Second")
+    eva = client(org, "eva")
+    post(eva, f"/opportunities/{first}", stage="won")
+    post(eva, f"/opportunities/{second}", stage="won")
+    with org.db.session() as s:
+        task = s.execute(select(FollowUp).where(FollowUp.subject.like("Customer handover: First"))).scalar_one()
+        task.status = "done"
+    post(eva, f"/opportunities/{first}", stage="negotiation")
+    assert lead_row(org, lid).status == "converted"  # the second deal still makes them a customer
+    with org.db.session() as s:
+        assert s.execute(select(FollowUp).where(FollowUp.subject.like("Customer handover: First"))).scalar_one().status == "done"
+
+
+def test_ok_a_later_usd_quote_after_a_euro_one_sets_the_deal_value(org):
+    _, oid, qid, eva = quoted(org, currency="EUR")
+    r = post(eva, f"/opportunities/{oid}/quotes/{qid}/accept")
+    assert "enter the agreed value in USD" in where(r) and opp_row(org, oid).est_value is None
+    with org.db.session() as s:
+        assert s.get(Quote, qid).status == "accepted"
+    post(eva, f"/opportunities/{oid}/quotes", amount="20000")
+    with org.db.session() as s:
+        second = s.execute(select(Quote).order_by(Quote.id.desc())).scalars().first().id
+    post(eva, f"/opportunities/{oid}/quotes/{second}/accept")
+    assert opp_row(org, oid).est_value == 20000
+
+
+def test_ok_a_role_without_leads_logging_a_meeting_lands_on_my_work(org):
+    """A Lead Generation Executive does not receive leads: the deal goes to the pool, and the page they come back to is
+    one they can open."""
+    with org.db.session() as s:
+        s.add(User(username="gen", password_hash=HASH, role="lead_gen_executive"))
+    lid = make_lead(org, owner=None, email="dana@acme.example")
+    make_deal(org, lid, owner=None, stage="discovery")
+    gen = client(org, "gen")
+    r = post(gen, f"/leads/{lid}/meeting", date="2026-11-03", time_et="10:00")
+    assert r.status_code == 303 and r.headers["location"].startswith("/my") and "Meeting logged" in where(r)
+    assert gen.get(r.headers["location"]).status_code == 200
+    assert lead_row(org, lid).owner not in (None, "gen")
+
+
+def test_ok_a_calendly_booking_by_a_returning_customer_goes_to_their_open_lead(org):
+    from aime.meetings import match_lead
+
+    _, _, new = won_customer(org)
+    with org.db.session() as s:
+        assert match_lead(s, DANA["email"])[0].id == new.id
