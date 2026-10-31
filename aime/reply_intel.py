@@ -62,6 +62,9 @@ REMOVAL_WORDS = re.compile(r"\b(remov(e|ed|al)|unsubscrib\w*|delet(e|ed)|stop|op
                            r"(off|from) (your|the|this) \w*\s?list)\b", re.I)
 # "How much longer do I have to put up with this?" asks for no price.
 _HOW_MUCH = r"how much(?! longer| more (of|time|do|can|must)| (do|must|can|should) i\b)"
+# Having no money for it, in everyday wording.
+_NO_BUDGET = (r"\b(no|zero|without( a| any)?|out of|(do not|don'?t|doesn'?t|did not|didn'?t) (have|get)( a| any| the)?|have not got( a| any| the)?)\s+budget\b|"
+              r"\bbudget (is|was|has been) (\w+ )?(gone|tight|frozen|cut|spent|used up|exhausted|allocated|limited|locked|closed)\b|\bbudget freeze\b")
 PATTERNS: list[tuple[str, re.Pattern]] = [
     # Opt-outs in everyday wording and with typos ("unsubcribe", "remove my email from your list", "no more emails").
     # "drop me a line", "take us through it" and "one from the list you sent" are not opt-outs.
@@ -107,7 +110,7 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
                               r"set up a (call|meeting)|tell me more|send (me )?(more|some) (info|details)|"
                               rf"what (does it|would it) cost|{_HOW_MUCH}|pricing|availab(le|ility)|free (on|next)|"
                               r"(monday|tuesday|wednesday|thursday|friday) (works|at|morning|afternoon))\b", re.I)),
-    ("objection", re.compile(r"\b(too expensive|no budget|(do not|don'?t) have (a |any |the )?budget|budget (is|was)|not (a priority|right now|now)|maybe later|"
+    ("objection", re.compile(rf"{_NO_BUDGET}|" r"\b(too expensive|budget (is|was)|not (a priority|right now|now)|maybe later|"
                              r"next (quarter|year)|bad timing|already (work|working|use|using|have)|in-house|"
                              r"circle back|check back)\b", re.I)),
     ("referral", re.compile(r"\b(you should (talk|speak|reach out) to|reach out to|the right person|"
@@ -214,8 +217,7 @@ _WHEN = r"(monday|tuesday|wednesday|thursday|friday|tomorrow|today|this week|nex
 PRICING = re.compile(rf"\b(pric(e|es|ing)|{_HOW_MUCH}|cost(s)?|quote|quotation|rates|fees|budget|estimate|ballpark|"
                      r"discount(s|ed)?|cheaper|rebate|coupon|\d+\s?% off)\b", re.I)
 # Having no money for it says no, and asks no price: "No budget at the moment. How much is it?" still asks.
-NO_BUDGET = re.compile(r"\b(no|zero|without( a| any)?|out of|(do not|don'?t|doesn'?t|did not|didn'?t) (have|get)( a| any| the)?|have not got( a| any| the)?)\s+budget\b|"
-                       r"\bbudget (is|was|has been) (\w+ )?(gone|tight|frozen|cut|spent|used up|exhausted|allocated|limited|locked|closed)\b|\bbudget freeze\b", re.I)
+NO_BUDGET = re.compile(_NO_BUDGET, re.I)
 MORE_INFO = re.compile(r"\b(more (info|information|details)|tell me more|learn more|any (info|details)|"
                        r"send (me |us )?(some |more |a |the )?(info|information|details|deck|case stud(y|ies)|brochure|"
                        r"materials?|examples?))\b", re.I)
@@ -1008,19 +1010,34 @@ SUGGESTED_WAITS = "suggested reply waiting for your approval"
 NO_CLEAR_SIGNAL = "no clear signal"
 # Stages a line that says nothing new does not lower: what they said before still stands.
 STAGES_THAT_STAND = ("interested", "meeting")
-# What can mean no, in words the rules do not read as a no ("You can stop now", "Never mind", "Kein Bedarf"). Any of it: the reply counts as
-# something new, whatever else it says, and is handled as every reply was before.
-MAY_MEAN_NO = re.compile(r"\b(no|nope|not|never|none|nothing|cannot|dont|cancel\w*|mind|off|stop\w*|wrong|busy|later|\w+n't|"
-                         r"kein\w*|nicht|nein|non|pas|nahi|nahin|mat|nada|sin)\b", re.I)
-
-
+# The only replies that say nothing new: a short acknowledgement, or that a colleague comes along. Anything else, in any language, stops
+# everything as every reply does: a list of what may mean no would always miss one ("Go away", "We'll pass", "Dejen de escribirme").
+_ACK = r"(thanks( a lot| so much| very much)?|thank you( so much| very much)?|many thanks|ok|okay|sounds good|sounds great|great|perfect|got it|noted|received)"
+_JOINING = (r"((my|a|our) colleague (will|can|may|might|would like to|is going to) (also )?(join|be joining|attend)( us| me| the call| the meeting| in| too| as well)*|"
+            r"my colleague is joining( us| me)?( too| as well)?|"
+            r"(i'll|i will|i'd like to|i would like to) (also )?bring (along )?(my |a )colleague( along| with me| too)*)")
+_BETWEEN = r"[\s,.!;:-]*"
+HARMLESS = re.compile(rf"(?:(?:hi|hello){_BETWEEN})?(?:{_ACK}{_BETWEEN})*(?:(?:(?:sorry|one more thing|also|fyi|by the way|btw|just so you know){_BETWEEN})*{_JOINING}{_BETWEEN})?"
+                      rf"(?:{_ACK}{_BETWEEN})*", re.I)
+_SIGN_OFF = re.compile(r"[\s,.!-]*\b(best regards|kind regards|regards|best|cheers|sincerely)\W*$", re.I)
+_MOST_HARMLESS_CHARS = 160
+# Below a "--" line is a signature to every other rule, and a disclaimer there says "not" and "delete". An opt-out there still counts here.
 SIGNED_STOP = re.compile(r"\b(stop|take off)\b", re.I)
 
 
+def says_only_something_harmless(text: str, from_name: str | None) -> bool:
+    """The whole text is on the short list, with at most their sign-off and their own name after it."""
+    said = _flat(text).strip()
+    for word in reversed(re.findall(r"\w+", from_name or "")):
+        said = re.sub(rf"[\s,.!-]*\b{re.escape(word)}\W*$", "", said, flags=re.I)
+    said = _SIGN_OFF.sub("", said).strip()
+    return bool(said) and len(said) <= _MOST_HARMLESS_CHARS and bool(re.search(rf"{_ACK}|{_JOINING}", said, re.I)) and bool(HARMLESS.fullmatch(said))
+
+
 def _nothing_new(row: InboundEmail, f: FollowUp | None, lead: Lead, person: bool) -> bool:
-    """One more line from someone in the conversation that the rules read as nothing at all ("my colleague will join us"). Every doubt
-    says no, and then this reply stops everything as any reply does: what may be a no, a footer's opt-out, mail only partly read, a
-    newsletter, an AI that reads it as a no, a sender who is not proven, an address that opted out or bounced."""
+    """One more line from someone in the conversation that says nothing new ("my colleague will join us"). Every doubt says no, and then
+    this reply stops everything as any reply does: anything off the short list, words below the quote or under a signature that may be an
+    opt-out, a reading the AI finds negative, a newsletter, mail only partly read, a sender who is not proven, an address that opted out."""
     reasons = list(row.reasons or [])
     if row.category != "other" or not reasons or reasons[0] != NO_CLEAR_SIGNAL or row.is_simulated:
         return False
@@ -1030,12 +1047,13 @@ def _nothing_new(row: InboundEmail, f: FollowUp | None, lead: Lead, person: bool
         return False
     if lead.outreach_status in ("unsubscribed", "bounced") or not (f is not None or row.sender_verified or person):
         return False
-    # Below a "--" line is a signature to every other rule, and a disclaimer there says "not" and "delete". An opt-out there still counts here.
-    signed = own_text(re.sub(r"(?m)^\s*--\s*$", "", row.body_text or ""))
-    if JUST_STOP.search(signed) or any(rx.search(_flat(signed)) for rx in (dict(PATTERNS)["unsubscribe"], ELSEWHERE_OPT_OUT, COMPLAINT, SIGNED_STOP)):
+    body = row.body_text or ""
+    if rest_of_reply(body):  # they wrote below the quote too
         return False
-    said = _flat(f"{row.new_text or own_text(row.body_text or '')}\n{rest_of_reply(row.body_text or '')}")
-    return not (MAY_MEAN_NO.search(said) or REMOVAL_WORDS.search(said) or UPSET.search(said) or LEGAL_MENTION.search(said))
+    for part in (own_text(re.sub(r"(?m)^\s*--\s*$", "", body)), below_header_copy(body)):
+        if JUST_STOP.search(part) or any(rx.search(_flat(part)) for rx in (dict(PATTERNS)["unsubscribe"], ELSEWHERE_OPT_OUT, COMPLAINT, SIGNED_STOP)):
+            return False
+    return says_only_something_harmless(row.new_text or own_text(body), getattr(row, "from_name", None))
 
 
 def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
@@ -1147,10 +1165,14 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         stage = "replied" if automatic_simulation else OUTREACH_STAGE.get(row.category, "replied")
         answers = []
         if _nothing_new(row, f, lead, person):  # the answer to what they asked still stands; the follow-ups stop, as for any reply
-            answers = session.execute(select(FollowUp.id).where(
+            drafts = session.execute(select(FollowUp).where(
                 FollowUp.lead_id == lead.id, FollowUp.channel == "email", FollowUp.kind == "response", FollowUp.status == "awaiting_approval",
                 func.lower(FollowUp.to_email) == (row.from_email or "").lower())).scalars().all()
-            if lead.outreach_status in STAGES_THAT_STAND:
+            # A subject of their own may say it all ("STOP", with "Thanks" below): only the conversation's own subject says nothing.
+            subject = _bare_subject(row.subject)
+            answers = [d.id for d in drafts if _bare_subject(d.subject) == subject]
+            same_subject = bool(answers) or (f is not None and _bare_subject(f.subject) == subject)
+            if same_subject and lead.outreach_status in STAGES_THAT_STAND:
                 stage = lead.outreach_status
         cancelled = stop_sequence(session, lead, stage, f"{label} received ({row.category.replace('_', ' ')})", actor, keep=tuple(answers))
         if cancelled:

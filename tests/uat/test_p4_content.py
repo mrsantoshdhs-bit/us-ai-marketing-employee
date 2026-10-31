@@ -16,7 +16,8 @@ from aime.models import Activity, Campaign, Company, Contact, ContentItem, Follo
 from aime.outreach import draft_outreach, sent_earlier
 from aime.qc.checks import check_claims
 from aime.qc.email_checks import run_email_checks
-from aime.reply_intel import (QUESTION_PLACEHOLDER, _month_due, check_back_month, classify, first_name, intent_of, note_now, offered_day, recommended_for, reply_footer,
+from aime.inbox import new_text
+from aime.reply_intel import (QUESTION_PLACEHOLDER, _month_due, _nothing_new, check_back_month, classify, first_name, intent_of, note_now, offered_day, recommended_for, reply_footer,
                               sentiment_and_recommendation, suggest)
 from aime.timeutil import utcnow
 from aime.web.app import create_app
@@ -696,6 +697,69 @@ def test_an_opt_out_under_a_signature_line_keeps_nothing_and_a_disclaimer_there_
     ctx, sent, lead_id = interested(make_ctx)
     second(ctx, sent, "My colleague will join us.\n--\nDavid\nIf you are not the intended recipient please delete this email.")
     assert [s for _i, s in answer_of(ctx, lead_id)] == ["awaiting_approval"]
+
+
+# The review's list: each of these kept the booking link while the keep rule was a list of what may mean no.
+ANYTHING_ELSE = ["Go away.", "Please go away.", "We'll pass.", "Thanks, we'll pass.", "Pass, thanks.", "Please disregard my last email.", "Ignore my previous email.", "Scratch that.",
+                 "We went with another vendor.", "We chose someone else.", "We've decided against it.", "Decided to go another way.", "Please hold off.", "Hold off for now.",
+                 "Pat has left the company.", "I have left Acme.", "Pat retired last month.", "Pat passed away in March.", "I have moved to another company.", "Incorrect address.",
+                 "You emailed me by mistake.", "This reached me in error.", "Enough already.", "Quit it.", "Please cease.", "We wont be proceeding.", "Cant help you.", "Doesnt apply to us.",
+                 "We are out of budget.", "We have a budget freeze.", "Our budget has been cut.", "Actually, let's reconnect in March.", "Please try me again in June.",
+                 "Bitte aufhoeren.", "Bitte aufh\u00f6ren.", "H\u00f6ren Sie auf.", "Stopp.", "Dejen de escribirme.", "Basta.", "D\u00e9jenme en paz.", "Arr\u00eatez.", "Arr\u00eatez de m'\u00e9crire.",
+                 "Laissez-moi tranquille.", "Smettete di scrivermi.", "Pare de me enviar e-mails.", "Bas karo.", "\u0915\u0943\u092a\u092f\u093e \u092e\u0947\u0932 \u092e\u0924 \u092d\u0947\u091c\u093f\u090f",
+                 "\u8bf7\u4e0d\u8981\u518d\u53d1\u90ae\u4ef6\u4e86", "\u3082\u3046\u9001\u3089\u306a\u3044\u3067\u304f\u3060\u3055\u3044", "\u041d\u0435 \u043f\u0438\u0448\u0438\u0442\u0435 \u043c\u043d\u0435",
+                 "See subject.", "Thanks, but no.", "Great, stop now.", "Thanks. Go away", "Okay then, goodbye.", "Thanks\nGo away"]
+HARMLESS_WORDS = ["Thanks.", "Thank you!", "Thank you very much.", "OK", "Okay, thanks", "Sounds great.", "Great.", "Got it, thanks.", "My colleague will join us.", "My colleague will join.",
+                  "Sorry, one more thing, my colleague will join us.", "I'll bring a colleague.", "I will bring my colleague along.", "A colleague will join the call. Thanks!",
+                  "Thanks,\nDavid", "Thanks,\nDavid Chen", "Great, thank you.\n\nBest regards,\nDavid"]
+
+
+def small_row(text, subject="Re: Question about internal tools at Acme"):
+    body = text
+    r = NS(new_text=new_text(body), body_text=body, subject=subject, bounced_addresses=[], auto_submitted=False, from_email="b@x.example", from_name="David Chen",
+           is_simulated=False, mail_kind=None, in_junk=None, mail_note=None, sender_verified=False)
+    r.category, r.confidence, r.reasons = classify(r)
+    return r
+
+
+@pytest.mark.parametrize("text", ANYTHING_ELSE)
+def test_anything_off_the_short_list_is_not_nothing_new(text):
+    assert not _nothing_new(small_row(text), object(), NS(outreach_status="interested"), False)
+
+
+@pytest.mark.parametrize("text", [t for t in HARMLESS_WORDS if t != "Sounds great."])
+def test_the_short_list_is_nothing_new(text):
+    assert _nothing_new(small_row(text), object(), NS(outreach_status="interested"), False)
+
+
+@pytest.mark.parametrize("text", ["Go away.", "We'll pass.", "Dejen de escribirme.", "\u8bf7\u4e0d\u8981\u518d\u53d1\u90ae\u4ef6\u4e86", "Pat has left the company.", "We are out of budget.", "Please try me again in June."])
+def test_those_really_cancel_the_answer_and_lower_the_stage(make_ctx, text):
+    ctx, sent, lead_id = interested(make_ctx)
+    second(ctx, sent, text)
+    assert [s for _i, s in answer_of(ctx, lead_id)][0] == "cancelled" and lead_of(ctx).outreach_status != "interested"
+
+
+@pytest.mark.parametrize("subject", ["STOP", "Please stop", "Go away", "Wrong address", "Remove"])
+@pytest.mark.parametrize("text", ["See subject.", "Thanks."])
+def test_a_stop_written_only_in_the_subject_cancels(make_ctx, subject, text):
+    ctx, sent, lead_id = interested(make_ctx)
+    second(ctx, sent, text, subject=subject)
+    assert [s for _i, s in answer_of(ctx, lead_id)] == ["cancelled"] and lead_of(ctx).outreach_status != "interested"
+
+
+def test_words_below_a_copied_header_keep_nothing(make_ctx):
+    ctx, sent, lead_id = interested(make_ctx)
+    second(ctx, sent, "Thanks\n\nFrom: S <s@e.example>\nSent: Monday\nTo: b@x.example\nSubject: hi\n\nHi Bob pitch\n\nPlease remove me from your mailing list")
+    assert [s for _i, s in answer_of(ctx, lead_id)] == ["cancelled"]
+
+
+@pytest.mark.parametrize("text", ["Sounds interesting, but we are out of budget.", "Sounds good but we have a budget freeze.", "Sounds great, though our budget has been cut."])
+def test_interest_beside_no_budget_stays_on_the_review_list(make_ctx, text):
+    ctx, _sender, sent = contacted(make_ctx)
+    FakeIMAP.messages = {1: mail(f"David Chen <{TO}>", f"Re: {sent.subject}", text, in_reply_to=sent.message_id)}
+    run_inbox(ctx)
+    r = latest_reply(ctx)
+    assert r.status == "needs_review" and r.confidence != "high", (r.category, r.confidence, r.status)
 
 
 def test_a_stranger_writing_with_their_address_and_no_thread_keeps_nothing(make_ctx):
