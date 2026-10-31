@@ -7,6 +7,7 @@ deals, are skipped. The rule (`[handover] strategy`):
 - workload (default): the fewest open deals, ties in pool order;
 - round_robin: the next person after the last one assigned;
 - skill: people who list the deal's service among their skills first, then the fewest open deals.
+When the lead's owner is on leave or gone, the lead goes to the deal's new owner too, on record.
 Nobody available: the deal stays unassigned and the administrators are alerted. A deal whose owner has done nothing
 for `[handover] escalate_after_hours` hours (0 = off) is escalated to the owner's manager; it is not moved."""
 
@@ -18,7 +19,7 @@ from types import SimpleNamespace
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from aime.models import Activity, Alert, Assignment, Lead, Opportunity, Team, User
+from aime.models import Activity, Alert, Assignment, FollowUp, Lead, Meeting, Opportunity, Team, User
 from aime.timeutil import utcnow
 
 STRATEGIES = ("workload", "round_robin", "skill")
@@ -90,6 +91,40 @@ def record(session: Session, *, lead_id: int | None, opportunity_id: int | None,
     return row
 
 
+def _away(session: Session, username: str) -> bool:
+    """Marked unavailable, or the account is closed. Someone at capacity or outside a configured pool is not: they are still
+    working, and no lead is taken from them by a rule (the deal goes by the rule, as it always has)."""
+    user = session.execute(select(User).where(User.username == username)).scalars().first()
+    return user is not None and (not user.active or user.available is False)
+
+
+def owner_choices(session: Session, scope, current: str | None = None) -> list[SimpleNamespace]:
+    """Who a person may pick as owner: everyone active they may see who can work a record, those away marked. Read-only roles
+    are not offered, except whoever holds it now (the list must show the owner, or Save would silently unassign)."""
+    from aime.permissions import permissions_of
+
+    return [SimpleNamespace(name=u.username, away=u.available is False)
+            for u in session.execute(select(User).where(User.active.is_(True)).order_by(User.username)).scalars()
+            if (scope is None or scope.all or u.username in scope.usernames)
+            and (u.username == current or "edit_records" in permissions_of(session, u.role))]
+
+
+def open_work(session: Session, username: str) -> str:
+    """How much is open in this person's name, in words."""
+    from aime.crm_ops import OPEN_LEAD_STATUSES
+
+    leads = select(Lead.id).where(Lead.owner == username, Lead.status.in_(OPEN_LEAD_STATUSES))
+    numbers = {
+        "open lead": session.execute(select(func.count(Lead.id)).where(Lead.id.in_(leads))).scalar_one(),
+        "open deal": open_load(session, [username]).get(username, 0),
+        "email waiting for approval": session.execute(select(func.count(FollowUp.id)).where(
+            FollowUp.lead_id.in_(leads), FollowUp.channel == "email", FollowUp.status == "awaiting_approval")).scalar_one(),
+        "coming meeting": session.execute(select(func.count(Meeting.id)).where(
+            Meeting.lead_id.in_(leads), Meeting.status == "scheduled", Meeting.ends_at >= utcnow())).scalar_one(),
+    }
+    return ", ".join(f"{n} {what}{'' if n == 1 else 's'}" for what, n in numbers.items() if n) or "no open work"
+
+
 def assign_new(session: Session, settings, opp: Opportunity, actor: str) -> str | None:
     """Give an unowned deal (and its lead, if unowned) an owner by the configured rule."""
     if opp.owner:
@@ -105,6 +140,15 @@ def assign_new(session: Session, settings, opp: Opportunity, actor: str) -> str 
     opp.owner = owner
     if lead is not None and owner and not lead.owner:
         lead.owner = owner
+    elif lead is not None and owner and lead.owner != owner and _away(session, lead.owner):
+        # on leave or gone: the customer goes with the deal, or the reply is answered by one person and the lead held by another
+        from aime.crm_ops import log_activity
+
+        old, lead.owner = lead.owner, owner
+        why = f"went with its new deal: {old} is away"
+        record(session, lead_id=lead.id, opportunity_id=None, from_owner=old, to_owner=owner, method=method, reason=why, actor=actor)
+        log_activity(session, f"Lead moved from {old} to {owner}: {why}", actor, type_="assignment", company_id=lead.company_id,
+                     lead_id=lead.id, opportunity_id=opp.id)
     record(session, lead_id=opp.lead_id, opportunity_id=opp.id, from_owner=None, to_owner=owner, method=method,
            reason=reason, actor=actor)
     if owner is None:

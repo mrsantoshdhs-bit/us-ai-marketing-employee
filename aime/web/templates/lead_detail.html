@@ -56,7 +56,7 @@
     <h2>Owner</h2>
     <p class="small">{{ lead.owner or 'Unassigned' }}{% for o in opps if o.owner and o.owner != lead.owner %} · deal {{ o.name }}: {{ o.owner }}{% endfor %}</p>
     {% if can_assign %}<form method="post" action="/leads/{{ lead.id }}/assign" class="filters">
-      <select name="owner"><option value="">Unassigned</option>{% for n in assignees %}<option {{ 'selected' if n == lead.owner }}>{{ n }}</option>{% endfor %}</select>
+      <select name="owner"><option value="">Unassigned</option>{% for p in assignees %}<option value="{{ p.name }}" {{ 'selected' if p.name == lead.owner }}>{{ p.name }}{% if p.away %} (away){% endif %}</option>{% endfor %}</select>
       <input name="reason" placeholder="Reason (optional)" maxlength="200"><button class="secondary">Assign lead and its open deals</button></form>{% endif %}
     {% if assignments %}<ul class="small">{% for a in assignments %}<li>{{ a.created_at|local }}: {{ a.from_owner or 'unassigned' }} → {{ a.to_owner or 'unassigned' }} ({{ a.method|replace('_', ' ') }}{% if a.reason %}: {{ a.reason }}{% endif %}) by {{ a.actor }}</li>{% endfor %}</ul>{% endif %}
     <h2>Meetings</h2>

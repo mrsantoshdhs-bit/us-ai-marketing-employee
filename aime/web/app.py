@@ -33,6 +33,7 @@ from aime import clock_check, maintenance, send_journal
 from aime.agents import AGENTS
 from aime.agents.sales_workflow import SIGN_IN_ALERT
 from aime.context import AppContext, get_context
+from aime.assignment import owner_choices
 from aime.crm_ops import CONTACT_NOT_SUPPRESSED, is_suppressed, log_activity, suppress
 from aime.db import kv_get, kv_set, take_write_lock
 from aime.inbound import InboundPayload, record_inquiry
@@ -732,9 +733,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             replies = s.execute(select(InboundEmail).where(InboundEmail.lead_id == lead.id)).scalars().all()
             assignments = assignment_history(s, lead.id)
             sc = scope(request)
-            # who this user may hand the lead to: anyone active (view_all), else their team
-            assignees = [u for u in s.execute(select(User.username).where(User.active.is_(True)).order_by(User.username)).scalars()
-                         if sc.all or u in sc.usernames]
+            # the company's history can hold a note on another lead of it: its words only for who may open that lead
+            others = {a.lead_id for a in acts if a.lead_id and a.lead_id != lead.id}
+            not_mine = {i for i in others if not can_see_lead(s, sc, i)}
+            # who this user may hand the lead to: anyone active who can work it (view_all), else their team
+            assignees = owner_choices(s, sc, lead.owner)
             # both directions in time order: what we sent (or may have sent) and what they wrote back
             thread = sorted([{"at": f.sent_at, "dir": "out", "subject": f.subject, "who": f.to_email, "text": f.body,
                               "status": f.status} for f in fups if f.channel == "email" and f.sent_at]
