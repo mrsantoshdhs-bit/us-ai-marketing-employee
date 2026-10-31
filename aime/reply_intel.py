@@ -57,7 +57,7 @@ REMOVAL_WORDS = re.compile(r"\b(remov(e|ed|al)|unsubscrib\w*|delet(e|ed)|stop|op
                            r"(do not|don'?t|never) (e-?mail|contact|message|send|write)|take (me|us|my|our)|"
                            r"(off|from) (your|the|this) \w*\s?list)\b", re.I)
 # "How much longer do I have to put up with this?" asks for no price.
-_HOW_MUCH = r"how much (is|are|does|would|will|for|to charge|it|this|that|per|money|do (you|they|we)|you charge)\b|how much\s*\?"
+_HOW_MUCH = r"how much (is|are|does|would|will|for|to charge|it|this|that|per|money|do (you|they|we)|you charge)\b|how much(?=\s*\?)"
 PATTERNS: list[tuple[str, re.Pattern]] = [
     # Opt-outs in everyday wording and with typos ("unsubcribe", "remove my email from your list", "no more emails").
     # "drop me a line", "take us through it" and "one from the list you sent" are not opt-outs.
@@ -120,7 +120,6 @@ FOOTER_LINE = re.compile(
     r"\byou (may|can) (opt[- ]?out|unsubscribe)\b(?! (me|us)\b)|"
     r"\bif you (no longer|do not|don'?t|would prefer not to|would rather not)( \w+)? ?(wish |want |like )?(to )?(receive|get)\b|"
     r"\|\s*unsubscribe|unsubscribe\s*\||\bthis (e-?mail|message) was sent (by|to)\b", re.I)
-BARE_OPT_OUT = re.compile(r"^\W*(unsubscribe|opt[- ]?out)( here)?\W*$", re.I)
 # Someone angry is not good news, whatever single word matched.
 UPSET = re.compile(r"\b(furious|disgrac\w*|outrag\w*|ridiculous|appall\w*|unacceptable|annoy\w*|fed up|sick of|pissed|angry|"
                    r"never listen|put up with|how dare|third time|told you)\b", re.I)
@@ -274,15 +273,8 @@ FOOTER_REASON = "possible opt-out in a footer"
 
 
 def _without_footer(text: str) -> str:
-    """The text without the lines that look like a company's footer. "Unsubscribe" alone on a line is a footer's link only
-    below interest; anywhere else it is someone asking."""
-    interest = dict(PATTERNS)["interested"]
-    keep: list[str] = []
-    for line in text.split("\n"):
-        if FOOTER_LINE.search(line) or (BARE_OPT_OUT.match(line) and interest.search(" ".join(keep))):
-            continue
-        keep.append(line)
-    return "\n".join(keep)
+    """The text without the lines that look like a company's footer."""
+    return "\n".join(line for line in text.split("\n") if not FOOTER_LINE.search(line))
 
 
 def _classify(row: InboundEmail, text: str | None = None) -> tuple[str, str, list[str]]:
@@ -335,7 +327,9 @@ def _classify(row: InboundEmail, text: str | None = None) -> tuple[str, str, lis
         reasons = [f'"{hits["unsubscribe"]}"'] if "unsubscribe" in hits else []
         if complaint:
             reasons.append(f'complaint: "{complaint.group(0)}"')
-        return "unsubscribe", "medium" if complaint else "high", reasons
+        if "interested" in hits:  # "Sounds interesting" and an opt-out: honoured at once, and a person reads what they meant
+            reasons.append("it also reads as interest: a person checks")
+        return "unsubscribe", "medium" if complaint or "interested" in hits else "high", reasons
     if elsewhere := ELSEWHERE_OPT_OUT.search(said):
         return "unsubscribe", "medium", [f'"{elsewhere.group(0)}" (not in English: a person checks)']
     if kind == "calendar":

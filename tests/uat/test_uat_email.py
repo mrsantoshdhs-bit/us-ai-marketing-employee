@@ -702,11 +702,12 @@ def test_ok_spanish_reply_goes_to_a_person_and_stops_the_sequence(make_ctx):
     assert len(FakeSMTP.sent) == 1 and [d.step for d in drafts(ctx)] == [1]
 
 
-def test_ok_spanish_opt_out_is_stopped_and_reviewed_though_not_suppressed_by_itself(make_ctx):
+def test_ok_spanish_opt_out_is_honoured_and_a_person_checks_the_reading(make_ctx):
     ctx, sender, sent = contacted(make_ctx)
     deliver(ctx, in_thread(sent, "Por favor, no me envíen más correos y quítenme de su lista."))
     r = latest_reply(ctx)
-    assert r.status == "needs_review" and lead_of(ctx).outreach_status == "replied"
+    assert r.category == "unsubscribe" and r.status == "needs_review" and lead_of(ctx).outreach_status == "unsubscribed"
+    assert DAVID in suppressed_values(ctx)
     run(ctx, sender, NOW + timedelta(days=30))
     assert len(FakeSMTP.sent) == 1
 

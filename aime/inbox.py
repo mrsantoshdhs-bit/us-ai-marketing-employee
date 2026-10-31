@@ -301,6 +301,7 @@ def _delivery_notice(msg: Message, sender: str, subject: str, auto: bool,
 
 
 _ADDRESS = re.compile(r"[^@\s<>,;:()\"]+@[^@\s<>,;:()\"]+\.[^@\s<>,;:()\".]+")
+_MIME_LINE = re.compile(rb"(?im)^content-(?:type|disposition):[^\r\n]*(?:\r?\n[ \t][^\r\n]*)*")
 
 
 def is_address(value: str | None) -> bool:
@@ -317,6 +318,8 @@ def _thread_ids(value: str) -> list[str]:
 
 def parse_message(raw: bytes, own: frozenset[str] | set[str] = frozenset()) -> ParsedEmail:
     """`own`: our own addresses (sender, mailbox, unsubscribe address), never taken as a bounced recipient."""
+    # The mail library reads these two lines' parameters in time that grows with the square of their length.
+    raw = _MIME_LINE.sub(lambda m: m.group(0)[:HEADER_LIMIT], raw)
     msg = email.message_from_bytes(raw)
     raw_from = _header(msg, "From")[:HEADER_LIMIT]
     name, addr = parseaddr(raw_from)
