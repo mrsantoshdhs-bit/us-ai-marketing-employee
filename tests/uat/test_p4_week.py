@@ -13,7 +13,7 @@ from aime.agents.sales_workflow import SalesWorkflowAgent
 from aime.assignment import assign_new
 from aime.crm_ops import log_activity, suppress
 from aime.integrations import calendar as calendar_module
-from aime.models import Activity, Assignment, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity, User
+from aime.models import Activity, Assignment, Company, Contact, CustomRole, FollowUp, InboundEmail, Lead, Meeting, Opportunity, User
 from aime.pipeline import NO_REPLY, REPLY_SENT, REPLY_WAITING, settle_next_steps
 from aime.permissions import permissions_of
 from aime.timeutil import utcnow
@@ -23,7 +23,7 @@ from tests.test_inbound_sales import TUESDAY_11AM_ET, FakeSMTP
 from tests.test_inbox import DAVID, FakeIMAP, contacted, mail, run_inbox
 from tests.test_outreach import lead_of
 from tests.uat.test_uat_email import ORIGIN, web
-from tests.uat.test_uat_sales_journey import TOKEN, add_people, client, lead_row, make_deal, make_draft, make_lead, opp_row, post
+from tests.uat.test_uat_sales_journey import HASH, TOKEN, add_people, client, lead_row, make_deal, make_draft, make_lead, opp_row, post
 
 
 @pytest.fixture
@@ -574,3 +574,16 @@ def test_a_deals_next_step_goes_by_the_newest_reply(make_ctx, oldest_first, expe
     with ctx.db.session() as s:
         settle_next_steps(s, lead_id)
     assert opp_row(ctx, oid).next_step == expected
+
+
+def test_an_unlinked_replys_words_stay_from_a_role_that_cannot_open_it(org):
+    lid = make_lead(org, owner="eva", email="dana@acme.example", company="Acme", domain="acme.example")
+    with org.db.session() as s:
+        s.add(CustomRole(name="own_only", label="Own only", permissions=["view_own", "edit_records"]))
+        s.add(User(username="owny", password_hash=HASH, role="own_only"))
+        lead = s.get(Lead, lid)
+        lead.owner = "owny"
+        log_activity(s, "Reply from other@acme.example", "inbox", type_="reply", body="UNLINKED-WORDS", company_id=lead.company_id, lead_id=None)
+    page = client(org, "owny").get(f"/leads/{lid}").text
+    assert "Reply from other@acme.example" in page and "UNLINKED-WORDS" not in page
+    assert "UNLINKED-WORDS" in client(org, "boss").get(f"/leads/{lid}").text  # one who sees everything reads it, as before

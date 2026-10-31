@@ -739,6 +739,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             # the company's history can hold a note on another lead of it: its words only for who may open that lead
             others = {a.lead_id for a in acts if a.lead_id and a.lead_id != lead.id}
             not_mine = {i for i in others if not can_see_lead(s, sc, i)}
+            if not sc.all and not sc.unassigned:  # a row tied to no lead: a role that cannot open unlinked mail does not read it here
+                not_mine.add(None)
             # who this user may hand the lead to: anyone active who can work it (view_all), else their team
             assignees = owner_choices(s, sc, lead.owner)
             # both directions in time order: what we sent (or may have sent) and what they wrote back
