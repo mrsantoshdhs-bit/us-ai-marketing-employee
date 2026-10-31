@@ -7,7 +7,6 @@ from __future__ import annotations
 import os
 import re
 import threading
-from collections import Counter
 from datetime import timedelta
 from email.utils import format_datetime
 from pathlib import Path
@@ -1342,34 +1341,40 @@ def _moved(ctx):
         return s.execute(select(Alert).where(Alert.key == "leads:moved")).scalars().all()
 
 
-def test_the_notice_keeps_the_days_running_count_across_runs_and_does_not_count_twice_in_a_run(make_ctx):
+def test_the_notice_keeps_the_running_count_across_runs_and_does_not_count_twice_in_a_run(make_ctx):
     ctx = make_ctx()
     agent = LeadQualificationAgent(ctx)
     with ctx.db.session() as s:
-        one, told = Counter(nurture=2), Counter()
-        agent._say_moved(s, one, told)
-        one.update(nurture=1)  # the same run, a batch later: its total so far
-        agent._say_moved(s, one, told)
-        agent._say_moved(s, one, told)
+        one = [("nurture", 1), ("nurture", 2)]
+        agent._say_moved(s, one)
+        one.append(("nurture", 3))  # the same run, a batch later: only what is new since
+        agent._say_moved(s, one)
+        agent._say_moved(s, one)
     (alert,) = _moved(ctx)
-    assert "moved 3 lead(s) today: 3 to nurture" in alert.message
+    assert "moved 3 lead(s) since this was last read: 3 to nurture" in alert.message
     with ctx.db.session() as s:  # a later run
-        agent._say_moved(s, Counter(nurture=1, qualified=2), Counter())
+        agent._say_moved(s, [("nurture", 4), ("qualified", 5), ("qualified", 6)])
     (alert,) = _moved(ctx)
-    assert "moved 6 lead(s) today: 4 to nurture, 2 to qualified" in alert.message
+    assert "moved 6 lead(s) since this was last read: 4 to nurture, 2 to qualified" in alert.message
 
 
-def test_the_notice_starts_again_on_a_new_day_and_a_run_that_moved_nothing_changes_nothing(make_ctx, monkeypatch):
+def test_the_notice_stays_until_read_then_starts_again_and_a_run_that_moved_nothing_changes_nothing(make_ctx, monkeypatch):
     ctx = make_ctx()
     agent = LeadQualificationAgent(ctx)
     with ctx.db.session() as s:
-        agent._say_moved(s, Counter(nurture=5), Counter())
-        agent._say_moved(s, Counter(), Counter())
-    assert "moved 5 lead(s) today" in _moved(ctx)[0].message
+        agent._say_moved(s, [("nurture", i) for i in range(5)])
+        agent._say_moved(s, [])
+    assert "moved 5 lead(s)" in _moved(ctx)[0].message
     set_clock(monkeypatch, utcnow() + timedelta(days=1))
     with ctx.db.session() as s:
-        agent._say_moved(s, Counter(qualified=1), Counter())
-    assert "moved 1 lead(s) today: 1 to qualified" in _moved(ctx)[-1].message
+        agent._say_moved(s, [("qualified", 9)])
+    (alert,) = _moved(ctx)
+    assert "moved 6 lead(s) since this was last read: 5 to nurture, 1 to qualified" in alert.message
+    with ctx.db.session() as s:
+        s.get(Alert, alert.id).acknowledged = True
+    with ctx.db.session() as s:  # read within the day: the next move is a new notice all the same
+        agent._say_moved(s, [("qualified", 10)])
+    assert "moved 1 lead(s) since this was last read: 1 to qualified" in _moved(ctx)[-1].message
 
 
 # ----------------------------------------------------------------------------------------------- 13. the docs say it

@@ -20,7 +20,7 @@
     <td>{{ tier(l) }}</td><td>{{ grade(l.grade) }}</td><td class="n">{{ l.score }}</td>
     <td><a href="/leads/{{ l.id }}">{{ l.company.name }}</a>{% if l.is_sample %} <span class="pill">sample</span>{% endif %}{% if l.contact %}<div class="small muted">{{ l.contact.display_name }}</div>{% endif %}</td>
     <td>{{ l.company.state or '—' }}</td><td>{{ l.company.industry|industry }}</td><td>{{ l.source }}</td>
-    <td>{{ status_pill(l.status) }}</td><td class="small">{{ l.category or '—' }}</td><td>{{ l.primary_service|service }}</td><td class="n">{{ l.intent_score }}</td>
+    <td>{{ status_pill(l.status) }}{% if l.status == 'disqualified' and l.disqualify_reason %}<div class="small muted">{{ l.disqualify_reason }}</div>{% endif %}</td><td class="small">{{ l.category or '—' }}</td><td>{{ l.primary_service|service }}</td><td class="n">{{ l.intent_score }}</td>
     <td class="small">{{ l.created_at|local }}</td>
   </tr>
   {% else %}<tr><td colspan="12" class="muted">No leads yet. They appear after the research or inbound jobs run.</td></tr>{% endfor %}

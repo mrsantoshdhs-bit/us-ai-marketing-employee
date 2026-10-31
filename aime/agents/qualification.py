@@ -13,11 +13,11 @@ from aime.agents.base import BaseAgent
 from aime.crm_ops import is_suppressed, log_activity
 from aime.db import kv_get, kv_set
 from aime.matching import seeks_external_help
-from aime.models import Activity, Company, Contact, FollowUp, InboundInquiry, Lead, Signal
-from aime.monitoring import alert_once
+from aime.models import Activity, Alert, Company, Contact, FollowUp, InboundInquiry, Lead, Signal
+from aime.monitoring import alert_once, resolve_alerts
 from aime.outreach import RUNNING_STAGES, set_status
 from aime.pipeline import clear_stage
-from aime.scoring import LeadFacts, categorize, read_company, score_lead, signal_fact
+from aime.scoring import LeadFacts, categorize, lasting_grade, read_company, score_lead, signal_fact
 from aime.timeutil import as_aware_utc, local_tz, utcnow
 
 # Who writes the activity log besides people. People are recorded by user name, whatever the name is, so a name that is
@@ -29,7 +29,9 @@ NOT_A_PERSON = {"marketing_manager", "research", "company_research", "linkedin_c
 CLOSED_STAGES = ("not_interested", "no_response", "reengage")
 
 
-MOVED_TODAY = "qualification.moved_today"  # the day's running count behind the "Scoring moved" notice
+MOVED_TODAY = "qualification.moved_today"  # what the unread "Scoring moved" notice has counted so far
+MOVED_ALERT = "leads:moved"
+MOVED_NAMED = 30  # lead numbers named in the notice; the count covers the rest
 WRITE_BATCH = 50  # leads saved at a time: at about 5 ms a lead, a click waits a quarter of a second at most
 
 
@@ -72,8 +74,7 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
             select(Signal.company_id, func.max(Signal.created_at)).group_by(Signal.company_id)).all())
         out = QualifyOutput()
         grades: Counter[str] = Counter()
-        moved: Counter[str] = Counter()
-        told: Counter[str] = Counter()
+        moved: list[tuple[str, int]] = []  # (new status, lead) not yet in the notice
 
         for lead in leads:
             stale_cutoff = now - timedelta(hours=inp.stale_hours)
@@ -112,6 +113,7 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                 contact_source=contact.source if contact else None,
                 contact_role=contact.role_category if contact else None,
                 contact_email_status=contact.email_status if contact else None,
+                contact_title=contact.title if contact else None,
                 now=now,
             )
             result = score_lead(facts, thresholds)
@@ -125,6 +127,10 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                 lead.primary_service = result.matched_services[0] if result.matched_services else None
             lead.last_scored_at = now
             out.scored += 1
+            lasting = lasting_grade(facts, thresholds) if result.grade in ("A", "B") else result.grade
+            if lasting not in ("A", "B") and result.grade in ("A", "B") and prev_status in ("new", "nurture"):
+                lead.score_breakdown = [*result.reasons, f"Not moved to qualified: grade {result.grade} today, but grade {lasting} "
+                                        "within a month, as its newest hiring post counts for less"]
             grades[result.grade] += 1
 
             if result.disqualify_reason:
@@ -142,11 +148,11 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                         set_status(session, lead, "stopped", self.name, "the lead was disqualified")
             elif prev_status == "nurture" and self._sequence_parked_by_score(session, lead):
                 lead.status = "qualified"  # a person emailed this lead: an aged job post does not end the sequence
-            elif (result.grade in ("A", "B") and prev_status in ("new", "nurture")
+            elif (lasting in ("A", "B") and prev_status in ("new", "nurture")
                   and self._may_requalify(session, lead, company, signals, prev_status)):
                 lead.status = "qualified"
                 out.newly_qualified.append(lead.id)
-            elif result.grade in ("C", "D") and prev_status == "new":
+            elif lasting in ("C", "D") and prev_status == "new":
                 lead.status = "nurture"
             elif (result.grade in ("C", "D") and prev_status == "qualified" and lead.source == "research"
                   and not self._human_touched(session, lead)):
@@ -166,30 +172,44 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
             if lead.status != prev_status:
                 log_activity(session, f"Lead {prev_status} → {lead.status} (score {result.total}, grade {result.grade})",
                              self.name, type_="status_change", company_id=company.id, lead_id=lead.id)
-                moved[lead.status] += 1
+                moved.append((lead.status, lead.id))
             if out.scored % WRITE_BATCH == 0:  # the write lock is not held for the whole run: clicks wait for no one
-                self._say_moved(session, moved, told)  # with the moves it counts: a run that fails later has still told someone
+                self._say_moved(session, moved)  # with the moves it counts: a run that fails later has still told someone
                 session.commit()
-        self._say_moved(session, moved, told)
+        self._say_moved(session, moved)
         out.grade_counts = dict(grades)
         return out
 
-    def _say_moved(self, session: Session, moved: Counter, told: Counter) -> None:
-        """One notice a day that keeps the day's running count: a later run adds to it. `moved` is this run's own total so far,
-        and `told` how much of that the notice already has; the day's count is saved beside the moves, so they stand or fall
-        together."""
-        new = moved - told
-        if not new:
+    def _say_moved(self, session: Session, moved: list[tuple[str, int]]) -> None:
+        """One warning that names the leads and keeps adding up until a person has read it: a run on Sunday is still there on
+        Monday. Once read, the next move starts a new one. `moved` is emptied into it; the running count is saved beside the
+        moves, so they stand or fall together."""
+        if not moved:
             return
-        told.update(new)
+        unread = session.execute(select(Alert.id).where(Alert.source == self.name, Alert.key == MOVED_ALERT,
+                                                        Alert.acknowledged.is_(False))).first()
+        kept = (kv_get(session, MOVED_TODAY) or {}) if unread else {}
+        if not unread:
+            resolve_alerts(session, (MOVED_ALERT,), set())  # that one was read: this is a new notice, not silenced by the dismissal
+        counts = Counter(kept.get("moved") or {})
+        leads: dict[str, list[int]] = {status: list(ids) for status, ids in (kept.get("leads") or {}).items()}
+        for status, lead_id in moved:
+            counts[status] += 1
+            leads.setdefault(status, []).append(lead_id)
+        moved.clear()
         day = as_aware_utc(utcnow()).astimezone(local_tz(self.settings.schedule.get("timezone"))).date().isoformat()
-        kept = kv_get(session, MOVED_TODAY) or {}
-        today = Counter(kept.get("moved") or {}) if kept.get("day") == day else Counter()
-        today.update(new)
-        kv_set(session, MOVED_TODAY, {"day": day, "moved": dict(today)})
-        words = ", ".join(f"{n} to {status}" for status, n in sorted(today.items()))
-        alert_once(session, "info", self.name, f"Scoring moved {sum(today.values())} lead(s) today: {words}. Each lead's page "
-                   "says why, and a wrong competitor flag can be cleared there.", self.settings, key="leads:moved")
+        kv_set(session, MOVED_TODAY, {"day": kept.get("day") or day, "moved": dict(counts), "leads": leads})
+        words = ", ".join(f"{n} to {status}" for status, n in sorted(counts.items()))
+        named, left = [], MOVED_NAMED
+        for status, ids in sorted(leads.items()):
+            ids = list(dict.fromkeys(ids))
+            if ids and left > 0:
+                named.append(f"{status}: " + ", ".join(f"#{i}" for i in ids[:left]))
+            left -= len(ids)
+        more = f", and {-left} more" if left < 0 else ""
+        alert_once(session, "warning", self.name, f"Scoring moved {sum(counts.values())} lead(s) since this was last read: {words}. "
+                   f"Leads {'; '.join(named)}{more}. Each lead's page says why, and a wrong competitor flag can be cleared there.",
+                   self.settings, key=MOVED_ALERT)
 
     def _may_requalify(self, session: Session, lead: Lead, company: Company, signals: list[Signal],
                        prev_status: str) -> bool:

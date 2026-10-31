@@ -314,9 +314,9 @@ def test_recheck_withdraws_people_no_longer_found_but_keeps_anyone_already_email
     assert again["Tom Baker"].source == "website" and len(again) == len(found)
 
 
-def test_companies_that_sell_ai_agents_are_flagged_and_a_person_can_clear_it(make_ctx):
+def test_companies_that_sell_ai_work_are_flagged_and_a_person_can_clear_it(make_ctx):
     state = {"/": HOME.replace("Brightline Logistics helps regional carriers plan routes, dispatch drivers and update "
-                               "customers from one place.", "Brightline builds AI agents that automate dispatch for "
+                               "customers from one place.", "Brightline offers custom AI development to "
                                "regional carriers.")}
     ctx = recheck_ctx(make_ctx, state)
     cid = add_company(ctx)
@@ -331,7 +331,7 @@ def test_companies_that_sell_ai_agents_are_flagged_and_a_person_can_clear_it(mak
         draft = s.execute(select(FollowUp)).scalar_one()
         assert draft.status == "cancelled" and "competitor" in draft.blocked_reason
         note = s.execute(select(Activity).where(Activity.subject.like("Marked as a possible competitor%"))).scalars().one()
-        assert "ai agents that" in note.subject.lower()
+        assert "custom ai development" in note.subject.lower()
     client = TestClient(create_app(ctx))
     assert "Not a competitor" in client.get("/leads/1").text
     client.post(f"/companies/{cid}/not_competitor", headers={"origin": "http://testserver"})

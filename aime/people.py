@@ -214,6 +214,15 @@ def role_category(title: str) -> str:
     return "other"
 
 
+def decision_maker_title(title: str) -> bool:
+    """A title that names someone who decides today. A sentence read off a page ("each team member is an owner.") or a menu item
+    ("Pet Owner Support") is not one, and neither is someone who has left."""
+    t = " ".join((title or "").split())
+    if not t or FORMER_RE.search(t) or t.endswith(".") or len(t.split()) > 8:
+        return False
+    return not re.search(r"\bowner\s+[a-z]", t, re.I)
+
+
 def seniority(title: str) -> int:
     """3 founder/owner/C-level, 2 VP/head/partner, 1 director, 0 lead/manager/other, -1 junior. Advisors rank 1."""
     t = title.lower()

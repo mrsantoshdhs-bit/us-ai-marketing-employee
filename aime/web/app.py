@@ -63,7 +63,7 @@ from aime.reply_intel import INTENT_LABELS, QUESTION_PLACEHOLDER
 from aime.reply_intel import act as act_on_reply
 from aime.meetings import check_double_bookings, record_meeting, reopen_after_cancel
 from aime.scheduler.runner import ABANDON_AFTER, due_jobs, load_job_specs, next_run, run_job
-from aime.scoring import lead_tier, tier_reason
+from aime.scoring import lead_tier, read_company, tier_reason
 from aime.timeutil import as_aware_utc, fmt_et, fmt_local, local_tz, to_naive_utc, utcnow
 from aime.permissions import role_label
 from aime.stages import probability_of, stage_names
@@ -275,6 +275,26 @@ def stage_reason(s, lead: Lead) -> str | None:
                                                     Activity.subject.startswith(start, autoescape=True))
                      .order_by(Activity.id.desc()).limit(1)).scalar()
     return said[len(start):].rstrip(")") if said else None
+
+
+def status_would_not_hold(s, lead: Lead) -> str | None:
+    """Why the next scoring run would close this lead again whatever a person sets, in plain words with what they can do. The
+    scoring rule itself is not changed here: this only says so at the moment of the click, not the morning after."""
+    company = lead.company
+    if company.is_competitor:
+        return ("This company is flagged as a possible competitor, so the next scoring run would close it again. If it does not sell "
+                "software or AI work to clients, use the \"Not a competitor\" button on this page: that clears the flag for good.")
+    signals = s.execute(select(Signal).where(Signal.company_id == company.id)).scalars().all()
+    if read_company(company, signals)["country"] != "US":
+        said = f" (its location reads: {company.location_text[:80]})" if company.location_text else ""
+        return (f"This company is outside the US market we sell to{said}, so the next scoring run would close it again, and that rule "
+                "has no exception. Add a note if you want to keep track of it; if its location on record is wrong, ask your "
+                "administrator to correct it.")
+    if is_suppressed(s, lead.contact.email if lead.contact else None, company.domain) or (
+            lead.contact and lead.contact.consent_status == "opted_out"):
+        return ("This contact or domain is on the suppression list, so the next scoring run would close it again. "
+                "Only an administrator can take it off the list.")
+    return None
 
 
 def previous_sign_in(s, user_id: int) -> datetime | None:
@@ -731,7 +751,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         with C().db.session() as s:
             lead = s.get(Lead, lead_id) or _404()
             old = lead.status
+            refused = status_would_not_hold(s, lead) if status in ("new", "qualified", "nurture") else None
+            if refused:  # the next scoring run would put it back without a word: say so now, and leave it as it is
+                return back(f"/leads/{lead_id}", f"Status not changed. {refused}")
             lead.status = status
+            if status != "disqualified":
+                lead.disqualify_reason = None
             lead.last_activity_at = utcnow()
             log_activity(s, f"Status {old} → {status} (manual)", who(request), type_="status_change", body=note or None,
                          company_id=lead.company_id, lead_id=lead.id)

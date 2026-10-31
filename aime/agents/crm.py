@@ -13,6 +13,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent
+from aime.agents.qualification import NOT_A_PERSON
 from aime.crm_ops import (add_signal, ensure_lead, is_suppressed, log_activity, merge_companies, upsert_company,
                           upsert_contact, us_location_evidence)
 from aime.dedupe import clean_company_name, domain_from_email, domain_from_url, name_from_title, normalize_name
@@ -20,7 +21,7 @@ from aime.inbound import InboundPayload, load_inbox_files, validate_inquiry
 from aime.knowledge.geo import normalize_state
 from aime.knowledge.industries import INDUSTRIES
 from aime.matching import classify_industry, competitor_evidence, competitor_in_post
-from aime.models import Alert, Company, FollowUp, InboundInquiry, Lead, Opportunity, ResearchSnapshot, Signal
+from aime.models import Activity, Alert, Company, FollowUp, InboundInquiry, Lead, Opportunity, ResearchSnapshot, Signal
 from aime.sources.base import CompanyCandidate
 from aime.timeutil import utcnow
 from aime.website_check import check_website
@@ -39,6 +40,7 @@ class CRMInput(BaseModel):
 
 class CRMOutput(BaseModel):
     competitors_flagged: int = 0
+    competitor_flags_removed: int = 0
     linkedin_leads_fetched: int = 0
     linkedin_leads_recorded: int = 0
     inbound_files_loaded: int = 0
@@ -91,6 +93,7 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         if "lifecycle" in ops:
             out.lifecycle_updates = self._lifecycle(session)
         if "competitors" in ops:
+            out.competitor_flags_removed = self._review_competitor_flags(session)
             out.competitors_flagged = self._flag_competitors(session)
         return out
 
@@ -243,6 +246,61 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
                 log_activity(session, f'Marked as a possible competitor: it says "{phrase}"', self.name, type_="data_quality",
                              company_id=company.id, lead_id=lead.id)
         return flagged
+
+    def _review_competitor_flags(self, session: Session) -> int:
+        """A flag AIME set is read again by today's rule, which stored flags otherwise never are. It goes only when AIME's own
+        log shows AIME set it and nothing the company or its posts say matches now; a flag with no such record, or one a person
+        had a hand in, stays. It changes the flag and the lead's status, each logged, and nothing else: a lead that returns is
+        scored by the next run like any other, so the most it can get is a draft waiting for a person's approval."""
+        removed = 0
+        for company in session.execute(select(Company).where(Company.is_competitor.is_(True), Company.merged_into_id.is_(None),
+                                                             Company.competitor_cleared_by.is_(None))).scalars().all():
+            log = session.execute(select(Activity).where(Activity.company_id == company.id, Activity.subject.like("%competitor%"),
+                                                         Activity.type != "status_change")).scalars().all()
+            set_by_aime = any(a.subject.startswith("Marked as a possible competitor") and (a.actor or "") in NOT_A_PERSON for a in log)
+            if not set_by_aime or any((a.actor or "") not in NOT_A_PERSON for a in log) or self._competitor_words_on_file(session, company):
+                continue
+            company.is_competitor = False
+            removed += 1
+            log_activity(session, "Competitor flag removed: AIME set it on older wording, and nothing on record now shows it sells "
+                         "software or AI work to clients", self.name, type_="data_quality", company_id=company.id)
+            for lead in session.execute(select(Lead).where(Lead.company_id == company.id, Lead.status == "disqualified",
+                                                           Lead.disqualify_reason.contains("competitor"))).scalars().all():
+                self._return_lead(session, lead, company)
+        return removed
+
+    def _competitor_words_on_file(self, session: Session, company: Company) -> bool:
+        snap = session.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == company.id)
+                               .order_by(ResearchSnapshot.id.desc())).scalars().first()
+        own = f"{snap.description or ''} {' '.join(snap.services_offered or [])}" if snap else ""
+        posts = session.execute(select(Signal.text).where(Signal.company_id == company.id, Signal.signal_type == "hiring")).scalars()
+        return bool(competitor_evidence(f"{own} {company.website_title or ''}") or any(map(competitor_in_post, posts))
+                    or competitor_in_post(company.description))
+
+    def _return_lead(self, session: Session, lead: Lead, company: Company) -> None:
+        """The lead the old flag closed. A person's last word on its status holds; an opt-out or an outreach already under way
+        keeps it closed, for a person to decide."""
+        changes = session.execute(select(Activity).where(Activity.lead_id == lead.id, Activity.type == "status_change")
+                                  .order_by(Activity.created_at.desc(), Activity.id.desc())).scalars().all()
+        if changes and (changes[0].actor or "") not in NOT_A_PERSON:
+            return
+        contact = lead.contact
+        if is_suppressed(session, contact.email if contact else None, company.domain) or (contact and contact.consent_status == "opted_out"):
+            lead.disqualify_reason = "Contact or domain is on the suppression list"
+            why = "the contact or domain is on the suppression list"
+        elif lead.outreach_status not in (None, "drafted", "approved"):
+            lead.disqualify_reason = "Competitor flag removed; its outreach had begun, so a person decides whether to reopen it"
+            why = "its outreach had begun, so a person decides whether to reopen it"
+        else:
+            # one that a person parked goes back to being parked: the score alone does not take it further
+            by_person = next((a for a in changes if (a.actor or "") not in NOT_A_PERSON), None)
+            status = "nurture" if by_person is not None and "→ nurture" in (by_person.subject or "") else "new"
+            log_activity(session, f"Lead disqualified → {status}: the competitor flag was removed, so the next scoring run decides",
+                         self.name, type_="status_change", company_id=company.id, lead_id=lead.id)
+            lead.status, lead.disqualify_reason = status, None
+            return
+        log_activity(session, f"Competitor flag removed, but the lead stays closed: {why}", self.name, type_="data_quality",
+                     company_id=company.id, lead_id=lead.id)
 
     def _dedupe(self, session: Session) -> int:
         companies = session.execute(select(Company).where(Company.merged_into_id.is_(None))
