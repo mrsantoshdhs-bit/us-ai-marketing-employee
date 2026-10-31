@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from aime import maintenance
 from aime.agents import AuthorizedPublishingAgent
-from aime.models import Activity, Alert, ContentItem, JobRun, OAuthToken
+from aime.models import Alert, ContentItem, JobRun, OAuthToken
 from aime.scheduler.runner import run_job
 from aime.timeutil import utcnow
 from aime.web.app import create_app
