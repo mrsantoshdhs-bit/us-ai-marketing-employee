@@ -1,8 +1,9 @@
 """Scheduler watchdog (Windows Task Scheduler, hourly, while you are logged on).
 
 Reads data/heartbeat.json and shows a desktop notification if scheduled ticks have stopped or the dashboard
-is not answering on its port. It changes nothing and does not import the app (only the small notify/redact
-helpers), so it works even when the app itself is broken. Findings are appended to data/logs/watchdog.log.
+is not answering on its port. It changes nothing (but its own small note of a wake it allowed for) and does not import the
+app (only the small notify/redact helpers), so it works even when the app itself is broken. Findings are appended to
+data/logs/watchdog.log.
 """
 
 import json
@@ -25,6 +26,9 @@ DASHBOARD_RECHECK_SECONDS = 10
 # either order: this one read the beat from before the sleep, 6 minutes after a wake on 29 and 30 Oct. Half an hour after a wake
 # is the tick's to run in; this task's next run, an hour on, reports a real stop.
 WAKE_GRACE_SECONDS = 30 * 60
+# A PC whose awake stretches stay short would be just awake at every run: however it sleeps, one silence is excused this long at most.
+WAKE_GRACE_AT_MOST = timedelta(hours=2)
+WAKE_GRACE_NOTE = "watchdog_wake_grace.json"
 
 
 def seconds_since_wake() -> float | None:
@@ -46,10 +50,28 @@ def seconds_since_wake() -> float | None:
     return (datetime.now(timezone.utc) - woke).total_seconds()
 
 
+def _grace_left(data_dir: Path, last_beat: str, now: datetime) -> bool:
+    """May a wake still excuse the silence since this beat? Counted from the first time it did. A note that cannot be written
+    excuses nothing: then a stop could be hidden for ever."""
+    note = data_dir / WAKE_GRACE_NOTE
+    try:
+        saved = json.loads(note.read_text(encoding="utf-8"))
+        if saved["beat"] == last_beat:
+            return timedelta(0) <= now - datetime.fromisoformat(saved["first"]) <= WAKE_GRACE_AT_MOST
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):  # none yet, or unreadable: a new count
+        pass
+    try:
+        note.write_text(json.dumps({"beat": last_beat, "first": now.isoformat()}), encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
 def check(data_dir: Path, now: datetime | None = None, since_wake=None) -> list[str]:
     """Problems worth a notification; empty when ticks are fresh, a maintenance window is active, or the PC has only just woken."""
     from aime import maintenance
 
+    own_clock = now is None  # a time given to this check is not this PC's: its wake says nothing about that
     now = now or datetime.now(timezone.utc)
     if maintenance.active(data_dir):
         return []
@@ -67,8 +89,9 @@ def check(data_dir: Path, now: datetime | None = None, since_wake=None) -> list[
         return ["No work is being done because the PC's clock looks wrong. Correct the clock, or run `python -m aime confirm-clock`."]
     age = now - at
     if age > (STALE_WHILE_RUNNING if beat.get("state") == "running" else STALE_AFTER):
-        woke = (since_wake or seconds_since_wake)() if since_wake or now is None else None  # a given time is not this PC's own
-        if woke is not None and 0 <= woke < WAKE_GRACE_SECONDS and age.total_seconds() > woke:  # the silence began before the wake
+        woke = (since_wake or seconds_since_wake)() if since_wake or own_clock else None
+        if (woke is not None and 0 <= woke < WAKE_GRACE_SECONDS and age.total_seconds() > woke  # the silence began before the wake
+                and _grace_left(data_dir, beat["at"], now)):
             return []
         return [f"Scheduled ticks stopped: last tick {int(age.total_seconds() // 60)} min ago. "
                 "Check Task Scheduler (AIMarketingEmployee-Tick) and data/logs/scheduler_crash.log."]

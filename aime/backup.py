@@ -48,6 +48,10 @@ class BackupError(Exception):
     pass
 
 
+class BundleTrouble(BackupError):
+    """The copy could not be made on this PC: nothing is wrong with the off-machine folder. Its message is in words."""
+
+
 def _clear_leftovers(folder: Path, *patterns: str) -> list[str]:
     """Half-written files of this tool that a power cut left behind. By name only (nothing else in the folder is ever touched)
     and only old ones, by the time in the name, or the file's own time if it has none: a copy being written now is young."""
@@ -225,7 +229,7 @@ def create_bundle(settings, db_path: Path, out_dir: Path) -> Path:
     from aime.migrations import SCHEMA_VERSION
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="aime-bundle-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="aime-bundle-", ignore_cleanup_errors=True) as tmp:
         snap = backup_sqlite_file(db_path, Path(tmp), label="bundle")
         check = verify_backup(snap)
         if not check["ok"]:
@@ -388,6 +392,8 @@ def offsite_sync(folder: str | Path, synced: list[Path] | None = None) -> tuple[
 
 def offsite_trouble(exc: BaseException, folder: str | Path) -> str:
     """Why an off-machine copy could not be written, in words."""
+    if isinstance(exc, BundleTrouble):
+        return str(exc)
     if isinstance(exc, (FileNotFoundError, NotADirectoryError, FileExistsError)):
         anchor = Path(folder).expanduser().anchor
         if anchor and not Path(anchor).exists():
@@ -403,6 +409,18 @@ def offsite_trouble(exc: BaseException, folder: str | Path) -> str:
     return f"the copy for the off-machine folder {folder} could not be made: {redact(str(exc))}"
 
 
+def _bundle_trouble(exc: Exception) -> BundleTrouble:
+    if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+        cause = "this PC's disk has no room left"
+    elif isinstance(exc, PermissionError):
+        cause = "another program on this PC is holding one of the files that go into it"
+    elif isinstance(exc, BackupError):
+        cause = str(exc)
+    else:
+        cause = type(exc).__name__
+    return BundleTrouble(f"the copy could not be made on this PC, so nothing reached the off-machine folder: {cause}")
+
+
 def try_write_offsite(settings, db_path: Path) -> dict:
     """write_offsite for a job or a person: a failure comes back as a result, with the reason in words."""
     try:
@@ -411,11 +429,24 @@ def try_write_offsite(settings, db_path: Path) -> dict:
         return {"status": "error", "reason": offsite_trouble(exc, settings.backup_offsite_dir)}
 
 
+def record_offsite(session, result: dict, local_ok: bool = True) -> None:
+    """What one attempt at an off-machine copy leaves on record, by the job or by hand: doctor, the home page and the alert read it."""
+    from aime.db import kv_set
+    from aime.timeutil import utcnow
+
+    now = utcnow().isoformat()
+    if result["status"] == "ok":
+        kv_set(session, "backup.last_offsite", {"file": result["file"], "at": now, "bytes": result["bytes"]})
+        if result.get("key_changed_after"):
+            kv_set(session, OFFSITE_KEY_CHANGED, {"file": result["key_changed_after"], "at": now})
+    kv_set(session, OFFSITE_PROBLEM, {"why": result["reason"], "at": now, "local_ok": local_ok} if result["status"] == "error" else None)
+
+
 def offsite_problem_words(problem: dict, failures: int = 0) -> str:
-    """The whole story for a person, from what db_maintenance recorded."""
+    """The whole story for a person, from what was recorded. "Fine" only when this run has shown it: see job_db_maintenance."""
     times = f" {failures} times in a row" if failures > 1 else ""
-    local = "The local backup is fine" if problem.get("local_ok") else "The local backup needs a look too"
-    return f"{local}, but the off-machine copy failed{times}: {problem.get('why')}."
+    local = "The local backup is fine, but" if problem.get("local_ok") else "The local backup needs a look too, and"
+    return f"{local} the off-machine copy failed{times}: {problem.get('why')}."
 
 
 def offsite_copy_problem(settings, record: dict | None) -> str | None:
@@ -459,9 +490,13 @@ def write_offsite(settings, db_path: Path) -> dict:
     folder.mkdir(parents=True, exist_ok=True)
     _clear_leftovers(folder, f"{OFFSITE_PREFIX}*.partial")
     earlier = sorted(folder.glob(f"{OFFSITE_PREFIX}*.aimebak"))
-    with tempfile.TemporaryDirectory(prefix="aime-offsite-") as tmp:
-        bundle = create_bundle(settings, db_path, Path(tmp))
-        data = bundle.read_bytes()
+    # A file in the temp folder that an antivirus still has open must not fail a copy that is good and in place.
+    with tempfile.TemporaryDirectory(prefix="aime-offsite-", ignore_cleanup_errors=True) as tmp:
+        try:
+            bundle = create_bundle(settings, db_path, Path(tmp))
+            data = bundle.read_bytes()
+        except Exception as exc:  # whatever it is, it happened on this PC, before the folder was written
+            raise _bundle_trouble(exc) from exc
         target = folder / f"{OFFSITE_PREFIX}{datetime.now():%Y%m%d-%H%M%S}.aimebak"
         partial = target.with_suffix(".partial")
         try:

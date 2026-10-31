@@ -59,6 +59,7 @@ def script(name: str):
 class FakeSMTP:
     sent: list = []
     on_connect = None
+    on_send = None
 
     def __init__(self, host, port, timeout=30):
         if FakeSMTP.on_connect:
@@ -74,6 +75,8 @@ class FakeSMTP:
         return 220, b"ok"
 
     def send_message(self, msg, *a, **k):
+        if FakeSMTP.on_send:
+            FakeSMTP.on_send()
         FakeSMTP.sent.append(msg["To"])
         return {}
 
@@ -85,7 +88,7 @@ def _fresh_mail_and_no_task_scheduler(monkeypatch):
 
     monkeypatch.setattr(windows, "query", lambda *a, **k: {"installed": False, "error": "uat"})
     monkeypatch.setattr(notify, "has_desktop", lambda: False)  # no real notification on the PC running the tests
-    FakeSMTP.sent, FakeSMTP.on_connect = [], None
+    FakeSMTP.sent, FakeSMTP.on_connect, FakeSMTP.on_send = [], None, None
 
 
 def approved_email(ctx, tag="a") -> int:
@@ -443,11 +446,11 @@ def test_defect_an_email_that_finished_sending_after_a_sleep_keeps_no_false_warn
     send_run(ctx)
     fid = approved_email(ctx)
 
-    def slept():
-        FakeSMTP.on_connect = None
+    def slept():  # at the handing over: a sleep before it now stops the send (see test_p4_pc)
+        FakeSMTP.on_send = None
         monkeypatch.setattr(aime.timeutil, "CLOCK_OFFSET", aime.timeutil.CLOCK_OFFSET + timedelta(minutes=30))
         send_run(ctx)
-    FakeSMTP.on_connect = slept
+    FakeSMTP.on_send = slept
     send_run(ctx)
     with ctx.db.session() as s:
         f = s.get(FollowUp, fid)

@@ -277,7 +277,7 @@ def cmd_doctor(args, ctx) -> int:
 
 
 def cmd_backup(args, ctx) -> int:
-    from aime.backup import backup_sqlite_file, try_write_offsite, verify_backup
+    from aime.backup import backup_sqlite_file, record_offsite, try_write_offsite, verify_backup
 
     db_path = Path(ctx.db.engine.url.database)
     path = backup_sqlite_file(db_path, ctx.settings.backups_dir, label=args.label)
@@ -288,13 +288,11 @@ def cmd_backup(args, ctx) -> int:
     if args.offsite:
         result = try_write_offsite(ctx.settings, db_path)
         print("Off-machine copy:", result.get("file") or f"not written: {result.get('reason')}")
+        with ctx.db.session() as s:  # doctor and the monitor job read this, as for the daily copy
+            record_offsite(s, result, local_ok=check["ok"])
         if result.get("file"):
             from aime.backup import offsite_sync
-            from aime.db import kv_set
-            from aime.timeutil import utcnow
 
-            with ctx.db.session() as s:  # doctor and the monitor job read this, as for the daily copy
-                kv_set(s, "backup.last_offsite", {"file": result["file"], "at": utcnow().isoformat(), "bytes": result["bytes"]})
             print("Off-machine folder:", offsite_sync(ctx.settings.backup_offsite_dir)[1])
         if result["status"] != "ok":
             return 1

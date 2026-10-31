@@ -7,14 +7,15 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import DatabaseError
 
 from aime.agents import (AnalyticsReportingAgent, AuthorizedPublishingAgent, CompanyResearchAgent, CRMManagementAgent,
                          InboxAgent,
                          LeadQualificationAgent, LinkedInContentAgent, MarketingManagerAgent, SalesWorkflowAgent,
                          USBusinessResearchAgent)
 from aime.agents.base import AgentResult, agent_enabled
-from aime.backup import (OFFSITE_KEY_CHANGED, OFFSITE_PROBLEM, PREDEPLOY_KEPT, backup_sqlite_file, checkpoint, integrity_check,
-                         prune_backups, try_write_offsite, verify_backup, weekly_offsite_drill, weekly_restore_drill)
+from aime.backup import (OFFSITE_PROBLEM, PREDEPLOY_KEPT, backup_sqlite_file, checkpoint, integrity_check, prune_backups,
+                         record_offsite, try_write_offsite, verify_backup, weekly_offsite_drill, weekly_restore_drill)
 from aime.context import AppContext
 from aime.db import kv_get, kv_set
 from aime.doctor import run_checks
@@ -253,6 +254,13 @@ def job_db_maintenance(ctx: AppContext, job: str = "db_maintenance") -> JobOutco
     out = JobOutcome()
     s = ctx.settings
     db_path = ctx.db.engine.url.database
+    try:  # this run may end in a crash (a full disk): until it has shown otherwise, nobody is told the local backup is fine
+        with ctx.db.session() as session:
+            earlier = kv_get(session, OFFSITE_PROBLEM)
+            if earlier:
+                kv_set(session, OFFSITE_PROBLEM, {**earlier, "local_ok": False})
+    except DatabaseError:  # a note must not stop the backup; a real fault shows in the steps below
+        pass
     kept = _copy_of_the_failed_try(ctx, job) if db_path else None
     backup = kept or (backup_sqlite_file(Path(db_path), s.backups_dir, label="auto") if db_path else None)
     verified = verify_backup(backup) if backup else None
@@ -287,11 +295,8 @@ def job_db_maintenance(ctx: AppContext, job: str = "db_maintenance") -> JobOutco
 
     if db_path:  # encrypted off-machine copy (optional; a failure is reported but the local backup stands)
         offsite = try_write_offsite(s, Path(db_path))  # keep the job alive; the monitor raises an alert on repeated failures
-        if offsite["status"] == "ok":
-            with ctx.db.session() as session:
-                kv_set(session, "backup.last_offsite", {"file": offsite["file"], "at": utcnow().isoformat(), "bytes": offsite["bytes"]})
-                if offsite.get("key_changed_after"):
-                    kv_set(session, OFFSITE_KEY_CHANGED, {"file": offsite["key_changed_after"], "at": utcnow().isoformat()})
+        with ctx.db.session() as session:
+            record_offsite(session, offsite, local_ok=False)  # the end of this job says whether the local backup is fine
         off_step = {"agent": "offsite_backup", "status": "failed" if offsite["status"] == "error" else "success",
                     "output": offsite}
         if offsite["status"] == "error":
@@ -302,6 +307,7 @@ def job_db_maintenance(ctx: AppContext, job: str = "db_maintenance") -> JobOutco
     else:
         problem = None
     drill = weekly_restore_drill(ctx) if db_path else None
+    local_ok = not problems and (not drill or drill["status"] == "success")
     if drill:
         out.failed = out.failed or drill["status"] != "success"
         out.steps.append(drill)
@@ -311,7 +317,7 @@ def job_db_maintenance(ctx: AppContext, job: str = "db_maintenance") -> JobOutco
         out.steps.append(drill)
         problem = problem or drill.get("error")
     with ctx.db.session() as session:  # what doctor, the home page and the alert say, in words
-        kv_set(session, OFFSITE_PROBLEM, {"why": problem, "at": utcnow().isoformat(), "local_ok": not problems} if problem else None)
+        kv_set(session, OFFSITE_PROBLEM, {"why": problem, "at": utcnow().isoformat(), "local_ok": local_ok} if problem else None)
     return out
 
 

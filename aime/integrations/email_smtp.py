@@ -111,9 +111,10 @@ class EmailSender:
         return sorted(tests)[0], True
 
     def send(self, to: str, subject: str, body: str, in_reply_to: str | None = None,
-             message_id: str | None = None, references: str | None = None) -> str:
+             message_id: str | None = None, references: str | None = None, last_look=None) -> str:
         """Returns the Message-ID. Pass `message_id` (stored before sending) so it is known even if the send fails
-        midway, and replies to a delivered-but-unconfirmed email still match by In-Reply-To."""
+        midway, and replies to a delivered-but-unconfirmed email still match by In-Reply-To. `last_look` is called at the last
+        moment before the message is handed over, after the sign-in: raising EmailNotReady there means nothing left."""
         ready, reason = self.status()
         if not ready:
             raise EmailNotReady(reason)
@@ -158,5 +159,7 @@ class EmailSender:
                 smtp.auth("XOAUTH2", lambda challenge=None: xoauth2(s.smtp_username, bearer))
             elif s.smtp_username:
                 smtp.login(s.smtp_username, s.smtp_password)
+            if last_look:
+                last_look()
             smtp.send_message(msg)
         return msg_id

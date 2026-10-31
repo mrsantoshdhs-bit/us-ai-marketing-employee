@@ -532,12 +532,18 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             msg_id = self.sender.send(to, *args, **kwargs)
         except NOT_DELIVERED:
             send_journal.record_released(data, f.id, to)  # if this fails too: "delivery unknown", for a person
+            self._clear_interrupted(session, f)  # what this run knows is better: it did not leave
             raise
-        session.refresh(f)  # the PC may have slept inside the mail conversation: another run then called it interrupted
+        self._clear_interrupted(session, f)
+        return msg_id
+
+    @staticmethod
+    def _clear_interrupted(session: Session, f: FollowUp) -> None:
+        """The PC may have slept inside the mail conversation: another run then called it interrupted, with an alert to check."""
+        session.refresh(f)
         if f.status == "uncertain":
             session.execute(update(Alert).where(Alert.message.like(f"Follow-up #{f.id}:%"), Alert.acknowledged.is_(False)).values(
                 acknowledged=True, resolved_at=utcnow()))
-        return msg_id
 
     def _why_stop_the_run(self, last_look: datetime, now: datetime, cfg: dict, in_window: bool) -> str | None:
         """Judged again before each email, because the process can freeze for hours between two of them (a laptop lid). Only
@@ -548,6 +554,12 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         if in_window and not self._in_send_window(now + (real - self.run_began), cfg):
             return LEFT_THE_WINDOW
         return self.read_hold() if self.read_hold else None
+
+    def _stop_before_handing_over(self, last_look: datetime, now: datetime, cfg: dict, in_window: bool) -> None:
+        """The same judgement at the last moment: the PC can sleep between the claim and the mail server too."""
+        stop = self._why_stop_the_run(last_look, now, cfg, in_window)
+        if stop:
+            raise EmailNotReady(stop)
 
     def _send_locked(self, session: Session, approved: list[FollowUp], now: datetime, cfg: dict,
                      out: SalesOutput) -> None:
@@ -704,7 +716,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             session.refresh(f)
             try:
                 msg_id = self._deliver(session, f, f.to_email or contact.email, f.subject, f.body or "", in_reply_to=f.in_reply_to,
-                                       message_id=f.message_id, references=self._references(session, f))
+                                       message_id=f.message_id, references=self._references(session, f),
+                                       last_look=lambda at=last_look: self._stop_before_handing_over(at, now, cfg, in_window))
             except smtplib.SMTPRecipientsRefused as exc:
                 self._recipient_refused(session, f, exc, out)
                 session.commit()
