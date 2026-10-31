@@ -4,11 +4,14 @@ the port. Each test named test_defect_ failed on release #74. Synthetic data onl
 
 from __future__ import annotations
 
+import argparse
 import ctypes
+import errno
 import http.server
 import importlib.util
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -17,6 +20,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 import aime.config
@@ -25,14 +29,17 @@ from aime import logging_setup
 from aime.agents.crm import CRMManagementAgent
 from aime.agents.qualification import LeadQualificationAgent
 from aime.agents.sales_workflow import SalesWorkflowAgent
+from aime import backup as bk
+from aime import send_journal
 from aime.backup import encrypt_bytes, prune_offsite, write_offsite
-from aime.db import kv_set
+from aime.dashboard_probe import PAGE, PAGE_MARK, STATIC_FILE, STATIC_MARK, WRONG_HOST, page_owner, self_check
+from aime.db import kv_get, kv_set
 from aime.doctor import run_checks
-from aime.integrations.email_smtp import EmailSender
+from aime.integrations.email_smtp import EmailNotReady, EmailSender
 from aime.models import Alert, Company, FollowUp, JobRun, Lead
-from aime.scheduler.runner import run_job
+from aime.scheduler.runner import FileLock, run_job
 from aime.timeutil import utcnow
-from aime.web.app import health_strip
+from aime.web.app import create_app, health_strip
 from aime import workflows
 from aime.workflows import MAILBOX_READ, job_crm_maintenance, job_followups
 from tests.test_inbound_sales import FakeSMTP
@@ -613,11 +620,6 @@ def load_script(name):
 
 
 def test_the_sign_in_page_really_carries_the_mark_the_probes_look_for(make_ctx):
-    from fastapi.testclient import TestClient
-
-    from aime.dashboard_probe import PAGE, PAGE_MARK
-    from aime.web.app import create_app
-
     with TestClient(create_app(make_ctx())) as client:
         page = client.get(PAGE)
     assert page.status_code == 200 and PAGE_MARK in page.content
@@ -983,3 +985,418 @@ def test_the_words_for_a_folder_beside_the_onedrive_root_and_a_missing_drive(tmp
         assert leaves is False and "not signed in" not in why and "not connected" in why
         leaves, why = offsite_sync(r"Z:\Backups\AIME", synced=[])
         assert leaves is False and "not connected" in why
+
+
+# ---------------------------------------------------------------------------------- found by the independent review
+def test_the_watchdog_allows_for_a_wake_when_called_as_main_calls_it(tmp_path, monkeypatch):
+    wd = load_script("watchdog")
+    old_beat(tmp_path)
+    monkeypatch.setattr(wd, "seconds_since_wake", lambda: 30.0)
+    assert wd.check(tmp_path) == []
+    monkeypatch.setattr(wd, "seconds_since_wake", lambda: wd.WAKE_GRACE_SECONDS + 1.0)
+    assert wd.check(tmp_path)
+
+
+def test_short_awake_stretches_hide_a_stop_for_two_hours_at_most(tmp_path):
+    wd = load_script("watchdog")
+    old_beat(tmp_path, minutes=300)
+    at = datetime.now(timezone.utc)
+    just_woke = lambda: 60.0  # noqa: E731
+    assert wd.check(tmp_path, now=at, since_wake=just_woke) == []
+    assert wd.check(tmp_path, now=at + timedelta(hours=1), since_wake=just_woke) == []
+    assert wd.check(tmp_path, now=at + timedelta(hours=2), since_wake=just_woke) == []
+    assert "stopped" in wd.check(tmp_path, now=at + timedelta(hours=2, minutes=1), since_wake=just_woke)[0]
+    old_beat(tmp_path, minutes=300)  # a tick has run since, then a new silence: that one has its own count
+    (tmp_path / "heartbeat.json").write_text(json.dumps({**json.loads((tmp_path / "heartbeat.json").read_text(encoding="utf-8")),
+                                                         "at": (at + timedelta(hours=1)).replace(tzinfo=None).isoformat() + "Z"}), encoding="utf-8")
+    assert wd.check(tmp_path, now=at + timedelta(hours=3), since_wake=just_woke) == []
+
+
+def test_a_grace_note_that_cannot_be_written_or_a_clock_set_back_hides_nothing(tmp_path, monkeypatch):
+    wd = load_script("watchdog")
+    old_beat(tmp_path)
+    at = datetime.now(timezone.utc)
+    assert wd.check(tmp_path, now=at, since_wake=lambda: 60.0) == []
+    assert wd.check(tmp_path, now=at - timedelta(minutes=10), since_wake=lambda: 60.0)  # earlier than the first time: not believed
+    (tmp_path / wd.WAKE_GRACE_NOTE).unlink()
+    real = Path.write_text
+
+    def full_disk(self, *a, **k):
+        if self.name == wd.WAKE_GRACE_NOTE:
+            raise OSError(errno.ENOSPC, "no room")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", full_disk)
+    assert wd.check(tmp_path, now=at, since_wake=lambda: 60.0)
+
+
+def test_a_full_disk_crash_after_a_day_of_folder_trouble_does_not_say_the_local_backup_is_fine(make_ctx, clock, tmp_path, monkeypatch):
+    ctx = make_ctx(backup_offsite_dir=gone_folder(tmp_path), backup_passphrase=PASS)
+    start = clock(datetime(2026, 11, 3, 1, 0))
+    run_job(ctx, "db_maintenance", trigger="test")
+    with ctx.db.session() as s:
+        assert kv_get(s, bk.OFFSITE_PROBLEM)["local_ok"] is True
+
+    def full(*a, **k):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(workflows, "backup_sqlite_file", full)
+    monkeypatch.setattr(workflows, "_copy_of_the_failed_try", lambda *a: None)
+    clock(start + timedelta(days=1))
+    assert run_job(ctx, "db_maintenance", trigger="test")["status"] == "failed"
+    clock(start + timedelta(days=1, minutes=45))
+    run_job(ctx, "db_maintenance", trigger="test")
+    run_job(ctx, "monitor", trigger="test")
+    with ctx.db.session() as s:
+        said = [a.message for a in s.execute(select(Alert)).scalars()]
+        strip = next(x for x in health_strip(ctx, s) if x[0] == "Off-machine backup")
+    check = next(c for c in run_checks(ctx) if c["name"] == "Off-machine encrypted backup")
+    assert not any("local backup is fine" in m for m in said), said
+    assert any("db_maintenance" in m and "failed 2 times" in m for m in said), said
+    assert "local backup is fine" not in strip[2] and "local backup is fine" not in check["detail"]
+
+
+def test_a_failed_local_drill_does_not_say_the_local_backup_is_fine(make_ctx, clock, tmp_path, monkeypatch):
+    ctx = make_ctx(backup_offsite_dir=gone_folder(tmp_path), backup_passphrase=PASS)
+    clock(datetime(2026, 11, 3, 1, 0))
+    monkeypatch.setattr(workflows, "weekly_restore_drill",
+                        lambda c: {"agent": "restore_drill", "status": "failed", "error": "newest copy bad", "output": {}})
+    run_job(ctx, "db_maintenance", trigger="test")
+    with ctx.db.session() as s:
+        assert kv_get(s, bk.OFFSITE_PROBLEM)["local_ok"] is False
+        strip = next(x for x in health_strip(ctx, s) if x[0] == "Off-machine backup")
+    assert "needs a look" in strip[2] and "local backup is fine" not in strip[2]
+
+
+def test_the_local_backup_is_called_fine_again_once_a_run_has_shown_it(make_ctx, clock, tmp_path):
+    ctx = make_ctx(backup_offsite_dir=gone_folder(tmp_path), backup_passphrase=PASS)
+    clock(datetime(2026, 11, 3, 1, 0))
+    run_job(ctx, "db_maintenance", trigger="test")
+    run_job(ctx, "db_maintenance", trigger="test")
+    with ctx.db.session() as s:
+        assert kv_get(s, bk.OFFSITE_PROBLEM)["local_ok"] is True
+
+
+def smtp_where(before_connect=None, before_login=None):
+    sent = []
+
+    class Mail(FakeSMTP):
+        def __init__(self, *a, **k):
+            if before_connect:
+                before_connect()
+            super().__init__(*a, **k)
+
+        def login(self, *a):
+            if before_login:
+                before_login()
+            return super().login(*a)
+
+        def send_message(self, msg, *a, **k):
+            sent.append(msg["To"])
+            return {}
+
+    return Mail, sent
+
+
+def test_a_sleep_after_the_claim_sends_nothing_and_the_email_later_goes_once(make_ctx, clock, monkeypatch):
+    ctx = make_ctx(**MAIL)
+    start = clock(datetime(2026, 11, 3, 22, 59))  # Tuesday 17:59 New York
+    ids = two_approved(ctx)
+    asleep = []
+
+    def lid_closes():
+        if not asleep:
+            asleep.append(1)
+            clock(start + timedelta(hours=10))
+
+    smtp, sent = smtp_where(before_connect=lid_closes)
+    followups_job_with(monkeypatch, smtp)
+    mailbox_read_now(ctx)
+    job_followups(ctx)
+    assert not sent
+    assert [s for s, _ in rows(ctx, ids)] == ["approved", "approved"]
+    assert not send_journal.read(ctx.settings.data_dir).claims  # taken back: the retry is no repeat
+    with ctx.db.session() as s:
+        assert all(s.get(FollowUp, i).send_started_at is None for i in ids)
+
+    clock(start + timedelta(hours=16))  # 09:59 New York, a new read
+    mailbox_read_now(ctx)
+    job_followups(ctx)
+    assert len(sent) == len(set(sent)) == 2
+    assert [s for s, _ in rows(ctx, ids)] == ["sent", "sent"]
+    mailbox_read_now(ctx)
+    job_followups(ctx)
+    assert len(sent) == 2
+
+
+def test_a_read_gone_stale_during_the_sign_in_sends_nothing_even_inside_the_window(make_ctx, clock, monkeypatch):
+    ctx = make_ctx(**MAIL)
+    clock(datetime(2026, 11, 4, 15, 0))  # Wednesday 10:00 New York
+    ids = two_approved(ctx)
+
+    def read_fails():
+        with ctx.db.session() as s:
+            kv_set(s, workflows.MAILBOX_READ, None)
+
+    smtp, sent = smtp_where(before_login=read_fails)
+    followups_job_with(monkeypatch, smtp)
+    mailbox_read_now(ctx)
+    job_followups(ctx)
+    assert not sent
+    assert all(s == "approved" and "Held:" in why for s, why in rows(ctx, ids))
+
+
+def test_the_last_look_leaves_a_normal_send_alone(make_ctx, clock, monkeypatch):
+    ctx = make_ctx(**MAIL)
+    clock(datetime(2026, 11, 4, 15, 0))
+    ids = two_approved(ctx)
+    smtp, sent = smtp_where()
+    followups_job_with(monkeypatch, smtp)
+    mailbox_read_now(ctx)
+    job_followups(ctx)
+    assert len(sent) == 2 and [x for x in rows(ctx, ids)] == [("sent", ""), ("sent", "")]
+    assert len(send_journal.read(ctx.settings.data_dir).claims) == 2
+
+
+def test_the_last_look_comes_after_the_sign_in_and_only_ever_stops_it(make_ctx):
+    ctx = make_ctx(**MAIL)
+    order = []
+
+    class Mail(FakeSMTP):
+        def login(self, *a):
+            order.append("signed in")
+            return super().login(*a)
+
+        def send_message(self, msg, *a, **k):
+            order.append("handed over")
+            return {}
+
+    sender = EmailSender(ctx.settings, smtp_factory=Mail)
+    sender.send("a@acme.example", "Hello", FOOTER, last_look=lambda: order.append("looked"))
+    assert order == ["signed in", "looked", "handed over"]
+    order.clear()
+
+    def stop():
+        raise EmailNotReady("stop")
+
+    with pytest.raises(EmailNotReady, match="stop"):
+        sender.send("a@acme.example", "Hello", FOOTER, last_look=stop)
+    assert order == ["signed in"]
+
+
+def test_a_copy_by_hand_ends_the_recorded_trouble_and_notes_a_changed_passphrase(make_ctx, tmp_path, capsys):
+    from aime.cli import cmd_backup
+
+    ctx = offsite_ctx(make_ctx, tmp_path)
+    (tmp_path / "off").mkdir()
+    old = tmp_path / "off" / "aime-offsite-20260101-000000.aimebak"
+    old.write_bytes(encrypt_bytes(b"x" * 100, "another-long-passphrase"))
+    with ctx.db.session() as s:
+        kv_set(s, bk.OFFSITE_PROBLEM, {"why": "the drive was gone", "at": utcnow().isoformat(), "local_ok": True})
+    assert cmd_backup(argparse.Namespace(label="manual", offsite=True), ctx) == 0
+    with ctx.db.session() as s:
+        assert kv_get(s, bk.OFFSITE_PROBLEM) is None
+        assert kv_get(s, bk.OFFSITE_KEY_CHANGED)["file"] == old.name
+        assert kv_get(s, "backup.last_offsite")["bytes"] > 0
+    checks = {c["name"]: c for c in run_checks(ctx)}
+    assert checks["Off-machine encrypted backup"]["ok"] and not checks["Older off-machine copies open"]["ok"]
+
+
+def test_a_failed_copy_by_hand_is_recorded_too(make_ctx, tmp_path, capsys):
+    from aime.cli import cmd_backup
+
+    ctx = make_ctx(backup_offsite_dir=gone_folder(tmp_path), backup_passphrase=PASS)
+    assert cmd_backup(argparse.Namespace(label="manual", offsite=True), ctx) == 1
+    with ctx.db.session() as s:
+        problem = kv_get(s, bk.OFFSITE_PROBLEM)
+    assert "cannot be reached" in problem["why"] and problem["local_ok"] is True
+
+
+def test_a_good_copy_stands_when_the_temp_folder_cannot_be_cleared(make_ctx, tmp_path, monkeypatch):
+    ctx = offsite_ctx(make_ctx, tmp_path)
+    real = bk.create_bundle
+    holders = []
+
+    def bundle(settings, db, out):
+        made = real(settings, db, out)
+        holders.append(made.open("rb"))  # an antivirus scanning the new zip for a moment
+        return made
+
+    monkeypatch.setattr(bk, "create_bundle", bundle)
+    try:
+        result = bk.try_write_offsite(ctx.settings, Path(ctx.db.engine.url.database))
+    finally:
+        for h in holders:
+            h.close()
+    assert result["status"] == "ok", result
+    assert bk.copy_opens(tmp_path / "off" / result["file"], PASS)
+
+
+def test_trouble_on_this_pc_is_not_blamed_on_the_folder(make_ctx, tmp_path, monkeypatch):
+    ctx = offsite_ctx(make_ctx, tmp_path)
+    db = Path(ctx.db.engine.url.database)
+
+    def raising(exc):
+        def make(*a, **k):
+            raise exc
+        return make
+
+    monkeypatch.setattr(bk, "create_bundle", raising(OSError(errno.ENOSPC, "temp folder full")))
+    said = bk.try_write_offsite(ctx.settings, db)["reason"]
+    assert "this PC's disk has no room left" in said and "has no room left" not in said.replace("this PC's disk has no room left", "")
+    monkeypatch.setattr(bk, "create_bundle", raising(PermissionError(13, "an image held")))
+    said = bk.try_write_offsite(ctx.settings, db)["reason"]
+    assert "on this PC is holding" in said and "refused the file" not in said
+    monkeypatch.setattr(bk, "create_bundle", raising(bk.BackupError("database snapshot failed verification: malformed")))
+    said = bk.try_write_offsite(ctx.settings, db)["reason"]
+    assert "could not be made on this PC" in said and "snapshot failed" in said
+
+
+def test_the_folders_own_trouble_is_still_the_folders(make_ctx, tmp_path, monkeypatch):
+    ctx = offsite_ctx(make_ctx, tmp_path)
+    real = Path.write_bytes
+
+    def full(self, data):
+        if self.suffix == ".partial":
+            raise OSError(errno.ENOSPC, "no room", str(self))
+        return real(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", full)
+    said = bk.try_write_offsite(ctx.settings, Path(ctx.db.engine.url.database))["reason"]
+    assert "off-machine folder" in said and "has no room left" in said and "on this PC" not in said
+
+
+def log_line(text):
+    return logging.LogRecord("a", logging.INFO, "f", 1, text, None, None)
+
+
+def test_two_processes_keep_the_size_limit_and_every_line(tmp_path):
+    """A dashboard open all day and a tick: nothing holds the file between lines, so whichever writes past the limit rotates."""
+    main = tmp_path / "aime.log"
+    dashboard = logging_setup.KeepingRotatingHandler(main, maxBytes=2000, backupCount=50, encoding="utf-8", delay=True)
+    tick = logging_setup.KeepingRotatingHandler(main, maxBytes=2000, backupCount=50, encoding="utf-8", delay=True)
+    try:
+        dashboard.emit(log_line("the dashboard's first line"))  # and then quiet all day
+        assert dashboard.stream is None
+        for i in range(400):
+            tick.emit(log_line(f"tick line {i:04d} " + "x" * 40))
+    finally:
+        dashboard.close()
+        tick.close()
+    assert main.stat().st_size < 2500
+    every = "".join(p.read_text(encoding="utf-8") for p in tmp_path.glob("aime.log*"))
+    assert "the dashboard's first line" in every and all(f"tick line {i:04d}" in every for i in range(400))
+
+
+def test_a_program_that_keeps_the_log_open_costs_no_lines_or_history(tmp_path):
+    """An older dashboard, or any other program, that holds it for good: the limit cannot be kept, the guarantee is."""
+    if sys.platform != "win32":
+        pytest.skip("a held file refuses rename only on Windows")
+    main = tmp_path / "aime.log"
+    main.write_text("x" * 3000 + "\n", encoding="utf-8")
+    (tmp_path / "aime.log.1").write_text("history 1\n", encoding="utf-8")
+    holder = main.open("a", encoding="utf-8")
+    handler = logging_setup.KeepingRotatingHandler(main, maxBytes=2000, backupCount=2, encoding="utf-8", delay=True)
+    try:
+        for i in range(5):
+            handler._next_try = 0.0
+            handler.emit(log_line(f"line {i}"))
+    finally:
+        handler.close()
+        holder.close()
+    assert (tmp_path / "aime.log.1").read_text(encoding="utf-8") == "history 1\n"
+    assert "line 4" in main.read_text(encoding="utf-8")
+
+
+def server_giving(answer):
+    """answer(path) -> (status, headers, body)."""
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            status, headers, body = answer(self.path)
+            self.send_response(status)
+            for k, v in headers.items():
+                self.send_header(k, v)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def owner_of(answer):
+    server = server_giving(answer)
+    try:
+        return page_owner("127.0.0.1", server.server_address[1])
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_who_holds_the_port_for_each_kind_of_answer():
+    csp = {"Content-Security-Policy": f"default-src 'self'; form-action 'self' {STATIC_MARK}"}
+    assert owner_of(lambda p: (200, {}, b"<title>Sign in - " + PAGE_MARK + b"</title>")) == "dashboard"
+    assert owner_of(lambda p: (400, {}, WRONG_HOST)) == "dashboard"
+    assert owner_of(lambda p: (400, {}, b"Bad request: invalid host header, friend")) == "other"
+    assert owner_of(lambda p: (200, {}, b"some other program")) == "other"
+    assert owner_of(lambda p: (404, {}, b"nothing here")) == "other"
+    # a server error on the page: a file that needs no database tells who it is
+    assert owner_of(lambda p: (500, {}, b"Internal Server Error") if p == PAGE else (200, csp, b"body {}")) == "dashboard"
+    assert owner_of(lambda p: (500, {}, b"Internal Server Error") if p == PAGE else (404, {}, b"no such file")) == "other"
+    assert owner_of(lambda p: (502, {}, b"Bad gateway") if p == PAGE else (200, {}, b"body {}")) == "other"
+    # both fail: it cannot be told, and nobody is told another program holds the port
+    assert owner_of(lambda p: (500, {}, b"Internal Server Error")) == "dashboard"
+
+
+def test_the_real_dashboard_gives_what_the_probes_look_for(make_ctx):
+    ctx = make_ctx(allowed_hosts="crm.tailnet.example")
+    with TestClient(create_app(ctx), base_url="http://127.0.0.1:8765") as client:
+        wrong_host = client.get(PAGE)
+    assert wrong_host.status_code == 400 and wrong_host.content.strip() == WRONG_HOST
+    for auth in (True, False):
+        with TestClient(create_app(make_ctx(dashboard_auth=auth))) as client:
+            static = client.get(STATIC_FILE)
+        assert static.status_code == 200 and STATIC_MARK in static.headers["content-security-policy"]
+
+
+def test_the_dashboards_own_error_page_never_makes_it_end_itself(tmp_path):
+    """Its self-check counts any answer: a server error for ten minutes on end causes no restart."""
+    server = server_giving(lambda p: (500, {}, b"Internal Server Error"))
+    ended = []
+    try:
+        self_check("127.0.0.1", server.server_address[1], tmp_path, sleep=lambda _s: None, end=ended.append, rounds=10)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert not ended
+
+
+def test_a_lock_is_released_only_by_its_holder(tmp_path):
+    path = tmp_path / "send.lock"
+    first, second, third = FileLock(path, 1800), FileLock(path, 1800), FileLock(path, 1800)
+    assert first.acquire()
+    long_ago = time.time() - 7200
+    os.utime(path, (long_ago, long_ago))
+    assert second.acquire()  # the first slept past its time
+    written = path.read_bytes()
+    first.release()  # and wakes
+    assert path.read_bytes() == written and not first.held
+    assert not third.acquire()  # the second still has it
+    second.release()
+    assert not path.exists()
+    assert third.acquire()
+    third.release()
+    assert not path.exists()
+
+
+def test_a_released_lock_that_is_gone_is_no_error(tmp_path):
+    path = tmp_path / "x.lock"
+    lock = FileLock(path, 1800)
+    assert lock.acquire()
+    path.unlink()
+    lock.release()
+    assert not lock.held
