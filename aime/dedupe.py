@@ -67,6 +67,17 @@ def domain_part_of_name(name: str) -> str | None:
     return m.group(1) if m else None
 
 
+def company_to_address(name: str | None, website_title: str | None = None, domain: str | None = None) -> str | None:
+    """The name to write to the company itself. A web address used as a name gives way to the homepage's own spelling, or
+    to its name part when that was written with capitals ("Zentro.com"). None when there is no name fit to write
+    ("meetzentro.com" with no title, "AI x Healthcare Startup"): a greeting says "team" rather than guess."""
+    name = " ".join((name or "").split())
+    inner = domain_part_of_name(name)
+    if inner:
+        return name_from_title(website_title, domain or name) or (inner if any(c.isupper() for c in inner) else None)
+    return None if not name or describes_rather_than_names(name) else name
+
+
 def normalize_name(name: str) -> str:
     n = name.lower().strip()
     n = re.sub(r"\(.*?\)", " ", n)

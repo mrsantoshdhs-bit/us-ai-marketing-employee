@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 
 from aime.contact_validation import STATUS_OK
+from aime.dedupe import company_to_address
 from aime.qc import CheckResult, build_report
 from aime.qc.checks import check_cliches, check_grammar, check_spelling
 
@@ -75,11 +76,13 @@ def run_email_checks(subject: str, body: str, evidence: list[dict], contact, sup
                                f"check the source for: {', '.join(numbers[:5])}" if numbers else "none outside quotes"))
 
     # Every draft names the lead's own company, except the closing one ("Closing the loop on ...", aime/outreach.py).
-    company = getattr(getattr(contact, "company", None), "name", None)
+    record = getattr(contact, "company", None)
+    company = getattr(record, "name", None)
     if company and not subject.lower().startswith("closing the loop"):
-        named = _normalize(company) in _normalize(f"{subject}\n{main}")
+        written = company_to_address(company, getattr(record, "website_title", None), getattr(record, "domain", None))
+        named = bool(written) and _normalize(written) in _normalize(f"{subject}\n{main}")
         results.append(CheckResult("company name", "pass" if named else "uncertain",
-                                   f"names {company}" if named else f"{company} is not named: is this the right company?"))
+                                   f"names {written}" if named else f"{company} is not named: is this the right company?"))
 
     sources = [_normalize(e.get("source_text") or e.get("fact") or "") for e in evidence or []]
     quotes = QUOTE_RE.findall(main)
