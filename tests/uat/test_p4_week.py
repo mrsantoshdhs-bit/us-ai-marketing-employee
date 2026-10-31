@@ -148,7 +148,12 @@ def test_an_ended_meeting_marked_held_reaches_the_deal_and_the_report(org):
     with org.db.session() as s:
         assert s.get(Meeting, mid).status == "completed" and s.get(Opportunity, oid).next_step.startswith("Meeting held")
     assert f"/meetings/{mid}/held" not in eva.get("/meetings").text
-    assert post(eva, f"/meetings/{mid}/held").status_code == 400  # once only
+    again = post(eva, f"/meetings/{mid}/held", notes="Second click")  # a double click: no error, and nothing changes
+    assert again.status_code == 303 and "Already marked" in unquote(again.headers["location"])
+    with org.db.session() as s:
+        assert s.get(Meeting, mid).notes == "Went well"
+        assert len(s.execute(select(Activity.id).where(Activity.lead_id == lid, Activity.type == "meeting")).scalars().all()) == 1
+    assert post(eva, f"/meetings/{mid}/no_show").status_code == 400  # another outcome on a marked meeting is still refused
     res = AnalyticsReportingAgent(org).run({"kind": "daily"})
     assert res.ok and res.output.kpis["meetings_held_total"] == 1
 
@@ -344,7 +349,7 @@ def test_marking_someone_unavailable_says_how_much_work_they_hold(org):
     boss = client(org, "boss")
     r = post(boss, f"/admin/users/{uid}/edit", role="sales_executive", available="")
     said = unquote(r.headers["location"])
-    assert "1 open lead, 1 open deal, 1 email waiting for approval" in said and "reassign" in said
+    assert "1 open lead, 1 open deal, 1 email waiting for approval" in said and "reassign" in said and "new deal" in said
     again = post(boss, f"/admin/users/{uid}/edit", role="sales_executive", available="")  # already away: nothing new to say
     assert "open lead" not in unquote(again.headers["location"])
     with org.db.session() as s:

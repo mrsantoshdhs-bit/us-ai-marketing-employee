@@ -188,7 +188,8 @@ def register(app, C, render, back, who) -> None:
                 from aime.assignment import open_work
 
                 away = (f". {user.username} gets no new leads now and still holds {open_work(s, user.username)}: that stays with them "
-                        "until a manager reassigns it on each lead's page")
+                        "until a manager reassigns it on each lead's page, except that a new deal on one of their leads takes that "
+                        "lead to whoever receives the deal")
         return back("/admin/users", f"Saved {user.username}{away}")
 
     @app.post("/admin/users/{uid}/{action}", response_class=HTMLResponse)

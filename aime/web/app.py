@@ -977,9 +977,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         with C().db.session() as s:
             take_write_lock(s)
             m = s.get(Meeting, mid) or _404()
-            if action not in ("held", "no_show", "cancel") or m.status != "scheduled":
+            outcome = {"held": "completed", "no_show": "no_show", "cancel": "cancelled"}.get(action)
+            if outcome and m.status == outcome:  # the second request of a double click
+                return back("/meetings", "Already marked: nothing changed")
+            if not outcome or m.status != "scheduled":
                 raise HTTPException(400, "Action not allowed in the current state")
-            m.status = {"held": "completed", "no_show": "no_show", "cancel": "cancelled"}[action]
+            m.status = outcome
             m.notes = (notes or m.notes or "")[:2000] or None
             opp = s.get(Opportunity, m.opportunity_id) if m.opportunity_id else None
             if opp and opp.stage not in ("won", "lost"):
