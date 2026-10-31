@@ -32,6 +32,7 @@ OFFSITE_PREFIX = "aime-offsite-"
 OFFSITE_KEEP = 30
 MIN_PASSPHRASE = 12
 MIN_FREE_BYTES = 2 * 2**30
+DAMAGE_WORDS = ("malformed", "not a database")  # what SQLite says of a damaged file; anything else may pass by itself
 DRILL_EVERY_DAYS = 7
 PREDEPLOY_KEPT = 5  # the newest pre-deploy copies, whatever BACKUP_KEEP_MANUAL says: what a rollback goes back to
 
@@ -81,17 +82,24 @@ def prune_manual_backups(backup_dir: Path, keep: int, min_age_days: int = 30, no
     removed = []
     for old in _manual_to_remove(backup_dir, keep, min_age_days, now, keep_predeploy):
         for path in (old, old.with_name(old.name + "-wal"), old.with_name(old.name + "-shm")):  # with what lies beside it
-            if path.exists():
-                path.unlink()
+            if path.exists() and _removed(path):
                 removed.append(path.name)
     return removed + _clear_empty_side_files(backup_dir)
+
+
+def _removed(path: Path) -> bool:
+    """A file another program holds stays until the next run: tidying up must never fail the backup job."""
+    try:
+        path.unlink()
+        return True
+    except OSError:
+        return False
 
 
 def _clear_empty_side_files(backup_dir: Path) -> list[str]:
     removed = []
     for side in list(backup_dir.glob("aime-*.db-wal")) + list(backup_dir.glob("aime-*.db-shm")):
-        if side.stat().st_size == 0:
-            side.unlink()
+        if side.stat().st_size == 0 and _removed(side):
             removed.append(side.name)
     return removed
 
@@ -128,13 +136,18 @@ def prune_backups(backup_dir: Path, label: str = "auto", keep: int = 14) -> int:
 
 
 def integrity_check(db: Database) -> dict:
-    """A file too damaged to answer is a failed check, not an exception: that is what this check is there to report."""
+    """A file too damaged to answer is a failed check, not an exception: that is what this check is there to report. A check
+    that could not run just now (locked, an I/O error, cannot be opened) says nothing about the file: "passing" marks it."""
     try:
         with db.engine.connect() as conn:
             integrity = conn.execute(text("PRAGMA integrity_check")).scalar()
             fk = conn.execute(text("PRAGMA foreign_key_check")).fetchall()
-    except DatabaseError as exc:
-        return {"integrity": f"unreadable: {exc.orig}", "foreign_key_violations": 0, "ok": False}
+    except (DatabaseError, sqlite3.Error) as exc:
+        said = getattr(exc, "orig", None) or exc
+        result = {"integrity": f"unreadable: {said}", "foreign_key_violations": 0, "ok": False}
+        if not any(word in str(said).lower() for word in DAMAGE_WORDS):
+            result["passing"] = True
+        return result
     return {"integrity": integrity, "foreign_key_violations": len(fk), "ok": integrity == "ok" and not fk}
 
 

@@ -33,16 +33,12 @@ def run_checks(ctx: AppContext) -> list[dict]:
 
     ic = integrity_check(ctx.db)
     add("SQLite integrity", ic["ok"], f"integrity={ic['integrity']}, foreign-key violations={ic['foreign_key_violations']}"
-        + ("" if ic["integrity"] == "ok" else f". {restore_advice(ctx.settings)}"))
+        + ("" if ic["integrity"] == "ok" else ". It could not be checked just now and is tried again" if ic.get("passing")
+           else f". {restore_advice(ctx.settings)}"), "warning" if ic.get("passing") else "error")
     held = send_journal.hold(ctx.settings.data_dir)
     add("Sending is not on hold", held is None, "no hold" if held is None else send_journal.held_message(held), own_alert=True)
     try:
-        with ctx.db.session() as s:  # a backup copied over by hand: found here before the next send run finds it
-            behind = send_journal.restore_evidence(s, send_journal.read(ctx.settings.data_dir))
-        add("Database knows what was sent", not behind, "it does" if not behind else
-            f"{len(behind)} email(s) went out that this database does not know, so it is older than the record of sent emails. "
-            f"They will not be sent again, and sending is held at the next run: read Follow-ups, then {send_journal.CONFIRM}.",
-            own_alert=True)
+        _sent_record_check(ctx, add)
         _record_checks(ctx, add)
         _setup_checks(ctx, add)
     except DatabaseError as exc:  # a damaged file: say so, and still report what needs no database
@@ -98,6 +94,21 @@ def checks_without_database(settings, problem: Exception) -> list[dict]:
     checks.append({"name": "Free disk space", "ok": low is None, "severity": "warning", "own_alert": False,
                    "detail": low or "2 GB or more free"})
     return checks
+
+
+def _sent_record_check(ctx: AppContext, add) -> None:
+    """A backup copied over by hand: found here before the next send run finds it."""
+    try:
+        with ctx.db.session() as s:
+            behind = send_journal.restore_evidence(s, send_journal.read(ctx.settings.data_dir))
+    except OSError as exc:
+        add("Database knows what was sent", False, f"The record of sent emails cannot be read just now ({type(exc).__name__}): "
+            "nothing is sent while that lasts. Check that no other program holds the file.", "warning")
+        return
+    add("Database knows what was sent", not behind, "it does" if not behind else
+        f"{len(behind)} email(s) went out that this database does not know, so it is older than the record of sent emails. "
+        f"They will not be sent again, and sending is held at the next run: read Follow-ups, then {send_journal.CONFIRM}.",
+        own_alert=True)
 
 
 def _record_checks(ctx: AppContext, add) -> None:

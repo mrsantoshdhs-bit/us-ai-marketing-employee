@@ -218,7 +218,8 @@ def lock_owner_gone(path: Path) -> bool:
     cut) is dead once it is older than the moment between creating and writing it. Raises FileNotFoundError."""
     age = _time.time() - path.stat().st_mtime
     try:
-        pid = int(path.read_text(encoding="utf-8").split()[0])
+        parts = path.read_text(encoding="utf-8").split()
+        pid = int(parts[0])
     except FileNotFoundError:
         raise
     except OSError:  # held by another program for a moment: nothing can be said
@@ -228,7 +229,12 @@ def lock_owner_gone(path: Path) -> bool:
     if not pid_alive(pid):
         return True
     started = pid_started(pid)
-    return started is not None and started > _time.time() - age + PID_START_SLACK
+    if started is None:
+        return False
+    try:  # the writer noted its own start: this tells owner from stranger whatever the clock has done since
+        return abs(started - float(parts[2])) > 1
+    except (ValueError, IndexError):  # written before it did, or by a test
+        return started > _time.time() - age + PID_START_SLACK
 
 
 class FileLock:
@@ -242,27 +248,50 @@ class FileLock:
     def _owner_dead(self) -> bool:
         return lock_owner_gone(self.path)
 
+    def _stale(self) -> bool:
+        return _time.time() - self.path.stat().st_mtime > self.stale_seconds or self._owner_dead()
+
+    def _take_over(self) -> None:
+        """Remove a lock whose owner is gone, one process at a time: two that both saw it stale must not have the second
+        delete the lock the first has just written. Whoever waits here judges the file again. A guard left by a power cut
+        is ignored after a minute. Raises FileNotFoundError when there is nothing left to take over."""
+        guard = self.path.with_name(self.path.name + ".takeover")
+        try:
+            os.close(os.open(guard, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        except FileExistsError:
+            if _time.time() - guard.stat().st_mtime > 60:
+                guard.unlink(missing_ok=True)
+            return
+        try:
+            if self._stale():
+                self.path.unlink()
+        finally:
+            guard.unlink(missing_ok=True)
+
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         for _ in range(2):
             try:
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, f"{os.getpid()} {datetime.now().isoformat()}".encode())
-                os.close(fd)
+                try:
+                    os.write(fd, f"{os.getpid()} {datetime.now().isoformat()} {pid_started(os.getpid()) or ''}".encode())
+                finally:
+                    os.close(fd)
                 self.held = True
                 return True
             except FileExistsError:
                 try:
-                    age = _time.time() - self.path.stat().st_mtime
-                    gone = age > self.stale_seconds or self._owner_dead()
+                    gone = self._stale()
+                    if gone:
+                        self._take_over()
                 except FileNotFoundError:
                     continue
+                except PermissionError:  # held for a moment by the process deleting it, or by another program
+                    return False
                 if gone:
-                    try:
-                        self.path.unlink()
-                    except FileNotFoundError:
-                        pass
                     continue
+                return False
+            except PermissionError:  # Windows: the file is being deleted by another process right now
                 return False
         return False
 
@@ -375,8 +404,12 @@ def run_job(ctx: AppContext, name: str, trigger: str = "manual", *, allow_during
         if state in ("stopped", "emergency_stop"):
             return {"job": name, "status": "skipped",
                     "reason": f"automation {state.replace('_', ' ')} in the Automation Control Center"}
-    if recover_runs:  # manual runs close out crashed runs too, not only scheduled ticks
-        _recover_if_free(ctx)
+    if recover_runs:  # by hand ("Run now", `aime run`), not from a tick, which has checked the clock already
+        beat = read_heartbeat(ctx.settings)
+        wrong = _clock_stops_work(ctx, beat, trigger, check_in=False) if beat else None
+        if wrong:
+            return {"job": name, "status": "skipped", "reason": wrong}
+        _recover_if_free(ctx)  # manual runs close out crashed runs too, not only scheduled ticks
     _note_mailbox_secrets(ctx)
     lock = FileLock(ctx.settings.locks_dir / f"job_{name}.lock")
     if not lock.acquire():
@@ -451,12 +484,12 @@ def _note_gap(ctx: AppContext, previous: dict | None, now: datetime) -> None:
         log.exception("Could not record: %s", message)
 
 
-def _clock_stops_this_tick(ctx: AppContext, previous: dict | None, trigger: str) -> str | None:
+def _clock_stops_work(ctx: AppContext, previous: dict | None, trigger: str, check_in: bool = True) -> str | None:
     """An implausible clock (aime.clock_check): one alert, a check-in that says so, and no work on a wrong date. The real
     clock, not a run's own `now`. Judging it must never stop the tick."""
     try:
         wrong = clock_check.problem(ctx, previous, utcnow())
-        if wrong:
+        if wrong and check_in:
             write_heartbeat(ctx.settings, {"trigger": trigger, "pid": os.getpid(), "state": clock_check.HOLD_STATE,
                                            "last_good_at": clock_check.anchor(ctx, previous)})
         with ctx.db.session() as s:
@@ -472,17 +505,23 @@ def _clock_stops_this_tick(ctx: AppContext, previous: dict | None, trigger: str)
 
 def tick(ctx: AppContext, trigger: str = "scheduler", now: datetime | None = None) -> dict:
     window = maintenance.active(ctx.settings.data_dir)
-    if window:
-        write_heartbeat(ctx.settings, {"trigger": trigger, "pid": os.getpid(), "state": "maintenance",
-                                       "maintenance": window})
+    if window:  # a check-in, but no evidence of the clock: the next tick is judged against the last one that worked
+        before = read_heartbeat(ctx.settings) or {}
+        write_heartbeat(ctx.settings, {"trigger": trigger, "pid": os.getpid(), "state": "maintenance", "maintenance": window,
+                                       "last_good_at": before.get("last_good_at") or before.get("at")})
         return {"status": "skipped", "reason": f"maintenance window until {window['until']}", "ran": []}
     lock = FileLock(ctx.settings.locks_dir / "tick.lock", stale_seconds=5400)
-    if not lock.acquire():
+    try:
+        got = lock.acquire()
+    except OSError as exc:  # a full disk or a folder gone read-only: the watchdog reports that ticks stopped
+        log.warning("Could not take the tick lock: %s", exc)
+        return {"status": "skipped", "reason": f"the tick lock file cannot be written ({type(exc).__name__})", "ran": []}
+    if not got:
         return {"status": "skipped", "reason": "another tick is running", "ran": []}
     ran: list[dict] = []
     try:
         previous = read_heartbeat(ctx.settings)
-        wrong = _clock_stops_this_tick(ctx, previous, trigger)
+        wrong = _clock_stops_work(ctx, previous, trigger)
         if wrong:
             return {"status": "skipped", "reason": wrong, "ran": []}
         write_heartbeat(ctx.settings, {"trigger": trigger, "pid": os.getpid(), "state": "running"})

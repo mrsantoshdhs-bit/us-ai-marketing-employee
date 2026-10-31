@@ -186,25 +186,40 @@ def restore_database(settings, source: Path) -> dict:
             raise
         # From here on the database changes: sending is held first, so a crash half way sends nothing either.
         hold_was_on = send_journal.hold(settings.data_dir) is not None
-        send_journal.set_hold(settings.data_dir, "restored", f"the database was restored from {source.name} and has forgotten "
-                              "what it sent after that backup: check the Sent folder")
-        incoming = db.with_name(db.name + ".restoring")
-        shutil.copyfile(checked, incoming)
-        check = integrity_of_file(incoming)
-        if check != "ok":
-            incoming.unlink(missing_ok=True)
-            if not window_was_on:
-                maintenance.stop(settings.data_dir)
-            if not hold_was_on:
-                send_journal.clear_hold(settings.data_dir)
-            raise RestoreRefused(f"The copy of {source.name} failed its check ({check}). The present database was not replaced.")
-        for side in SIDE_FILES:
-            db.with_name(db.name + side).unlink(missing_ok=True)
-        incoming.replace(db)
-        for side in SIDE_FILES:  # a copy taken from a live folder may have come with its own
-            db.with_name(db.name + side).unlink(missing_ok=True)
-        if source.suffix in (".aimebak", ".zip"):
-            _files_beside_the_bundle(settings, Path(tmp) / "bundle")
+        replaced = False
+        try:
+            send_journal.set_hold(settings.data_dir, "restored", f"the database was restored from {source.name} and has forgotten "
+                                  "what it sent after that backup: check the Sent folder")
+            incoming = db.with_name(db.name + ".restoring")
+            shutil.copyfile(checked, incoming)
+            check = integrity_of_file(incoming)
+            if check != "ok":
+                incoming.unlink(missing_ok=True)
+                if not window_was_on:
+                    maintenance.stop(settings.data_dir)
+                if not hold_was_on:
+                    send_journal.clear_hold(settings.data_dir)
+                raise RestoreRefused(f"The copy of {source.name} failed its check ({check}). The present database was not replaced.")
+            for side in SIDE_FILES:
+                db.with_name(db.name + side).unlink(missing_ok=True)
+            incoming.replace(db)
+            replaced = True
+            for side in SIDE_FILES:  # a copy taken from a live folder may have come with its own
+                db.with_name(db.name + side).unlink(missing_ok=True)
+            if source.suffix in (".aimebak", ".zip"):
+                _files_beside_the_bundle(settings, Path(tmp) / "bundle")
+        except OSError as exc:
+            incoming = db.with_name(db.name + ".restoring")
+            try:
+                incoming.unlink(missing_ok=True)
+            except OSError:
+                pass
+            state = (f"The backup {source.name} IS in place, but a later step did not finish" if replaced else
+                     "The present database was not replaced")
+            copy = f" The database as it was is kept as {kept}." if kept else ""
+            raise RestoreRefused(f"The restore stopped ({exc}). {state}.{copy} The maintenance window is on and sending is on hold "
+                                 "(if that could be written): nothing runs or goes out. Free the disk or close what holds the "
+                                 "file, then run this again.") from exc
     ctx = create_context(settings)  # applies any newer schema, with its own backup first
     try:
         with ctx.db.session() as s:

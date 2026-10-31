@@ -49,6 +49,7 @@ CONSENTED = ("inquiry", "opt_in")
 OPEN_FOLLOWUP = ("pending", "awaiting_approval", "approved", "sending", "uncertain")
 COUNTS_AS_SENT = ("sent", "sending", "uncertain")  # for the daily limits: an uncertain email may have gone out
 SEND_BUSY = "Another run is sending emails right now; this one goes out on the next run"
+JOURNAL_ALERT = "sending:journal"
 # What certainly delivered nothing: the server refused it, it never connected, or the message could not be built.
 NOT_DELIVERED = (smtplib.SMTPRecipientsRefused, EmailNotReady, smtplib.SMTPSenderRefused, smtplib.SMTPConnectError,
                  smtplib.SMTPAuthenticationError, ConnectionRefusedError, socket.gaierror, ValueError)
@@ -503,7 +504,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             return False
         automation.observe_sending(session, self.settings.outbound_email_enabled, now)
         for f in session.execute(due).scalars():
-            f.blocked_reason = send_journal.row_message()
+            f.blocked_reason = send_journal.row_message() if why.startswith("ON HOLD") else why[:300]
             out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
         return True
 
@@ -515,7 +516,11 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         try:
             send_journal.record_claim(data, f.id, to, f.message_id)
         except OSError as exc:
+            alert_once(session, "error", self.name, "Nothing is being sent: the record of sent emails cannot be written "
+                       f"({send_journal.journal_path(data)}, {type(exc).__name__}). Check that the disk has room and that no "
+                       "other program holds the file or made it read-only.", self.settings, key=JOURNAL_ALERT)
             raise EmailNotReady(f"the record of sent emails cannot be written ({type(exc).__name__}), so nothing left") from exc
+        resolve_alerts(session, (JOURNAL_ALERT,), set())
         try:
             msg_id = self.sender.send(to, *args, **kwargs)
         except NOT_DELIVERED:
@@ -533,8 +538,15 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         in_window = self._in_send_window(now, cfg)
         limits = self._outreach_limits(session, now, cfg)
         sign_in_failed = False
+        try:
+            journal = send_journal.read(self.settings.data_dir)  # once: this run's own sends are other emails
+        except OSError as exc:
+            for f in approved:
+                f.blocked_reason = f"Waiting: the record of sent emails cannot be read just now ({type(exc).__name__})"
+                out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+            return
         for f in approved:
-            went_out = send_journal.claim_for(send_journal.read(self.settings.data_dir), f)
+            went_out = send_journal.claim_for(journal, f)
             if went_out:  # the record outside the database says it left already: never again without a person
                 send_journal.mark_for_a_person(session, f, went_out, self.name)
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
