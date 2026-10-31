@@ -503,3 +503,16 @@ def test_they_replied_cancels_an_approved_answer_and_nothing_is_sent(make_ctx):
     FakeSMTP.sent = []
     SalesWorkflowAgent(ctx, sender=sender).run({"now": (TUESDAY_11AM_ET + timedelta(days=1)).isoformat()})
     assert FakeSMTP.sent == [] and answer_of(ctx, lead_id) == [(fid, "cancelled")]
+
+
+def test_a_stopped_lead_with_a_logged_reply_cannot_be_reopened(make_ctx):
+    ctx = contacted(make_ctx)[0]
+    client = web(ctx)
+    lead_id = lead_of(ctx).id
+    client.post(f"/leads/{lead_id}/stop_outreach", headers=ORIGIN, follow_redirects=False)
+    client.post(f"/leads/{lead_id}/replied", headers=ORIGIN, follow_redirects=False)
+    assert lead_of(ctx).outreach_status == "stopped"
+    page = client.get(f"/leads/{lead_id}").text
+    assert "/reopen_outreach" not in page and "a person logged that this company replied" in page
+    r = client.post(f"/leads/{lead_id}/reopen_outreach", data={"reason": "try again"}, headers=ORIGIN, follow_redirects=False)
+    assert "Not reopened" in unquote(r.headers["location"]) and lead_of(ctx).outreach_status == "stopped"
