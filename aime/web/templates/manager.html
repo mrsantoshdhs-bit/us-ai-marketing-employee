@@ -69,7 +69,7 @@
 
 <section class="cc-grid three-up">
   <div class="panel" id="replies">
-    <div class="panel-head"><h2>{{ icon('chat') }} Interested replies</h2><a class="panel-link" href="/inbox?show=all">Conversations {{ icon('arrow-right') }}</a></div>
+    <div class="panel-head"><h2>{{ icon('chat') }} Interested replies</h2><a class="panel-link" href="/inbox?show=all">Replies {{ icon('arrow-right') }}</a></div>
     {% for r in interested %}<div class="row-item"><a href="/inbox?show=all">{{ r.subject or '(no subject)' }}</a> <span class="muted small">{{ r.from_email }} · {{ r.received_at|local(None, '%a %H:%M') }}</span></div>
     {% else %}<div class="empty-state"><b>No interested replies in 7 days</b>{% if not health.reading %}Mailbox reading is off, so replies are not read.{% endif %}</div>{% endfor %}
   </div>

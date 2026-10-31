@@ -1737,7 +1737,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 replies = s.execute(select(InboundEmail).where(record_condition(scope(request), InboundEmail.lead_id), or_(
                     func.lower(InboundEmail.subject).like(like), func.lower(InboundEmail.from_email).like(like)))
                     .order_by(InboundEmail.id.desc()).limit(12)).scalars().all()
-                groups.append(("Conversations", "chat", [(r.subject or "(no subject)", "/inbox?show=all",
+                groups.append(("Replies", "chat", [(r.subject or "(no subject)", "/inbox?show=all",
                                                           f"{r.from_email} · {(r.category or 'new').replace('_', ' ')}") for r in replies]))
                 meetings = s.execute(select(Meeting).where(record_condition(scope(request), Meeting.lead_id), or_(
                     func.lower(Meeting.invitee_name).like(like), func.lower(Meeting.invitee_email).like(like),

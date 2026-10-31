@@ -423,11 +423,11 @@ def reopen_refusal(session: Session, lead: Lead) -> str | None:
         return "a person logged that this company replied"
     waiting = [m for m in mail if m.status in ("new", "needs_review")]
     if any(m.holds_sending for m in waiting):
-        return "an email about this company waits for review on Conversations, and it holds sending"
+        return "an email about this company waits for review on Replies, and it holds sending"
     if any(m.category == "bounce" for m in waiting):
-        return "a delivery failure report on this company waits for a person on Conversations"
+        return "a delivery failure report on this company waits for a person on Replies"
     if waiting:
-        return "an email about this company has not been read by a person yet: see Conversations"
+        return "an email about this company has not been read by a person yet: see Replies"
     return None
 
 
