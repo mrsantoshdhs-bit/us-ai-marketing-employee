@@ -256,7 +256,8 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
     def _judge_silent_sites(self, session: Session, silent: list[Company], answered: int) -> None:
         from aime.monitoring import alert_once, resolve_alerts
 
-        down = self._network_looks_down(session, silent, answered) if silent else False
+        # nothing asked, nothing learned: an outage's alert stays open until something has answered
+        down = self._network_looks_down(session, silent, answered) if silent else (False if answered else None)
         now = utcnow()
         for company in silent:
             if down:  # nothing was learned about these sites: no count, no change

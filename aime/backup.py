@@ -422,6 +422,8 @@ def offsite_copy_problem(settings, record: dict | None) -> str | None:
     """What is wrong with the newest copy in the off-machine folder, or None: not only the record of it. It is decrypted, which
     takes a fraction of a second for a local file; a cloud-only file is not downloaded for this."""
     folder = Path(settings.backup_offsite_dir).expanduser()
+    if not folder.is_dir():
+        return f"the off-machine folder {folder} cannot be reached just now"
     files = sorted(folder.glob(f"{OFFSITE_PREFIX}*.aimebak"))
     if not files:
         return f"no copy is left in the off-machine folder {folder}: the last one was written as {(record or {}).get('file')}"

@@ -10,7 +10,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DatabaseError
 
 from aime import clock_check, maintenance, send_journal
-from aime.backup import (OFFSITE_KEY_CHANGED, OFFSITE_PROBLEM, free_space_problem, integrity_check, newest_good_backup,
+from aime.backup import (OFFSITE_KEY_CHANGED, OFFSITE_PROBLEM, copy_opens, free_space_problem, integrity_check, newest_good_backup,
                          offsite_copy_problem, offsite_problem_words, offsite_status, offsite_sync, verify_backup)
 from aime.context import AppContext
 from aime.db import kv_get
@@ -222,7 +222,8 @@ def _setup_checks(ctx: AppContext, add) -> None:
         wrong = offsite_copy_problem(ctx.settings, off)
         add("Off-machine encrypted backup", hours <= BACKUP_MAX_AGE_HOURS and not wrong,
             f"{off['file']}, {hours:.0f} h ago" + (f"; {wrong}" if wrong else ""))
-    if off_ready and key_changed and (Path(ctx.settings.backup_offsite_dir).expanduser() / key_changed["file"]).exists():
+    if off_ready and key_changed and copy_opens(Path(ctx.settings.backup_offsite_dir).expanduser() / key_changed["file"],
+                                                ctx.settings.backup_passphrase) is False:
         add("Older off-machine copies open", False, f"The copy {key_changed['file']} and those before it do not open with the backup "
             "passphrase in use now: it was changed, or that copy is damaged. Keep the old passphrase until those copies have aged "
             "out, about 30 days.", "warning")

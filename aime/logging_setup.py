@@ -50,7 +50,8 @@ def setup_logging(logs_dir: Path, level: int = logging.INFO) -> None:
     logger = logging.getLogger("aime")
     logger.setLevel(level)
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    file_handler = KeepingRotatingHandler(logs_dir / "aime.log", maxBytes=2_000_000, backupCount=5, encoding="utf-8")
+    # delay: the file is opened at the first line, where a failure is logging's own: a held log must not stop a process starting
+    file_handler = KeepingRotatingHandler(logs_dir / "aime.log", maxBytes=2_000_000, backupCount=5, encoding="utf-8", delay=True)
     file_handler.setFormatter(fmt)
     file_handler.addFilter(RedactingFilter())
     logger.addHandler(file_handler)

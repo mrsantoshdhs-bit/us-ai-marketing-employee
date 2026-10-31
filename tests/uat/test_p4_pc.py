@@ -251,6 +251,20 @@ def test_an_outage_does_not_wait_out_every_timeout_of_a_long_list(make_ctx):
     assert check_sites(ctx).output.websites_checked == 5
 
 
+def test_a_run_with_nothing_due_does_not_end_an_outage_it_cannot_see(make_ctx, clock):
+    start = clock(datetime(2026, 11, 3, 1, 0))
+    ctx = make_ctx(handler=offline)
+    witness = sites_due(ctx, "witness.example")[0]
+    with ctx.db.session() as s:
+        s.get(Company, witness).website_checked_at = utcnow()
+    sites_due(ctx, "a.example", "b.example", "c.example")
+    check_sites(ctx)
+    assert open_alerts(ctx)
+    clock(start + timedelta(minutes=30))  # all three look again only after an hour
+    check_sites(ctx)
+    assert open_alerts(ctx)
+
+
 def test_a_site_never_checked_stays_unchecked_when_nothing_answers(make_ctx):
     ctx = make_ctx(handler=offline)
     with ctx.db.session() as s:
@@ -610,6 +624,7 @@ def test_the_sign_in_page_really_carries_the_mark_the_probes_look_for(make_ctx):
 
 
 def test_the_dashboard_task_says_who_holds_the_port_in_its_log(make_ctx, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # the script moves to the project folder when it loads: undone with this
     task = load_script("dashboard_task")
     ctx = make_ctx()
     monkeypatch.setattr(aime.config.Settings, "load", classmethod(lambda cls, *a, **k: ctx.settings))
@@ -874,6 +889,27 @@ def test_a_cloud_only_copy_is_never_opened_or_downloaded(tmp_path, monkeypatch):
     assert backup.copy_opens(good, PASS) is None and backup.copy_opens(good) is None
     assert backup.prune_offsite(tmp_path, keep=1, passphrase=PASS) == 0  # nothing can be proven: it stays
     assert not opened
+
+
+def test_a_log_held_when_a_process_starts_does_not_stop_it(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    main = logs / "aime.log"
+    main.write_text("old\n", encoding="utf-8")
+    close = held(main)
+    logger = logging.getLogger("aime")
+    before = list(logger.handlers)
+    raise_exc, logging.raiseExceptions = logging.raiseExceptions, False
+    try:
+        logging_setup.setup_logging(logs)  # used to raise here, ending the tick before any work
+        logging.getLogger("aime.scheduler").warning("a line with nowhere to go")
+    finally:
+        logging.raiseExceptions = raise_exc
+        close()
+        for h in [h for h in logger.handlers if h not in before]:
+            h.close()
+            logger.removeHandler(h)
+        logging_setup._CONFIGURED.discard(str(logs.resolve()))
 
 
 def test_doctor_says_when_the_newest_copy_is_cut_short_or_no_longer_opens(make_ctx, tmp_path):
