@@ -11,10 +11,12 @@ from fastapi.testclient import TestClient
 import aime.timeutil as tu
 from aime.agents.crm import CRMManagementAgent
 from aime.agents.qualification import LeadQualificationAgent
+from aime.crm_ops import upsert_company
 from aime.matching import competitor_evidence, competitor_in_post, match_services
 from aime.models import Activity, Alert, Company, FollowUp, Lead, ResearchSnapshot, Signal, Suppression
 from aime.people import decision_maker_title
 from aime.scoring import LeadFacts, SignalFact, lasting_grade, read_company, score_lead
+from aime.sources.base import CompanyCandidate
 from aime.web.app import create_app
 
 
@@ -382,3 +384,44 @@ def test_reasons_read_in_plain_words():
     text = " ".join(reasons)
     assert "AI Agent Orchestration (strong)" in text and "agent_orchestration" not in text and "strength" not in text
     assert "target industry (SaaS)" in text
+
+
+# ------------------------------------------------------------------ review of this branch, 31 Oct
+def test_a_new_post_on_a_company_on_file_never_sets_the_flag_by_itself(make_ctx):
+    ctx = make_ctx()
+    lead_id, _ = _hn_lead(ctx, days_old=5, status="qualified")
+    with ctx.db.session() as s:
+        lead = s.get(Lead, lead_id)
+        lead.outreach_status = "contacted"
+        cand = CompanyCandidate(name="Acme Tools", source="hn_hiring", source_url="https://example.test/9", domain="acme.example", state="TX",
+                                is_us=True, signal_type="hiring", signal_text="We are a small IT consulting firm.")
+        existing, created = upsert_company(s, cand)
+        assert not created and not existing.is_competitor
+    _review(ctx)
+    assert _state(ctx, lead_id, _company_of(ctx, lead_id))[:2] == (False, "qualified")  # already emailed: left alone
+
+
+def _company_of(ctx, lead_id):
+    with ctx.db.session() as s:
+        return s.get(Lead, lead_id).company_id
+
+
+def test_a_new_company_is_still_flagged_from_its_first_post(make_ctx):
+    ctx = make_ctx()
+    with ctx.db.session() as s:
+        cand = CompanyCandidate(name="Firm Co", source="hn_hiring", source_url="https://example.test/8", domain="firm.example", state="TX",
+                                is_us=True, signal_type="hiring", signal_text="We are a small IT consulting firm.")
+        company, created = upsert_company(s, cand)
+        assert created and company.is_competitor
+
+
+def test_the_morning_check_flags_a_company_on_file_and_logs_the_phrase(make_ctx):
+    ctx = make_ctx()
+    lead_id, cid = _hn_lead(ctx, days_old=5, status="qualified")
+    with ctx.db.session() as s:
+        s.add(Signal(company_id=cid, signal_type="hiring", text="We are a small IT consulting firm.", source="hn_hiring",
+                     source_url="https://example.test/7", fingerprint="p4b", observed_at=tu.utcnow()))
+    _review(ctx)
+    with ctx.db.session() as s:
+        assert s.get(Company, cid).is_competitor
+        assert s.query(Activity).filter(Activity.subject.like("Marked as a possible competitor%IT consulting firm%")).count() == 1
