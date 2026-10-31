@@ -399,9 +399,11 @@ class InboundEmail(Base):
     processed_at: Mapped[datetime | None] = mapped_column(DateTime)
     auth_results: Mapped[str | None] = mapped_column(Text)  # the receiving server's Authentication-Results, or AIME's own check
     sender_verified: Mapped[bool | None] = mapped_column(Boolean)  # the sender's domain signed it (None: not checked)
-    # What the mail is, when it is no person's answer: bounce | delay | receipt | sending_problem | calendar
+    # What the mail is, when it is no person's answer: bounce | delay | receipt | sending_problem | calendar | list
     mail_kind: Mapped[str | None] = mapped_column(String(20))
     mail_note: Mapped[str | None] = mapped_column(String(400))  # no readable text (and what it holds), or why delivery failed
+    # Written from an address we do not know, about this lead: its emails wait while this reply waits for a person.
+    holds_sending: Mapped[bool | None] = mapped_column(Boolean)
 
     lead: Mapped["Lead | None"] = relationship()
     contact: Mapped["Contact | None"] = relationship()

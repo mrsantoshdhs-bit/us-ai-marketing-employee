@@ -41,7 +41,7 @@ from aime.people import looks_like_name
 from aime.pipeline import pipeline_checks
 from aime.outreach import policy as outreach_policy
 from aime.qc.email_checks import run_email_checks
-from aime.reply_intel import QUESTION_PLACEHOLDER
+from aime.reply_intel import QUESTION_PLACEHOLDER, lead_on_hold
 from aime.redact import redact
 from aime.timeutil import as_aware_utc, utcnow
 
@@ -462,8 +462,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 f.blocked_reason = hold[:300]
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
             if held:
-                alert_once(session, "error", self.name, f"{len(held)} approved email(s) are waiting: the sales mailbox could "
-                           "not be read, so a reply or opt-out may be waiting in it. They go out after the next good read.",
+                alert_once(session, "error", self.name, f"{len(held)} approved email(s) are waiting. {hold.removeprefix('Held: ')}",
                            self.settings, key=MAILBOX_ALERT)
             return
         resolve_alerts(session, (MAILBOX_ALERT,), set())
@@ -501,6 +500,10 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             lead = f.lead
             test_auth = None  # the authorization a given test contact's email goes out under
             reengaging = f.purpose == "reengage" and lead.outreach_status == "reengage"  # the one email to a parked lead
+            if lead_on_hold(session, f.lead_id):  # someone we do not know wrote about this lead: a person decides first
+                f.blocked_reason = "Held: an email about this lead from an unknown address waits on Replies for a person"
+                out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+                continue
             gone = automation.campaign_approval_problem(session, f, now, self.settings)  # holds while the campaign does
             if gone:
                 automation.return_to_person(f, gone)

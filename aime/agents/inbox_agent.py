@@ -23,8 +23,8 @@ from aime.mail_auth import sender_signed
 from aime.meetings import check_double_bookings
 from aime.models import Alert, Contact, FollowUp, InboundEmail, SkippedMail
 from aime.monitoring import alert_once, resolve_alerts
-from aime.reply_intel import (BOOKING_NOTICE_DAYS, CALENDLY_NOTICE, booking_links_without_notice, company_leads,
-                              forget_old_skipped_mail, process_pending, remembered_lead_id, sent_with_our_subject)
+from aime.reply_intel import (BOOKING_NOTICE_DAYS, CALENDLY_NOTICE, UNSUBSCRIBE_SUBJECT, booking_links_without_notice, company_leads,
+                              forget_old_skipped_mail, process_pending, remembered_lead_id, sent_with_our_subject, subdomain_leads)
 from aime.timeutil import utcnow
 
 
@@ -42,6 +42,7 @@ class InboxOutput(BaseModel):
     stored: int = 0
     skipped_own: int = 0
     skipped_unrelated: int = 0  # INBOX_SCOPE=related: not sales mail, so not stored
+    read_to_end: bool = True  # False: more mail is waiting in a mailbox, so nothing may go out as if it had been read
     categories: dict[str, int] = Field(default_factory=dict)
     needs_review: int = 0
     proposals: int = 0  # A4: meeting-time proposals drafted for approval
@@ -189,13 +190,21 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         before = kv_get(session, state_key)
         raws, state = box.fetch_new(before, token=token)
         out.fetched += len(raws)
+        out.read_to_end = bool(state.pop("complete", True)) and out.read_to_end
+        connection_lost = state.pop("connection_lost", None)
+        given_up_on = state.pop("skipped_headers", None) or {}
         same_numbering = bool(before) and before.get("uidvalidity") == state.get("uidvalidity")
         if before and not same_numbering:
             session.add(Alert(level="warning", source=self.name, message=f"The mailbox was moved or rebuilt ({state_key}): its "
                               "numbering changed, so AIME's reading position was reset and recent mail is being read again. "
                               "Please check the mailbox for older mail that was still unanswered."))
         for uid in state.get("skipped_uids") or []:  # the server would not give this one after several tries
-            if uid not in ((before or {}).get("skipped_uids") or []):
+            if uid in ((before or {}).get("skipped_uids") or []):
+                continue
+            if head := given_up_on.get(str(uid)):  # kept, so that a known sender's sequence stops and a person sees who it was
+                self._keep_unreadable(session, f"{state.get('uidvalidity')}:{uid}", head, own,
+                                      _StoppedTheJob("it could not be fetched after several tries, and was skipped"), out)
+            else:
                 session.add(Alert(level="warning", source=self.name, message=f"An email (UID {uid}) could not be fetched "
                                   f"after several tries and was skipped ({state_key}): please look for it in the mailbox."))
         position = int(before.get("last_uid", 0)) if same_numbering else 0
@@ -206,6 +215,8 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
             if tries >= READ_TRIES:
                 self._keep_unreadable(session, key, raw, own, _StoppedTheJob(f"the job stopped on it {tries} times, so it was set aside"), out)
             else:
+                # uid - 1: killed on the first email of a new position, the next run must not start again from UID 1
+                position = max(position, uid - 1)
                 kv_set(session, state_key, {**state, "last_uid": position, "reading": {str(uid): tries + 1}})
                 session.commit()
                 try:
@@ -223,6 +234,13 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
             session.commit()
         kv_set(session, state_key, state)
         session.commit()
+        if connection_lost is not None:  # what was read is handled; the run is a failed read, and tried again at once
+            if int((state.get("dropped") or {}).get(str(connection_lost), 0)) >= READ_TRIES:
+                alert_once(session, "warning", self.name, f"The connection to the mailbox drops each time AIME fetches the email "
+                           f"with UID {connection_lost} ({state_key}): nothing behind it can be read until it is moved or the "
+                           "connection holds. Please look for it in the mailbox.", self.settings)
+                session.commit()
+            raise ConnectionError(f"the connection to the mailbox dropped while fetching email UID {connection_lost}")
 
     @staticmethod
     def _undo_mark(session: Session, state_key: str, state: dict) -> None:
@@ -279,6 +297,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
 
 CALENDLY_SUBJECT = re.compile(r"\b(new event|canceled|cancelled|rescheduled|invitee)\b", re.I)
 REPLY_SUBJECT = re.compile(r"\s*(re|aw|sv|antw|fwd?|fw|wg|tr|rv)\s*:", re.I)
+NO_REPLY = re.compile(r"(no-?reply|do-?not-?reply)", re.I)
 OUR_FOOTER_QUOTED = re.compile(r"to stop receiving emails from us", re.I)  # the line every email of ours ends with
 
 
@@ -317,6 +336,9 @@ def sales_related(session: Session, p: ParsedEmail) -> bool:
         return True
     if company_leads(session, p.from_email) or remembered_lead_id(session, p.from_email):
         return True
-    if sent_with_our_subject(session, p.subject):
+    if sent_with_our_subject(session, p.subject) or UNSUBSCRIBE_SUBJECT.match(p.subject or ""):  # our unsubscribe link, from any alias
+        return True
+    if (p.kind != "list" and not p.auto_submitted and not NO_REPLY.match(p.from_email)  # a person at a sub-domain, not its robots
+            and subdomain_leads(session, p.from_email)):
         return True
     return bool(REPLY_SUBJECT.match(p.subject or "") and OUR_FOOTER_QUOTED.search(p.body_text or ""))

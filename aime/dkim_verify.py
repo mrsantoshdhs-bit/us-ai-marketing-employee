@@ -13,7 +13,8 @@ import re
 _WSP = re.compile(rb"[ \t]+")
 _HOSTNAME = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}")
 _SELECTOR = re.compile(r"[A-Za-z0-9_.-]{1,200}")
-_MUST_BE_SIGNED = (b"from", b"subject", b"to")  # who wrote it, about what, and to whom: all three are believed by the CRM
+_MUST_BE_SIGNED = (b"from", b"subject")  # who wrote it and about what. Microsoft 365 commonly leaves To out (see auth_results)
+_ONCE_ONLY = (b"from", b"subject")
 
 
 def _split(raw: bytes) -> tuple[list[tuple[bytes, bytes]], bytes]:
@@ -83,6 +84,12 @@ def _public_key(selector: str, domain: str, resolver=None):
 
 def verify_one(raw: bytes, index: int = 0, resolver=None) -> str | None:
     """The signing domain if the index-th DKIM-Signature verifies, else None."""
+    found = verify_signature(raw, index, resolver)
+    return found[0] if found else None
+
+
+def verify_signature(raw: bytes, index: int = 0, resolver=None) -> tuple[str, bool] | None:
+    """(signing domain, whether it also vouches for one To line) if the index-th DKIM-Signature verifies, else None."""
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
@@ -112,7 +119,7 @@ def verify_one(raw: bytes, index: int = 0, resolver=None) -> str | None:
     signed = [n.strip().lower().encode() for n in tags.get("h", "").split(":") if n.strip()]
     if any(name not in signed for name in _MUST_BE_SIGNED):
         return None
-    if any(sum(1 for name, _ in headers if name == once) > 1 for once in _MUST_BE_SIGNED):
+    if any(sum(1 for name, _ in headers if name == once) > 1 for once in _ONCE_ONLY):
         return None  # the check reads the lowest of two From lines and the mail parser the first: one signed email, any sender
     available: dict[bytes, list[bytes]] = {}
     for name, raw_header in headers:
@@ -136,23 +143,31 @@ def verify_one(raw: bytes, index: int = 0, resolver=None) -> str | None:
             return None
     except (InvalidSignature, Exception):  # any doubt (bad key, DNS failure, malformed data): not verified
         return None
-    return domain
+    return domain, b"to" in signed and sum(1 for name, _ in headers if name == b"to") == 1
 
 
-def verified_domains(raw: bytes, resolver=None, limit: int = 4) -> set[str]:
-    """Every domain whose DKIM signature on this email verifies (at most `limit` signatures are tried)."""
-    out = set()
+def verified_signatures(raw: bytes, resolver=None, limit: int = 4) -> dict[str, bool]:
+    """{domain: whether a signature of it covers the To line} for every signature on this email that verifies (at most
+    `limit` are tried)."""
+    out: dict[str, bool] = {}
     count = len([1 for name, _ in _split(raw)[0] if name == b"dkim-signature"])
     for i in range(min(count, limit)):
         try:
-            if domain := verify_one(raw, i, resolver):
-                out.add(domain)
+            found = verify_signature(raw, i, resolver)
         except Exception:  # noqa: S112, BLE001 -- a malformed signature is simply not verified
             continue
+        if found:
+            out[found[0]] = out.get(found[0], False) or found[1]
     return out
+
+
+def verified_domains(raw: bytes, resolver=None, limit: int = 4) -> set[str]:
+    """Every domain whose DKIM signature on this email verifies."""
+    return set(verified_signatures(raw, resolver, limit))
 
 
 def auth_results(raw: bytes, resolver=None) -> str:
     """AIME's own Authentication-Results line for this email (authserv-id "aime.dkim"). Only checked hostnames reach it."""
-    domains = sorted(verified_domains(raw, resolver))
-    return "aime.dkim; " + ("; ".join(f"dkim=pass header.d={d}" for d in domains) if domains else "dkim=none")
+    domains = verified_signatures(raw, resolver)
+    lines = [f"dkim=pass header.d={d}" + ("" if domains[d] else " header.to=unsigned") for d in sorted(domains)]
+    return "aime.dkim; " + ("; ".join(lines) if lines else "dkim=none")
