@@ -26,7 +26,7 @@ import httpx
 
 from aime.context import USER_AGENT
 from aime.dedupe import registrable_domain
-from aime.website_check import _read_capped, robots_verdict
+from aime.website_check import _read_capped, read_robots
 
 # A link is classified by the first kind whose keywords appear in its path or text.
 PAGE_KINDS: list[tuple[str, tuple[str, ...]]] = [
@@ -54,7 +54,7 @@ SKIP_TAGS = {"script", "style", "noscript", "svg", "template", "iframe", "select
 # name/title cards. A header or footer inside an article or section belongs to that content and is kept.
 CHROME_TAGS = {"nav", "header", "footer"}
 CONTENT_TAGS = {"article", "section", "main", "aside"}
-EMAIL_RE = re.compile(r"(?<![\w.+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,24}(?![\w-])")
+EMAIL_RE = re.compile(r"(?<![\w.%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,24}(?![\w-])")
 
 
 @dataclass
@@ -189,10 +189,17 @@ class _PageParser(HTMLParser):
                 self.content_blocks.append(self.blocks[-1])
 
 
+def _without_open_tail(html: str) -> str:
+    """What follows the last ">" can only be tags that never end. The parser retries each of them to the end of the page,
+    which a page of "<meta " turns into minutes; as plain text they cost one pass and nothing of value is lost."""
+    tail = html.rfind(">") + 1
+    return html[:tail] + html[tail:].replace("<", " ")
+
+
 def parse_page(url: str, kind: str, html: str) -> Page:
     p = _PageParser()
     try:
-        p.feed(html)
+        p.feed(_without_open_tail(html))
         p.close()
     except Exception:  # malformed markup: keep whatever was parsed so far
         pass
@@ -255,7 +262,7 @@ class SiteReader:
         if origin not in self._robots:
             try:
                 self.requested.append(origin + "/robots.txt")
-                self._robots[origin] = robots_verdict(client.get(origin + "/robots.txt"))
+                self._robots[origin] = read_robots(client, origin + "/robots.txt")[0]
             except httpx.HTTPError:
                 self._robots[origin] = None
         rules = self._robots[origin]
@@ -277,7 +284,7 @@ class SiteReader:
                 with client.stream("GET", url, follow_redirects=False) as r:
                     if r.has_redirect_location:
                         target = urljoin(url, r.headers["location"])
-                        if registrable_domain(urlparse(target).netloc) != site:
+                        if registrable_domain(urlparse(target).hostname or "") != site:
                             return Page(url=start, kind=kind, status="offsite_redirect",
                                         title=urlparse(target).netloc[:200]), target
                         url = target
@@ -294,7 +301,7 @@ class SiteReader:
 
     def read(self) -> list[Page]:
         pages: list[Page] = []
-        with self.ctx.http(timeout=12, headers={"Accept": "text/html,application/xhtml+xml"}) as client:
+        with self.ctx.http(public_only=True, timeout=12, headers={"Accept": "text/html,application/xhtml+xml"}) as client:
             home, final = self._fetch(client, f"https://{self.domain}/", "home")
             if home.status == "error":
                 home, final = self._fetch(client, f"http://{self.domain}/", "home")

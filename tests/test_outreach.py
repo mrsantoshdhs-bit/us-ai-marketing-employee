@@ -54,8 +54,9 @@ def test_first_touch_quotes_only_published_evidence(make_ctx):
     (f,) = drafts(ctx)
     assert f.kind == "outreach" and f.step == 1 and f.status == "awaiting_approval" and f.approved_at is None
     assert f.to_email == f"david.chen@{SITE}" and f.body.startswith("Hi David,")
-    quote = f.body.split('"')[1].rstrip("…")
-    assert quote in POST and f.evidence[0]["url"] == "https://news.ycombinator.com/item?id=123"
+    quote = f.body.split('"')[1].rstrip("…")  # the company's own website comes before its job post
+    assert quote in f.evidence[0]["source_text"] and f.evidence[0]["url"] != "https://news.ycombinator.com/item?id=123"
+    assert any(e["url"] == "https://news.ycombinator.com/item?id=123" and e["source_text"] == POST for e in f.evidence)
     assert "publishes this address as a business contact" in f.body and "unsubscribe" in f.body
     assert '.".' not in f.body  # no doubled full stop after a quoted sentence
     assert "1 Sample St" in f.body and f.quality["qc"]["status"] == "passed", f.quality["qc"]

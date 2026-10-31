@@ -17,6 +17,9 @@ COMPETITOR_PATTERNS = [
     r"outsourc(?:ing|ed) (?:software|development)",
     r"staff augmentation",
     r"nearshore|offshore development",
+    r"\b(?:applied[- ]ai|ai|ai transformation|digital transformation|automation) (?:advisory|consulting|consultancy|"
+    r"implementation|transformation) (?:firm|company|agency|studio|partner)\b",
+    r"\bai transformation firm\b",
 ]
 _COMPETITOR_RE = re.compile("|".join(COMPETITOR_PATTERNS), re.IGNORECASE)
 # What a company says it sells on its own website: AI agents or workers, an agent platform, or developers for
@@ -30,9 +33,26 @@ OWN_SITE_COMPETITOR_PATTERNS = [
     r"\b(?:custom )?(?:crm|software|app) development (?:agency|company|firm|services)\b",
     r"\b(?:hire|access|connect with|join) (?:thousands of )?(?:elite |top(?:-tier)? |vetted |remote )*"
     r"(?:developers|engineers|software talent)\b",
+    r"\bfractional (?:cto|cio|caio|chief)\b",
+    r"\bcustom ai (?:development|solutions|systems|agents)\b",
+    r"\bagentic (?:\w+ ){0,2}(?:management|platform|enterprise|workflows?|operations|compliance|systems?)\b",
+    r"\bai agents? (?:do|run|handle|work)\b",
+    r"\b(?:give|for) (?:your |developers and )*ai agents\b",
+    r"\bfor your code and agents\b|\bagents they can trust\b|\bagent identit(?:y|ies)\b|\bmcp (?:gateway|registry)\b",
+    r"\bautomates? (?:personali[sz]ed |your )?(?:outreach|sales|follow-?ups?)\b",
     *COMPETITOR_PATTERNS,
 ]
 _OWN_SITE_COMPETITOR_RE = re.compile("|".join(OWN_SITE_COMPETITOR_PATTERNS), re.IGNORECASE)
+# The same, in a hiring post of a company whose own site has not been read: only what names the product it sells. A post
+# can describe a job ("build AI agents for our clinic"), so these never decide when the company's own words are on record.
+UNREAD_COMPANY_PATTERNS = [
+    r"\bagentic (?:\w+ ){0,2}(?:platform|management|compliance)\b",
+    r"\bbuilds? agentic\b",
+    r"\b(?:roll out|deploy|govern) ai agents\b",
+    r"\bplatform for developers and ai agents\b",
+    r"\bai agents that (?:take|do|run|handle)\b",
+]
+_UNREAD_COMPANY_RE = re.compile("|".join(UNREAD_COMPANY_PATTERNS), re.IGNORECASE)
 
 
 @lru_cache(maxsize=512)
@@ -68,11 +88,27 @@ class ServiceMatch:
         return f"{SERVICES[self.service_id].name} ({self.confidence}): mentions {', '.join(self.keywords[:4])}"
 
 
+# Words our keywords would catch that are no evidence of a need: a thing denied ("not LLMs"), what engineers use to write
+# code ("agentic coding", "Claude Code"), and engineering terms that share a word with a service ("test automation").
+_NOT_A_NEED_RE = re.compile(
+    r"\b(?:not|no|non|without|beyond|rather than)[- ]+(?:an? )?(?:llms?|ai|gpt|genai|saas|crm|automation)\b"
+    r"|\bbehind llms\b|\bwere not a saas\b|\bnot a saas\b"
+    r"|\bagentic (?:coding|engineering|development|tooling|practices|skills)\b"
+    r"|\b(?:claude code|github copilot|coding (?:agents?|assistants?)|llm[- ]based tooling|ai[- ]assisted (?:coding|development)|"
+    r"ai tools daily|ai coding tools?)\b"
+    r"|\b(?:container|kubernetes|k8s|workload|infrastructure|service) orchestration\b"
+    r"|\b(?:test|testing|qa|cloud|infrastructure|infra|build|deployment|deploy|ci/?cd|security|network|browser|e2e|home|"
+    r"factory|lab|industrial|warehouse|robotics) automation\b|\bautomation engineers?\b"
+    r"|\bintegration test(?:s|ing)?\b|\bunit and integration\b",
+    re.IGNORECASE,
+)
+
+
 def match_services(text: str | None) -> list[ServiceMatch]:
     """Return services evidenced by the text, strongest first."""
     if not text:
         return []
-    lower = text.lower()
+    lower = _NOT_A_NEED_RE.sub(" ", text.lower().replace("\u2019", "'"))
     found: dict[str, list[tuple[str, int, list[tuple[int, int]]]]] = {}
     for svc in SERVICES.values():
         for kw, weight in [(k, 2) for k in svc.strong] + [(k, 1) for k in svc.weak]:
@@ -125,9 +161,23 @@ def competitor_evidence(own_words: str | None) -> str | None:
     return m.group(0) if m else None
 
 
+# The company asks for help. "Contractors" alone is usually someone's customers or trade: "software for HVAC contractors", "a
+# defense contractor", "(employees + contractors)".
+def competitor_in_post(post: str | None) -> str | None:
+    """The phrase in a hiring post that shows the company sells what we sell, for a company whose own site is unread."""
+    m = _UNREAD_COMPANY_RE.search(post or "") or _COMPETITOR_RE.search(post or "")
+    return m.group(0) if m else None
+
+
 _EXTERNAL_HELP_RE = re.compile(
-    r"\bcontract(?:or|ors)\b|\bcontract (?:role|position|engineer|developer)s?\b|\bcontract-to-hire\b"
-    r"|\bfreelanc\w*|\b(?:agency|consulting|development|implementation) partners?\b|\bfractional\b",
+    r"\b(?:hiring|hire|seeking|looking for|need|open to|accepting|considering|work with|welcome)\s+(?:\w+\s+){0,2}"
+    r"(?:contractors?|freelancers?)\b"
+    r"|\b(?:contractors?|freelancers?)\s+(?:are\s+)?(?:welcome|ok|okay|considered|accepted|wanted|needed)\b"
+    r"|\bcontract (?:role|position|engineer|developer|work|basis)s?\b|\bcontract-to-hire\b|\b1099\b"
+    r"|\b(?:part[- ]time|full[- ]time)\s*(?:/|or|,)?\s*contract\b|\bcontract\s*(?:/|or)\s*full[- ]time\b"
+    r"|\bfreelance (?:role|position|engineer|developer|work|basis)s?\b"
+    r"|\b(?:agency|consulting|development|implementation) partners?\b"
+    r"|\b(?:hiring|hire|seeking|looking for|need)\s+(?:an?\s+)?fractional\b",
     re.IGNORECASE,
 )
 

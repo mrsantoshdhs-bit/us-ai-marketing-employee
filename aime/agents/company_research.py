@@ -175,7 +175,8 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                              lead_id=lead.id if lead else None)
         snapshot = build_snapshot(company, pages, people, status)
         session.add(snapshot)
-        phrase = competitor_evidence(f"{snapshot.description or ''} {' '.join(snapshot.services_offered or [])}")
+        titles = " ".join(p.title for p in pages if p.ok and p.kind == "home")  # the page title is its own words too
+        phrase = competitor_evidence(f"{snapshot.description or ''} {' '.join(snapshot.services_offered or [])} {titles}")
         if phrase and not company.is_competitor and not company.competitor_cleared_by:
             company.is_competitor = True
             out.competitors.append(company.id)

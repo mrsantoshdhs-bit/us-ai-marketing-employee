@@ -79,18 +79,22 @@ SERVICES: dict[str, Service] = {
             "saas_dev",
             "SaaS Development",
             "Multi-tenant SaaS products built to scale without a rewrite",
-            ("saas", "multi-tenant", "multitenant", "subscription billing", "b2b software", "self-serve",
+            ("multi-tenant", "multitenant", "subscription billing", "b2b software", "self-serve",
              "mvp", "platform engineering"),
-            ("platform", "product engineer", "startup", "product-led"),
+            ("saas", "product engineer", "product-led"),
             ("#SaaS", "#ProductDevelopment", "#SoftwareEngineering"),
         ),
         Service(
             "custom_software",
             "Custom Software Development",
             "Custom software that removes the bottleneck without replacing what works",
-            ("custom software", "legacy", "modernization", "modernize", "rewrite", "internal tool",
-             "web app", "mobile app", "full stack", "full-stack", "fullstack"),
-            ("backend", "frontend", "react", "python", "node", "typescript", "api", "apis", "django", "rails"),
+            # What the company wants built or replaced. A programming language or "full-stack" says who it hires, which
+            # says nothing about a need for an outside builder.
+            ("custom software", "bespoke software", "legacy system", "legacy systems", "legacy code", "legacy codebase",
+             "legacy application", "legacy applications", "legacy software", "legacy platform", "legacy stack",
+             "modernization", "modernize", "modernizing", "rewrite our", "rewriting our", "rewrite of", "internal tool",
+             "internal tools"),
+            ("web app", "mobile app", "web application", "mobile application"),
             ("#CustomSoftware", "#SoftwareDevelopment", "#DigitalTransformation"),
         ),
         Service(

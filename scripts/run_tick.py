@@ -26,15 +26,20 @@ try:
 
         beat = DATA / "heartbeat.json"
         try:
-            previous = json.loads(beat.read_text(encoding="utf-8")).get("last_background_at")
-        except (OSError, ValueError):
-            previous = None
+            before = json.loads(beat.read_text(encoding="utf-8"))
+            previous, last_good = before.get("last_background_at"), before.get("last_good_at") or before.get("at")
+        except (OSError, ValueError, AttributeError):  # cut short by a power cut, or not the shape it should be
+            previous, last_good = None, None
         at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         session = session_kind()
-        beat.write_text(json.dumps({
-            "at": at, "session": session, "trigger": "scheduler", "pid": os.getpid(), "state": "maintenance",
-            "maintenance": window, "last_background_at": at if session == "background" else previous,
-        }), encoding="utf-8")
+        try:
+            beat.write_text(json.dumps({
+                "at": at, "session": session, "trigger": "scheduler", "pid": os.getpid(), "state": "maintenance",
+                "maintenance": window, "last_background_at": at if session == "background" else previous,
+                "last_good_at": last_good,  # this beat is no evidence of the clock: see aime/clock_check.py
+            }), encoding="utf-8")
+        except OSError:  # read-only, or a full disk: the maintenance window still stands
+            pass
         sys.exit(0)
 
     from aime.cli import main
@@ -44,8 +49,11 @@ except SystemExit:
     raise
 except Exception:  # pythonw swallows output, so record crashes on disk
     log = DATA / "logs" / "scheduler_crash.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("a", encoding="utf-8") as fh:
-        fh.write(f"\n[{datetime.now().isoformat()}]\n{traceback.format_exc()}")
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n[{datetime.now().isoformat()}]\n{traceback.format_exc()}")
+    except OSError:  # a full disk: the watchdog notices that ticks stopped
+        pass
     code = 1
 sys.exit(code)

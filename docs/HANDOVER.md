@@ -22,7 +22,7 @@ suggested replies → **Calendly bookings** → meetings → pipeline automation
 | Contact validation | `aime/contact_validation.py` | Decision-makers |
 | Scoring | `aime/scoring.py`, `aime/agents/qualification.py` | Leads |
 | Outreach, approvals, sending | `aime/outreach.py`, `aime/qc/email_checks.py`, `aime/agents/sales_workflow.py`, `aime/integrations/email_smtp.py` | Follow-ups |
-| Inbox, replies | `aime/inbox.py`, `aime/reply_intel.py`, `aime/agents/inbox_agent.py` | Replies |
+| Inbox, replies | `aime/inbox.py`, `aime/reply_intel.py`, `aime/agents/inbox_agent.py` | Conversations |
 | Meetings, pipeline | `aime/meetings.py`, `aime/pipeline.py` | Meetings, Pipeline |
 | Reports, acceptance evidence | `aime/agents/analytics.py`, `aime/acceptance.py` | Reports |
 | Sign-in, roles | `aime/web/auth.py` (admin: job runs, integrations; Sales Manager: everything sales) | — |
@@ -65,7 +65,8 @@ drafts; empty `IMAP_HOST` stops mailbox reading.
 1. Gmail app password, `.env` values, SPF/DKIM/DMARC (`docs/SALES_SETUP.md`).
 2. Calendly link, with notifications to the sales mailbox.
 3. Your account is admin (set on 26 Oct with `user set-role`). Add Sales Manager accounts with
-   `python -m aime user create --username <name>` if others help.
+   `python -m aime user create --username <name>` if others help. An account that already exists (such as `sales1`)
+   refuses `create`: give it a password with `python -m aime user set-password --username <name>`.
 4. Sign in to OneDrive (it is installed but not signed in, so the backup folder does not leave this PC),
    then the off-machine backup passphrase (`docs/SALES_SETUP.md` section 7).
 5. The live acceptance run (`docs/ACCEPTANCE.md`) with a test address you control.

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections import defaultdict
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import false, select
 from sqlalchemy.orm import Session
 
 from aime.config import Settings
@@ -59,6 +60,7 @@ LEGACY_KEYS = [
     (re.compile(r"^Agent '([^']+)' success rate"), "agent_rate:{}"),
     (re.compile(r"^Local AI model \(Ollama\) unreachable"), "llm:down"),
 ]
+PUBLISHING_DUE = re.compile(r"^\d+ approved post\(s\) are due but cannot be published")
 
 
 def alert_key(alert: Alert) -> str | None:
@@ -71,16 +73,19 @@ def alert_key(alert: Alert) -> str | None:
             m = pattern.match(alert.message)
             if m:
                 return key.format(*m.groups())
+    if alert.source == "publishing" and PUBLISHING_DUE.match(alert.message):
+        return "publishing:due"
     return None
 
 
 def alert_once(session: Session, level: str, source: str, message: str, settings: Settings | None = None,
-               key: str | None = None) -> bool:
+               key: str | None = None, until_resolved: bool = False) -> bool:
     """Create an alert unless it is already known; new ones can raise a desktop toast.
 
     Without `key`: the same message at most once per 24 hours. With `key` (what the alert is about): an open alert
-    with that key gets the latest message instead of a repeat, one a person dismissed stays quiet for 24 hours,
-    and `resolve_alerts` closes it once the problem is gone.
+    with that key gets the latest message instead of a repeat (older copies of it are closed), one a person dismissed
+    stays quiet for 24 hours, and `resolve_alerts` closes it once the problem is gone. With `until_resolved` (a state
+    someone chose, not a fault): one a person dismissed stays quiet until then.
     """
     since = utcnow() - timedelta(hours=24)
     if key is None:
@@ -90,12 +95,16 @@ def alert_once(session: Session, level: str, source: str, message: str, settings
     else:
         same = [a for a in session.execute(select(Alert).where(Alert.source == source, (Alert.acknowledged.is_(False))
                                                                | (Alert.created_at >= since)
-                                                               | (Alert.acknowledged_at >= since))).scalars()
+                                                               | (Alert.acknowledged_at >= since)
+                                                               | (Alert.resolved_at.is_(None) if until_resolved else false()))).scalars()
                 if alert_key(a) == key]
-        for a in same:
-            if not a.acknowledged:
-                a.key, a.level, a.message = key, level, message[:500]
-                return False
+        still_open = sorted((a for a in same if not a.acknowledged), key=lambda a: a.id)
+        if still_open:
+            a = still_open[-1]
+            a.key, a.level, a.message = key, level, message[:500]
+            for old in still_open[:-1]:
+                old.key, old.acknowledged, old.resolved_at = key, True, utcnow()
+            return False
         latest = max(same, key=lambda a: a.id, default=None)
         if latest is not None and latest.resolved_at is None:  # dismissed by a person within the last 24 hours
             return False  # (a dismissal of an earlier episode that has since cleared does not silence a new one)
@@ -193,16 +202,30 @@ def write_heartbeat(settings: Settings, info: dict) -> None:
     check-in: the last time a run happened in the background session (scheduled to run while signed out)."""
     path = heartbeat_path(settings)
     payload = {"at": utcnow().isoformat() + "Z", "session": session_kind(), **info}
-    previous = (read_heartbeat(settings) or {}).get("last_background_at")
+    previous = (_beat_file(settings) or {}).get("last_background_at")
     payload["last_background_at"] = payload["at"] if payload["session"] == "background" else previous
-    path.write_text(json.dumps(payload, default=str, indent=2), encoding="utf-8")
+    try:
+        path.write_text(json.dumps(payload, default=str, indent=2), encoding="utf-8")
+    except OSError:  # read-only, held by another program, a full disk: a missing check-in is reported, the work goes on
+        logging.getLogger("aime.monitoring").warning("Could not write the heartbeat file %s", path, exc_info=True)
 
 
-def read_heartbeat(settings: Settings) -> dict | None:
+def _beat_file(settings: Settings) -> dict | None:
     path = heartbeat_path(settings)
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        beat = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return beat if isinstance(beat, dict) else None
+
+
+def read_heartbeat(settings: Settings) -> dict | None:
+    """The last check-in, or None. A file of any other shape counts as none, so every reader may rely on "at"."""
+    beat = _beat_file(settings)
+    try:
+        when = datetime.fromisoformat(beat["at"].rstrip("Z"))
+    except (TypeError, KeyError, ValueError, AttributeError):
+        return None
+    return beat if when.tzinfo is None else None

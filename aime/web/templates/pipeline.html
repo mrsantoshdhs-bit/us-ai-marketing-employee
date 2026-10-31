@@ -10,7 +10,7 @@
   <div class="col"><strong>{{ stage|capitalize }}</strong> <span class="muted">({{ board[stage]|length }})</span>
     {% for o in board[stage] %}
     <div class="item">
-      <div><a href="/opportunities/{{ o.id }}">{{ o.name }}</a>{% if o.lead_id %} <a class="small muted" href="/leads/{{ o.lead_id }}">lead</a>{% endif %}</div>
+      <div>{% if o.lead_id in simulated %}<span class="pill bad">SIMULATED</span> {% endif %}<a href="/opportunities/{{ o.id }}">{{ o.name }}</a>{% if o.lead_id %} <a class="small muted" href="/leads/{{ o.lead_id }}">lead</a>{% endif %}</div>
       <div class="small muted">{{ o.service|service }}{% if o.est_value %} · ${{ '{:,.0f}'.format(o.est_value) }}{% endif %} · {{ o.probability }}%</div>
       {% if o.owner %}<div class="small">Sales Manager: {{ o.owner }}</div>{% endif %}
       {% if o.lost_reason %}<div class="small">Lost: {{ o.lost_reason }}</div>{% endif %}

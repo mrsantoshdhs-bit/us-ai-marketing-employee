@@ -184,7 +184,7 @@ def erase_person(session: Session, email: str, actor: str) -> dict[str, int]:
     details, the inquiries and emails they sent us, our emails to them and the activity lines naming them are erased.
     The address stays only on the suppression list, so nothing is ever sent to it again. Company records stay."""
     from aime.automation import audit
-    from aime.models import InboundEmail, InboundInquiry
+    from aime.models import InboundEmail, InboundInquiry, SkippedMail
 
     email = (email or "").strip().lower()
     if "@" not in email:
@@ -209,6 +209,9 @@ def erase_person(session: Session, email: str, actor: str) -> dict[str, int]:
             counts["inquiries"] += 1
     for e in session.execute(select(InboundEmail).where(InboundEmail.from_email == email)).scalars():
         e.from_email, e.subject, e.body_text, e.new_text = ERASED, ERASED, ERASED, ERASED
+        counts["emails_received"] += 1
+    for skipped in session.execute(select(SkippedMail).where(SkippedMail.from_email == email)).scalars().all():
+        session.delete(skipped)  # the short record of mail read as unrelated: sender, subject and date, nothing else
         counts["emails_received"] += 1
     for a in session.execute(select(Activity).where(or_(Activity.subject.contains(email),
                                                         Activity.body.contains(email)))).scalars():

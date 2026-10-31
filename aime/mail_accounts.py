@@ -32,9 +32,9 @@ from sqlalchemy.orm import Session
 
 from aime import automation as am
 from aime.integrations.email_smtp import MAIL_TIMEOUT, tls_context
-from aime.models import MailAccount, OAuthToken
+from aime.models import Alert, MailAccount, OAuthToken
 from aime.redact import redact
-from aime.secure_store import protect, unprotect
+from aime.secure_store import SecretUnreadable, protect, unprotect
 from aime.timeutil import utcnow
 
 PRESETS = {
@@ -46,21 +46,67 @@ PRESETS = {
 }
 EMAIL = re.compile(r"^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
 HOST = re.compile(r"^[A-Za-z0-9.-]{3,255}$")
+UNREADABLE_ALERT = "mail:secret"
 
 
 def oauth_key(account_id: int) -> str:
     return f"mailbox:{account_id}"
 
 
+def _stored_password(a: MailAccount) -> str | None:
+    """The app password, or None when it cannot be read here (restored on another PC, Windows password reset)."""
+    try:
+        return unprotect(a.secret)
+    except (OSError, ValueError, RuntimeError):  # on another PC, or damaged
+        return None
+
+
+def secret_problem(a: MailAccount) -> str | None:
+    """Plain words when this mailbox's stored password cannot be read. Never says anything about the password itself."""
+    if a.auth == "oauth" or not a.secret or _stored_password(a) is not None:
+        return None
+    return (f"The password of mailbox {a.email} cannot be read on this PC (it was stored on another PC or under another "
+            "Windows password): enter it again on the Mailboxes page")
+
+
+def unreadable_mailboxes(session: Session) -> list[MailAccount]:
+    return [a for a in session.execute(select(MailAccount).where(MailAccount.active.is_(True)).order_by(MailAccount.id)).scalars()
+            if secret_problem(a)]
+
+
+def alert_unreadable(session: Session, settings) -> None:
+    """One alert, updated rather than repeated, closed once the password has been entered again."""
+    from aime.monitoring import alert_once, resolve_alerts
+
+    boxes = unreadable_mailboxes(session)
+    if boxes:
+        alert_once(session, "error", "mailbox", " ".join(secret_problem(a) for a in boxes)[:500], settings, key=UNREADABLE_ALERT)
+    elif session.execute(select(Alert.id).where(Alert.key == UNREADABLE_ALERT, Alert.resolved_at.is_(None))).first():
+        resolve_alerts(session, (UNREADABLE_ALERT,), set())
+
+
+def imap_factory_for(a: MailAccount, factory):
+    """What the inbox job connects with: no sign-in attempt without the password (a mailbox can lock after refused
+    sign-ins), and the mailbox fails its part of the run in plain words, so the others are still read."""
+    why = secret_problem(a)
+    if not why:
+        return factory
+
+    def refuse(*_args, **_kwargs):
+        raise SecretUnreadable(why)
+    return refuse
+
+
 def public(a: MailAccount) -> dict:
     """What the panel and the API may show: everything except secrets (only whether one is stored)."""
+    why = secret_problem(a)
     return {"id": a.id, "label": a.label, "provider": a.provider, "email": a.email, "auth": a.auth,
             "username": a.username, "imap_host": a.imap_host, "imap_port": a.imap_port, "imap_folder": a.imap_folder,
             "smtp_host": a.smtp_host, "smtp_port": a.smtp_port, "active": a.active, "read_replies": a.read_replies,
             "is_primary": a.is_primary, "has_secret": bool(a.secret), "oauth_client_id": a.oauth_client_id,
             "has_oauth_secret": bool(a.oauth_client_secret), "oauth_tenant": a.oauth_tenant,
-            "last_test_at": a.last_test_at.isoformat() if a.last_test_at else None, "last_test_ok": a.last_test_ok,
-            "last_test_detail": a.last_test_detail}
+            "last_test_at": a.last_test_at.isoformat() if a.last_test_at else (utcnow().isoformat() if why else None),
+            "last_test_ok": False if why else a.last_test_ok, "last_test_detail": why or a.last_test_detail}
 
 
 def _clean(data: dict, existing: MailAccount | None) -> dict:
@@ -182,7 +228,15 @@ def sending_status(session: Session, settings) -> tuple[bool, str]:
     is one, else .env. The pages and `aime status` show this, so a panel mailbox is never reported as missing."""
     from aime.integrations.email_smtp import EmailSender
 
+    from aime.send_journal import hold, held_message
+
+    held = hold(settings.data_dir)
+    if held:  # after a restore or a damaged database: every other answer would be wrong for now
+        return False, held_message(held)
     a = primary(session)
+    why = secret_problem(a) if a is not None else None
+    if why and settings.outbound_email_enabled:
+        return False, why
     ready, reason = EmailSender(sending_settings(session, settings)).status()
     if a is not None:
         return ready, f"{reason}; sends from {a.email} (Mailboxes panel)" if ready else reason
@@ -205,7 +259,8 @@ def settings_for(settings, a: MailAccount):
     """The app's settings with this mailbox's server, user and sign-in in place of the .env mail settings. Every
     switch (OUTBOUND_EMAIL_ENABLED, REQUIRE_HUMAN_APPROVAL, ...) stays as it is."""
     oauth = a.auth == "oauth"
-    password = "" if oauth or not a.secret else unprotect(a.secret)
+    # Unreadable: as if none were stored. The sender then reports that it is not ready and signs in to nothing.
+    password = "" if oauth or not a.secret else _stored_password(a) or ""
     return dataclasses.replace(
         settings, smtp_host=a.smtp_host, smtp_port=a.smtp_port, smtp_username=a.username, smtp_password=password,
         smtp_from=a.email, smtp_use_tls=True, imap_host=a.imap_host, imap_port=a.imap_port, imap_username=a.username,

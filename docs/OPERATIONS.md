@@ -5,16 +5,35 @@ All commands run from the project folder with the virtual environment's Python:
 
 ## Daily routine (5 minutes)
 
-1. Open the dashboard (`scripts\start_dashboard.ps1` → http://127.0.0.1:8765) and sign in.
-   **Today** is the home page: a health strip (scheduler, jobs, local AI model, images, LinkedIn,
-   publishing, email, backups), everything waiting for you (posts with their quality-check result,
-   reply drafts, outcomes that need checking), open alerts, the pipeline funnel and companies to review.
-2. **Content** → approve or edit posts waiting for approval. Nothing is published without approval
-   *and* an authorized LinkedIn connection with `PUBLISHING_ENABLED=true`.
-3. **Follow-ups** → approve reply drafts to people who contacted you; work the "Review …" tasks for
-   qualified research leads (never contacted automatically).
-4. **Today** → acknowledge alerts; anything red needs attention. Job runs and agent performance
-   are on **System**.
+1. Open the dashboard (`scripts\start_dashboard.ps1` → http://127.0.0.1:8765) and sign in. **Dashboard** is the home
+   page: open alerts first (acknowledge them there or on **System health**), then the last 7 or 30 days: the big number
+   of each card is that period, the small one the total.
+2. **Manager Today**: **Needs you** lists what only a person can decide, the most urgent first (an interested prospect
+   waiting for an answer comes before anything else), each with its reason. **Automation health** says what is really
+   running, and **Failures and alerts** adds what failed since you last signed in.
+3. **Approval Queue**: read, then approve or reject the emails and LinkedIn posts waiting. Nothing goes out without a
+   person: B2B outreach, follow-ups and answers to replies all wait here (and on **Follow-ups**, which also shows how long
+   each draft has waited). Posts also need `PUBLISHING_ENABLED=true` and a LinkedIn connection.
+4. **Conversations**: read the replies marked for review.
+5. **Follow-ups**: work the "Review …" tasks: qualified leads no email can go to yet.
+
+A salesperson starts on **My work**: their leads and what happens next with each, deals, tasks, meetings, one "Do this
+next" line, and anything handed over to them. **Mine** is what they own, **Team** what their team shares.
+
+**First sign-in of a new person.** On **Users & teams** create the account (it gives a one-time link to choose a
+password), or on this PC: `python -m aime user create --username <name>` for a new account and
+`python -m aime user set-password --username <name>` for an existing one (for example a built-in `sales1`). They then
+sign in at the dashboard's address.
+
+## PC facts
+
+- **The send window needs this PC awake in the evening, India time.** Emails go out 08:00 to 18:00 New York time on
+  weekdays: 18:30 to 04:30 IST in US winter (17:30 to 03:30 in US summer). If the PC sleeps through it, approved emails
+  simply wait; Manager Today says so. Jobs that were due run at the next check-in.
+- **Mail in the Junk folder is not read.** Only the inbox is. Check Junk now and then, and move a prospect's reply out of
+  it so that the next mailbox check reads it.
+- **Keep the backup passphrase somewhere other than this PC.** The off-machine backup cannot be opened without it, and
+  this PC is what the backup protects you from losing.
 
 ## Health checks
 
@@ -62,10 +81,13 @@ alert). If no slot is free it is never published late: it returns to "awaiting a
 ## Backups and restore
 
 - `db_maintenance` (daily 06:15) writes an online backup to `data/backups/`, **verifies it** (integrity
-  and table counts) and keeps 14. Pre-deploy and manual backups are never pruned.
+  and table counts) and keeps 14. Once a week it also restores the newest copy into a temporary folder and checks it.
+- Manual, pre-deploy and pre-migration copies are kept for at least 30 days. After that the newest 20
+  (`BACKUP_KEEP_MANUAL`; 0 keeps every one) and the newest 5 pre-deploy copies stay, and the last copy that still
+  verifies is never removed.
 - **Off-machine copy (optional):** set `BACKUP_OFFSITE_DIR` (e.g. `C:\Users\<you>\OneDrive\AIME-Backups`)
-  and `BACKUP_PASSPHRASE` (12+ characters) in `.env`. Each day an encrypted bundle (database, publish
-  journal, post images, config, SHA-256 manifest; never `.env`) is written there and test-decrypted;
+  and `BACKUP_PASSPHRASE` (12+ characters) in `.env`. Each day an encrypted bundle (database, publish and sent
+  journals, post images, config, SHA-256 manifest; never `.env`) is written there and test-decrypted;
   the last 30 copies are kept. **Store the passphrase in your password manager: without it the copies
   cannot be read.**
 - Manual: `backup --label before-change` (add `--offsite` for an encrypted copy too);
@@ -73,13 +95,55 @@ alert). If no slot is free it is never published late: it returns to "awaiting a
 - An encrypted copy only counts as off-machine when the folder really leaves the PC. `doctor` checks that a
   signed-in OneDrive account syncs `BACKUP_OFFSITE_DIR` ("Off-machine folder leaves this PC"); on 27 Oct
   OneDrive was installed but not signed in, so the folder was local only.
-- `doctor` warns while the off-machine copy is not configured (folder or passphrase missing).
+- `doctor` warns while the off-machine copy is not configured (folder or passphrase missing), and when under 2 GB
+  of disk is free. `doctor` also opens the newest verified backup each time, and names the next good copy if it has gone bad.
 - **Restore drill:** `restore-drill` (latest local backup) or `restore-drill --source <file.aimebak>`
   restores into a temporary folder and checks it. It never writes to `data/`.
-- Restore: `maintenance on`, copy the chosen backup over `data/aime.db` (delete `aime.db-wal` and
-  `aime.db-shm` first), run `doctor`, then `maintenance off`. For an encrypted copy, first run
-  `restore-drill --source <file.aimebak> --extract-to C:\restore-check` (a new folder outside `data/`),
-  then restore the checked `aime.db`, `publish_journal.jsonl` and `assets/` from that folder.
+
+### Restoring a backup
+
+**Choose the backup.** `doctor` names the newest copy that passes its check today. Take the newest one from before the
+trouble began; `backup-verify <file>` checks any other. Every restore loses what happened after that copy was made.
+
+**Run:**
+
+1. Stop the dashboard: end the `AIMarketingEmployee-Dashboard` task in Task Scheduler, or close its window. With the
+   dashboard running, its `-wal` file cannot be deleted on Windows and would damage the restored database.
+2. `python -m aime restore --from <file> --confirm`. It refuses while the dashboard or a run is using the file. It
+   starts a maintenance window, keeps a copy of the present database in the backups folder (`aime-pre-restore-*`, or
+   `damaged-*` if it is damaged), removes the `-wal` and `-shm` files, puts the backup in place, checks it, applies newer
+   schema, and holds sending. It takes a `.db`, a `.zip` bundle or an encrypted `.aimebak`.
+3. Read what it prints, then your **Sent folder**, then Follow-ups.
+4. `python -m aime confirm-sending`, once you have looked.
+5. `python -m aime maintenance off`. The tasks start the work and the dashboard again.
+
+**What comes back to life, and how each is handled:**
+
+- **Approved emails.** An email sent after the backup is "approved" again in the restored database, and would go out
+  twice. Each email is recorded in `data/sent_journal.jsonl` before it goes to the mail server; that file is outside
+  `aime.db` and a restore leaves it alone. An email it names is not sent again: it goes to Follow-ups, where a person
+  checks the Sent folder, then marks it sent or requeues it. Sending is held for everything until `confirm-sending`, also
+  when a database was copied back by hand: the record knowing more than the database is how it is found.
+- **Do-not-contact entries and edits** made after the backup are gone. Replies, opt-outs and bounces are read again from the
+  mailbox, because the reading position went back too; anything entered by hand must be entered again.
+- **Mailbox passwords.** They are encrypted for this Windows account on this PC (DPAPI). After a Windows password reset or on
+  another PC they cannot be read: pages say so, one alert says so, nothing signs in, and the rest of the work goes on.
+  Re-enter the password on Administration > Mailboxes. LinkedIn and other connections are connected again the same way.
+
+**A new PC** needs: the code (`git clone`) and its `.venv`, your `.env` from the password manager, an encrypted copy
+and `BACKUP_PASSPHRASE`, and the tasks (`scheduler install`, `install-watchdog`, `install-dashboard`). An encrypted copy
+holds the sent record of its own day only, so what went out after it is unknown: check the Sent folder before confirming.
+A backup more than 14 days old, with no check-in on this PC yet, also stops the first check-in for the clock:
+`python -m aime confirm-clock`, once you have seen the clock is right.
+
+**Damaged or missing database.** `maintenance`, `doctor`, `status`, `restore-drill`, `backup-verify` and `restore` work
+without the database, and `doctor` gives the next step. With a missing `aime.db` on production while backups exist,
+nothing starts and no empty database is created (to start empty on purpose, move the backups folder away). A database that
+fails its integrity check holds sending the same way as a restore; after `confirm-sending` only a different result holds it again.
+
+**A wrong clock.** A check-in stops before any work, with one alert naming the clock, when the clock is more than 14 days past the
+last check-in or earlier than the newest record: on a wrong date, work changes records for good. Correct the clock and it
+resumes by itself. If the clock is right (a holiday longer than two weeks), run `python -m aime confirm-clock`.
 
 ## Scheduler recovery
 
@@ -176,10 +240,10 @@ Nothing is sent while `OUTBOUND_EMAIL_ENABLED=false`.
 - **Lead outreach stage** (lead page): drafted, approved, contacted, then replied / stopped. "They replied"
   stops the sequence.
 
-## Replies, unsubscribes and bounces (sales mailbox)
+## Conversations: replies, unsubscribes and bounces (sales mailbox)
 
 Setup: `docs/SALES_SETUP.md`. The `inbox` job (every 15 minutes) reads the mailbox read-only and matches
-each email to a lead by thread, then by address. **Replies** page: category, confidence, the new text,
+each email to a lead by thread, then by address. **Conversations** page: category, confidence, the new text,
 and what was done.
 
 - Any human reply stops the automated sequence. Interested: the lead becomes *interested*, an
@@ -195,7 +259,7 @@ and what was done.
   opinion, shown in the reply's reasons ("AI … suggests: interested, asks for a meeting (please check)").
   It never acts by itself: such a reply stays in review, with a "Possible interest" alert, until you
   reclassify it. At most five replies per run get a second opinion (a few seconds each).
-- Reclassify on the Replies page applies the right actions and is logged.
+- Reclassify on the Conversations page applies the right actions and is logged.
 - Limits on approved outreach: 20 a day, one per company domain a day, five per run (`[outreach]`).
 - Test mode (`OUTBOUND_TEST_RECIPIENTS`): every email goes only to your test addresses, marked
   `[TEST for <intended recipient>]`. `aime simulate-reply --lead <id> --text "..."` processes a reply

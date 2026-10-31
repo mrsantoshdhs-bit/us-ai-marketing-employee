@@ -7,10 +7,12 @@ Intent is never inferred: it is scored only from recorded evidence
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from aime.knowledge.geo import STATES
+from aime.knowledge.geo import STATES, parse_location
+from aime.matching import classify_industry, match_services
 from aime.timeutil import utcnow
 
 FIRST_PARTY_SIGNALS = {"inbound", "manual"}
@@ -23,6 +25,7 @@ class SignalFact:
     strength: float
     observed_at: datetime
     has_source_url: bool
+    hires_builders: bool = False  # a hiring post for people who build software, whatever else it says
 
 
 @dataclass
@@ -42,6 +45,8 @@ class LeadFacts:
     explicit_services: list[str] = field(default_factory=list)
     stated_timeline: bool = False
     stated_budget: bool = False
+    running_business: bool = False  # its own words show customers, a product or funding
+    us_office_only: bool = False  # places abroad come first in its own list: a US office, most likely not its home
     website_status: str | None = None  # see aime.website_check; None = not checked yet
     seeks_external_help: bool = False  # their own post asks for contractors / partners
     contact_source: str | None = None  # inbound | manual | import | website | sec_filing
@@ -93,8 +98,54 @@ def grade_for(total: int, thresholds: dict) -> str:
     return "D"
 
 
+_BUILDERS_RE = re.compile(r"\b(?:engineers?|developers?|programmers?|swe)\b", re.I)
+_RUNNING_BUSINESS_RE = re.compile(r"\b(?:customers?|clients?|users|patients?|partners|hq|headquartered|revenue|profitable|paying|funded|funding|raised|series [a-f]|"
+                                  r"seed|backed by|investors?|venture|y ?combinator|yc|arr|mrr|live product|in production|piloting|"
+                                  r"(?:builds?|creates?|makes?|sells?) software|our (?:product|platform))\b", re.I)
+
+
+def signal_fact(signal) -> SignalFact:
+    """A stored signal as scoring sees it. A hiring post is read again by today's rules, so what the matching rules no longer
+    accept stops counting at the next score, with nothing rewritten; what a person stated stays as recorded."""
+    services, strength = list(signal.matched_services or []), signal.strength
+    if signal.signal_type == "hiring" and signal.text:
+        matches = match_services(signal.text)
+        services, strength = [m.service_id for m in matches], max((m.strength for m in matches), default=0.0)
+    builds = signal.signal_type == "hiring" and bool(_BUILDERS_RE.search(signal.text or ""))
+    return SignalFact(signal.signal_type, services, strength, signal.observed_at, bool(signal.source_url), builds)
+
+
+# The label every hiring post once got when it named no industry.
+OLD_DEFAULT_INDUSTRY = "tech_startups"
+
+
+def read_company(company, signals) -> dict:
+    """The company's facts as scoring sees them. A company found in a hiring post is checked against the post's own words:
+    older records carry a default industry and locations read by older rules, and only evidence earns points. A company
+    whose industry a person or a registry gave is taken as it is, and no stored record is changed."""
+    facts = {"industry": company.industry, "state": company.state, "country": company.country}
+    if company.source != "hn_hiring":
+        return facts
+    posts = " ".join(s.text or "" for s in signals if s.signal_type == "hiring")
+    if company.industry == OLD_DEFAULT_INDUSTRY:
+        facts["industry"] = classify_industry(posts)
+    facts["running_business"] = bool(_RUNNING_BUSINESS_RE.search(posts))
+    place = parse_location(company.location_text)
+    if place.is_us is False:
+        facts["country"] = "outside"
+    facts["us_office_only"] = place.foreign_first
+    return facts
+
+
 # Hiring evidence counts in full for 60 days, half until 120 days, then not at all.
 FRESH_DAYS, STALE_DAYS = 60, 120
+# Weights measured on the real leads (Phase 2): the default industry's +15 and the programming-language matches are gone, and
+# these evidence-based points keep companies that really do run a business and build software within reach of grade B.
+BUILDERS_POINTS = 7
+BUILDERS_INTENT = 6
+RUNNING_BUSINESS_POINTS = 12
+US_STATED_POINTS = 5
+PRESENCE_ONLY_POINTS = 2
 
 
 def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
@@ -108,15 +159,24 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
         pts = 8 if f.industry == "smb" else 15
         fit += pts
         reasons.append(f"+{pts} fit: target industry ({f.industry})")
-    if f.country == "US" and f.state in STATES:
+    elif f.running_business:
+        fit += RUNNING_BUSINESS_POINTS
+        reasons.append(f"+{RUNNING_BUSINESS_POINTS} fit: its own words show a running business (customers, a product or funding), "
+                       "industry not stated")
+    elif not f.industry:
+        reasons.append("+0 fit: nothing on record shows its industry")
+    if f.country == "US" and f.us_office_only:
+        fit += PRESENCE_ONLY_POINTS
+        reasons.append(f"+{PRESENCE_ONLY_POINTS} fit: a US office, listed after places abroad")
+    elif f.country == "US" and f.state in STATES:
         fit += 10
         reasons.append(f"+10 fit: US location verified ({f.state})")
     elif f.country == "US" and f.state == "DC":
         fit += 10
         reasons.append("+10 fit: US location verified (DC)")
     elif f.country == "US":
-        fit += 4
-        reasons.append("+4 fit: US presence stated, state unknown")
+        fit += US_STATED_POINTS
+        reasons.append(f"+{US_STATED_POINTS} fit: US presence stated, state unknown")
     if f.has_website:
         if f.website_status in ("verified", "redirected"):
             fit += 5
@@ -155,8 +215,14 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
             pts = round(3 + 4 * strength)
             reasons.append(f"+{pts} need: public evidence for {svc} (strength {strength:.2f})")
         need += pts
-    recent = [s for s in f.signals if s.matched_services and now - s.observed_at <= timedelta(days=45)]
-    if recent and ranked:
+    # Hiring people to build software is work an outside team could share, but it names no need: it takes a place among the
+    # needs and never decides what we would offer.
+    builders = [s for s in f.signals if s.hires_builders and now - s.observed_at <= timedelta(days=STALE_DAYS)]
+    if builders and len(ranked) < 3:
+        need += BUILDERS_POINTS
+        reasons.append(f"+{BUILDERS_POINTS} need: it is hiring people to build software (work an outside team could share)")
+    recent = [s for s in f.signals if (s.matched_services or s.hires_builders) and now - s.observed_at <= timedelta(days=45)]
+    if recent and (ranked or builders):
         need += 5
         reasons.append("+5 need: evidence observed in the last 45 days")
     need = min(35, need)
@@ -182,6 +248,10 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
         if f.seeks_external_help and intent:
             intent += 3
             reasons.append("+3 intent: their post asks for contractors, freelancers, or partners")
+    elif any(s.hires_builders and now - s.observed_at <= timedelta(days=FRESH_DAYS) for s in f.signals):
+        intent = BUILDERS_INTENT
+        reasons.append(f"+{BUILDERS_INTENT} intent: a recent hiring post for people who build software, naming no need "
+                       "(signal, not buying intent)")
     else:
         reasons.append("+0 intent: no recorded buying signal")
 
@@ -216,7 +286,7 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
     if f.country != "US":
         disqualify = "Outside US target market"
     elif f.is_competitor:
-        disqualify = "Company appears to sell similar services (competitor)"
+        disqualify = "Company appears to sell similar services or AI products itself (possible competitor)"
     elif f.suppressed or f.contact_consent == "opted_out":
         disqualify = "Contact or domain is on the suppression list"
     if disqualify:

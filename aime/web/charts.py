@@ -17,16 +17,19 @@ from aime.timeutil import as_aware_utc, utcnow
 EMPTY = Markup('<div class="chart-empty">{}</div>')
 
 
-def weekly_buckets(dates: list[datetime | date | None], weeks: int = 8, today: date | None = None) -> list[tuple[str, int]]:
-    """Counts per week (Monday to Sunday) over the last `weeks` weeks, oldest first, labelled by the Monday."""
-    today = today or utcnow().date()
+def weekly_buckets(dates: list[datetime | date | None], weeks: int = 8, today: date | None = None,
+                   tz: tzinfo | None = None) -> list[tuple[str, int]]:
+    """Counts per week (Monday to Sunday) over the last `weeks` weeks, oldest first, labelled by the Monday. With `tz`
+    the weeks are the owner's (the database stores UTC): Monday starts at their midnight, as on Manager Today."""
+    today = today or (as_aware_utc(utcnow()).astimezone(tz).date() if tz else utcnow().date())
     start = today - timedelta(days=today.weekday()) - timedelta(weeks=weeks - 1)
     counts = [0] * weeks
     for d in dates:
         if d is None:
             continue
-        day = d.date() if isinstance(d, datetime) else d
-        i = (day - start).days // 7
+        if isinstance(d, datetime):
+            d = as_aware_utc(d).astimezone(tz).date() if tz else d.date()
+        i = (d - start).days // 7
         if 0 <= i < weeks:
             counts[i] += 1
     return [((start + timedelta(weeks=i)).strftime("%b %d"), counts[i]) for i in range(weeks)]

@@ -557,13 +557,13 @@ def test_ok_image_upload_failure_is_clean_retry_not_uncertain(make_ctx):
     assert out.failed and post(ctx, cid).status == "approved" and fake.post_calls == 0
 
 
-def test_ok_overdue_post_moves_or_goes_back_to_a_person(make_ctx):
+def test_ok_overdue_post_moves_and_keeps_its_approval(make_ctx):
     fake = FakeLI()
     ctx = li_ctx(make_ctx, fake)
     late = add_post(ctx, slot_delta=timedelta(hours=-30))
     out = publish(ctx)
     assert out.rescheduled == [late] and fake.post_calls == 0 and post(ctx, late).scheduled_for > utcnow()
-    with ctx.db.session() as s:  # every slot in the horizon taken: back to a person, approval withdrawn
+    with ctx.db.session() as s:  # every slot in the horizon held by drafts: an approved post goes first, still approved
         from aime.calendar_slots import free_slots
         for sl in free_slots(s, ctx.settings):
             s.add(ContentItem(service=SERVICE, industry=INDUSTRY, title=f"f{sl}", body="b", hashtags=[], status="draft",
@@ -571,7 +571,7 @@ def test_ok_overdue_post_moves_or_goes_back_to_a_person(make_ctx):
     again = add_post(ctx, slot_delta=timedelta(hours=-30))
     publish(ctx)
     item = post(ctx, again)
-    assert item.status == "awaiting_approval" and item.approved_at is None and fake.post_calls == 0
+    assert item.status == "approved" and item.approved_at is not None and item.scheduled_for > utcnow() and fake.post_calls == 0
 
 
 def test_ok_paused_automation_holds_publishing(make_ctx):
@@ -1016,15 +1016,18 @@ def _cards(ctx, days=7):
 
 def test_ok_home_cards_match_records(scenario):
     cards, view = _cards(scenario)
-    assert {k: c["value"] for k, c in cards.items()} == {"Companies discovered": 7, "Verified contacts": 3, "Emails sent": 3,
+    assert {k: c["value"] for k, c in cards.items()} == {"Companies discovered": 7, "Usable contacts": 3, "Emails sent": 3,
                                                          "Meetings booked": 2}
     assert cards["Companies discovered"]["period"] == 4 and cards["Companies discovered"]["change"] == "+2"
-    assert cards["Verified contacts"]["period"] == 3 and cards["Emails sent"]["period"] == 3
+    assert cards["Usable contacts"]["period"] == 3 and cards["Emails sent"]["period"] == 3
     assert view["leads_badge"]["count"] == 6
     html = client_for(scenario).get("/").text
-    assert re.findall(r'class="kpi-value">([\d,]+)<', html) == ["7", "3", "3", "2"]
+    # the big number is the chosen period (T03); the total stays beside it
+    assert re.findall(r'class="kpi-value">([\d,]+)<', html) == ["4", "3", "3", "2"]
+    assert re.findall(r'class="kpi-total">Last 7 days · ([\d,]+) in total<', html) == ["7", "3", "3", "2"]
     stages = {st["label"]: st["value"] for st in view["pipeline_stages"]}
-    assert stages == {"New leads": 6, "Contacted": 2, "Interested": 1, "Meeting booked": 2, "Closed won": 1}
+    # the disqualified lead is not among the new leads (T04)
+    assert stages == {"Open leads": 5, "Contacted": 2, "Interested": 1, "Meeting booked": 2, "Closed won": 1}
 
 
 def test_ok_funnel_tiles_and_api_stats_match_records(scenario):
@@ -1045,7 +1048,7 @@ def test_ok_funnel_tiles_and_api_stats_match_records(scenario):
 def test_ok_system_page_kpis_match_records(scenario):
     text = text_of(client_for(scenario).get("/system").text)
     for label, n in (("Companies", 7), ("Open leads", 4), ("Qualified", 2), ("Grade A", 2), ("Open opportunities", 2),
-                     ("Replies to approve", 2), ("Posts to approve", 2), ("Posts published", 2)):
+                     ("Emails to approve", 2), ("Posts to approve", 2), ("Posts published", 2)):
         assert f"{n} {label}" in text or f"{label} {n}" in text, label
 
 
@@ -1063,7 +1066,8 @@ def test_ok_performance_page_matches_records(scenario):
     alice = next(x for x in r.rows if x.username == "alice")
     # leads 0 and 1 belong to alice: 3 sent, 2 interested, 2 negative, 2 non-simulated... meetings created in the period
     assert (alice.leads_owned, alice.emails_sent, alice.positive_replies, alice.negative_replies) == (2, 3, 2, 2)
-    assert (alice.meetings, alice.won, alice.lost, alice.won_value, alice.won_value_ai_sourced) == (3, 1, 1, 5000.0, 5000.0)
+    # a cancelled meeting is not counted, as on the home page and the funnel (T05)
+    assert (alice.meetings, alice.won, alice.lost, alice.won_value, alice.won_value_ai_sourced) == (2, 1, 1, 5000.0, 5000.0)
     assert alice.conversion == 0.5 and r.total.won_value == 5000.0 and r.ai["won_value_human_sourced"] == 0
     html = client_for(scenario).get("/performance").text
     assert "50%" in html and "$5,000" in html
@@ -1155,7 +1159,7 @@ def test_ok_empty_database_has_no_zero_division(ctx):
     res = _report(ctx)
     assert res.ok, res.error
     md = Path(res.output.path_md).read_text(encoding="utf-8")
-    assert "Reply rate (replies / outreach sent) | — | — |" in md
+    assert "Reply rate (leads who replied / leads contacted) | — | — |" in md
     with ctx.db.session() as s:
         assert build(s, utcnow() - timedelta(days=1), utcnow()).total.conversion is None
 
@@ -1249,8 +1253,8 @@ def test_ok_daily_report_figures_match_records_and_rerun_keeps_one_row(scenario)
     assert (k["meetings_booked_total"], k["meetings_held_total"], k["simulated_replies_total"], k["simulated_meetings_total"]) == (2, 1, 1, 1)
     assert (k["content_published_total"], k["content_awaiting_approval"]) == (2, 2)
     md = Path(res.output.path_md).read_text(encoding="utf-8")
-    assert "| Reply rate (replies / outreach sent) | — | 100% (3/3) |" in md
-    assert "| Interest rate (interested / replies) | — | 67% (2/3) |" in md
+    assert "| Reply rate (leads who replied / leads contacted) | — | 100% (2/2) |" in md
+    assert "| Interest rate (interested leads / leads who replied) | — | 100% (2/2) |" in md
     assert "SIMULATED test activity" in md
     assert _report(scenario, import_metrics=False).ok
     client = client_for(scenario)
@@ -1648,7 +1652,7 @@ def test_ok_clock_moved_forward_gives_one_catch_up(ctx, monkeypatch, clock):
     fast_jobs(monkeypatch)
     clock(datetime(2026, 10, 27, 14, 0))
     tick(ctx)
-    clock.forward(timedelta(days=30))
+    clock.forward(timedelta(days=13))  # longer than aime.clock_check.GAP_LIMIT, a person confirms first
     assert sorted(r["job"] for r in tick(ctx)["ran"]) == sorted(JOBS)  # a weekly slot passed as well
     assert tick(ctx)["ran"] == []
 
@@ -1661,6 +1665,13 @@ def test_defect_clock_set_back_stops_all_jobs_silently(ctx, monkeypatch, clock):
     clock(datetime(2026, 12, 1, 12, 0))
     tick(ctx)
     clock(datetime(2026, 10, 27, 14, 0))
+    # Phase 2 (R12): a clock earlier than the newest record stops the work until a person says the clock is right, and says
+    # so. It must not be silent, and it must not last until the clock catches up.
+    assert tick(ctx)["ran"] == []
+    assert [a for a in alerts(ctx, "%clock%") if not a.acknowledged], "stopped with no alert"
+    from aime.cli import cmd_confirm_clock
+
+    cmd_confirm_clock(None, ctx)
     ran = [r["job"] for r in tick(ctx)["ran"]]
     assert "monitor" in ran and "publish" in ran, f"five weeks without any job and no alert; this tick ran only {ran}"
 

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DatabaseError
 
-from aime import maintenance
-from aime.backup import integrity_check, offsite_status, offsite_sync
+from aime import clock_check, maintenance, send_journal
+from aime.backup import free_space_problem, integrity_check, newest_good_backup, offsite_status, offsite_sync, verify_backup
 from aime.context import AppContext
 from aime.db import kv_get
 from aime.integrations.linkedin import configured_author_urn
@@ -26,16 +28,24 @@ def run_checks(ctx: AppContext) -> list[dict]:
     """Each check: {name, ok, detail, severity}. severity: error | warning."""
     checks: list[dict] = []
 
-    def add(name: str, ok: bool, detail: str, severity: str = "error") -> None:
-        checks.append({"name": name, "ok": bool(ok), "detail": detail, "severity": severity})
+    def add(name: str, ok: bool, detail: str, severity: str = "error", own_alert: bool = False) -> None:
+        checks.append({"name": name, "ok": bool(ok), "detail": detail, "severity": severity, "own_alert": own_alert})
 
     ic = integrity_check(ctx.db)
-    add("SQLite integrity", ic["ok"], f"integrity={ic['integrity']}, foreign-key violations={ic['foreign_key_violations']}")
+    add("SQLite integrity", ic["ok"], f"integrity={ic['integrity']}, foreign-key violations={ic['foreign_key_violations']}"
+        + ("" if ic["integrity"] == "ok" else ". It could not be checked just now and is tried again" if ic.get("passing")
+           else f". {restore_advice(ctx.settings)}"), "warning" if ic.get("passing") else "error")
+    held = send_journal.hold(ctx.settings.data_dir)
+    add("Sending is not on hold", held is None, "no hold" if held is None else send_journal.held_message(held), own_alert=True)
     try:
+        _sent_record_check(ctx, add)
         _record_checks(ctx, add)
         _setup_checks(ctx, add)
     except DatabaseError as exc:  # a damaged file: say so, and still report what needs no database
-        add("Database readable", False, f"Records cannot be read, so their checks did not run: {redact(str(exc.orig))[:200]}")
+        add("Database readable", False, f"Records cannot be read, so their checks did not run: {redact(str(exc.orig))[:200]}. "
+            f"{restore_advice(ctx.settings)}")
+    low = free_space_problem(ctx.settings.data_dir)
+    add("Free disk space", low is None, low or "2 GB or more free", "warning")
 
     _, author_ok = configured_author_urn(ctx.settings)
     add("LinkedIn author setting valid", author_ok,
@@ -47,6 +57,9 @@ def run_checks(ctx: AppContext) -> list[dict]:
         else f"publish_policy.mode={mode!r} is not supported and is treated as shadow", "warning")
 
     hb = read_heartbeat(ctx.settings)
+    stopped = bool(hb) and hb.get("state") == clock_check.HOLD_STATE
+    add("Clock looks right", not stopped, "The last check-in stopped because the PC's clock looked wrong, so no work is being done. "
+        f"{clock_check.ADVICE}" if stopped else "no stop for the clock", own_alert=True)
     if hb is None:
         add("Scheduler heartbeat", False, "No tick recorded yet", "warning")
     else:
@@ -59,6 +72,43 @@ def run_checks(ctx: AppContext) -> list[dict]:
         add("Scheduler heartbeat fresh", age <= limit or paused,
             f"last tick {int(age.total_seconds() // 60)} min ago, state={state}", "warning")
     return checks
+
+
+def restore_advice(settings) -> str:
+    """The next step when the database cannot be used, naming a copy that passes its check today."""
+    good = newest_good_backup(settings.backups_dir)
+    if good is None:
+        return "No local backup passes its check: look for an encrypted copy in BACKUP_OFFSITE_DIR (docs/OPERATIONS.md)."
+    return f"Next step: `python -m aime restore --from \"{good}\"` (the newest backup that passes its check)."
+
+
+def checks_without_database(settings, problem: Exception) -> list[dict]:
+    """What doctor can say when the database cannot even be opened: that, why, and what to do next."""
+    missing = not Path(make_url(settings.database_url).database or "").exists()
+    busy = "locked" in str(problem).lower()
+    what = ("is missing" if missing else "is busy: another process has held it for too long; try again" if busy
+            else "is damaged and cannot be opened (not a database, or its integrity check cannot run)")
+    checks = [{"name": "SQLite integrity", "ok": False, "severity": "error", "own_alert": False,
+               "detail": f"The database {what}: {redact(str(getattr(problem, 'orig', None) or problem))[:200]}. {restore_advice(settings)}"}]
+    low = free_space_problem(settings.data_dir)
+    checks.append({"name": "Free disk space", "ok": low is None, "severity": "warning", "own_alert": False,
+                   "detail": low or "2 GB or more free"})
+    return checks
+
+
+def _sent_record_check(ctx: AppContext, add) -> None:
+    """A backup copied over by hand: found here before the next send run finds it."""
+    try:
+        with ctx.db.session() as s:
+            behind = send_journal.restore_evidence(s, send_journal.read(ctx.settings.data_dir))
+    except OSError as exc:
+        add("Database knows what was sent", False, f"The record of sent emails cannot be read just now ({type(exc).__name__}): "
+            "nothing is sent while that lasts. Check that no other program holds the file.", "warning")
+        return
+    add("Database knows what was sent", not behind, "it does" if not behind else
+        f"{len(behind)} email(s) went out that this database does not know, so it is older than the record of sent emails. "
+        f"They will not be sent again, and sending is held at the next run: read Follow-ups, then {send_journal.CONFIRM}.",
+        own_alert=True)
 
 
 def _record_checks(ctx: AppContext, add) -> None:
@@ -149,10 +199,15 @@ def _setup_checks(ctx: AppContext, add) -> None:
             "warning")
     else:
         hours = (utcnow() - datetime.fromisoformat(last["at"])).total_seconds() / 3600
-        present = (ctx.settings.backups_dir / last["file"]).exists()  # the record of a check is not the file itself
-        add("Recent verified backup", hours <= BACKUP_MAX_AGE_HOURS and present,
+        file = ctx.settings.backups_dir / last["file"]
+        present = file.exists()  # the record of a check is not the file itself
+        sound = present and verify_backup(file)["ok"]  # nor is a file checked yesterday still good today
+        better = None if sound else newest_good_backup(ctx.settings.backups_dir)
+        add("Recent verified backup", hours <= BACKUP_MAX_AGE_HOURS and sound,
             f"{last['file']}: {last['rows']} rows, verified {hours:.0f} h ago"
-            + ("" if present else "; that file is no longer in the backups folder"))
+            + ("" if present else "; that file is no longer in the backups folder")
+            + ("" if sound or not present else "; that file fails its check today")
+            + ("" if sound else (f"; the newest good copy is {better.name}" if better else "; no other copy passes its check")))
     off_ready, off_reason = offsite_status(ctx.settings)
     if not off_ready:
         add("Off-machine encrypted backup", False, f"Off-machine backup {off_reason}", "warning")
@@ -166,9 +221,12 @@ def _setup_checks(ctx: AppContext, add) -> None:
         add("Off-machine folder leaves this PC", leaves is True, why, "warning")
 
     st = ctx.settings
-    if st.outbound_email_enabled and st.section("outreach").get("b2b_enabled"):
-        from aime import mail_accounts
+    from aime import mail_accounts
 
+    with ctx.db.session() as s:
+        unreadable = [mail_accounts.secret_problem(a) for a in mail_accounts.unreadable_mailboxes(s)]
+    add("Mailbox passwords can be read", not unreadable, " ".join(unreadable) or "every enabled mailbox", own_alert=True)
+    if st.outbound_email_enabled and st.section("outreach").get("b2b_enabled"):
         with ctx.db.session() as s:  # the .env mailbox or a Mailboxes panel mailbox with Read replies on
             reading, where = mail_accounts.reading_status(s, st)
         add("Sales mailbox monitored", reading,
@@ -176,3 +234,7 @@ def _setup_checks(ctx: AppContext, add) -> None:
             "outreach can be sent but replies, unsubscribes and bounces are not read: on the Mailboxes page enable a "
             "mailbox and turn on Read replies (or set IMAP_HOST in .env)",
             "warning")
+        every = int(st.schedule.get("jobs", {}).get("inbox", {}).get("every_minutes") or 0)
+        add("Mailbox read before sending", every <= 15, f"the inbox job runs every {every} minutes" if every <= 15 else
+            f"the inbox job runs only every {every} minutes: approved emails wait for a read just before they go, so they "
+            "will often be held. Set it to 15 minutes or less", "warning")

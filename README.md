@@ -2,11 +2,11 @@
 
 A local, $0-per-month team of ten AI agents that researches US businesses from authorized public
 sources, identifies their decision-makers from the companies' own pages and SEC filings, scores opportunities on evidence, drafts LinkedIn content with a local LLM, manages a
-lightweight CRM, drafts compliant replies to inbound inquiries, and reports daily. It runs on a
+lightweight CRM, drafts B2B outreach and replies, reads the sales mailbox, and reports daily. It runs on a
 Windows Task Scheduler task and has a local dashboard.
 
 **Human in the loop by design.** Nothing is published or sent without your approval *and* an
-authorized integration. Research leads are never contacted automatically.
+authorized integration. Researched leads get a draft email, never an email: a person approves each one.
 
 ## Quick start
 
@@ -30,7 +30,9 @@ Windows Task Scheduler (every 15 min, per-user, restarts on failure)
        ├─ plan             06:45  Marketing Manager (50-state rotation, industry focus, campaign, briefs)
        ├─ research         07:00  Research agent → website verification → Qualification → Sales Workflow
        ├─ content          07:30  LinkedIn Content agent (topics, LLM drafts, images, calendar)
+       ├─ enrich           Company Research (own websites, SEC filings, decision-makers)
        ├─ inbound          30 min CRM intake → Qualification → Sales Workflow
+       ├─ inbox            15 min Reads the sales mailbox read-only, classifies replies, updates the CRM
        ├─ followups        60 min Sales Workflow (drafts, tasks, approved sends)
        ├─ publish          30 min Authorized Publishing (official LinkedIn API only)
        ├─ daily_report     20:00  Analytics & Reporting (Markdown + HTML)
@@ -59,7 +61,7 @@ FastAPI dashboard (127.0.0.1) ── SQLite (data/aime.db, WAL) ── Ollama ll
 | LinkedIn Content | Topic research, local-LLM drafts behind a quality gate, template fallback, hashtags, 1200×627 images, calendar | 3 attempts |
 | Authorized Publishing | Approved + due posts only, official API, durable claim → journal → DB (at-most-once), uncertain outcomes reconciled, never re-posted | 1 attempt per run; per-post: definite failures retried 3×, uncertain never |
 | Lead Qualification | 0–100 score: fit 35, need 35, intent 20 (evidence only), data 10, with reasons | 3 attempts |
-| Sales Workflow | Opportunities for inbound, approval-gated reply sequences, tasks for research leads, send window, at-most-once sending | 1 attempt (non-idempotent) |
+| Sales Workflow | Opportunities for inbound, approval-gated replies and B2B outreach sequences, review tasks for leads no email can go to, send window, at-most-once sending | 1 attempt (non-idempotent) |
 | CRM Management | Inbound intake + spam checks, website verification, suppression, merges without deletes, hygiene, lifecycle | 3 attempts |
 | Company Research | Reads companies' own websites (robots.txt honoured) and SEC insider filings; quoted research snapshot; decision-makers with evidence, never guessed | 1 attempt (per-company failures recorded) |
 | Inbox | Reads the sales mailbox read-only; classifies replies (interest, objections, unsubscribes, bounces); updates the CRM; drafts responses for approval | 2 attempts |
@@ -67,6 +69,13 @@ FastAPI dashboard (127.0.0.1) ── SQLite (data/aime.db, WAL) ── Ollama ll
 
 Every run is logged to `agent_runs` (dashboard → Agents) and `data/logs/agent_runs.jsonl`;
 job runs to `job_runs`; health metrics (success rate, avg/p95 latency, retries) are on the System page.
+
+## The dashboard
+
+**Dashboard** (home: alerts, this period's figures), **Manager Today** (what needs a person, most urgent first, and
+automation health), **My work** (a salesperson's own leads and next steps; Mine or Team), **CRM Pipeline**, **Companies**,
+**Contacts**, **Leads**, **Conversations** (replies), **Follow-ups** (emails and tasks), **Meetings**, **Approval Queue**,
+**Sales Analytics**, **Sales performance**, **System health**. `docs/OPERATIONS.md` has the daily routine.
 
 ## Lead sources (authorized, $0)
 
@@ -86,7 +95,8 @@ Dropped files are moved to `processed/` only after their rows are saved, are nev
 
 - No scraping, browser bots, cookie reuse, CAPTCHA bypass, connection requests, DMs, or fake engagement.
 - LinkedIn: OAuth with your consent; `PUBLISHING_ENABLED` master switch; per-post approval.
-- Email: only to people who contacted you or opted in; per-message approval; business-hours window;
+- Email: to people who contacted you, and B2B outreach to business addresses a company publishes itself; per-message
+  approval; business-hours window;
   unsubscribe line, `List-Unsubscribe` header, postal address (CAN-SPAM); suppression list honored.
 - No fabricated data: intent is scored only from evidence, opportunity values only from people,
   sample data uses reserved `.example` domains and is flagged.
@@ -103,7 +113,7 @@ Dropped files are moved to `processed/` only after their rows are saved, are nev
 | Company-page posting | Apply for Community Management API; set `LINKEDIN_AUTHOR_URN=urn:li:organization:<id>` | Free (approval required) |
 | SEC EDGAR research | `SEC_USER_AGENT="Your Org you@yourdomain.com"` | Free |
 | Census market sizing | Free key → `CENSUS_API_KEY` | Free |
-| Reply emails | `OUTBOUND_EMAIL_ENABLED=true`, SMTP settings, `COMPANY_POSTAL_ADDRESS` | Your existing mailbox |
+| Outreach and reply emails | `OUTBOUND_EMAIL_ENABLED=true`, SMTP settings, `COMPANY_POSTAL_ADDRESS` | Your existing mailbox |
 | LinkedIn analytics | Export post analytics CSV → `data/imports/linkedin_metrics/` | Free |
 
 ## Commands
@@ -120,6 +130,7 @@ python -m aime policy [evaluate]                     # shadow auto-publish decis
 python -m aime llm-check --service ai_agents --industry real_estate
 python -m aime inbound inquiries.json
 python -m aime suppress someone@domain.com
+python -m aime user create|list|set-password|set-role|disable|enable --username <name>
 python -m aime seed-demo --data-dir demo_data      # separate demo DB from fictional data
 ```
 

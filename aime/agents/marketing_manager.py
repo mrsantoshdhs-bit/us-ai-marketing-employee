@@ -16,7 +16,8 @@ from aime.knowledge.geo import STATE_PRIORITY, normalize_state
 from aime.knowledge.industries import INDUSTRIES
 from aime.knowledge.services import SERVICES
 from aime.metrics_import import latest_metric_ids
-from aime.models import Campaign, Company, ContentItem, ContentMetric, Lead, MarketingPlan, MarketSegment, ResearchTopic
+from aime.models import (Campaign, Company, ContentItem, ContentMetric, InboundEmail, Lead, MarketingPlan, MarketSegment,
+                         ResearchTopic)
 from aime.timeutil import local_tz, utcnow
 
 
@@ -99,13 +100,21 @@ class MarketingManagerAgent(BaseAgent[PlanInput, PlanOutput]):
         focus_industries = [industries[ind_cursor % len(industries)]]
         kv_set(session, "plan.industry_cursor", (ind_cursor + 1) % len(industries))
         rationale.append(f"Exploring {focus_industries[0]} (industry rotation).")
-        ranked_perf = sorted(((v[0], k) for k, v in perf.items() if v[1] >= 3), reverse=True)
-        for avg, ind in ranked_perf:
+        # What real prospects did comes before what the score thinks of them.
+        answered = dict(session.execute(
+            select(Company.industry, func.count(InboundEmail.lead_id.distinct()))
+            .join(Lead, Lead.company_id == Company.id).join(InboundEmail, InboundEmail.lead_id == Lead.id)
+            .where(InboundEmail.is_simulated.is_(False), InboundEmail.category.in_(("interested", "question")),
+                   InboundEmail.received_at >= utcnow() - timedelta(days=90))
+            .group_by(Company.industry)).all())
+        ranked_perf = sorted(((answered.get(k, 0), v[0], k) for k, v in perf.items() if v[1] >= 3 or answered.get(k)), reverse=True)
+        for replies, avg, ind in ranked_perf:
             if len(focus_industries) >= n_ind:
                 break
             if ind not in focus_industries:
                 focus_industries.append(ind)
-                rationale.append(f"Exploiting {ind}: highest average lead score in 30 days ({avg:.0f}).")
+                rationale.append(f"Exploiting {ind}: {replies} interested prospect(s) in 90 days." if replies
+                                 else f"Exploiting {ind}: highest average lead score in 30 days ({avg:.0f}).")
         k = 1
         while len(focus_industries) < n_ind:
             nxt = industries[(ind_cursor + k) % len(industries)]

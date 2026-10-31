@@ -12,6 +12,7 @@ from pathlib import Path
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 
 from aime.models import Base
 
@@ -85,8 +86,14 @@ def ensure_indexes(engine: Engine) -> list[str]:
 
 
 def migrate(engine: Engine, backup_dir: Path | None = None, has_data: bool = False) -> list[str]:
-    """Create missing tables, add missing columns and indexes. Returns the applied statements."""
-    Base.metadata.create_all(engine)
+    """Create missing tables, add missing columns and indexes. Returns the applied statements. After a deploy a tick and
+    the dashboard start together: what the other process has just added is no failure."""
+    try:
+        Base.metadata.create_all(engine)
+    except OperationalError as exc:
+        if "already exists" not in str(exc):
+            raise
+        Base.metadata.create_all(engine)  # the other process created a table between the check and this one's
     todo = pending_columns(engine)
     if not todo:
         return ensure_indexes(engine)
@@ -103,7 +110,12 @@ def migrate(engine: Engine, backup_dir: Path | None = None, has_data: bool = Fal
                 ddl += f" DEFAULT {default}"
             elif not col.nullable:
                 ddl += " DEFAULT ''"
-            conn.execute(text(ddl))
+            try:
+                conn.execute(text(ddl))
+            except OperationalError as exc:
+                if "duplicate column" not in str(exc):
+                    raise
+                continue
             applied.append(ddl)
         conn.execute(text(
             "INSERT INTO kv_store(key, value, updated_at) VALUES ('schema_version', :v, CURRENT_TIMESTAMP) "

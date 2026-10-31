@@ -34,6 +34,7 @@ ROLE_RULES: list[tuple[str, re.Pattern]] = [
     # Board members only: "Director of Customer Experience" is a department director, not the board.
     ("board", re.compile(r"^(independent |non-executive )?director$|\b(board member|board of directors|trustee)\b", re.I)),
 ]
+FORMER_RE = re.compile(r"\b(?:former|formerly|retired|previously|past|ex)\b[- ]", re.I)
 # A title naming another organisation ("Founder, Biddify", "CFO at Acme Corp") belongs to someone from elsewhere:
 # a customer quoted in a testimonial, an advisor, a guest. Department words after the separator are fine.
 ORG_SUFFIX_RE = re.compile(r"\b(inc|llc|ltd|corp|corporation|company|co|labs?|group|partners|bank|university|college|"
@@ -95,6 +96,10 @@ NAME_STOPWORDS = {
     "why", "who", "where", "when", "new", "real", "estate", "software", "technology", "data", "cloud", "ai",
     "products", "product", "platform", "pricing", "features", "overview", "mission", "vision", "values", "story",
     "history", "culture", "community", "work", "works", "portfolio", "projects", "insights", "faq",
+    # jobs, not surnames ("Founding Engineer")
+    "founding", "engineer", "engineers", "developer", "developers", "designer", "designers", "analyst", "analysts",
+    "scientist", "scientists", "consultant", "consultants", "recruiter", "recruiters", "specialist", "specialists",
+    "coordinator", "senior", "junior", "staff", "intern", "associate", "assistant", "architect",
 }
 NAME_PART = r"[A-Z][a-z]+(?:[-'’][A-Z]?[a-z]+)*|Mc[A-Z][a-z]+|Mac[A-Z][a-z]+"
 NAME_PATTERN = rf"(?:{NAME_PART})(?:\s+[A-Z]\.)?(?:\s+(?:{NAME_PART})){{1,2}}"
@@ -157,7 +162,18 @@ def is_title(text: str) -> bool:
         return False
     if re.search(r"[.!?]\s+[A-Z]", t) or "@" in t or "http" in t.lower():
         return False  # a sentence, an email or a link, not a job title
+    if "$" in t or re.search(r"\b(?:of|at|for) an?\b", t):
+        return False  # a customer describing themselves: "COO of a $4M family-owned plumbing business."
+    if FORMER_RE.search(t):
+        return False  # no longer in the job, so not someone who decides
     return bool(TITLE_RE.search(t))
+
+
+def _run_together(word: str) -> bool:
+    """Words stuck together by a page's menu ("HomeAbout"); a name's own capital comes after a short prefix ("McDonald",
+    "DeShawn", "MacArthur")."""
+    humps = [m.start() for m in re.finditer(r"(?<=[a-z])[A-Z]", word)]
+    return len(humps) > 1 or (len(humps) == 1 and humps[0] > 3)
 
 
 def looks_like_name(text: str, company: str | None = None) -> bool:
@@ -178,7 +194,7 @@ def looks_like_name(text: str, company: str | None = None) -> bool:
                 return False  # an initial only in the middle ("Jane A. Doe")
             continue
         letters = core.replace("-", "").replace("'", "").replace("’", "")
-        if not (letters.isalpha() and core[0].isupper()) or (core.isupper() and len(core) > 2):
+        if not (letters.isalpha() and core[0].isupper()) or (core.isupper() and len(core) > 2) or _run_together(core):
             return False
         if not any(ch.islower() for ch in core):
             return False
@@ -190,6 +206,8 @@ def looks_like_name(text: str, company: str | None = None) -> bool:
 
 
 def role_category(title: str) -> str:
+    if FORMER_RE.search(title):
+        return "other"
     for category, rx in ROLE_RULES:
         if rx.search(title):
             return category
@@ -199,6 +217,8 @@ def role_category(title: str) -> str:
 def seniority(title: str) -> int:
     """3 founder/owner/C-level, 2 VP/head/partner, 1 director, 0 lead/manager/other, -1 junior. Advisors rank 1."""
     t = title.lower()
+    if FORMER_RE.search(t):
+        return -1
     if re.search(r"\b(advis[oe]ry?|advisor|adviser|emeritus)\b", t):
         return 1
     if re.search(r"\b(intern|assistant|associate|coordinator|specialist|trainee|junior)\b", t):

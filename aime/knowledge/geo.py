@@ -70,6 +70,11 @@ NON_US_MARKERS: list[str] = [
     "stockholm", "sweden", "poland", "warsaw", "portugal", "lisbon", "latam", "apac", "copenhagen",
     "denmark", "oslo", "norway", "helsinki", "finland", "vienna", "austria", "prague", "estonia",
     "argentina", "colombia", "philippines", "nigeria", "kenya", "south africa", "dubai", "uae",
+    "frankfurt", "hamburg", "freiburg", "cologne", "stuttgart", "romania", "bucharest", "budapest", "hungary", "greece",
+    "athens", "italy", "milan", "rome", "belgium", "brussels", "ukraine", "kyiv", "turkey", "istanbul", "egypt", "pakistan",
+    "karachi", "lahore", "vietnam", "thailand", "indonesia", "korea", "seoul", "china", "shanghai", "beijing", "hong kong",
+    "taiwan", "taipei", "new zealand", "auckland", "chile", "peru", "bogota", "sao paulo", "ontario", "quebec", "bulgaria",
+    "sofia", "serbia", "croatia", "latvia", "lithuania", "czech", "berlin",
 ]
 
 _US_MARKER_RE = re.compile(
@@ -78,6 +83,10 @@ _US_MARKER_RE = re.compile(
 )
 _DEGREE_PREFIX_RE = re.compile(r"(?:B\.?S|B\.?A|M\.?S)\.?/\s*$")
 _STATE_CODE_RE = re.compile(r"(?:,|\(|/|\||;|-|–)\s*([A-Z]{2})(?=\s*(?:$|[,)|/;\-–]|\s|\.))")
+# "US Eastern timezone overlap" is about working hours: it says where a company is only when nothing says otherwise.
+_US_HOURS_RE = re.compile(r"(?<![A-Za-z])(?:USA|U\.S\.A?\.?|US)[ ,/—-]*(?:east|west|central|pacific|mountain|eastern|western)?"
+                          r"(?:[ /](?:east|west|central|pacific|mountain|eastern|western))?[ -]*(?:coast )?"
+                          r"(?:time ?zones?|timezones?|time|hours|overlap)\b", re.I)
 _NON_US_RE = re.compile(r"(?<![a-z])(?:" + "|".join(re.escape(m) for m in NON_US_MARKERS) + r")(?![a-z])")
 _STATE_NAMES_SORTED = sorted(((name.lower(), code) for code, name in US_REGIONS.items()), key=lambda x: -len(x[0]))
 _CITIES_SORTED = sorted(CITY_TO_STATE.items(), key=lambda x: -len(x[0]))
@@ -90,6 +99,7 @@ class Location:
     city: str | None = None
     remote: bool = False
     evidence: list[str] = field(default_factory=list)
+    foreign_first: bool = False  # a place outside the US is named before the US one: most likely not its home
 
 
 def normalize_state(value: str | None) -> str | None:
@@ -100,6 +110,21 @@ def normalize_state(value: str | None) -> str | None:
         return v.upper()
     lookup = {name.lower(): code for code, name in US_REGIONS.items()}
     return lookup.get(v.lower())
+
+
+def _reads_as_state(text: str, match: re.Match) -> bool:
+    """A capitalised pair right after a separator is a state only when it stands alone: "| DE Frankfurt" names a country, and
+    "- OR " is a word. After "City, " it is a state whatever follows ("Austin, TX Hybrid"). "LA" in a list of places is Los
+    Angeles ("LA/SF"); it is Louisiana only after a city's name."""
+    code, opened_by = match.group(1), text[match.start()]
+    after = text[match.end(1):]
+    before = text[:match.start()].rstrip()
+    after_city = opened_by == "," and bool(before) and before[-1].islower()
+    if code == "LA":
+        return after_city and not after.startswith("/")
+    if after_city:
+        return True
+    return not re.match(r"\s+(?!(?:or|and|only|remote|hybrid|onsite|on-site|based|preferred)\b)[A-Za-z]", after, re.I)
 
 
 def parse_location(text: str | None) -> Location:
@@ -119,6 +144,8 @@ def parse_location(text: str | None) -> Location:
             continue
         if _DEGREE_PREFIX_RE.search(text[max(0, match.start() - 6): match.start() + 1]):
             continue  # "BS/MS degree" is not Mississippi
+        if not _reads_as_state(text, match):
+            continue
         found.append((match.start(1), code, None, f"state code {code}"))
 
     masked = lower
@@ -132,14 +159,19 @@ def parse_location(text: str | None) -> Location:
             found.append((m.start(), code, None, f"state {name}"))
             masked = masked[: m.start()] + " " * len(name) + masked[m.end():]
 
-    us_marker = bool(_US_MARKER_RE.search(text) or _US_MARKER_RE.search(lower))
+    plain = _US_HOURS_RE.sub(" ", text)
+    non_us = _NON_US_RE.search(lower)
+    said = plain if non_us else text  # hours in US time count only when nothing else names a place
+    marker = _US_MARKER_RE.search(said) or _US_MARKER_RE.search(said.lower())
+    us_marker = bool(marker)
     remote = "remote" in lower
     if found:
         found.sort(key=lambda f: f[0])
-        _, state, city, ev = found[0]
-        return Location(is_us=True, state=state, city=city, remote=remote, evidence=[f[3] for f in found])
+        first, state, city, ev = found[0]
+        return Location(is_us=True, state=state, city=city, remote=remote, evidence=[f[3] for f in found],
+                        foreign_first=bool(non_us and non_us.start() < min(first, marker.start() if marker else first)))
     if us_marker:
         return Location(is_us=True, remote=remote, evidence=["explicit US marker"])
-    if _NON_US_RE.search(lower):
+    if non_us:
         return Location(is_us=False, remote=remote, evidence=["non-US location only"])
     return Location(is_us=None, remote=remote)

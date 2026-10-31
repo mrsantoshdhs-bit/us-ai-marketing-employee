@@ -11,6 +11,10 @@ import hashlib
 import re
 
 _WSP = re.compile(rb"[ \t]+")
+_HOSTNAME = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}")
+_SELECTOR = re.compile(r"[A-Za-z0-9_.-]{1,200}")
+_MUST_BE_SIGNED = (b"from", b"subject")  # who wrote it and about what. Microsoft 365 commonly leaves To out (see auth_results)
+_ONCE_ONLY = (b"from", b"subject")
 
 
 def _split(raw: bytes) -> tuple[list[tuple[bytes, bytes]], bytes]:
@@ -80,6 +84,12 @@ def _public_key(selector: str, domain: str, resolver=None):
 
 def verify_one(raw: bytes, index: int = 0, resolver=None) -> str | None:
     """The signing domain if the index-th DKIM-Signature verifies, else None."""
+    found = verify_signature(raw, index, resolver)
+    return found[0] if found else None
+
+
+def verify_signature(raw: bytes, index: int = 0, resolver=None) -> tuple[str, bool] | None:
+    """(signing domain, whether it also vouches for one To line) if the index-th DKIM-Signature verifies, else None."""
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
@@ -93,20 +103,24 @@ def verify_one(raw: bytes, index: int = 0, resolver=None) -> str | None:
     sig_raw = sigs[index][1]
     tags = _tags(sig_raw.split(b":", 1)[1])
     algo, domain, selector = tags.get("a", ""), tags.get("d", "").lower(), tags.get("s", "")
-    if algo not in ("rsa-sha256", "ed25519-sha256") or not domain or not selector or tags.get("v", "1") != "1":
+    if algo not in ("rsa-sha256", "ed25519-sha256") or not selector or tags.get("v", "1") != "1":
         return None
+    if not _HOSTNAME.fullmatch(domain) or len(domain) > 253 or not _SELECTOR.fullmatch(selector):
+        return None  # d=a,header.d=calendly.com,.evil.example is a legal DNS name in the attacker's own zone, but no signing domain
+    if "l" in tags:
+        return None  # l= signs only the start of the body: whatever is added below would still verify (RFC 6376, 8.2)
     head_mode, _, body_mode = tags.get("c", "simple/simple").partition("/")
     body_mode = body_mode or "simple"
     if head_mode not in ("simple", "relaxed") or body_mode not in ("simple", "relaxed"):
         return None
     canon = _canon_body(body, body_mode)
-    if "l" in tags:
-        canon = canon[:int(tags["l"])]
     if base64.b64encode(hashlib.sha256(canon).digest()).decode() != tags.get("bh", ""):
         return None  # the body changed after signing
     signed = [n.strip().lower().encode() for n in tags.get("h", "").split(":") if n.strip()]
-    if b"from" not in signed:
+    if any(name not in signed for name in _MUST_BE_SIGNED):
         return None
+    if any(sum(1 for name, _ in headers if name == once) > 1 for once in _ONCE_ONLY):
+        return None  # the check reads the lowest of two From lines and the mail parser the first: one signed email, any sender
     available: dict[bytes, list[bytes]] = {}
     for name, raw_header in headers:
         available.setdefault(name, []).append(raw_header)
@@ -129,20 +143,31 @@ def verify_one(raw: bytes, index: int = 0, resolver=None) -> str | None:
             return None
     except (InvalidSignature, Exception):  # any doubt (bad key, DNS failure, malformed data): not verified
         return None
-    return domain
+    return domain, b"to" in signed and sum(1 for name, _ in headers if name == b"to") == 1
 
 
-def verified_domains(raw: bytes, resolver=None, limit: int = 4) -> set[str]:
-    """Every domain whose DKIM signature on this email verifies (at most `limit` signatures are tried)."""
-    out = set()
+def verified_signatures(raw: bytes, resolver=None, limit: int = 4) -> dict[str, bool]:
+    """{domain: whether a signature of it covers the To line} for every signature on this email that verifies (at most
+    `limit` are tried)."""
+    out: dict[str, bool] = {}
     count = len([1 for name, _ in _split(raw)[0] if name == b"dkim-signature"])
     for i in range(min(count, limit)):
-        if domain := verify_one(raw, i, resolver):
-            out.add(domain)
+        try:
+            found = verify_signature(raw, i, resolver)
+        except Exception:  # noqa: S112, BLE001 -- a malformed signature is simply not verified
+            continue
+        if found:
+            out[found[0]] = out.get(found[0], False) or found[1]
     return out
 
 
+def verified_domains(raw: bytes, resolver=None, limit: int = 4) -> set[str]:
+    """Every domain whose DKIM signature on this email verifies."""
+    return set(verified_signatures(raw, resolver, limit))
+
+
 def auth_results(raw: bytes, resolver=None) -> str:
-    """AIME's own Authentication-Results line for this email (authserv-id "aime.dkim")."""
-    domains = sorted(verified_domains(raw, resolver))
-    return "aime.dkim; " + ("; ".join(f"dkim=pass header.d={d}" for d in domains) if domains else "dkim=none")
+    """AIME's own Authentication-Results line for this email (authserv-id "aime.dkim"). Only checked hostnames reach it."""
+    domains = verified_signatures(raw, resolver)
+    lines = [f"dkim=pass header.d={d}" + ("" if domains[d] else " header.to=unsigned") for d in sorted(domains)]
+    return "aime.dkim; " + ("; ".join(lines) if lines else "dkim=none")

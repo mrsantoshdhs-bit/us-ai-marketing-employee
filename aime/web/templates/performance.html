@@ -30,6 +30,8 @@
     <th>{{ t.negative_replies }}</th><th>{{ t.meetings }}</th><th>{{ t.deals_opened }}</th><th>{{ t.won }}</th><th>{{ t.lost }}</th>
     <th>{{ pct(t.conversion) }}</th><th>{{ usd(t.won_value) }}</th><th>{{ usd(t.won_value_ai_sourced) }}</th></tr>
 </table></div>
+{% if report.won_without_value %}<div class="flash">{{ report.won_without_value|length }} won deal{{ 's' if report.won_without_value|length != 1 }} without a value add{{ 's' if report.won_without_value|length == 1 }} nothing to Won value:
+  {% for d in report.won_without_value %}<a href="/opportunities/{{ d.id }}">{{ d.name }}</a>{% if d.quote %} (accepted quote {{ d.quote }}: not counted as US dollars){% endif %}{{ ', ' if not loop.last }}{% endfor %}. Enter its value in dollars on the deal to count it.</div>{% endif %}
 <h2>The AI employee in this period</h2>
 <div class="card small">
   <div>Email drafts written: <b>{{ report.ai.drafts_written }}</b>{% for k, n in report.ai.drafts_by_kind.items() %} <span class="pill">{{ (k or 'inquiry reply')|replace('_', ' ') }}: {{ n }}</span>{% endfor %}</div>

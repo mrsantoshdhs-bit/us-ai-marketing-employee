@@ -51,7 +51,7 @@ def test_exceptions_say_why_a_person_is_needed(make_ctx):
     with ctx.db.session() as s:
         view = manager_today(ctx, s)
     whys = {n["kind"]: n["why"] for n in view["needs"]}
-    assert "pricing" in whys["Reply"] and "REQUIRE_HUMAN_APPROVAL=true" in whys["Email"]
+    assert "pricing" in whys["Reply"] and "every email needs a person" in whys["Email"]
     assert any("SEC EDGAR returned 503" in f["why"] for f in view["failures"])
     page = TestClient(create_app(ctx)).get("/manager").text
     assert "What does it cost?" in page and "Why: a pricing question" in page

@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% from "_macros.html" import state_pill, status_pill %}
+{% extends "base.html" %}{% from "_macros.html" import state_pill, status_pill, alert_row %}
 {% block title %}System · AI Sales Employee{% endblock %}
 {% block content %}
 <h1>System <span class="muted small">{{ company_name }}</span></h1>
@@ -26,17 +26,17 @@
         <ul class="reasons small">{% for r in plan.rationale %}<li>{{ r }}</li>{% endfor %}</ul>
       {% else %}<span class="muted">No plan yet — the Marketing Manager runs on the schedule (or run the "plan" job).</span>{% endif %}
     </div>
-    <h2>Unacknowledged alerts</h2>
+    <h2 id="alerts">Unacknowledged alerts</h2>
     <div class="card">
-      {% for a in alerts %}
-        <div style="margin-bottom:6px">{{ state_pill(a.level|upper) }} <span class="small">{{ a.created_at|local }}</span> {{ a.message }}
-          {% if can_edit %}<form class="inline" method="post" action="/alerts/{{ a.id }}/ack"><button class="secondary">Acknowledge</button></form>{% endif %}</div>
+      {% for a in alerts %}{{ alert_row(a, can_edit) }}
       {% else %}<span class="muted">No alerts.</span>{% endfor %}
+      {% if more_notices %}<div class="small muted">{{ more_notices }} older notice{{ 's' if more_notices != 1 }} not shown.</div>{% endif %}
+      {% if can_edit and alerts %}<form class="inline" method="post" action="/alerts/ack_all" style="margin-top:8px"><button class="secondary">Acknowledge all</button></form>{% endif %}
     </div>
   </div>
 </div>
 
-<h2>Recent job runs {% if heartbeat %}<span class="muted small">· last scheduler tick {{ heartbeat.at }} ({{ heartbeat.trigger }})</span>{% endif %}</h2>
+<h2>Recent job runs {% if heartbeat %}<span class="muted small">· last scheduler tick {{ heartbeat_at|local }} ({{ heartbeat.trigger }})</span>{% endif %}</h2>
 <div class="card table-wrap"><table>
   <tr><th>Job</th><th>Trigger</th><th>Status</th><th>Started</th><th class="n">Duration</th></tr>
   {% for r in runs %}

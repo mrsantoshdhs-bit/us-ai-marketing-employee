@@ -19,7 +19,7 @@ from aime.web.app import create_app
 
 SITE = "brightline-logistics.example"
 HOME = """<html><head><title>Brightline Logistics | Freight software</title>
-<meta name="description" content="Brightline Logistics helps regional carriers plan routes, dispatch drivers and invoice customers from one place.">
+<meta name="description" content="Brightline Logistics helps regional carriers plan routes, dispatch drivers and update customers from one place.">
 </head><body><nav><a href="/about-us">About Us</a> <a href="/team">Our Team</a> <a href="/contact">Contact</a>
 <a href="/private/staff">Staff portal</a> <a href="/careers">Careers</a> <a href="https://www.linkedin.com/company/x">LinkedIn</a></nav>
 <h1>Freight operations, simplified</h1>
@@ -315,7 +315,7 @@ def test_recheck_withdraws_people_no_longer_found_but_keeps_anyone_already_email
 
 
 def test_companies_that_sell_ai_agents_are_flagged_and_a_person_can_clear_it(make_ctx):
-    state = {"/": HOME.replace("Brightline Logistics helps regional carriers plan routes, dispatch drivers and invoice "
+    state = {"/": HOME.replace("Brightline Logistics helps regional carriers plan routes, dispatch drivers and update "
                                "customers from one place.", "Brightline builds AI agents that automate dispatch for "
                                "regional carriers.")}
     ctx = recheck_ctx(make_ctx, state)

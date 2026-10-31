@@ -22,3 +22,9 @@
 {% macro ext(url, label='source') -%}
 {%- set u = url|safe_url -%}{% if u %}<a href="{{ u }}" target="_blank" rel="noopener noreferrer">{{ label }}</a>{% else %}<span class="muted">{{ url or '—' }}</span>{% endif %}
 {%- endmacro %}
+
+{% macro alert_row(a, can_edit) -%}
+<div class="row-item"><span class="pill {{ 'bad' if a.level == 'error' else 'warn' if a.level == 'warning' else '' }}">{{ a.level }}</span> <span class="small muted">{{ a.at|local }}</span> {{ a.message|plain }}
+  {% if can_edit %}{% if a.id %}<form class="inline" method="post" action="/alerts/{{ a.id }}/ack"><button class="secondary">Acknowledge</button></form>
+  {% else %}<form class="inline" method="post" action="/alerts/ack_all"><input type="hidden" name="group" value="{{ a.group }}"><button class="secondary">Acknowledge</button></form>{% endif %}{% endif %}</div>
+{%- endmacro %}

@@ -23,13 +23,14 @@ from sqlalchemy.orm import Session
 from aime import automation
 from aime.agents.base import BaseAgent, RetryPolicy
 from aime.agents.contracts import BlockedItem
-from aime.calendar_slots import free_slots
+from aime.calendar_slots import requeue_late
 from aime.crm_ops import log_activity
 from aime.monitoring import alert_once, resolve_alerts
 from aime.integrations.linkedin import (LinkedInAPIError, LinkedInAuthStatus, LinkedInClient, access_token,
                                         format_commentary, get_auth_status, get_token, normalize_commentary,
                                         post_url)
 from aime.models import ContentItem, PublishAttempt
+from aime import send_journal
 from aime.publish_journal import confirmed, record_success
 from aime.redact import redact
 from aime.timeutil import utcnow
@@ -38,6 +39,7 @@ MAX_ATTEMPTS = 3
 STALE_CLAIM = timedelta(minutes=10)
 ABSENCE_CONFIRM_AFTER = timedelta(minutes=30)
 UNCERTAIN_HINT = "Outcome unknown ({why}). Check LinkedIn, then Confirm published or Requeue in the dashboard."
+DUE_ALERT = "publishing:due"
 
 
 class PublishInput(BaseModel):
@@ -86,6 +88,9 @@ class AuthorizedPublishingAgent(BaseAgent[PublishInput, PublishOutput]):
         out = PublishOutput(can_publish=auth.can_publish, authorization=auth.reason)
 
         self._reconcile(session, now, auth, out)
+        if send_journal.hold(self.settings.data_dir):  # a restored or damaged database: a person looks first
+            out.can_publish, out.authorization = False, send_journal.row_message()
+            return out
 
         # "approved" without an approval record (e.g. set directly in the database) is not an approval.
         for item in session.execute(select(ContentItem).where(
@@ -109,11 +114,23 @@ class AuthorizedPublishingAgent(BaseAgent[PublishInput, PublishOutput]):
             for item in due:
                 item.publish_blocked_reason = reason
                 out.blocked.append(BlockedItem(id=item.id, reason=reason))
+            # Off by a person's decision, this is a state to know about once, not a fault to be reminded of every day.
+            decided = paused or not self.settings.publishing_enabled
             if due:
-                self._alert_once(session, f"{len(due)} approved post(s) are due but cannot be published: {reason}")
+                why = reason if paused or self.settings.publishing_enabled else "publishing is switched off"
+                alert_once(session, "info" if decided else "warning", self.name,
+                           f"{len(due)} approved post(s) are due but cannot be published: {why}", self.settings,
+                           key=DUE_ALERT, until_resolved=decided)
+            else:
+                resolve_alerts(session, (DUE_ALERT,), set())
             session.commit()
             return out
+        resolve_alerts(session, (DUE_ALERT,), set())
 
+        late = [item for item in due if now - item.scheduled_for > max_overdue]
+        if late:
+            self._requeue(session, late, now, out)
+            due = [item for item in due if item not in late]
         token = access_token(get_token(session))
         published_now = 0
         for item in due:
@@ -127,28 +144,6 @@ class AuthorizedPublishingAgent(BaseAgent[PublishInput, PublishOutput]):
                 self._alert_once(session, f"Post #{item.id} '{item.title[:60]}': {item.publish_blocked_reason}")
                 session.commit()
                 continue
-            if now - item.scheduled_for > max_overdue:
-                slots = free_slots(session, self.settings, now)
-                if slots:
-                    item.scheduled_for = slots[0]
-                    item.publish_blocked_reason = None  # not blocked: it goes out at the new slot
-                    log_activity(session, f"Post #{item.id} missed its slot; rescheduled to {slots[0]:%Y-%m-%d %H:%M} UTC",
-                                 self.name, type_="status_change")
-                    out.rescheduled.append(item.id)
-                    self._alert_once(session, f"Post #{item.id} missed its slot and was moved to {slots[0]:%Y-%m-%d %H:%M} UTC",
-                                     level="info")
-                else:
-                    # Never publish late: without a free slot the post goes back to a person.
-                    late_hours = int((now - item.scheduled_for).total_seconds() // 3600)
-                    item.status, item.approved_by, item.approved_at = "awaiting_approval", None, None
-                    item.publish_blocked_reason = ("Missed its slot and no free slot is available; "
-                                                   "choose a new time and approve it again")
-                    out.blocked.append(BlockedItem(id=item.id, reason=item.publish_blocked_reason))
-                    log_activity(session, f"Post #{item.id} held: {late_hours} h past its slot, approval withdrawn",
-                                 self.name, type_="status_change")
-                    self._alert_once(session, f"Post #{item.id} missed its slot and needs a new time and approval")
-                session.commit()
-                continue
             if published_now >= max_items:
                 break
             attempt = self._claim(session, item, auth)
@@ -159,6 +154,29 @@ class AuthorizedPublishingAgent(BaseAgent[PublishInput, PublishOutput]):
             elif any(u.id == item.id for u in out.uncertain):
                 break  # stop the batch: the API connection is unreliable right now
         return out
+
+    def _requeue(self, session: Session, late: list[ContentItem], now: datetime, out: PublishOutput) -> None:
+        """Never publish late, and never take back a person's approval for it: new slots, in the same order."""
+        was = {item.id: item.scheduled_for for item in late}
+        moved, drafts = requeue_late(session, self.settings, late, now)
+        for item in moved:
+            item.publish_blocked_reason = None  # not blocked: it goes out at the new slot
+            verb = "missed its slot" if item.id in was else "moved to keep the approved order"
+            log_activity(session, f"Post #{item.id} {verb}; rescheduled to {item.scheduled_for:%Y-%m-%d %H:%M} UTC",
+                         self.name, type_="status_change")
+            out.rescheduled.append(item.id)
+            if item.id in was:
+                self._alert_once(session, f"Post #{item.id} missed its slot and was moved to {item.scheduled_for:%Y-%m-%d %H:%M} UTC",
+                                 level="info")
+        for item in drafts:
+            log_activity(session, f"Draft post #{item.id} moved to {item.scheduled_for:%Y-%m-%d %H:%M} UTC: an approved post took its slot",
+                         self.name, type_="status_change")
+        for item in late:
+            if item.scheduled_for == was[item.id]:  # no posting day configured
+                item.publish_blocked_reason = "Missed its slot and no posting slot is available; choose a new time"
+                out.blocked.append(BlockedItem(id=item.id, reason=item.publish_blocked_reason))
+                self._alert_once(session, f"Post #{item.id} missed its slot and needs a new time")
+        session.commit()
 
     # ------------------------------------------------------------------ claim / publish
     def _claim(self, session: Session, item: ContentItem, auth: LinkedInAuthStatus) -> PublishAttempt | None:

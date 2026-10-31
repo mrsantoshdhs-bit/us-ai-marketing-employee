@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 DATA = Path(os.environ.get("AIME_DATA_DIR") or ROOT / "data")
 STALE_AFTER = timedelta(minutes=45)  # three missed 15-minute ticks
+STALE_WHILE_RUNNING = timedelta(minutes=75)  # a tick writes its beat as each job starts, and Task Scheduler ends it after an hour
 # At sign-in this task and the Dashboard task both start 2 minutes after logon: give a dashboard that is still
 # starting this long to answer before reporting it as not running.
 DASHBOARD_GRACE_SECONDS = 180
@@ -30,15 +31,19 @@ def check(data_dir: Path, now: datetime | None = None) -> list[str]:
     if maintenance.active(data_dir):
         return []
     path = data_dir / "heartbeat.json"
+    if not (data_dir / "aime.db").exists() and any((data_dir / "backups").glob("aime-*.db")):
+        return ["The database is missing and backups exist: nothing is running. Run `python -m aime doctor` for the next step."]
     if not path.exists():
         return ["No scheduler heartbeat yet: the AIMarketingEmployee-Tick task may not be installed."]
     try:
         beat = json.loads(path.read_text(encoding="utf-8"))
         at = datetime.fromisoformat(beat["at"].rstrip("Z")).replace(tzinfo=timezone.utc)
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return ["Scheduler heartbeat file is unreadable."]
+    if beat.get("state") == "clock_hold":
+        return ["No work is being done because the PC's clock looks wrong. Correct the clock, or run `python -m aime confirm-clock`."]
     age = now - at
-    if age > STALE_AFTER:
+    if age > (STALE_WHILE_RUNNING if beat.get("state") == "running" else STALE_AFTER):
         return [f"Scheduled ticks stopped: last tick {int(age.total_seconds() // 60)} min ago. "
                 "Check Task Scheduler (AIMarketingEmployee-Tick) and data/logs/scheduler_crash.log."]
     return []
@@ -46,25 +51,49 @@ def check(data_dir: Path, now: datetime | None = None) -> list[str]:
 
 def dashboard_problem(host: str = "127.0.0.1", port: int | None = None, wait_seconds: float = 0,
                       sleep=time.sleep, clock=time.monotonic) -> str | None:
-    """None when the dashboard answers on its port. With `wait_seconds`, a dashboard that does not answer yet is
-    checked again every few seconds until then (it may still be starting) before it is reported."""
+    """None when the dashboard gives a page. With `wait_seconds`, a dashboard that does not answer yet is checked again
+    every few seconds until then (it may still be starting) before it is reported. A port that accepts the connection
+    and gives no page is a hung dashboard or another program: it is reported as that, not as all well."""
     import socket
 
     from dotenv import dotenv_values
 
+    from aime.dashboard_probe import PAGE_TIMEOUT, page_answers
+
     port = port or int(os.environ.get("DASHBOARD_PORT") or dotenv_values(ROOT / ".env").get("DASHBOARD_PORT") or 8765)
     deadline = clock() + wait_seconds
     while True:
+        accepted = True
         try:
             with socket.create_connection((host, port), timeout=2):
-                return None
+                pass
         except OSError:
-            if clock() >= deadline:
-                break
-            sleep(DASHBOARD_RECHECK_SECONDS)
+            accepted = False
+        if accepted and page_answers(host, port):
+            return None
+        if clock() >= deadline:
+            break
+        sleep(DASHBOARD_RECHECK_SECONDS)
     waited = f" after waiting {int(wait_seconds)} s for it to start" if wait_seconds else ""
+    if accepted:
+        return (f"The dashboard is not answering: something holds port {port} but gave no page in {int(PAGE_TIMEOUT)} s{waited}. "
+                "A hung dashboard ends itself within minutes and the Dashboard task starts a new one; if this stays, another "
+                "program has the port, or end the AIMarketingEmployee-Dashboard task in Task Scheduler.")
     return (f"The dashboard is not running (nothing on port {port}{waited}). Start it with scripts/start_dashboard.ps1, "
             "or install `python -m aime scheduler install-dashboard` so it restarts by itself.")
+
+
+def free_space_problem(data_dir: Path) -> str | None:
+    """A nearly full disk stops backups, then the database, then ticks. Stdlib only, like the rest of this script."""
+    import shutil
+
+    try:
+        free = shutil.disk_usage(data_dir).free
+    except OSError:
+        return None
+    if free >= 2 * 2**30:
+        return None
+    return f"Only {free / 2**30:.1f} GB is free on the disk holding {data_dir}: free some space, or backups and then the database fail."
 
 
 def main() -> int:
@@ -73,15 +102,19 @@ def main() -> int:
     problems = check(DATA)
     if not maintenance.active(DATA):
         problems += [p for p in [dashboard_problem(wait_seconds=DASHBOARD_GRACE_SECONDS)] if p]
+    problems += [p for p in [free_space_problem(DATA)] if p]
     if problems:
         from aime.notify import TITLE, toast
 
+        toast(f"{TITLE}: scheduler", problems[0])  # first: on a full disk it is the one thing that can still tell the owner
         log = DATA / "logs" / "watchdog.log"
-        log.parent.mkdir(parents=True, exist_ok=True)
-        with log.open("a", encoding="utf-8") as fh:
-            for p in problems:
-                fh.write(f"[{datetime.now().isoformat(timespec='seconds')}] {p}\n")
-        toast(f"{TITLE}: scheduler", problems[0])
+        try:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with log.open("a", encoding="utf-8") as fh:
+                for p in problems:
+                    fh.write(f"[{datetime.now().isoformat(timespec='seconds')}] {p}\n")
+        except OSError:
+            pass
     return 0
 
 

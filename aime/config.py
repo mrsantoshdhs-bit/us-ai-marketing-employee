@@ -47,6 +47,12 @@ DEFAULT_BUSINESS: dict[str, Any] = {
         "send_window_end": "18:00",
         "send_window_timezone": "America/New_York",
         "stale_lead_days": 30,
+        # Days nothing is sent on, by name (aime/calendar_slots.py) or as "2026-12-24". Columbus Day and Veterans Day are
+        # known names, left out because most US businesses work on them.
+        "holidays": ["new_years_day", "mlk_day", "presidents_day", "memorial_day", "juneteenth", "independence_day",
+                     "labor_day", "thanksgiving", "day_after_thanksgiving", "christmas"],
+        "draft_reminder_days": 2,
+        "draft_fresh_days": 14,
     },
 }
 
@@ -243,7 +249,7 @@ class Settings:
     # wait for a person. CALENDLY_FORWARDERS: extra addresses allowed to forward notices (comma-separated).
     calendly_verified_only: bool = True
     llm_cost_per_1k_tokens: float = 0.0
-    backup_keep_manual: int = 0  # manual and pre-deploy copies to keep (older than 30 days); 0 keeps every one  # the local model is free; for a provider that charges per token
+    backup_keep_manual: int = 20  # manual and pre-deploy copies to keep once older than 30 days; 0 keeps every one
     # Let the local model write the personal opening line of a reply draft, checked for prices, promises and claims;
     # anything doubtful falls back to the template. Off by default.
     ai_email_drafts: bool = False

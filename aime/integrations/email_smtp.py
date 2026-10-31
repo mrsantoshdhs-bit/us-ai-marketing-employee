@@ -59,11 +59,13 @@ def compliance_footer(settings: Settings, outreach: bool = False, why: str | Non
     address = settings.company_postal_address or POSTAL_PLACEHOLDER
     why = why or ("We emailed you because your company publishes this address as a business contact."
                   if outreach else f"You are receiving this because you contacted {settings.company_name}.")
+    # A postal address often starts with the company's name: the name is then written once.
+    sender = address if address.lower().startswith(settings.company_name.lower()) else f"{settings.company_name} · {address}"
     return (
         "\n\n---\n"
         f"{why} "
         f"To stop receiving emails from us, reply with \"unsubscribe\" or write to {unsub}.\n"
-        f"{settings.company_name} · {address}"
+        f"{sender}"
     )
 
 
@@ -81,7 +83,7 @@ class EmailSender:
     def status(self) -> tuple[bool, str]:
         s = self.settings
         if not s.outbound_email_enabled:
-            return False, "DISABLED: OUTBOUND_EMAIL_ENABLED=false"
+            return False, "DISABLED: sending is switched off"
         if not s.smtp_host or not s.smtp_from:
             return False, "NOT CONFIGURED: SMTP_HOST / SMTP_FROM missing"
         if not s.company_postal_address:
