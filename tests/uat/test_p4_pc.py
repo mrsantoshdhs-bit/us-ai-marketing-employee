@@ -1129,6 +1129,33 @@ def test_a_sleep_after_the_claim_sends_nothing_and_the_email_later_goes_once(mak
     assert len(sent) == 2
 
 
+def test_a_sleep_after_the_claim_that_another_run_called_interrupted_leaves_no_false_warning(make_ctx, clock, monkeypatch):
+    ctx = make_ctx(**MAIL)
+    start = clock(datetime(2026, 11, 4, 15, 0))  # Wednesday 10:00 New York
+    fid = add_mail(ctx, add_lead(ctx, stage="approved"))
+    asleep = []
+
+    def lid_closes():
+        if not asleep:
+            asleep.append(1)
+            clock(start + timedelta(minutes=30))
+            SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=FakeSMTP)).run({"send": False})
+            assert rows(ctx, [fid])[0][0] == "uncertain"  # the other run, while this one is frozen
+
+    smtp, sent = smtp_where(before_connect=lid_closes)
+    followups_job_with(monkeypatch, smtp)
+    mailbox_read_now(ctx)
+    job_followups(ctx)
+    assert not sent and rows(ctx, [fid])[0][0] == "approved"
+    with ctx.db.session() as s:
+        left = [a.message for a in s.execute(select(Alert).where(Alert.acknowledged.is_(False))).scalars() if f"#{fid}:" in a.message]
+    assert not left
+    clock(start + timedelta(minutes=45))
+    mailbox_read_now(ctx)
+    job_followups(ctx)
+    assert len(sent) == 1 and rows(ctx, [fid])[0][0] == "sent"
+
+
 def test_a_read_gone_stale_during_the_sign_in_sends_nothing_even_inside_the_window(make_ctx, clock, monkeypatch):
     ctx = make_ctx(**MAIL)
     clock(datetime(2026, 11, 4, 15, 0))  # Wednesday 10:00 New York

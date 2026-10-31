@@ -531,12 +531,18 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             msg_id = self.sender.send(to, *args, **kwargs)
         except NOT_DELIVERED:
             send_journal.record_released(data, f.id, to)  # if this fails too: "delivery unknown", for a person
+            self._clear_interrupted(session, f)  # what this run knows is better: it did not leave
             raise
-        session.refresh(f)  # the PC may have slept inside the mail conversation: another run then called it interrupted
+        self._clear_interrupted(session, f)
+        return msg_id
+
+    @staticmethod
+    def _clear_interrupted(session: Session, f: FollowUp) -> None:
+        """The PC may have slept inside the mail conversation: another run then called it interrupted, with an alert to check."""
+        session.refresh(f)
         if f.status == "uncertain":
             session.execute(update(Alert).where(Alert.message.like(f"Follow-up #{f.id}:%"), Alert.acknowledged.is_(False)).values(
                 acknowledged=True, resolved_at=utcnow()))
-        return msg_id
 
     def _why_stop_the_run(self, last_look: datetime, now: datetime, cfg: dict, in_window: bool) -> str | None:
         """Judged again before each email, because the process can freeze for hours between two of them (a laptop lid). Only
