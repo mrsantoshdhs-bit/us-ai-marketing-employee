@@ -298,8 +298,7 @@ def smtp_recording(sent, also=None):
 
 def followups_job_with(monkeypatch, smtp):
     """The real job, with a mail server that is not real."""
-    monkeypatch.setattr(workflows, "SalesWorkflowAgent", lambda ctx, read_hold=None: SalesWorkflowAgent(
-        ctx, sender=EmailSender(ctx.settings, smtp_factory=smtp), read_hold=read_hold))
+    monkeypatch.setattr(workflows, "SalesWorkflowAgent", lambda c: SalesWorkflowAgent(c, sender=EmailSender(c.settings, smtp_factory=smtp)))
 
 
 def mailbox_read_now(ctx):

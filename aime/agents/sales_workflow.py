@@ -99,10 +99,10 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
     output_model = SalesOutput
     retry_policy = RetryPolicy(max_attempts=1)  # sending email is not idempotent
 
-    def __init__(self, ctx, sender: EmailSender | None = None, read_hold=None):
+    def __init__(self, ctx, sender: EmailSender | None = None):
         super().__init__(ctx)
         self.sender = sender or EmailSender(ctx.settings)
-        self.read_hold = read_hold  # asked before each email: why it must wait for a new read of the mailbox, or None
+        self.read_hold = None  # the followups job's: asked before each email, why it must wait for a new read of the mailbox
 
     def _use_primary_mailbox(self, session: Session) -> None:
         """A primary mailbox from the Super Admin panel sends instead of the .env mailbox. Every switch and
