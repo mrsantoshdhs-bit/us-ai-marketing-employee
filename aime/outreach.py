@@ -29,6 +29,7 @@ TOPICS = {
     "bpa": "manual data entry", "sales_automation": "sales follow-ups", "leadgen_automation": "lead capture",
     "saas_dev": "your product roadmap", "custom_software": "internal tools", "ai_consulting": "AI adoption",
 }
+MAX_SUBJECT_CHARS = 70
 OPEN = ("pending", "awaiting_approval", "approved", "sending", "uncertain")
 STOP_STATUSES = ("replied", "interested", "meeting", "not_interested", "no_response", "unsubscribed", "bounced",
                  "stopped")
@@ -68,7 +69,7 @@ _JOB_TALK = re.compile(r"\b(?:salary|salaries|compensation|visa|sponsor\w*|citiz
 _NOT_ABOUT_THE_WORK = re.compile(r"\b(?:previously|prior to|formerly|holds? a|joined|alumni|prev\.|ph\.?d|co-?founder|founder|ceo|cto|served as|"
                                  r"career|graduated|made in|powered by|built with|copyright|all rights|cookies?|privacy|sign up|sign in|log in|"
                                  r"learn more|read more|click|book a|thank you|welcome to|introducing|contact us|subscribe)\b", re.I)
-MIN_QUOTE_WORDS, MAX_LIST_COMMAS = 5, 3
+MIN_QUOTE_WORDS, MAX_LIST_COMMAS, MAX_QUOTE_CHARS = 5, 3, 170
 
 
 def _sentences(text: str) -> list[str]:
@@ -108,7 +109,7 @@ def _has_word(sentence: str, keywords: list[str]) -> bool:
     return any(re.search(rf"(?<![a-z0-9]){re.escape(k.lower())}(?![a-z0-9])", low) for k in keywords)
 
 
-def short_quote(text: str, keywords: list[str] | None = None, max_len: int = 140) -> str:
+def short_quote(text: str, keywords: list[str] | None = None, max_len: int = MAX_QUOTE_CHARS) -> str:
     """From a job post: the first sentence that says what the company does, one with a keyword if there is one. Empty when
     no sentence is fit to quote: no email is better than one that quotes a job post's header back at its author."""
     fit = [s for s in _sentences(text) if _reads_as_prose(s) and not _JOB_TALK.search(s)]
@@ -117,7 +118,7 @@ def short_quote(text: str, keywords: list[str] | None = None, max_len: int = 140
     return _shortened(next((s for s in fit if keywords and _has_word(s, keywords)), fit[0]), max_len)
 
 
-def website_quote(text: str, keywords: list[str] | None = None, max_len: int = 140) -> str:
+def website_quote(text: str, keywords: list[str] | None = None, max_len: int = MAX_QUOTE_CHARS) -> str:
     """From a company's own pages: a sentence about its work with one of the keywords; without keywords, its description."""
     fit = [s for s in _sentences(text) if _reads_as_prose(s, ended=keywords is not None) and not _NOT_ABOUT_THE_WORK.search(s)]
     if keywords is not None:
@@ -185,6 +186,11 @@ def _addressed(lead: Lead, contact) -> tuple[str | None, str, str]:
     return company, team if inbox else f"Hi {contact.first_name.split()[0]},", f" at {company}" if company else ""
 
 
+def _subject(start: str, at_company: str) -> str:
+    """A long company name stays in the greeting: a subject over the limit would fail the quality checks."""
+    return start + at_company if len(start + at_company) <= MAX_SUBJECT_CHARS else start
+
+
 def draft_outreach(settings: Settings, step: int, lead: Lead, contact, evidence: list[Evidence]) -> tuple[str, str]:
     from aime.meetings import booking_minutes  # the length of the meeting the booking link offers
 
@@ -200,11 +206,11 @@ def draft_outreach(settings: Settings, step: int, lead: Lead, contact, evidence:
                "whether it is worth pursuing." if inbox else
                f"Would a {booking_minutes(settings)}-minute call next week be useful to see whether this could help {company}? "
                "If someone else looks after this, I would be grateful for a pointer.")
-        subject = f"Question about {topic}{at_company}"
+        subject = _subject(f"Question about {topic}", at_company)
         end = "" if line.endswith(('."', '!"', '?"')) else "."  # no doubled full stop after a quoted sentence
         body = f"{greeting}\n\n{line}{end}\n\n{brand.format(company=settings.company_name)}\n\n{ask}\n\n{_signature(settings)}"
     elif step == 2:
-        subject = f"Following up: {topic}{at_company}"
+        subject = _subject(f"Following up: {topic}", at_company)
         body = (f"{greeting}\n\nI wanted to follow up on my note about {topic}. If it is on your list this quarter, "
                 "I would be happy to walk through how we would approach it for your team. If not, no problem at all."
                 f"\n\n{_signature(settings)}")
@@ -221,7 +227,7 @@ def draft_reengage(settings: Settings, lead: Lead, contact) -> tuple[str, str]:
     promise not to write again."""
     _, greeting, at_company = _addressed(lead, contact)
     topic = TOPICS.get(lead.primary_service or "", "your operations")
-    subject = f"Checking back in: {topic}{at_company}"
+    subject = _subject(f"Checking back in: {topic}", at_company)
     body = (f"{greeting}\n\nA few months ago I wrote about {topic}{at_company}. Priorities change, so I wanted to "
             f"check in once: if you are looking at {topic} now, I would be glad to share how we would approach it. If "
             f"not, there is no need to reply, and I will not write again.\n\n{_signature(settings)}")
@@ -267,6 +273,10 @@ def set_status(session: Session, lead: Lead, status: str, actor: str, note: str 
                  type_="outreach", company_id=lead.company_id, lead_id=lead.id)
 
 
+def delivered_to_prospect(f: FollowUp) -> bool:
+    return not f.delivered_to or not f.to_email or f.delivered_to.lower() == f.to_email.lower()
+
+
 def record_delivery(session: Session, f: FollowUp, sent_at, delivered_to: str | None, actor: str) -> None:
     """What a delivered email changes, whether the send succeeded or a person confirmed it ("mark sent"): the
     follow-up, the lead's last activity, and the outreach stage that lets the next step be drafted."""
@@ -274,6 +284,8 @@ def record_delivery(session: Session, f: FollowUp, sent_at, delivered_to: str | 
     f.delivered_to = delivered_to or f.delivered_to
     f.delivery_status = f.delivery_status if f.delivery_status in ("bounced", "replied") else "sent"
     lead = f.lead
+    if not delivered_to_prospect(f):
+        return  # test mode: it went to our own address, so the prospect has heard nothing from us
     lead.last_activity_at = sent_at
     if f.kind == "outreach" and lead.outreach_status in (None, "drafted", "approved", "reengage"):
         set_status(session, lead, "contacted", actor)

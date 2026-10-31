@@ -13,7 +13,7 @@ from aime.agents.base import BaseAgent
 from aime.crm_ops import is_suppressed, log_activity
 from aime.matching import seeks_external_help
 from aime.models import Activity, Company, Contact, FollowUp, InboundInquiry, Lead, Signal
-from aime.scoring import LeadFacts, SignalFact, categorize, score_lead
+from aime.scoring import LeadFacts, categorize, read_company, score_lead, signal_fact
 from aime.timeutil import utcnow
 
 
@@ -77,18 +77,15 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
             payload = inquiry.payload if inquiry else {}
             facts = LeadFacts(
                 source=lead.source,
-                industry=company.industry,
                 target_industries=targets,
-                state=company.state,
-                country=company.country,
+                **read_company(company, signals),
                 has_website=bool(company.website or company.domain),
                 employee_range=company.employee_range,
                 verified=company.verified,
                 is_competitor=company.is_competitor,
                 suppressed=is_suppressed(session, contact.email if contact else None, company.domain),
                 contact_consent=contact.consent_status if contact else None,
-                signals=[SignalFact(s.signal_type, list(s.matched_services or []), s.strength, s.observed_at,
-                                    bool(s.source_url)) for s in signals],
+                signals=[signal_fact(s) for s in signals],
                 explicit_services=list(payload.get("services_interested") or []),
                 stated_timeline=bool(payload.get("timeline")),
                 stated_budget=bool(payload.get("budget")),

@@ -13,8 +13,8 @@ from aime.site_reader import SiteReader, parse_page
 from aime.website_check import check_website, page_title, read_robots, site_name
 
 
-@pytest.mark.parametrize("address", ["127.0.0.1", "10.1.2.3", "172.16.0.9", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0",
-                                     "224.0.0.1", "::1", "fe80::1", "fc00::1", "::ffff:127.0.0.1", "::ffff:192.168.1.1", "not an address"])
+@pytest.mark.parametrize("address", ["127.0.0.1", "10.1.2.3", "172.16.0.9", "192.168.1.1", "169.254.169.254", "100.64.0.1", "224.0.0.1", "0.0.0.1",
+                                     "::1", "fe80::1", "fc00::1", "::ffff:127.0.0.1", "::ffff:192.168.1.1", "not an address"])
 def test_inside_addresses_are_not_public(address):
     assert not is_public_ip(address)
 

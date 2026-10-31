@@ -71,7 +71,7 @@ def company_to_address(name: str | None, website_title: str | None = None, domai
     """The name to write to the company itself. A web address used as a name gives way to the homepage's own spelling, or
     to its name part when that was written with capitals ("Zentro.com"). None when there is no name fit to write
     ("meetzentro.com" with no title, "AI x Healthcare Startup"): a greeting says "team" rather than guess."""
-    name = " ".join((name or "").split())
+    name = " ".join((name or "").split()).rstrip(" .,")  # "Acme Inc." would read "Hello Acme Inc. team,"
     inner = domain_part_of_name(name)
     if inner:
         return name_from_title(website_title, domain or name) or (inner if any(c.isupper() for c in inner) else None)
@@ -91,15 +91,19 @@ def normalize_name(name: str) -> str:
     return " ".join(words)
 
 
+_DOMAIN_PREFIXES = ("meet", "get", "try", "use", "join", "hello", "hey", "go", "with", "the", "my")
+
+
 def name_from_title(title: str | None, domain: str | None) -> str | None:
     """The company's own name from its homepage title ("Digital Hub Solution | The best ..."), only when one part of
     the title spells the domain's name ("digitalhubsolution.com"). None when nothing matches: no name is guessed."""
     if not title or not domain:
         return None
     label = re.sub(r"[^a-z0-9]", "", registrable_domain(domain).split(".")[0].lower())
+    bare = re.sub(rf"^(?:{'|'.join(_DOMAIN_PREFIXES)})(?=.{{3}})", "", label)  # "meetzentro.com" is the site of "Zentro"
     for part in re.split(r"\s+[|\-\u2013\u2014\u00b7\u2022]\s+|\s*:\s+", title):
         part = " ".join(part.split())
-        if label and 2 <= len(part) <= 80 and re.sub(r"[^a-z0-9]", "", part.lower()) == label:
+        if label and 2 <= len(part) <= 80 and re.sub(r"[^a-z0-9]", "", part.lower()) in (label, bare):
             return part
     return None
 
