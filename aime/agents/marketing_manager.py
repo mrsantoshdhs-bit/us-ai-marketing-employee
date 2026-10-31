@@ -139,15 +139,19 @@ class MarketingManagerAgent(BaseAgent[PlanInput, PlanOutput]):
             return (last_used.get(svc) or epoch, -(trend.get(svc) or 0), -(engagement.get(svc) or 0))
 
         ranked_services = sorted(services, key=svc_key)
-        if trend:
-            top = max(trend.items(), key=lambda kv: kv[1])
-            rationale.append(f"Trending public discussion favours {top[0]} ({top[1]} recent stories).")
+        posts = int(s.section("content").get("posts_per_week", 3))
+        # Trend only breaks a tie between services equally due, so the plan says so only where it changed which service a
+        # brief is about: this run's order against the order without it.
+        untrended = sorted(services, key=lambda svc: (last_used.get(svc) or epoch, -(engagement.get(svc) or 0)))
+        for used_trend, without in zip(ranked_services[:posts], untrended[:posts], strict=False):
+            if used_trend != without:
+                rationale.append(f"Trending public discussion favours {used_trend} ({trend.get(used_trend, 0)} recent stories).")
+                break
 
         # ---- Campaign
         campaign = self._ensure_campaign(session, today, ranked_services[0], focus_industries[0], rationale)
 
         # ---- Briefs
-        posts = int(s.section("content").get("posts_per_week", 3))
         briefs: list[ContentBrief] = []
         for i in range(posts):
             svc = ranked_services[i % len(ranked_services)]
