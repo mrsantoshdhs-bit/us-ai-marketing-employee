@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections import defaultdict
 from collections.abc import Callable
@@ -193,16 +194,30 @@ def write_heartbeat(settings: Settings, info: dict) -> None:
     check-in: the last time a run happened in the background session (scheduled to run while signed out)."""
     path = heartbeat_path(settings)
     payload = {"at": utcnow().isoformat() + "Z", "session": session_kind(), **info}
-    previous = (read_heartbeat(settings) or {}).get("last_background_at")
+    previous = (_beat_file(settings) or {}).get("last_background_at")
     payload["last_background_at"] = payload["at"] if payload["session"] == "background" else previous
-    path.write_text(json.dumps(payload, default=str, indent=2), encoding="utf-8")
+    try:
+        path.write_text(json.dumps(payload, default=str, indent=2), encoding="utf-8")
+    except OSError:  # read-only, held by another program, a full disk: a missing check-in is reported, the work goes on
+        logging.getLogger("aime.monitoring").warning("Could not write the heartbeat file %s", path, exc_info=True)
 
 
-def read_heartbeat(settings: Settings) -> dict | None:
+def _beat_file(settings: Settings) -> dict | None:
     path = heartbeat_path(settings)
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        beat = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return beat if isinstance(beat, dict) else None
+
+
+def read_heartbeat(settings: Settings) -> dict | None:
+    """The last check-in, or None. A file of any other shape counts as none, so every reader may rely on "at"."""
+    beat = _beat_file(settings)
+    try:
+        when = datetime.fromisoformat(beat["at"].rstrip("Z"))
+    except (TypeError, KeyError, ValueError, AttributeError):
+        return None
+    return beat if when.tzinfo is None else None

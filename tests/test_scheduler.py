@@ -154,6 +154,26 @@ def test_dashboard_task_starts_nothing_when_running_or_in_maintenance(tmp_path, 
     assert task.main() == 0 and started == [["serve"]]
 
 
+def _gives_pages(srv) -> None:
+    """A thread that answers every connection with a page: since Phase 2 only a page counts as the dashboard answering."""
+    import threading
+
+    def serve():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            with conn:
+                conn.settimeout(5)
+                try:
+                    conn.recv(4096)
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                except OSError:
+                    pass
+    threading.Thread(target=serve, daemon=True).start()
+
+
 def test_watchdog_reports_a_stopped_dashboard():
     import importlib.util
     import socket
@@ -165,6 +185,7 @@ def test_watchdog_reports_a_stopped_dashboard():
         port = srv.getsockname()[1]
         assert "not running" in wd.dashboard_problem(port=port)  # bound but not listening: refused
         srv.listen()
+        _gives_pages(srv)
         assert wd.dashboard_problem(port=port) is None
 
 
@@ -260,7 +281,11 @@ def test_watchdog_gives_a_dashboard_that_is_still_starting_time_to_answer():
     with socket.socket() as srv:
         srv.bind(("127.0.0.1", 0))
         port = srv.getsockname()[1]
-        fake = FakeClock(on_sleep=lambda n: n == 2 and srv.listen())  # starts answering after the second pause
+        def start_answering(n):  # after the second pause
+            if n == 2:
+                srv.listen()
+                _gives_pages(srv)
+        fake = FakeClock(on_sleep=start_answering)
         assert wd.dashboard_problem(port=port, wait_seconds=wd.DASHBOARD_GRACE_SECONDS, sleep=fake.sleep,
                                     clock=fake.clock) is None
         assert fake.sleeps == 2

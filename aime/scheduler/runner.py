@@ -21,7 +21,7 @@ from pathlib import Path
 from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
 
-from aime import automation, maintenance, process_priority
+from aime import automation, clock_check, maintenance, process_priority
 from aime.config import Settings
 from aime.context import AppContext
 from aime.models import AgentRun, JobRun, JobState
@@ -37,6 +37,8 @@ MAX_DAILY_RETRIES = 3
 ABANDON_AFTER = timedelta(hours=2)  # Task Scheduler kills a tick after 1 hour
 ORPHAN_AFTER = timedelta(minutes=10)  # a 'running' row whose job lock has no live owner is abandoned after this
 CLOCK_SKEW = timedelta(minutes=5)  # a recorded time further ahead of now than this comes from a clock that was wrong
+UNREADABLE_LOCK_SECONDS = 10  # between creating a lock file and writing it; a file empty for longer was cut short
+PID_START_SLACK = 5  # seconds: a process that started this much after its lock was written did not write it
 WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
@@ -181,6 +183,50 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+def pid_started(pid: int) -> float | None:
+    """When this process started (seconds since 1970), or None when that cannot be told."""
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return None
+        try:
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if not kernel32.GetProcessTimes(wintypes.HANDLE(handle), *[ctypes.byref(t) for t in times]):
+                return None
+            ticks = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime  # 100 ns since 1601
+            return ticks / 10_000_000 - 11_644_473_600
+        finally:
+            kernel32.CloseHandle(wintypes.HANDLE(handle))
+    try:
+        return os.stat(f"/proc/{pid}").st_mtime
+    except OSError:
+        return None
+
+
+def lock_owner_gone(path: Path) -> bool:
+    """The process named in a lock file no longer holds it: it has ended, or Windows gave its number to a program that
+    started after the lock was written (usual after a power cut). A file with no readable owner (cut short by a power
+    cut) is dead once it is older than the moment between creating and writing it. Raises FileNotFoundError."""
+    age = _time.time() - path.stat().st_mtime
+    try:
+        pid = int(path.read_text(encoding="utf-8").split()[0])
+    except FileNotFoundError:
+        raise
+    except OSError:  # held by another program for a moment: nothing can be said
+        return False
+    except (ValueError, IndexError):
+        return age > UNREADABLE_LOCK_SECONDS
+    if not pid_alive(pid):
+        return True
+    started = pid_started(pid)
+    return started is not None and started > _time.time() - age + PID_START_SLACK
+
+
 class FileLock:
     """Cross-process lock file holding the owner's PID; recovered at once if the owner died."""
 
@@ -190,11 +236,7 @@ class FileLock:
         self.held = False
 
     def _owner_dead(self) -> bool:
-        try:
-            pid = int(self.path.read_text(encoding="utf-8").split()[0])
-        except (OSError, ValueError, IndexError):
-            return False
-        return pid != os.getpid() and not pid_alive(pid)
+        return lock_owner_gone(self.path)
 
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -208,9 +250,10 @@ class FileLock:
             except FileExistsError:
                 try:
                     age = _time.time() - self.path.stat().st_mtime
+                    gone = age > self.stale_seconds or self._owner_dead()
                 except FileNotFoundError:
                     continue
-                if age > self.stale_seconds or self._owner_dead():
+                if gone:
                     try:
                         self.path.unlink()
                     except FileNotFoundError:
@@ -229,14 +272,10 @@ class FileLock:
 
 
 def _lock_owner_gone(ctx: AppContext, job: str) -> bool:
-    path = ctx.settings.locks_dir / f"job_{job}.lock"
     try:
-        pid = int(path.read_text(encoding="utf-8").split()[0])
+        return lock_owner_gone(ctx.settings.locks_dir / f"job_{job}.lock")
     except FileNotFoundError:
         return True
-    except (OSError, ValueError, IndexError):
-        return False
-    return pid != os.getpid() and not pid_alive(pid)
 
 
 def recover(ctx: AppContext, now: datetime | None = None) -> dict:
@@ -261,6 +300,27 @@ def recover(ctx: AppContext, now: datetime | None = None) -> dict:
                                                   | AgentRun.job_run_id.in_(ids or [-1])).values(
             status="abandoned", error="Process ended before the agent finished")).rowcount
     return {"abandoned_jobs": len(dead), "abandoned_agent_runs": agents}
+
+
+def _recover_if_free(ctx: AppContext, now: datetime | None = None) -> dict:
+    """recover() always writes. A database locked past its timeout just then must not lose the work: the next tick closes
+    those runs out."""
+    try:
+        return recover(ctx, now)
+    except OperationalError as exc:
+        log.warning("Could not close out earlier runs now: %s", exc)
+        return {"abandoned_jobs": 0, "abandoned_agent_runs": 0, "error": "database busy"}
+
+
+def _note_mailbox_secrets(ctx: AppContext) -> None:
+    """One alert while a mailbox's stored password cannot be read. It must never stop the job."""
+    from aime import mail_accounts
+
+    try:
+        with ctx.db.session() as s:
+            mail_accounts.alert_unreadable(s, ctx.settings)
+    except Exception:  # noqa: BLE001 - keep the scheduler alive no matter what
+        log.exception("Could not check the mailbox passwords")
 
 
 def _same_slot_failures(ctx: AppContext, name: str, state: JobState, started: datetime) -> int:
@@ -312,7 +372,8 @@ def run_job(ctx: AppContext, name: str, trigger: str = "manual", *, allow_during
             return {"job": name, "status": "skipped",
                     "reason": f"automation {state.replace('_', ' ')} in the Automation Control Center"}
     if recover_runs:  # manual runs close out crashed runs too, not only scheduled ticks
-        recover(ctx)
+        _recover_if_free(ctx)
+    _note_mailbox_secrets(ctx)
     lock = FileLock(ctx.settings.locks_dir / f"job_{name}.lock")
     if not lock.acquire():
         return {"job": name, "status": "skipped", "reason": "already running"}
@@ -386,6 +447,25 @@ def _note_gap(ctx: AppContext, previous: dict | None, now: datetime) -> None:
         log.exception("Could not record: %s", message)
 
 
+def _clock_stops_this_tick(ctx: AppContext, previous: dict | None, trigger: str) -> str | None:
+    """An implausible clock (aime.clock_check): one alert, a check-in that says so, and no work on a wrong date. The real
+    clock, not a run's own `now`. Judging it must never stop the tick."""
+    try:
+        wrong = clock_check.problem(ctx, previous, utcnow())
+        if wrong:
+            write_heartbeat(ctx.settings, {"trigger": trigger, "pid": os.getpid(), "state": clock_check.HOLD_STATE,
+                                           "last_good_at": clock_check.anchor(ctx, previous)})
+        with ctx.db.session() as s:
+            if wrong:
+                alert_once(s, "error", "scheduler", wrong, ctx.settings, key=clock_check.ALERT_KEY)
+            elif previous and previous.get("state") == clock_check.HOLD_STATE:
+                resolve_alerts(s, (clock_check.ALERT_KEY,), set())
+        return wrong
+    except OperationalError as exc:
+        log.warning("Could not check the clock now: %s", exc)
+        return None
+
+
 def tick(ctx: AppContext, trigger: str = "scheduler", now: datetime | None = None) -> dict:
     window = maintenance.active(ctx.settings.data_dir)
     if window:
@@ -398,9 +478,12 @@ def tick(ctx: AppContext, trigger: str = "scheduler", now: datetime | None = Non
     ran: list[dict] = []
     try:
         previous = read_heartbeat(ctx.settings)
+        wrong = _clock_stops_this_tick(ctx, previous, trigger)
+        if wrong:
+            return {"status": "skipped", "reason": wrong, "ran": []}
         write_heartbeat(ctx.settings, {"trigger": trigger, "pid": os.getpid(), "state": "running"})
         _note_gap(ctx, previous, now or utcnow())
-        recovered = recover(ctx, now)
+        recovered = _recover_if_free(ctx, now)
         for spec, due, reason in due_jobs(ctx, now):
             if due:
                 write_heartbeat(ctx.settings, {"trigger": trigger, "pid": os.getpid(), "state": "running",

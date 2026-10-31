@@ -1,7 +1,7 @@
 """Online SQLite backups, verification, encrypted off-machine bundles, restore drills, WAL checkpoints.
 
 Local backups (data/backups/aime-*.db) are verified right after they are written. An optional off-machine
-copy is a zip bundle (database snapshot, publish journal, post images, config, manifest with SHA-256 per
+copy is a zip bundle (database snapshot, publish and sent journals, post images, config, manifest with SHA-256 per
 file) encrypted with AES-256-GCM under a key derived from BACKUP_PASSPHRASE (scrypt). The restore drill
 rebuilds a backup in a temporary folder and checks it; it never touches the live data folder.
 """
@@ -31,6 +31,9 @@ MAGIC = b"AIMEBAK1"
 OFFSITE_PREFIX = "aime-offsite-"
 OFFSITE_KEEP = 30
 MIN_PASSPHRASE = 12
+MIN_FREE_BYTES = 2 * 2**30
+DRILL_EVERY_DAYS = 7
+PREDEPLOY_KEPT = 5  # the newest pre-deploy copies, whatever BACKUP_KEEP_MANUAL says: what a rollback goes back to
 
 
 class BackupError(Exception):
@@ -41,37 +44,64 @@ def backup_sqlite_file(db_path: Path, backup_dir: Path, label: str = "auto") -> 
     """Consistent copy of a live database using SQLite's online backup API (safe while in use)."""
     backup_dir.mkdir(parents=True, exist_ok=True)
     target = backup_dir / f"aime-{label}-{datetime.now():%Y%m%d-%H%M%S}.db"
-    src = sqlite3.connect(str(db_path))
-    dst = sqlite3.connect(str(target))
+    partial = target.with_name(f"partial-{target.name}")  # a failed copy (a full disk) must not look like a backup
     try:
-        src.backup(dst)
-    finally:
-        dst.close()
-        src.close()
+        src = sqlite3.connect(str(db_path))
+        dst = sqlite3.connect(str(partial))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
+        partial.replace(target)
+    except BaseException:
+        for leftover in (partial, partial.with_name(partial.name + "-journal")):
+            try:
+                leftover.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
     return target
 
 
-def prune_manual_backups(backup_dir: Path, keep: int, min_age_days: int = 30, now=None) -> list[str]:
-    """Opt-in (BACKUP_KEEP_MANUAL > 0): keep the newest `keep` manual, pre-deploy and pre-migration copies, never
-    one younger than `min_age_days`, and never the automatic ones (they have their own rotation). Also clears empty
-    -wal/-shm files left beside copies. Returns the removed names."""
-    import time
-
+def prune_manual_backups(backup_dir: Path, keep: int, min_age_days: int = 30, now=None, keep_predeploy: int = 0) -> list[str]:
+    """BACKUP_KEEP_MANUAL > 0: keep the newest `keep` manual, pre-deploy and pre-migration copies, and the newest
+    `keep_predeploy` pre-deploy copies among them; never one younger than `min_age_days`, never the automatic ones (they
+    have their own rotation), and never the last copy that still verifies. Also clears empty -wal/-shm files left beside
+    copies. Returns the removed names."""
     if keep <= 0:
         return []
-    now = now or time.time()
-    manual = sorted((p for p in backup_dir.glob("aime-*.db") if not p.name.startswith("aime-auto-")),
-                    key=lambda p: p.stat().st_mtime)
     removed = []
-    for old in manual[:-keep]:
-        if now - old.stat().st_mtime >= min_age_days * 86400:
-            old.unlink()
-            removed.append(old.name)
+    for old in _manual_to_remove(backup_dir, keep, min_age_days, now, keep_predeploy):
+        for path in (old, old.with_name(old.name + "-wal"), old.with_name(old.name + "-shm")):  # with what lies beside it
+            if path.exists():
+                path.unlink()
+                removed.append(path.name)
+    return removed + _clear_empty_side_files(backup_dir)
+
+
+def _clear_empty_side_files(backup_dir: Path) -> list[str]:
+    removed = []
     for side in list(backup_dir.glob("aime-*.db-wal")) + list(backup_dir.glob("aime-*.db-shm")):
         if side.stat().st_size == 0:
             side.unlink()
             removed.append(side.name)
     return removed
+
+
+def _manual_to_remove(backup_dir: Path, keep: int, min_age_days: int, now, keep_predeploy: int) -> list[Path]:
+    now = now or time.time()
+    manual = sorted((p for p in backup_dir.glob("aime-*.db") if not p.name.startswith("aime-auto-")),
+                    key=lambda p: p.stat().st_mtime)
+    predeploy = [p for p in manual if p.name.startswith(("aime-pre-deploy-", "aime-predeploy-"))]
+    stays = {*manual[-keep:], *(predeploy[-keep_predeploy:] if keep_predeploy > 0 else [])}
+    remove = [p for p in manual if p not in stays and now - p.stat().st_mtime >= min_age_days * 86400]
+    if remove:  # newest first: normally the first one answers
+        others = sorted((p for p in backup_dir.glob("aime-*.db") if p not in remove), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not any(verify_backup(p)["ok"] for p in others):
+            last_good = next((p for p in reversed(remove) if verify_backup(p)["ok"]), None)
+            remove = [p for p in remove if p != last_good]
+    return remove
 
 
 def prune_backups(backup_dir: Path, label: str = "auto", keep: int = 14) -> int:
@@ -158,9 +188,10 @@ def create_bundle(settings, db_path: Path, out_dir: Path) -> Path:
         if not check["ok"]:
             raise BackupError(f"database snapshot failed verification: {check['integrity']}")
         members: list[tuple[str, Path]] = [("aime.db", snap)]
-        journal = settings.data_dir / "publish_journal.jsonl"
-        if journal.exists():
-            members.append(("publish_journal.jsonl", journal))
+        for name in ("publish_journal.jsonl", "sent_journal.jsonl"):
+            journal = settings.data_dir / name
+            if journal.exists():
+                members.append((name, journal))
         if settings.assets_dir.exists():
             members += [(f"assets/{p.name}", p) for p in sorted(settings.assets_dir.iterdir())
                         if p.suffix.lower() in (".png", ".jpg", ".jpeg")]
@@ -308,6 +339,56 @@ def latest_local_backup(backup_dir: Path) -> Path | None:
     return files[-1] if files else None
 
 
+def newest_good_backup(backup_dir: Path, skip: set[str] | None = None) -> Path | None:
+    """The newest copy that passes its check today. Checked now: a file can go bad after it was verified."""
+    files = sorted((p for p in backup_dir.glob("aime-*.db") if p.stat().st_size > 0 and p.name not in (skip or ())),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    return next((p for p in files if verify_backup(p)["ok"]), None)
+
+
+def integrity_of_file(path: Path) -> str:
+    """The integrity check of a closed database file, as text; "ok" when sound."""
+    return verify_backup(path)["integrity"]
+
+
+def free_space_problem(folder: Path, minimum: int = MIN_FREE_BYTES) -> str | None:
+    """Words for the owner when the disk is nearly full (backups, the database and the log files all fail there)."""
+    try:
+        free = shutil.disk_usage(folder).free
+    except OSError:
+        return None
+    if free >= minimum:
+        return None
+    return (f"Only {free / 2**30:.1f} GB is free on the disk holding {folder}. Under {minimum / 2**30:.0f} GB backups and the "
+            "database start to fail: free some space.")
+
+
+def weekly_restore_drill(ctx) -> dict | None:
+    """A job step, once a week: the newest local backup is restored into a temporary folder and checked. A file gone bad
+    is then found while a good copy is still there. None when it is not time yet."""
+    from aime.db import kv_get, kv_set
+    from aime.timeutil import utcnow
+
+    with ctx.db.session() as s:
+        last = kv_get(s, "backup.last_drill")
+    try:
+        if last and (utcnow() - datetime.fromisoformat(last)).days < DRILL_EVERY_DAYS:
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        result = restore_drill(ctx.settings)
+    except (BackupError, OSError) as exc:
+        result = {"ok": False, "source": None, "detail": str(exc)}
+    step = {"agent": "restore_drill", "status": "success" if result["ok"] else "failed", "output": result}
+    if result["ok"]:
+        with ctx.db.session() as s:
+            kv_set(s, "backup.last_drill", utcnow().isoformat())
+    else:
+        step["error"] = f"The weekly restore drill failed on {result.get('source')}: {result['detail']}"
+    return step
+
+
 def restore_drill(settings, source: Path | None = None, extract_to: Path | None = None) -> dict:
     """Restore a backup into a temporary folder and check it. The live data folder is never written.
 
@@ -321,6 +402,7 @@ def restore_drill(settings, source: Path | None = None, extract_to: Path | None 
             raise BackupError(f"{extract_to} already exists; choose a new folder")
         if target == settings.data_dir.resolve() or settings.data_dir.resolve() in target.parents:
             raise BackupError("extract outside the live data folder")
+    chosen = source
     source = source or latest_local_backup(settings.backups_dir)
     if source is None:
         return {"ok": False, "source": None, "detail": "no backup found"}
@@ -353,5 +435,8 @@ def restore_drill(settings, source: Path | None = None, extract_to: Path | None 
         if ok and extract_to is not None:
             shutil.copytree(work, extract_to)
             detail += f"; extracted to {extract_to}"
+        if not ok and chosen is None:  # the newest copy has gone bad: say which one to use instead
+            better = newest_good_backup(settings.backups_dir, skip={source.name})
+            detail += f"; the newest good copy is {better.name}" if better else "; no other copy passes its check"
     return {"ok": ok, "source": source.name, "detail": detail, "tables": check["tables"], "rows": check["rows"],
             "seconds": round(time.perf_counter() - t0, 2)}

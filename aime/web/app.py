@@ -29,7 +29,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from aime import maintenance
+from aime import maintenance, send_journal
 from aime.agents import AGENTS
 from aime.context import AppContext, get_context
 from aime.crm_ops import is_suppressed, log_activity, suppress
@@ -991,6 +991,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                                 EmailSender(C().settings).recipient_for(to)[0] if to else None, who(request))
                 msg = "Marked as sent (confirmed in your Sent folder)"
             elif action == "requeue" and f.status == "uncertain":
+                send_journal.record_released(C().settings.data_dir, f.id, f.to_email or (f.contact.email if f.contact else None))
                 f.status, f.send_started_at = "approved", None
                 f.blocked_reason = "Requeued after a person confirmed it was not delivered"
                 msg = "Requeued"

@@ -17,6 +17,9 @@ from aime.scoring import LeadFacts, SignalFact, categorize, score_lead
 from aime.timeutil import utcnow
 
 
+WRITE_BATCH = 50  # leads saved at a time: at about 5 ms a lead, a click waits a quarter of a second at most
+
+
 class QualifyInput(BaseModel):
     lead_ids: list[int] | None = None
     rescore_all: bool = False
@@ -139,6 +142,8 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
             if lead.status != prev_status:
                 log_activity(session, f"Lead {prev_status} → {lead.status} (score {result.total}, grade {result.grade})",
                              self.name, type_="status_change", company_id=company.id, lead_id=lead.id)
+            if out.scored % WRITE_BATCH == 0:  # the write lock is not held for the whole run: clicks wait for no one
+                session.commit()
         out.grade_counts = dict(grades)
         return out
 

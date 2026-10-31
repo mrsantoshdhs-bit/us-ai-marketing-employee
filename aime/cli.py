@@ -6,13 +6,17 @@ import argparse
 import json
 import os
 import shutil
+import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from aime.config import BASE_DIR, Settings
-from aime.context import create_context, set_context
+from aime.context import DatabaseMissing, create_context, set_context
 
 
 def _print(obj, quiet: bool = False) -> None:
@@ -91,8 +95,12 @@ class PathOnlyAccessLog:
     (OAuth callbacks), one-time setup links and messages with email addresses, which do not belong in a log file."""
 
     def filter(self, record) -> bool:
+        from aime.dashboard_probe import SELF_CHECK_QUERY
+
         args = getattr(record, "args", None)
         if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            if args[2].endswith(SELF_CHECK_QUERY):  # the dashboard asking itself, once a minute
+                return False
             record.args = (*args[:2], args[2].split("?", 1)[0], *args[3:])
         return True
 
@@ -110,6 +118,9 @@ def cmd_serve(args, ctx) -> int:
         print("Refusing to bind to a non-local address. The dashboard is a local tool; see docs/DEPLOYMENT.md.")
         return 2
     logging.getLogger("uvicorn.access").addFilter(PathOnlyAccessLog())
+    from aime.dashboard_probe import start_self_check
+
+    start_self_check(host, port, ctx.settings.data_dir)  # a hung dashboard ends itself, so that the task can start a new one
     # proxy_headers off: nothing sits in front of this local dashboard, so X-Forwarded-For is never trusted (it
     # would let any local program pick the address the inbound API's rate limit counts)
     uvicorn.run(create_app(ctx), host=host, port=port, log_level="info", proxy_headers=False)
@@ -523,6 +534,76 @@ def cmd_restore_drill(args, ctx) -> int:
     return 0 if result["ok"] else 1
 
 
+def cmd_restore(args, settings) -> int:
+    """Put a backup back. Runs without opening the database: it may be damaged, and is about to be replaced."""
+    from aime.restore import RestoreRefused, restore_database
+
+    source = Path(args.source)
+    if not args.confirm:
+        print(f"This replaces the database in {settings.data_dir} with {source}. A copy of the present one is kept in the backups "
+              "folder. Stop the dashboard first. Run again with --confirm.")
+        return 2
+    try:
+        done = restore_database(settings, source)
+    except RestoreRefused as exc:
+        print(f"Restore refused: {exc}")
+        return 1
+    print(f"Restored from {done['source']}.")
+    if done["kept"]:
+        print(f"The database it replaced is kept as {done['kept']} in the backups folder.")
+    print(f"Emails this database thinks are still to go, that the record of sent emails says already went: {len(done['already_sent'])} "
+          f"{done['already_sent'] or ''}. They will not be sent again; they are on Follow-ups for you to check.")
+    print(f"Approved emails waiting: {done['approved_waiting']}. Sending is ON HOLD: nothing goes out yet.")
+    for c in done["failing"]:
+        print(f"[FAIL] {c['name']}: {c['detail']}")
+    print("Next steps:\n"
+          "  1. Check your Sent folder for what went out after this backup, and read Follow-ups.\n"
+          "  2. Do-not-contact entries and edits made after the backup are gone; replies are read again from the mailbox.\n"
+          "  3. `python -m aime confirm-sending` lets approved emails go again.\n"
+          "  4. `python -m aime maintenance off` starts the scheduled work and the dashboard again.")
+    return 0
+
+
+def cmd_confirm_sending(args, ctx) -> int:
+    """A person has looked after a restore or a damaged database: approved emails may go again."""
+    from aime import automation, send_journal
+    from aime.backup import integrity_check
+    from aime.monitoring import resolve_alerts
+
+    held = send_journal.hold(ctx.settings.data_dir)
+    if held is None:
+        print("Sending is not on hold.")
+        return 0
+    print(f"The hold: {held['reason']}")
+    check = integrity_check(ctx.db)["integrity"]
+    with ctx.db.session() as s:
+        marked = send_journal.review_rows(s, send_journal.read(ctx.settings.data_dir), "recovery")
+        send_journal.record_confirmed(ctx.settings.data_dir, args.who, None if check == "ok" else check)
+        send_journal.clear_hold(ctx.settings.data_dir)
+        resolve_alerts(s, (send_journal.HOLD_ALERT,), set())
+        automation.audit(s, args.who, "sending_confirmed", "sending hold", held["reason"][:300])
+    if check != "ok":
+        print(f"WARNING: the database still fails its integrity check ({str(check)[:200]}). You have accepted this result; a "
+              "different one holds sending again.")
+    print(f"Sending may go on. {len(marked)} email(s) the record says already went stay on Follow-ups for a person; "
+          "every other approved email goes out on the next run, inside the send window.")
+    return 0
+
+
+def cmd_confirm_clock(args, ctx) -> int:
+    """The PC's clock is right, and the stop for an implausible clock ends."""
+    from aime import clock_check
+    from aime.monitoring import read_heartbeat, resolve_alerts
+    from aime.timeutil import fmt_local
+
+    now = clock_check.confirm(ctx, read_heartbeat(ctx.settings))
+    with ctx.db.session() as s:
+        resolve_alerts(s, (clock_check.ALERT_KEY,), set())
+    print(f"Clock accepted: {fmt_local(now)} here. The next check-in does the work that is due. If this time is wrong, correct "
+          "the clock now: work done on a wrong date cannot be taken back.")
+    return 0
+
+
 def cmd_maintenance(args, ctx) -> int:
     from aime import maintenance
 
@@ -652,6 +733,12 @@ def build_parser() -> argparse.ArgumentParser:
     au = sub.add_parser("automation", help="Pause, stop or emergency-stop the automation (works without the dashboard)")
     au.add_argument("action", choices=["status", "pause", "stop", "emergency-stop"])
     au.add_argument("--reason", default="from the command line")
+    rs = sub.add_parser("restore", help="Put a backup back in place of the database; refuses while anything is using it")
+    rs.add_argument("--from", dest="source", required=True, help="Backup .db, bundle .zip or encrypted .aimebak")
+    rs.add_argument("--confirm", action="store_true", help="required: the present database is replaced (a copy is kept)")
+    cs = sub.add_parser("confirm-sending", help="After a restore or a damaged database: a person has looked, emails may go")
+    cs.add_argument("--who", default="owner (command line)")
+    sub.add_parser("confirm-clock", help="The PC's clock is right: end the stop for an implausible clock")
     mt = sub.add_parser("maintenance", help="Pause scheduled ticks for upgrades (always expires)")
     mt.add_argument("action", choices=["on", "off", "status"])
     mt.add_argument("--hours", type=float, default=2.0)
@@ -698,9 +785,59 @@ COMMANDS = {
     "seed-demo": cmd_seed_demo, "doctor": cmd_doctor, "backup": cmd_backup, "maintenance": cmd_maintenance,
     "refresh-graphics": cmd_refresh_graphics, "backup-verify": cmd_backup_verify, "restore-drill": cmd_restore_drill,
     "user": cmd_user, "policy": cmd_policy, "simulate-reply": cmd_simulate_reply, "research-recheck": cmd_research_recheck,
-    "acceptance-report": cmd_acceptance_report,
+    "acceptance-report": cmd_acceptance_report, "confirm-sending": cmd_confirm_sending, "confirm-clock": cmd_confirm_clock,
 }
 PRODUCTION_DATA_DIR = BASE_DIR / "data"
+# These still work when the database is damaged or missing: they are how a person gets out of that.
+NEEDS_NO_DATABASE = ("maintenance", "restore-drill", "backup-verify")
+
+
+def _status_without_database(settings, problem: Exception) -> int:
+    from aime import maintenance
+    from aime.doctor import checks_without_database
+
+    print("Database:", checks_without_database(settings, problem)[0]["detail"])
+    window = maintenance.active(settings.data_dir)
+    print("Maintenance:", f"ACTIVE until {window['until']} ({window['reason']})" if window else "off")
+    return 1
+
+
+def _doctor_without_database(settings, problem: Exception) -> int:
+    from aime.doctor import checks_without_database
+
+    checks = checks_without_database(settings, problem)
+    for c in checks:
+        print(f"[{'PASS' if c['ok'] else ('FAIL' if c['severity'] == 'error' else 'WARN')}] {c['name']}: {c['detail']}")
+    return 1
+
+
+def _without_database(args, settings, problem: Exception) -> int:
+    """The database cannot be used. A command that can help still runs; any other says why, also where a person looks when
+    a scheduled task has failed in silence (the task runs with no console)."""
+    if args.cmd in NEEDS_NO_DATABASE:
+        print(f"NOTE: the database cannot be used ({redact_error(problem)}). See `python -m aime doctor`.")
+        return COMMANDS[args.cmd](args, SimpleNamespace(settings=settings, db=None))
+    if args.cmd == "doctor":
+        return _doctor_without_database(settings, problem)
+    if args.cmd == "status":
+        return _status_without_database(settings, problem)
+    message = (f"{args.cmd} was not run: the database cannot be used ({redact_error(problem)}). "
+               "Run `python -m aime doctor` for the next step.")
+    print(message)
+    try:
+        log = settings.logs_dir / "scheduler_crash.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n[{datetime.now().isoformat()}] {message}\n")
+    except OSError:
+        pass
+    return 2
+
+
+def redact_error(problem: Exception) -> str:
+    from aime.redact import redact
+
+    return redact(str(getattr(problem, "orig", None) or problem))[:300]
 
 
 def _console_safe() -> None:
@@ -731,7 +868,13 @@ def main(argv: list[str] | None = None) -> int:
             print("AIME_ENV_FILE is set but its AIME_DATA_DIR is the production data folder. An alternate settings file "
                   "must use its own data folder (set AIME_DATA_DIR in it). Nothing was run.")
             return 2
-    ctx = create_context(settings)
+    if args.cmd == "restore":
+        return cmd_restore(args, settings or Settings.load())
+    settings = settings or Settings.load()
+    try:
+        ctx = create_context(settings)
+    except (DatabaseMissing, SQLAlchemyError, sqlite3.Error) as exc:
+        return _without_database(args, settings, exc)
     set_context(ctx)
     return COMMANDS[args.cmd](args, ctx)
 
