@@ -266,7 +266,7 @@ def test_ok_full_journey_from_web_inquiry_to_handover_and_reports(make_ctx):
     assert perf(eva.get("/my").text, "eva")  # her last 30 days are on My work
     reports = ana.get("/reports")
     assert reports.status_code == 200 and tile(reports.text, "Deals won") == 1 and tile(reports.text, "Meetings booked") == 1
-    assert eva.get("/reports", follow_redirects=False).headers["location"] == "/my"  # org figures: not for her
+    assert eva.get("/reports", follow_redirects=False).headers["location"].startswith("/my?msg=")  # org figures: not for her
 
 
 # ================================================================== lead capture: wrong and missing input

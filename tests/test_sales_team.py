@@ -272,9 +272,10 @@ def test_approving_makes_the_approver_the_owner_only_if_they_work_leads(org):
 def test_organisation_dashboards_are_for_roles_that_see_everything(org):
     ctx, leads = org
     eva = client(ctx, "eva")
-    for path in ("/", "/manager", "/command-center", "/reports", "/agents", "/jobs", "/audit", "/system"):
-        r = eva.get(path, follow_redirects=False)
-        assert r.status_code == 303 and r.headers["location"] == "/my", path
+    assert eva.get("/", follow_redirects=False).headers["location"] == "/my"  # home is simply their home
+    for path in ("/manager", "/command-center", "/reports", "/agents", "/jobs", "/audit", "/system"):
+        r = eva.get(path, follow_redirects=False)  # the same place, now saying why
+        assert r.status_code == 303 and r.headers["location"].startswith("/my?msg="), path
     assert eva.get("/api/stats").status_code == 403
     page = eva.get("/my").text
     assert "My work" in page and 'href="/manager"' not in page and 'href="/reports"' not in page

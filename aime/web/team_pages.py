@@ -183,7 +183,13 @@ def register(app, C, render, back, who) -> None:
                 user.session_version = (user.session_version or 1) + 1  # new permissions from the next sign-in
             audit(s, who(request), "user_changed", f"user {user.username}",
                   f"{before} -> {(user.role, user.team_id, user.manager, user.skills, user.available, user.capacity)}"[:2000])
-        return back("/admin/users", f"Saved {user.username}")
+            away = ""
+            if before[4] is not False and not user.available:
+                from aime.assignment import open_work
+
+                away = (f". {user.username} gets no new leads now and still holds {open_work(s, user.username)}: that stays with them "
+                        "until a manager reassigns it on each lead's page")
+        return back("/admin/users", f"Saved {user.username}{away}")
 
     @app.post("/admin/users/{uid}/{action}", response_class=HTMLResponse)
     def user_action(request: Request, uid: int, action: str):

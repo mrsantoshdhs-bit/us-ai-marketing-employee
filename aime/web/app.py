@@ -33,10 +33,11 @@ from aime import clock_check, maintenance, send_journal
 from aime.agents import AGENTS
 from aime.agents.sales_workflow import SIGN_IN_ALERT
 from aime.context import AppContext, get_context
+from aime.assignment import owner_choices
 from aime.crm_ops import CONTACT_NOT_SUPPRESSED, is_suppressed, log_activity, suppress
 from aime.db import kv_get, kv_set, take_write_lock
 from aime.inbound import InboundPayload, record_inquiry
-from aime.integrations.email_smtp import POSTAL_PLACEHOLDER, EmailSender, compliance_problem
+from aime.integrations.email_smtp import POSTAL_PLACEHOLDER, EmailSender, compliance_footer, compliance_problem
 from aime import mail_accounts
 from aime.integrations import linkedin_leads, oauth
 from aime.integrations.linkedin import (POST_REF_RE, LinkedInAPIError, LinkedInClient, get_auth_status, get_token,
@@ -56,10 +57,11 @@ from aime.qc import summary as qc_summary
 from aime.reply_intel import skipped_mail as reply_skipped_mail
 from aime.outreach import REACHED_PROSPECT, STOPPABLE_STAGES, after_reopen, cancel_queued, record_delivery, reopen_refusal, reopen_stopped, sent_earlier
 from aime.outreach import set_status as set_outreach_status
-from aime.outreach import stop_sequence
+from aime.outreach import outreach_footer, stop_sequence
+from aime.pipeline import settle_next_steps
 from aime.qc.checks import run_quality_checks
 from aime.qc.email_checks import run_email_checks
-from aime.reply_intel import INTENT_LABELS, QUESTION_PLACEHOLDER
+from aime.reply_intel import INTENT_LABELS, QUESTION_PLACEHOLDER, reply_footer
 from aime.reply_intel import act as act_on_reply
 from aime.reply_intel import note_now as reply_note_now
 from aime.meetings import check_double_bookings, record_meeting, reopen_after_cancel
@@ -72,9 +74,9 @@ from aime.stages import move as move_stage
 from aime.web.team_pages import assignment_history, next_email
 from aime.web.team_pages import register as register_team_pages
 from aime.web.deal_pages import register as register_deal_pages
-from aime.visibility import (EVERYTHING, can_see_lead, company_condition, contact_condition, lead_condition,
+from aime.visibility import (EVERYTHING, ORG_PAGE_WORDS, can_see_lead, company_condition, contact_condition, lead_condition,
                              opportunity_condition, org_page, record_condition)
-from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username, make_cookie,
+from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username, form_id, make_cookie,
                            safe_next, same_text, session_secret, user_count, wants_page)
 
 log = logging.getLogger("aime.web")
@@ -188,6 +190,8 @@ PLAIN_SETTINGS = {
     "PUBLISHING_ENABLED=false": "publishing is switched off", "PUBLISHING_ENABLED=true": "publishing is switched on",
     "PUBLISHING_ENABLED": "the publishing switch",
     "MEETING_BOOKING_ENABLED=false": "booking is switched off", "MEETING_BOOKING_ENABLED": "the booking switch",
+    "no calendar is connected (CALENDAR_PROVIDER is not set)": "no calendar is connected",
+    "MEETING_BOOKING_ENABLED=false: meeting booking is switched off": "meeting booking is switched off",
     "CALENDAR_PROVIDER": "the calendar choice", "COMPANY_POSTAL_ADDRESS": "the company's postal address",
     "SMTP_HOST / SMTP_FROM missing": "no mail server or sender address is set",
     "SMTP_PASSWORD missing (the mailbox's app password)": "the mailbox password is missing",
@@ -205,6 +209,22 @@ def plain(text: str | None) -> str:
     def word(m: re.Match) -> str:
         return PLAIN_SETTINGS.get(m.group(0)) or m.group(0).split("=")[0].replace("_", " ").lower()
     return _SETTING.sub(word, _STATE_WORD.sub("", text or ""))
+
+
+# How a follow-up's Activity line is stored ("Follow-up #76 reject"; the send journal reads the word) and how a person reads it.
+_FOLLOWUP_LINE = re.compile(r"(Follow-up #\d+) ([a-z_]+)")
+_FOLLOWUP_WORDS = {"approve": "approved", "reject": "rejected", "save": "edited and saved", "reconfirm": "confirmed again",
+                   "mark_sent": "marked as sent", "requeue": "put back in the queue"}
+
+
+def activity_words(subject: str | None) -> str:
+    m = _FOLLOWUP_LINE.fullmatch(subject or "")
+    return f"{m.group(1)} {_FOLLOWUP_WORDS.get(m.group(2), m.group(2))}" if m else subject or ""
+
+
+def activity_line(a: Activity) -> str:
+    """An Activity row on one line, for the feeds: a note's own words, not just "Note". A sent email's body is not repeated."""
+    return f"{a.subject}: {a.body}"[:200] if a.body and a.type != "email_sent" else activity_words(a.subject)
 
 
 def owner_tz(settings):
@@ -275,7 +295,41 @@ def stage_reason(s, lead: Lead) -> str | None:
     said = s.execute(select(Activity.subject).where(Activity.lead_id == lead.id, Activity.type == "outreach",
                                                     Activity.subject.startswith(start, autoescape=True))
                      .order_by(Activity.id.desc()).limit(1)).scalar()
-    return said[len(start):].rstrip(")") if said else None
+    return said[len(start):].removesuffix(")") if said else None
+
+
+# "They replied" does not move these stages: an opt-out, a bounce, a no or a person's Stop stay closed; the others say more than "replied".
+CLOSED_ON_REPLY = ("unsubscribed", "bounced", "not_interested", "stopped")
+STAGE_STAYS_ON_REPLY = (*CLOSED_ON_REPLY, "interested", "meeting")
+ANSWERED_REPLIES = ("interested", "question", "objection", "referral", "other")
+
+
+def answers_to_keep(s, lead: Lead) -> set[int]:
+    """The drafted answers on this lead to an email a person really wrote. Never on a closed stage or to an address that opted
+    out or is suppressed: those are cancelled as before, and every send gate still applies to what stays."""
+    if lead.outreach_status in CLOSED_ON_REPLY:
+        return set()
+    kept = set()
+    for f in s.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email", FollowUp.kind == "response",
+                                              FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
+        real = s.execute(select(InboundEmail.id).where(InboundEmail.suggested_followup_id == f.id, InboundEmail.is_simulated.is_(False),
+                                                       InboundEmail.category.in_(ANSWERED_REPLIES))).first()
+        opted_out = (f.contact and f.contact.consent_status == "opted_out") or is_suppressed(s, f.to_email)
+        if real and not opted_out:
+            kept.add(f.id)
+    return kept
+
+
+# Reports are files written when they ran, read later on any screen: a wide table scrolls inside itself on a phone.
+REPORT_STYLE = ("@media (max-width:700px){body{margin:12px}table{display:block;overflow-x:auto;max-width:100%}"
+                "h1{font-size:20px}}a.report-back{display:inline-block;margin-bottom:8px}")
+REPORT_BACK = '<a class="report-back" href="/reports">&larr; Sales Analytics</a>'
+
+
+def report_page(html: str) -> str:
+    """A stored report as a page in the dashboard: a way back, the words a person reads, and it fits a phone. Old reports too."""
+    return (plain(html).replace("Marketing Report", "Sales Report")
+            .replace("</style>", f"{REPORT_STYLE}</style>", 1).replace("<body>", f"<body>{REPORT_BACK}", 1))
 
 
 def status_would_not_hold(s, lead: Lead) -> str | None:
@@ -313,7 +367,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     app.state.ctx = ctx
     limiter = InboundLimiter()
     app.add_middleware(AuthMiddleware, get_ctx=lambda: app.state.ctx or get_context(),
-                       error_page=lambda *args: error_page(*args))
+                       error_page=lambda *args: error_page(*args), org_refused=lambda: back("/my", ORG_PAGE_WORDS))
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(OriginCheckMiddleware)
     settings = (ctx or get_context()).settings
@@ -329,9 +383,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return fmt_local(dt, tz_name, fmt) if tz_name else stamp(dt, C().settings, fmt)
 
     env.filters.update(local=local_filter, et=fmt_et, service=service_name, industry=industry_label, safe_url=safe_url,
-                       tier=lead_tier, tier_reason=tier_reason, run_summary=run_summary, plain=plain, waited=waiting_for,
+                       tier=lead_tier, tier_reason=tier_reason, run_summary=run_summary, plain=plain, activity_words=activity_words, waited=waiting_for,
                        intent_label=lambda i: INTENT_LABELS.get(i or "", ""))
-    env.globals.update(org_page=org_page, describe_rule=am.describe_rule, ADDRESS_RULES=am.ADDRESS_RULES, SERVICES=SERVICES, INDUSTRIES=INDUSTRIES, STATES=US_REGIONS, STAGES=STAGES,
+    env.globals.update(org_page=org_page, ORG_PAGE_WORDS=ORG_PAGE_WORDS, describe_rule=am.describe_rule, ADDRESS_RULES=am.ADDRESS_RULES, SERVICES=SERVICES, INDUSTRIES=INDUSTRIES, STATES=US_REGIONS, STAGES=STAGES,
                        LEAD_STATUSES=LEAD_STATUSES)
 
     def C() -> AppContext:
@@ -705,9 +759,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             replies = s.execute(select(InboundEmail).where(InboundEmail.lead_id == lead.id)).scalars().all()
             assignments = assignment_history(s, lead.id)
             sc = scope(request)
-            # who this user may hand the lead to: anyone active (view_all), else their team
-            assignees = [u for u in s.execute(select(User.username).where(User.active.is_(True)).order_by(User.username)).scalars()
-                         if sc.all or u in sc.usernames]
+            # the company's history can hold a note on another lead of it: its words only for who may open that lead
+            others = {a.lead_id for a in acts if a.lead_id and a.lead_id != lead.id}
+            not_mine = {i for i in others if not can_see_lead(s, sc, i)}
+            # who this user may hand the lead to: anyone active who can work it (view_all), else their team
+            assignees = owner_choices(s, sc, lead.owner)
             # both directions in time order: what we sent (or may have sent) and what they wrote back
             thread = sorted([{"at": f.sent_at, "dir": "out", "subject": f.subject, "who": f.to_email, "text": f.body,
                               "status": f.status} for f in fups if f.channel == "email" and f.sent_at]
@@ -722,12 +778,14 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return render(request, "lead_detail.html", lead=lead, signals=signals, acts=acts, fups=fups, opps=opps,
                       people=people, research=research, meetings=meetings, withdrawn=withdrawn, thread=thread,
                       assignments=assignments, assignees=assignees, can_assign=can_assign, coming=coming, stage_why=stage_why,
-                      reopen_why=reopen_why)
+                      reopen_why=reopen_why, not_mine=not_mine)
 
     @app.get("/contacts", response_class=HTMLResponse)
-    def contacts_page(request: Request, confidence: str = "", role: str = "", reachable: str = ""):
+    def contacts_page(request: Request, confidence: str = "", role: str = "", reachable: str = "", contact: str = ""):
+        one = form_id(contact)  # one person, from search: whatever the source, within what this user may see
         with C().db.session() as s:
-            stmt = select(Contact).where(Contact.source.in_(("website", "sec_filing")), contact_condition(scope(request)))
+            stmt = select(Contact).where(Contact.id == one if one else Contact.source.in_(("website", "sec_filing")),
+                                         contact_condition(scope(request)))
             if reachable:
                 stmt = stmt.where(*USABLE_EMAIL)
             if confidence:
@@ -746,7 +804,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             by_status = dict(s.execute(select(Company.research_status, func.count(Company.id)).where(
                 Company.research_status.is_not(None), *open_companies).group_by(Company.research_status)).all())
         return render(request, "contacts.html", rows=rows, leads=leads, confidence=confidence, role=role, reachable=reachable,
-                      researched=researched, with_people=with_people, by_status=by_status)
+                      researched=researched, with_people=with_people, by_status=by_status, one=one)
 
     @app.post("/leads/{lead_id}/status")
     def lead_status(request: Request, lead_id: int, status: str = Form(...), note: str = Form("")):
@@ -776,19 +834,25 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/leads/{lead_id}/replied")
     def lead_replied(request: Request, lead_id: int):
+        """Stops the sequence. The drafted answer to an email they really wrote is not part of it and stays for a person to
+        decide (answers_to_keep). A stage that already says more than "replied", or that closes outreach, stays as it is."""
         with C().db.session() as s:
             lead = s.get(Lead, lead_id) or _404()
-            if lead.outreach_status:
-                stop_sequence(s, lead, "replied", "Contact replied (logged manually); sequence stopped", who(request))
+            kept = answers_to_keep(s, lead)
+            if lead.outreach_status and lead.outreach_status not in STAGE_STAYS_ON_REPLY:
+                set_outreach_status(s, lead, "replied", who(request), "Contact replied (logged manually); sequence stopped")
             for f in s.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
                                                       FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
-                f.status, f.blocked_reason = "cancelled", "Contact replied; sequence stopped"
+                if f.id not in kept:
+                    f.status, f.blocked_reason = "cancelled", "Contact replied; sequence stopped"
             for o in s.execute(select(Opportunity).where(Opportunity.lead_id == lead.id, Opportunity.stage == "new")).scalars():
                 move_stage(s, o, "discovery", who(request), "contact replied (logged manually)")
             lead.last_activity_at = utcnow()
-            log_activity(s, "Contact replied (logged manually); automated follow-ups stopped", who(request),
+            log_activity(s, "Contact replied (logged manually); automated follow-ups stopped"
+                         + ("; the drafted answer to their email stays" if kept else ""), who(request),
                          type_="reply", company_id=lead.company_id, lead_id=lead.id)
-        return back(f"/leads/{lead_id}", "Reply logged and sequence stopped")
+        return back(f"/leads/{lead_id}", "Reply logged and sequence stopped"
+                    + ("; the drafted answer to their email still waits on Follow-ups" if kept else ""))
 
     @app.get("/companies", response_class=HTMLResponse)
     def companies(request: Request, q: str = "", state: str = "", industry: str = "", page: int = 1):
@@ -849,7 +913,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 InboundEmail.received_at >= now - timedelta(days=7))).scalars() if r.id not in asked]
             ready, why = booking.ready(s, C().settings)
         return render(request, "meetings.html", upcoming=[m for m in rows if m.status == "scheduled" and m.ends_at >= now][::-1],
-                      past=[m for m in rows if not (m.status == "scheduled" and m.ends_at >= now)],
+                      ended=[m for m in rows if m.status == "scheduled" and m.ends_at < now],
+                      past=[m for m in rows if m.status != "scheduled"],
                       proposals=proposals, requests=requests, booking_ready=ready, booking_why=why,
                       slot_label=booking.label, slots_of=lambda p: [datetime.fromisoformat(x) for x in p.slots or []])
 
@@ -1086,6 +1151,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 company.name, company.name_set_by = new, who(request)
                 log_activity(s, f"Company name corrected by {who(request)}: {old} → {new}", who(request), type_="override",
                              company_id=company.id, lead_id=lead.id if lead else None)
+                # an open deal still named after the old name follows; one a person named differently, or a closed one, stays
+                for o in s.execute(select(Opportunity).where(Opportunity.company_id == company.id, Opportunity.stage.not_in(("won", "lost")))).scalars():
+                    if o.name == old or o.name.startswith(f"{old} "):
+                        was, o.name = o.name, f"{new}{o.name[len(old):]}"[:Opportunity.name.type.length]
+                        log_activity(s, f"Deal renamed with its company: {was} → {o.name}", who(request), type_="opportunity",
+                                     company_id=company.id, lead_id=o.lead_id, opportunity_id=o.id)
         return back(page, "Company name saved. Emails already waiting keep their words: edit those on Follow-ups")
 
     @app.post("/opportunities/{opp_id}")
@@ -1215,7 +1286,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 elif suppressed:  # checked on every approval, edited or not
                     return back(f"/followups#f{f.id}", "Cannot approve: this address is on the do-not-contact list")
                 elif problem := compliance_problem(C().settings, f.body or ""):
-                    return back(f"/followups#f{f.id}", f"Cannot approve: {problem}. Put the footer back first")
+                    # this email's own footer, word for word: outreach says why they hear from us, a reply does not
+                    footer = (outreach_footer(C().settings, f.contact) if f.kind == "outreach" else reply_footer(C().settings)
+                              if f.kind == "response" else compliance_footer(C().settings))
+                    return back(f"/followups#f{f.id}", f"Cannot approve: {problem}. Put the footer back first, at the end of the "
+                                                       f"email: {' '.join(footer.replace('---', '').split())}")
                 elif qc_status in ("held", "failed") and qc_override != "yes":
                     return back(f"/followups#f{f.id}", f"Quality checks {qc_status}: review the findings and tick "
                                                        "'I reviewed the quality findings' to approve")
@@ -1279,6 +1354,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 raise HTTPException(400, "Action not allowed in the current state")
             log_activity(s, f"Follow-up #{f.id} {action}", who(request), type_="followup", company_id=f.company_id,
                          lead_id=f.lead_id)
+            if f.lead_id and action in ("reject", "mark_sent"):
+                settle_next_steps(s, f.lead_id)
             if f.channel == "email" and action in ("approve", "reject", "mark_sent", "requeue"):
                 am.audit(s, who(request), f"email_{action}", f"follow-up #{f.id}",
                          f"{f.kind or 'email'} to {am.recipient(f) or 'no address'}: {(f.subject or '')[:120]}")
@@ -1610,8 +1687,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                         x for x in (c.domain, c.state, c.website_status) if x)) for c in companies]))
                 contacts = s.execute(select(Contact).where(contact_condition(scope(request)), or_(
                     full_name.like(like), func.lower(Contact.email).like(like), func.lower(Contact.title).like(like))).limit(12)).scalars().all()
+                # their lead when this user may open one (the lead they are the contact of first), else their own row
+                seen = s.execute(select(Lead).where(Lead.company_id.in_([c.company_id for c in contacts] or [0]), Lead.status != "merged",
+                                                    lead_condition(scope(request))).order_by(Lead.id)).scalars().all()
+                of_person, of_company = {x.contact_id: x.id for x in seen}, {x.company_id: x.id for x in seen}
                 groups.append(("Contacts", "users", [
-                    (c.display_name, "/contacts", " · ".join(x for x in (c.title, c.email, c.company.name if c.company else None) if x))
+                    (c.display_name, f"/leads/{lid}" if (lid := of_person.get(c.id) or of_company.get(c.company_id)) else f"/contacts?contact={c.id}",
+                     " · ".join(x for x in (c.title, c.email, c.company.name if c.company else None) if x))
                     for c in contacts]))
                 emails = s.execute(select(FollowUp).where(FollowUp.channel == "email",
                                                           record_condition(scope(request), FollowUp.lead_id), or_(
@@ -1872,7 +1954,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         path = Path(r.path_html)
         if not path.exists():
             raise HTTPException(404, "Report file missing")
-        return HTMLResponse(path.read_text(encoding="utf-8"))
+        return HTMLResponse(report_page(path.read_text(encoding="utf-8")))
 
     # ------------------------------------------------------------------ integrations
     # ------------------------------------------------------------------ Super Admin: mailboxes
@@ -2405,7 +2487,7 @@ def operations_view(ctx: AppContext, s) -> dict:
                          "sub": f"{(r.job or 'manual').replace('_', ' ')}{took}", "href": f"/agents/runs/{r.id}"})
     for a in s.execute(select(Activity).order_by(Activity.id.desc()).limit(10)).scalars():
         timeline.append({"at": a.created_at, "kind": "CRM", "icon": ACTIVITY_LOOK.get(a.type, ("sparkle",))[0],
-                         "status": "logged", "text": a.subject, "sub": f"by {a.actor}",
+                         "status": "logged", "text": activity_line(a), "sub": f"by {a.actor}",
                          "href": f"/leads/{a.lead_id}" if a.lead_id else None})
     for e in s.execute(select(AuditEvent).order_by(AuditEvent.id.desc()).limit(6)).scalars():
         timeline.append({"at": e.at, "kind": "Control", "icon": "sliders", "status": "control",
@@ -2984,7 +3066,7 @@ def dashboard_view(ctx: AppContext, s, days: int) -> dict:
         icon, tone, word = ACTIVITY_LOOK.get(a.type, ("sparkle", "slate", "Logged"))
         if a.type == "meeting" and "cancel" in a.subject.lower():
             word = "Cancelled"
-        feed.append({"at": a.created_at, "icon": icon, "tone": tone, "status": word, "title": a.subject,
+        feed.append({"at": a.created_at, "icon": icon, "tone": tone, "status": word, "title": activity_line(a),
                      "sub": " · ".join(x for x in (names.get(a.company_id), f"by {a.actor}") if x),
                      "href": f"/leads/{a.lead_id}" if a.lead_id else None})
     for r in s.execute(select(AgentRun).where(AgentRun.status != "running").order_by(AgentRun.id.desc()).limit(4)).scalars():

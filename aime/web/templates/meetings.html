@@ -1,4 +1,9 @@
 {% extends "base.html" %}
+{% macro outcome_form(m) %}<form class="filters" method="post" action="/meetings/{{ m.id }}/held" style="margin-top:6px">
+    <input name="notes" placeholder="Notes (optional)" style="flex:1">
+    <button>Held</button><button class="secondary" formaction="/meetings/{{ m.id }}/no_show">No-show</button>
+    <button class="danger" formaction="/meetings/{{ m.id }}/cancel">Cancelled</button>
+  </form>{% endmacro %}
 {% block title %}Meetings · AI Sales Employee{% endblock %}
 {% block content %}
 <h1>Meetings</h1>
@@ -8,7 +13,7 @@
   "record the outcome" task closes. Simulated bookings (testing only) are marked SIMULATED.
 </div>
 <h2 id="proposals">Meeting times offered</h2>
-<div class="card small">{% if booking_ready %}Free times come from your calendar. The email offering them waits for your approval; when the prospect answers, book the time they chose: it is checked against the calendar again, then one event is created.{% else %}Booking from your calendar is off: {{ booking_why }}. The booking link in replies works as before.{% endif %}</div>
+<div class="card small">{% if booking_ready %}Free times come from your calendar. The email offering them waits for your approval; when the prospect answers, book the time they chose: it is checked against the calendar again, then one event is created.{% else %}Booking from your calendar is off: {{ booking_why|plain }}. The booking link in replies works as before.{% endif %}</div>
 {% for p in proposals %}
 <div class="card">
   <strong>{{ p.lead.company.name }}</strong> · {{ p.prospect_email }} · <span class="pill">{{ p.status }}</span>
@@ -34,13 +39,19 @@
   {% if can_edit and not m.lead %}<form class="filters" method="post" action="/meetings/{{ m.id }}/link" style="margin-top:6px">
     <input name="lead_id" type="number" min="1" placeholder="Lead # (from the lead's page address)" required>
     <button class="secondary">Link to lead</button></form>{% endif %}
-  {% if can_edit %}<form class="filters" method="post" action="/meetings/{{ m.id }}/held" style="margin-top:6px">
-    <input name="notes" placeholder="Notes (optional)" style="flex:1">
-    <button>Held</button><button class="secondary" formaction="/meetings/{{ m.id }}/no_show">No-show</button>
-    <button class="danger" formaction="/meetings/{{ m.id }}/cancel">Cancelled</button>
-  </form>{% endif %}
+  {% if can_edit %}{{ outcome_form(m) }}{% endif %}
 </div>
 {% else %}<div class="card muted">No upcoming meetings.</div>{% endfor %}
+{% if ended %}<h2 id="ended">Ended: what happened?</h2>
+{% for m in ended %}
+<div class="card">
+  {% if m.is_simulated %}<span class="pill bad">SIMULATED</span> {% endif %}<strong>{{ m.starts_at|et }}</strong> · {{ m.title }}
+  · {{ m.invitee_name or '' }} &lt;{{ m.invitee_email }}&gt;
+  {% if m.lead %} · <a href="/leads/{{ m.lead_id }}">{{ m.lead.company.name }}</a>{% else %} · <span class="pill warn">not matched to a lead</span>{% endif %}
+  <span class="muted small">({{ m.source|replace('_', ' ') }})</span>
+  {% if can_edit %}{{ outcome_form(m) }}{% else %}<div class="small muted">Its outcome has not been recorded yet.</div>{% endif %}
+</div>
+{% endfor %}{% endif %}
 <h2>Past and cancelled</h2>
 <div class="card table-wrap"><table>
   <tr><th>When (ET)</th><th>Who</th><th>Company</th><th>Status</th><th>Source</th><th>Notes</th></tr>
