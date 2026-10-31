@@ -10,18 +10,27 @@ leads to nurture, and correcting the clock did not bring them back. So a check-i
 The stop never gets stuck: it ends by itself when the clock is corrected, and `aime confirm-clock` tells it the clock is
 right (a long holiday, or a clock that used to be wrong and left records in the future). The confirmation is a file
 outside the database, so restoring a backup does not undo it.
+
+A wrong clock under those limits passes the stop, so what web servers say is compared too: the Date header of the requests
+research and the website checks make anyway (aime.context; no request is made for it). Several servers that disagree with
+this PC by the same amount raise one warning naming the clock. Alert only: it stops nothing, and one wrong server, or a page
+kept by a cache, is not enough. The mail server's times are not used: a message's arrival time says nothing about a clock
+that runs ahead.
 """
 
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from sqlalchemy import func, select
 
+from aime.dedupe import registrable_domain
 from aime.models import JobRun
-from aime.timeutil import utcnow
+from aime.timeutil import to_naive_utc, utcnow
 
 GAP_LIMIT = timedelta(days=14)
 BACK_MARGIN = timedelta(minutes=5)  # a time-server correction is no reason to stop
@@ -30,6 +39,63 @@ HOLD_STATE = "clock_hold"
 FILENAME = "CLOCK_CONFIRMED.json"
 ADVICE = ("If the clock is wrong, correct it (Windows Settings, Date and time) and the work resumes by itself. If it is "
           "right, run `python -m aime confirm-clock`.")
+
+
+SERVERS_ALERT_KEY = "clock:servers"  # not under ALERT_KEY: closing the stop's alert closes everything that starts with it
+SERVER_LIMIT = timedelta(hours=1)
+SERVER_SPREAD = timedelta(minutes=10)  # a wrong clock is off by the same amount from every server; stale pages are not
+SERVERS_NEEDED = 2
+MAX_SERVERS = 200
+CONFIRM_QUIET = timedelta(hours=24)  # after `aime confirm-clock` a person has looked: servers do not reopen it for a day
+_servers: dict[str, timedelta] = {}  # this process's requests: this PC's clock minus what the server said, per site
+_servers_lock = threading.Lock()
+
+
+def note_server_date(host: str, date_header: str | None, age_header: str | None = None) -> None:
+    """A server's Date header against this PC's clock. Never raises: it runs inside every request. Age is how long a cache
+    has kept the page, whose Date is then that much older."""
+    try:
+        said = to_naive_utc(parsedate_to_datetime(date_header))
+        age = timedelta(seconds=int(age_header)) if age_header and age_header.strip().isdigit() else timedelta()
+        site = registrable_domain(host)
+    except Exception:  # noqa: BLE001 - a stranger's header: whatever it holds, the request goes on
+        return
+    with _servers_lock:
+        if site in _servers or len(_servers) < MAX_SERVERS:
+            _servers[site] = utcnow() - said - age
+
+
+def _agreeing(gaps: list[timedelta]) -> list[timedelta]:
+    """The largest group of the given gaps that lie close together."""
+    gaps = sorted(gaps)
+    best: list[timedelta] = []
+    for i, first in enumerate(gaps):
+        group = [g for g in gaps[i:] if g - first <= SERVER_SPREAD]
+        best = group if len(group) > len(best) else best
+    return best
+
+
+def check_servers(session, settings) -> None:
+    """Judge what this process's requests heard, then forget it. A warning needs at least two sites off by more than an hour
+    by the same amount, and more of them than sites that agree with this PC; it closes when two or more sites agree with it."""
+    from aime.monitoring import alert_once, resolve_alerts
+
+    with _servers_lock:
+        gaps = list(_servers.values())
+        _servers.clear()
+    wrong = _agreeing([g for g in gaps if abs(g) > SERVER_LIMIT])
+    right = sum(abs(g) <= SERVER_LIMIT for g in gaps)
+    confirmed = _parse(_confirmation(settings.data_dir).get("at"))
+    if confirmed is not None and timedelta() <= utcnow() - confirmed <= CONFIRM_QUIET:
+        resolve_alerts(session, (SERVERS_ALERT_KEY,), set())
+    elif len(wrong) >= SERVERS_NEEDED and len(wrong) > right:
+        gap = wrong[len(wrong) // 2]
+        hours = abs(gap).total_seconds() / 3600
+        alert_once(session, "warning", "scheduler", f"The PC's clock looks wrong: it is about {hours:.1f} hours "
+                   f"{'ahead of' if gap > timedelta() else 'behind'} the time {len(wrong)} web servers gave. Work goes on, but dates "
+                   f"on a wrong clock can move leads and emails. {ADVICE}", settings, key=SERVERS_ALERT_KEY)
+    elif right >= SERVERS_NEEDED and not wrong:
+        resolve_alerts(session, (SERVERS_ALERT_KEY,), set())
 
 
 def _parse(stamp) -> datetime | None:

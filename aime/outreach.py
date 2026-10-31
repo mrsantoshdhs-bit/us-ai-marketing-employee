@@ -15,13 +15,14 @@ from dataclasses import dataclass
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from aime.automation import audit
 from aime.config import Settings
 from aime.contact_validation import STATUS_OK
 from aime.crm_ops import is_suppressed, log_activity
-from aime.dedupe import company_to_address
+from aime.dedupe import company_to_address, domain_from_email
 from aime.integrations.email_smtp import compliance_footer
 from aime.knowledge.content_bank import BRAND_LINES
-from aime.models import Company, FollowUp, Lead, ResearchSnapshot, Signal
+from aime.models import Activity, Company, Contact, FollowUp, InboundEmail, Lead, ResearchSnapshot, Signal
 from aime.timeutil import utcnow
 
 TOPICS = {
@@ -311,3 +312,67 @@ def stop_sequence(session: Session, lead: Lead, status: str, reason: str, actor:
     if lead.outreach_status != "unsubscribed":
         set_status(session, lead, status, actor, reason)
     return cancelled
+
+
+ASKED_NOT_TO = "asked not to be contacted"  # how a stop that someone asked for is worded (aime.reply_intel)
+
+
+def reopen_refusal(session: Session, lead: Lead) -> str | None:
+    """Why this lead's stopped outreach may not be reopened, in words for a person, or None. The owner's rule: "Do not
+    reopen opted-out leads or restart outreach without explicit approval." Everything anyone at the company said about not
+    being contacted counts, not only what the lead's own contact said, and every doubt refuses."""
+    from aime.reply_intel import lead_on_hold  # here, not at import time: reply_intel imports this module
+
+    company: Company = lead.company
+    if lead.outreach_status in ("unsubscribed", "bounced"):
+        return f"its stage is {lead.outreach_status}, which stays closed"
+    if lead.outreach_status != "stopped":
+        return "only a lead whose outreach was stopped can be reopened"
+    if lead.status not in ("new", "qualified", "nurture"):
+        return f"the lead is {lead.status}"
+    if company.is_competitor:
+        return "the company is marked as a possible competitor"
+    people = list(session.execute(select(Contact).where(Contact.company_id == lead.company_id)).scalars())
+    if lead.contact is not None and lead.contact not in people:
+        people.append(lead.contact)
+    if any(p.consent_status == "opted_out" for p in people):
+        return "someone at this company has opted out"
+    if lead.contact is not None and lead.contact.email_status == "bounced":
+        return "the contact's email address bounced"
+    addresses = {p.email for p in people} | set(session.execute(select(FollowUp.to_email).where(FollowUp.lead_id == lead.id)).scalars())
+    addresses |= set(session.execute(select(InboundEmail.from_email).where(InboundEmail.lead_id == lead.id)).scalars())
+    if is_suppressed(session, domain=company.domain) or any(is_suppressed(session, a) for a in addresses if a):
+        return "an address or the domain of this lead is on the do-not-contact list"
+    # a colleague's "please remove us" stops every lead of the company, but only one of them holds the email
+    domains = {d.lower() for d in (company.domain, *(domain_from_email(p.email) for p in people)) if d}
+    about_company = [InboundEmail.lead_id == lead.id, InboundEmail.company_id == lead.company_id,
+                     *(func.lower(InboundEmail.from_email).endswith("@" + d, autoescape=True) for d in domains)]
+    if session.execute(select(InboundEmail.id).where(InboundEmail.category == "unsubscribe", or_(*about_company)).limit(1)).first():
+        return "someone at this company asked not to be contacted"
+    if session.execute(select(Activity.id).where(Activity.lead_id == lead.id,
+                                                 func.lower(Activity.subject).contains(ASKED_NOT_TO)).limit(1)).first():
+        return "someone at this company asked not to be contacted"
+    if session.execute(select(InboundEmail.id).where(InboundEmail.lead_id == lead.id, InboundEmail.category == "bounce",
+                                                     InboundEmail.status == "needs_review").limit(1)).first():
+        return "a delivery failure report on this lead waits for a person on Conversations"
+    if lead_on_hold(session, lead.id):
+        return "an email about this lead waits for review on Conversations, and it holds sending"
+    return None
+
+
+def reopen_stopped(session: Session, lead: Lead, actor: str, reason: str) -> str | None:
+    """A person with the right to approve puts a stopped lead back: "contacted" if an outreach email went out, otherwise no
+    stage. Nothing else: no email is approved, drafted or sent by this, and cancelled emails stay cancelled. Any next email is
+    drafted by the normal workflow and waits for a person's approval. Only the dashboard's button calls this. Returns why
+    not, with nothing changed, or None."""
+    refused = reopen_refusal(session, lead)
+    if refused:
+        return refused
+    sent = session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.kind == "outreach",
+                                                  FollowUp.status == "sent")).scalars().all()
+    stage = ("contacted" if any(delivered_to_prospect(f) for f in sent) else TEST_SENT) if sent else None
+    lead.outreach_status, lead.outreach_updated_at, lead.last_activity_at = stage, utcnow(), utcnow()
+    log_activity(session, f"Outreach: {(stage or 'no stage').replace('_', ' ')} (reopened by {actor}: {reason})", actor,
+                 type_="outreach", company_id=lead.company_id, lead_id=lead.id)
+    audit(session, actor, "outreach_reopen", f"lead #{lead.id}", f"{lead.company.name}; stage {stage or 'none'}; why: {reason}")
+    return None

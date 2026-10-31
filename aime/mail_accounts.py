@@ -320,4 +320,9 @@ def test_connection(session: Session, settings, a: MailAccount, http, actor: str
     detail = "; ".join(steps)
     a.last_test_at, a.last_test_ok, a.last_test_detail = now or utcnow(), ok, detail[:500]
     am.audit(session, actor, "mailbox_tested", f"mailbox #{a.id}", f"{a.email}: {'passed' if ok else 'failed'}")
+    if ok and a.is_primary and a.active:  # it signs in again: the mailbox that sends is no longer "refused". Sends nothing.
+        from aime.agents.sales_workflow import SIGN_IN_ALERT
+        from aime.monitoring import resolve_alerts
+
+        resolve_alerts(session, (SIGN_IN_ALERT,), set())
     return ok, detail

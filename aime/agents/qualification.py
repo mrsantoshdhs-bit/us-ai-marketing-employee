@@ -11,13 +11,14 @@ from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent
 from aime.crm_ops import is_suppressed, log_activity
+from aime.db import kv_get, kv_set
 from aime.matching import seeks_external_help
 from aime.models import Activity, Company, Contact, FollowUp, InboundInquiry, Lead, Signal
 from aime.monitoring import alert_once
 from aime.outreach import RUNNING_STAGES, set_status
 from aime.pipeline import clear_stage
 from aime.scoring import LeadFacts, categorize, read_company, score_lead, signal_fact
-from aime.timeutil import utcnow
+from aime.timeutil import as_aware_utc, local_tz, utcnow
 
 # Who writes the activity log besides people. People are recorded by user name, whatever the name is, so a name that is
 # not here counts as a person: an agent left off this list keeps a lead qualified, it never drops one.
@@ -28,6 +29,7 @@ NOT_A_PERSON = {"marketing_manager", "research", "company_research", "linkedin_c
 CLOSED_STAGES = ("not_interested", "no_response", "reengage")
 
 
+MOVED_TODAY = "qualification.moved_today"  # the day's running count behind the "Scoring moved" notice
 WRITE_BATCH = 50  # leads saved at a time: at about 5 ms a lead, a click waits a quarter of a second at most
 
 
@@ -71,6 +73,7 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
         out = QualifyOutput()
         grades: Counter[str] = Counter()
         moved: Counter[str] = Counter()
+        told: Counter[str] = Counter()
 
         for lead in leads:
             stale_cutoff = now - timedelta(hours=inp.stale_hours)
@@ -165,17 +168,28 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                              self.name, type_="status_change", company_id=company.id, lead_id=lead.id)
                 moved[lead.status] += 1
             if out.scored % WRITE_BATCH == 0:  # the write lock is not held for the whole run: clicks wait for no one
-                self._say_moved(session, moved)  # with the moves it counts: a run that fails later has still told someone
+                self._say_moved(session, moved, told)  # with the moves it counts: a run that fails later has still told someone
                 session.commit()
-        self._say_moved(session, moved)
+        self._say_moved(session, moved, told)
         out.grade_counts = dict(grades)
         return out
 
-    def _say_moved(self, session: Session, moved: Counter) -> None:
-        if moved:
-            words = ", ".join(f"{n} to {status}" for status, n in sorted(moved.items()))
-            alert_once(session, "info", self.name, f"Scoring moved {sum(moved.values())} lead(s): {words}. Each lead's page "
-                       "says why, and a wrong competitor flag can be cleared there.", self.settings, key="leads:moved")
+    def _say_moved(self, session: Session, moved: Counter, told: Counter) -> None:
+        """One notice a day that keeps the day's running count: a later run adds to it. `moved` is this run's own total so far,
+        and `told` how much of that the notice already has; the day's count is saved beside the moves, so they stand or fall
+        together."""
+        new = moved - told
+        if not new:
+            return
+        told.update(new)
+        day = as_aware_utc(utcnow()).astimezone(local_tz(self.settings.schedule.get("timezone"))).date().isoformat()
+        kept = kv_get(session, MOVED_TODAY) or {}
+        today = Counter(kept.get("moved") or {}) if kept.get("day") == day else Counter()
+        today.update(new)
+        kv_set(session, MOVED_TODAY, {"day": day, "moved": dict(today)})
+        words = ", ".join(f"{n} to {status}" for status, n in sorted(today.items()))
+        alert_once(session, "info", self.name, f"Scoring moved {sum(today.values())} lead(s) today: {words}. Each lead's page "
+                   "says why, and a wrong competitor flag can be cleared there.", self.settings, key="leads:moved")
 
     def _may_requalify(self, session: Session, lead: Lead, company: Company, signals: list[Signal],
                        prev_status: str) -> bool:

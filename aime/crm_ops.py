@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from aime.dedupe import clean_company_name, domain_from_email, find_duplicate, normalize_name
@@ -156,6 +156,16 @@ def is_suppressed(session: Session, email: str | None = None, domain: str | None
     return session.execute(select(Suppression.id).where(Suppression.value.in_(values))).first() is not None
 
 
+_ON_THE_LIST = select(Suppression.value).correlate(None)
+# is_suppressed for a query over contacts: the address, its domain, or its company's domain is on the do-not-contact list.
+# suppress() marks the contacts on file at that moment; one found later, or at another domain than its company's, is caught here.
+CONTACT_NOT_SUPPRESSED = and_(
+    func.lower(Contact.email).not_in(_ON_THE_LIST),
+    func.lower(func.substr(Contact.email, func.instr(Contact.email, "@") + 1)).not_in(_ON_THE_LIST),
+    or_(Contact.company_id.is_(None),
+        Contact.company_id.not_in(select(Company.id).where(func.lower(Company.domain).in_(_ON_THE_LIST)).correlate(None))))
+
+
 def suppress(session: Session, value: str, reason: str) -> None:
     value = value.strip().lower()
     if not value:
@@ -272,6 +282,8 @@ def merge_companies(session: Session, keeper: Company, dup: Company, actor: str)
     for attr in ("website", "domain", "state", "city", "industry", "employee_range", "description", "phone"):
         if not getattr(keeper, attr) and getattr(dup, attr):
             setattr(keeper, attr, getattr(dup, attr))
+    if dup.name_set_by and not keeper.name_set_by:  # a person's correction outlives the merge
+        keeper.name, keeper.name_set_by = dup.name, dup.name_set_by
     keeper.verified = keeper.verified or dup.verified
     if not keeper.source_record_id and dup.source_record_id:
         keeper.source_record_id = dup.source_record_id  # e.g. the SEC CIK, so officers are still looked up

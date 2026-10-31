@@ -183,7 +183,10 @@ def find_duplicate(session: Session, name: str, domain: str | None, state: str |
     norm = normalize_name(name)
     if not norm:
         return None
-    candidates = session.execute(select(Company).where(active, Company.normalized_name == norm)).scalars().all()
+    candidates = list(session.execute(select(Company).where(active, Company.normalized_name == norm)).scalars())
+    # a name a person corrected: normalized_name keeps what the sources called the company, so both names find the record
+    candidates += [c for c in session.execute(select(Company).where(active, Company.name_set_by.is_not(None))).scalars()
+                   if c not in candidates and normalize_name(c.name) == norm]
     for c in candidates:
         if domain and c.domain and c.domain != domain:
             continue  # same name, different website: different companies
