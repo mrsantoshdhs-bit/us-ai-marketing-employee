@@ -31,6 +31,8 @@ JOB_BOARD_DOMAINS = {
     "businessinsider.com", "crunchbase.com", "glassdoor.com", "indeed.com", "builtin.com", "levels.fyi",
     "hnhiring.com", "wikipedia.org", "arxiv.org", "apple.com", "facebook.com", "instagram.com", "tiktok.com",
     "dover.com", "teamtailor.com", "pinpointhq.com", "jobs.lever.co", "welcometothejungle.com", "otta.com",
+    "applytojob.com", "curriculo.me", "jazz.co", "jazzhr.com", "workday.com", "myworkdayjobs.com", "icims.com",
+    "paylocity.com", "gem.com", "ycombinator.co",
 }
 _MULTI_PART_TLDS = {"co.uk", "com.au", "co.in", "com.br", "co.jp"}
 # Hosting platforms give each customer a subdomain: there the full host is the company's site, not the platform.
@@ -46,6 +48,23 @@ def clean_company_name(name: str) -> str:
     cleaned = re.sub(r"\s*[(\[]?\s*(?:https?://|www\.)\S*", " ", name)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -|,;:([")
     return cleaned or name.strip()
+
+
+# A web address used as a name: "meetzentro.com", "Zentro.com", "www.zentro.io".
+_DOMAIN_NAME_RE = re.compile(r"^(?:www\.)?([a-z0-9][a-z0-9-]*)(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|ai|co|app|dev|xyz|so|tech|us|inc|health|bio|me)$",
+                             re.I)
+# A post's first words that describe rather than name: "Looking for a co-founder", "SaaS Startup", "AI x Healthcare Startup".
+_DESCRIPTION_RE = re.compile(r"^(?:looking|seeking|hiring|join|building|we|our)\b|\b(?:start-?up|stealth)$|\sx\s", re.I)
+
+
+def describes_rather_than_names(name: str) -> bool:
+    return bool(_DESCRIPTION_RE.search(name.strip(" .,-")))
+
+
+def domain_part_of_name(name: str) -> str | None:
+    """The name inside a web address used as a name ("Zentro.com" -> "Zentro"); None when it is not a web address."""
+    m = _DOMAIN_NAME_RE.match(name.strip())
+    return m.group(1) if m else None
 
 
 def normalize_name(name: str) -> str:

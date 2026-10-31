@@ -125,9 +125,17 @@ def competitor_evidence(own_words: str | None) -> str | None:
     return m.group(0) if m else None
 
 
+# The company asks for help. "Contractors" alone is usually someone's customers or trade: "software for HVAC contractors", "a
+# defense contractor", "(employees + contractors)".
 _EXTERNAL_HELP_RE = re.compile(
-    r"\bcontract(?:or|ors)\b|\bcontract (?:role|position|engineer|developer)s?\b|\bcontract-to-hire\b"
-    r"|\bfreelanc\w*|\b(?:agency|consulting|development|implementation) partners?\b|\bfractional\b",
+    r"\b(?:hiring|hire|seeking|looking for|need|open to|accepting|considering|work with|welcome)\s+(?:\w+\s+){0,2}"
+    r"(?:contractors?|freelancers?)\b"
+    r"|\b(?:contractors?|freelancers?)\s+(?:are\s+)?(?:welcome|ok|okay|considered|accepted|wanted|needed)\b"
+    r"|\bcontract (?:role|position|engineer|developer|work|basis)s?\b|\bcontract-to-hire\b|\b1099\b"
+    r"|\b(?:part[- ]time|full[- ]time)\s*(?:/|or|,)?\s*contract\b|\bcontract\s*(?:/|or)\s*full[- ]time\b"
+    r"|\bfreelance (?:role|position|engineer|developer|work|basis)s?\b"
+    r"|\b(?:agency|consulting|development|implementation) partners?\b"
+    r"|\b(?:hiring|hire|seeking|looking for|need)\s+(?:an?\s+)?fractional\b",
     re.IGNORECASE,
 )
 

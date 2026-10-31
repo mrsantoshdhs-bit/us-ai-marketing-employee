@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse
 
-from aime.dedupe import FREE_EMAIL_DOMAINS, is_job_board
-from aime.knowledge.geo import US_REGIONS
+from aime.dedupe import FREE_EMAIL_DOMAINS, describes_rather_than_names, is_job_board
+from aime.knowledge.geo import CITY_TO_STATE, US_REGIONS
 from aime.sources.base import CompanyCandidate
 
 ROLE_WORDS = {
@@ -16,6 +16,7 @@ ROLE_WORDS = {
     "the", "a", "an", "and", "etc", "us", "usa", "software", "frontend", "backend", "full-stack", "fullstack",
 }
 MIN_EVIDENCE_CHARS = 40
+_PLACES = {*CITY_TO_STATE, *(name.lower() for name in US_REGIONS.values()), "sf", "la", "remote", "usa", "united states"}
 
 
 def validate_candidate(c: CompanyCandidate) -> tuple[list[str], list[str]]:
@@ -30,6 +31,10 @@ def validate_candidate(c: CompanyCandidate) -> tuple[list[str], list[str]]:
     words = set(re.findall(r"[a-z][a-z\-]*", name.lower()))
     if words and words <= ROLE_WORDS:
         problems.append("name looks like a job title, not a company")
+    elif describes_rather_than_names(name):
+        problems.append("name is a description, not a company")
+    elif name.lower().strip(" .,") in _PLACES:
+        problems.append("name is a place, not a company")
     if c.state and c.state not in US_REGIONS:
         problems.append("invalid US state")
     scheme = urlparse(c.source_url or "").scheme
