@@ -18,7 +18,7 @@ from aime.permissions import permissions_of
 from aime.timeutil import utcnow
 from aime.visibility import can_see_lead, scope_for
 from aime.web.app import activity_words
-from tests.test_inbound_sales import TUESDAY_11AM_ET
+from tests.test_inbound_sales import TUESDAY_11AM_ET, FakeSMTP
 from tests.test_inbox import DAVID, FakeIMAP, contacted, mail, run_inbox
 from tests.test_outreach import lead_of
 from tests.uat.test_uat_email import ORIGIN, web
@@ -484,3 +484,22 @@ def test_an_approve_refused_for_a_removed_footer_shows_what_to_put_back(make_ctx
     said = unquote(r.headers["location"])
     assert "Cannot approve" in said and 'reply with "unsubscribe"' in said and ctx.settings.company_postal_address in said
     assert [st for i, st in answer_of(ctx, lead_id) if i == fid] == ["awaiting_approval"]
+
+
+# ------------------------------------------------------------------ the independent review
+def test_they_replied_cancels_an_approved_answer_and_nothing_is_sent(make_ctx):
+    ctx, sender, sent = contacted(make_ctx)
+    FakeIMAP.messages = {1: mail(f"David Chen <{DAVID}>", f"Re: {sent.subject}", "Sounds good, can we talk on Thursday?",
+                                 in_reply_to=sent.message_id)}
+    run_inbox(ctx)
+    lead_id = lead_of(ctx).id
+    fid = answer_of(ctx, lead_id)[0][0]
+    client = web(ctx)
+    assert client.post(f"/followups/{fid}/approve", headers=ORIGIN, follow_redirects=False).status_code == 303
+    r = client.post(f"/leads/{lead_id}/replied", headers=ORIGIN, follow_redirects=False)
+    said = unquote(r.headers["location"])
+    assert "still waits" not in said and "will not go out" in said
+    assert answer_of(ctx, lead_id) == [(fid, "cancelled")]
+    FakeSMTP.sent = []
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": (TUESDAY_11AM_ET + timedelta(days=1)).isoformat()})
+    assert FakeSMTP.sent == [] and answer_of(ctx, lead_id) == [(fid, "cancelled")]

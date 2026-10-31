@@ -304,13 +304,14 @@ ANSWERED_REPLIES = ("interested", "question", "objection", "referral", "other")
 
 
 def answers_to_keep(s, lead: Lead) -> set[int]:
-    """The drafted answers on this lead to an email a person really wrote. Never on a closed stage or to an address that opted
-    out or is suppressed: those are cancelled as before, and every send gate still applies to what stays."""
+    """The drafts still waiting for a person that answer an email someone really wrote. An approved one is not among them: it
+    would go out on the next job, after a person said to stop. Never on a closed stage or to an address that opted out or is
+    suppressed: all of those are cancelled as before, and approving what stays passes every gate."""
     if lead.outreach_status in CLOSED_ON_REPLY:
         return set()
     kept = set()
     for f in s.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email", FollowUp.kind == "response",
-                                              FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
+                                              FollowUp.status == "awaiting_approval")).scalars():
         real = s.execute(select(InboundEmail.id).where(InboundEmail.suggested_followup_id == f.id, InboundEmail.is_simulated.is_(False),
                                                        InboundEmail.category.in_(ANSWERED_REPLIES))).first()
         opted_out = (f.contact and f.contact.consent_status == "opted_out") or is_suppressed(s, f.to_email)
@@ -810,11 +811,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         with C().db.session() as s:
             lead = s.get(Lead, lead_id) or _404()
             kept = answers_to_keep(s, lead)
+            approved_gone = False
             if lead.outreach_status and lead.outreach_status not in STAGE_STAYS_ON_REPLY:
                 set_outreach_status(s, lead, "replied", who(request), "Contact replied (logged manually); sequence stopped")
             for f in s.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
                                                       FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
                 if f.id not in kept:
+                    approved_gone = approved_gone or (f.kind == "response" and f.status == "approved")
                     f.status, f.blocked_reason = "cancelled", "Contact replied; sequence stopped"
             for o in s.execute(select(Opportunity).where(Opportunity.lead_id == lead.id, Opportunity.stage == "new")).scalars():
                 move_stage(s, o, "discovery", who(request), "contact replied (logged manually)")
@@ -823,7 +826,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                          + ("; the drafted answer to their email stays" if kept else ""), who(request),
                          type_="reply", company_id=lead.company_id, lead_id=lead.id)
         return back(f"/leads/{lead_id}", "Reply logged and sequence stopped"
-                    + ("; the drafted answer to their email still waits on Follow-ups" if kept else ""))
+                    + ("; the drafted answer to their email still waits on Follow-ups" if kept else "")
+                    + ("; the answer already approved was cancelled and will not go out" if approved_gone else ""))
 
     @app.get("/companies", response_class=HTMLResponse)
     def companies(request: Request, q: str = "", state: str = "", industry: str = "", page: int = 1):
