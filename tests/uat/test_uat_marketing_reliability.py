@@ -1155,7 +1155,7 @@ def test_ok_empty_database_has_no_zero_division(ctx):
     res = _report(ctx)
     assert res.ok, res.error
     md = Path(res.output.path_md).read_text(encoding="utf-8")
-    assert "Reply rate (replies / outreach sent) | — | — |" in md
+    assert "Reply rate (leads who replied / leads contacted) | — | — |" in md
     with ctx.db.session() as s:
         assert build(s, utcnow() - timedelta(days=1), utcnow()).total.conversion is None
 
@@ -1249,8 +1249,8 @@ def test_ok_daily_report_figures_match_records_and_rerun_keeps_one_row(scenario)
     assert (k["meetings_booked_total"], k["meetings_held_total"], k["simulated_replies_total"], k["simulated_meetings_total"]) == (2, 1, 1, 1)
     assert (k["content_published_total"], k["content_awaiting_approval"]) == (2, 2)
     md = Path(res.output.path_md).read_text(encoding="utf-8")
-    assert "| Reply rate (replies / outreach sent) | — | 100% (3/3) |" in md
-    assert "| Interest rate (interested / replies) | — | 67% (2/3) |" in md
+    assert "| Reply rate (leads who replied / leads contacted) | — | 100% (2/2) |" in md
+    assert "| Interest rate (interested leads / leads who replied) | — | 100% (2/2) |" in md
     assert "SIMULATED test activity" in md
     assert _report(scenario, import_metrics=False).ok
     client = client_for(scenario)

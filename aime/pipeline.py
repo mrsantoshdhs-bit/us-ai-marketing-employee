@@ -47,20 +47,16 @@ def clear_stage(session: Session, lead: Lead, actor: str, why: str) -> None:
                      company_id=lead.company_id, lead_id=lead.id)
 
 
-def _close_finished_stages(session: Session, actor: str) -> int:
-    closed = 0
+def _close_finished_stages(session: Session, actor: str) -> None:
     for lead in session.execute(select(Lead).where(Lead.outreach_status.in_(("drafted", "approved")))).scalars().all():
         emails = session.execute(select(FollowUp.status).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email")).scalars().all()
         if not any(st in (*OPEN, "sent") for st in emails):
             clear_stage(session, lead, actor, "its email was cancelled")
-            closed += 1
     for lead in session.execute(select(Lead).where(Lead.outreach_status == "contacted", Lead.status == "disqualified")).scalars().all():
         set_status(session, lead, "stopped", actor, "the lead was disqualified")
-        closed += 1
-    return closed
 
 
-def _remind_about_drafts(session: Session, settings, actor: str) -> int:
+def _remind_about_drafts(session: Session, settings, actor: str) -> None:
     cfg = settings.section("followup")
     remind_after, fresh_days = int(cfg.get("draft_reminder_days", 2)), int(cfg.get("draft_fresh_days", 14))
     now = utcnow()  # the real clock, as created_at is: a run's own `now` may be set for its send window
@@ -77,7 +73,6 @@ def _remind_about_drafts(session: Session, settings, actor: str) -> int:
                    key=DRAFTS_ALERT)
     else:
         resolve_alerts(session, (DRAFTS_ALERT,), set())
-    return len(waiting)
 
 
 def pipeline_checks(session: Session, settings, now: datetime, actor: str) -> dict:
@@ -134,6 +129,6 @@ def pipeline_checks(session: Session, settings, now: datetime, actor: str) -> di
 
     stats["escalated"] = escalations(session, settings, now, actor)  # untouched deals: the owner's manager is told
     close_manual_notices(session)
-    stats["stages_closed"] = _close_finished_stages(session, actor)
-    stats["drafts_waiting"] = _remind_about_drafts(session, settings, actor)
+    _close_finished_stages(session, actor)
+    _remind_about_drafts(session, settings, actor)
     return stats
