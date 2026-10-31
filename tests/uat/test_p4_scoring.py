@@ -515,3 +515,22 @@ def test_the_suppression_refusal_promises_nothing_that_does_not_exist(make_ctx):
         s.add(Suppression(value="acme.example", kind="domain", reason="opt-out"))
     where = _set_status(ctx, lead_id, "qualified")
     assert "suppression list" in where and "no way to take" in where and "administrator" not in where
+
+
+@pytest.mark.parametrize("text, services", [
+    ("Backed by Benchmark, we help clinics with AI agents built on Anthropic.", ["ai_agents"]),
+    ("We raised $5M from Benchmark to replace our CRM with OpenAI tooling.", ["custom_crm", "ai_agents"]),
+    ("Funded by NIH to build a RAG chatbot using Claude.", ["ai_agents"]),
+    ("LLM workflow orchestration is the core of the job.", ["agent_orchestration"]),
+    ("Workflow orchestration of our agents.", ["agent_orchestration"]),
+    ("Pipelines and orchestration of AI agents.", ["agent_orchestration"]),
+])
+def test_real_need_beside_an_investor_or_a_workflow_is_kept(text, services):
+    found = [m.service_id for m in match_services(text)]
+    assert all(x in found for x in services), found
+
+
+@pytest.mark.parametrize("text", ["Backed by OpenAI and Anthropic, we make shoes.", "We are ex-Anthropic, METR, OpenAI people making shoes.",
+                                  "Investors include Benchmark, Anthropic and others."])
+def test_a_vendor_named_only_as_investor_or_past_employer_is_no_need(text):
+    assert "ai_agents" not in [m.service_id for m in match_services(text)]

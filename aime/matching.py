@@ -83,16 +83,13 @@ class ServiceMatch:
         return f"{SERVICES[self.service_id].name} ({self.confidence}): mentions {', '.join(self.keywords[:4])}"
 
 
+_NOT_OF_AGENTS = r"(?!\s+(?:of|for|across)\s+(?:\w+\s+){0,2}(?:agents?|llms?)\b)"
 # Words our keywords would catch that are no evidence of a need: a thing denied ("not LLMs"), what engineers use to write
 # code ("agentic coding", "Claude Code"), and engineering terms that share a word with a service ("test automation").
 _NOT_A_NEED_RE = re.compile(
     r"\b(?:not|no|non|without|beyond|rather than)[- ]+(?:an? )?(?:llms?|ai|gpt|genai|saas|crm|automation)\b"
     r"|\bbehind llms\b|\bwere not a saas\b|\bnot a saas\b"
     r"|\bnot an? (?:ml|ai|machine learning)\b[^.\n]{0,40}\b(?:position|role|job)\b"
-    r"|\b(?:backed by|funded by|investors? (?:include|including|like)|investment from|raised (?:\S+ )?from)\b[^.\n;:]{0,100}?"
-    r"\b(?:anthropic|openai|gpt|claude)\b"
-    r"|\b(?:ex|former|formerly(?: at)?|alumni of|alums? of|previously at)[- ]+(?:anthropic|openai)\b"
-    r"(?:[^.)\n;]{0,40}?\b(?:anthropic|openai)\b)?"
     r"|\bagentic (?:coding|engineering|development|tooling|practices|skills)\b"
     r"|\b(?:claude code|github copilot|coding (?:agents?|assistants?)|llm[- ]based tooling|ai[- ]assisted (?:coding|development)|"
     r"ai tools daily|ai coding tools?|ai ides?|claude or similar tools)\b"
@@ -100,8 +97,8 @@ _NOT_A_NEED_RE = re.compile(
     r"|\bcursor\s*(?:,|/|&|and|or)\s*(?:and |or )?(?:claude|copilot|chatgpt|codex|windsurf|gemini)\b"
     r"|\bapply via mcp\b"
     r"|\b(?:container|kubernetes|k8s|workload|infrastructure|service|terraform) orchestration\b"
-    r"|(?<!ai )(?<!agent )\b(?:workflow|data|pipeline|etl|batch|job)[- ]orchestration\b"
-    r"|\b(?:pipelines?|data services?),? (?:and )?orchestration\b|\borchestration in resource[- ]constrained\b"
+    r"|(?<!ai )(?<!agent )(?<!llm )(?<!agentic )\b(?:workflow|data|pipeline|etl|batch|job)[- ]orchestration\b" + _NOT_OF_AGENTS +
+    r"|\b(?:pipelines?|data services?),? (?:and )?orchestration\b" + _NOT_OF_AGENTS + r"|\borchestration in resource[- ]constrained\b"
     r"|\b(?:apache )?airflow\b|\bdagster\b|\bprefect\b|\btemporal\b"
     r"|\b(?:test|testing|qa|cloud|infrastructure|infra|build|deployment|deploy|ci/?cd|security|network|browser|e2e|home|"
     r"factory|lab|industrial|warehouse|robotics) automation\b|\bautomation engineers?\b"
@@ -110,11 +107,28 @@ _NOT_A_NEED_RE = re.compile(
 )
 
 
+_VENDOR_RE = re.compile(r"\b(?:anthropic|openai|gpt|claude)\b", re.I)
+# Inside the same clause only: "backed by Benchmark, Anthropic and others" names an investor; "backed by Benchmark, we build on
+# Anthropic" does not. Only the vendor's name goes, so whatever else the words say still counts.
+_CLAUSE = r"(?:(?!\b(?:to|we|with|using|built|build|for|that|our)\b)[^.\n;:]){0,100}?"
+_NAMED_ONLY_RE = re.compile(
+    r"\b(?:backed by|funded by|investors? (?:include|including|like)|investment from|raised (?:\S+ )?from)\b" + _CLAUSE
+    + r"\b(?:anthropic|openai|gpt|claude)\b(?:\s*(?:,|and|&)+\s*(?:anthropic|openai|gpt|claude)\b)*"
+    r"|\b(?:ex|former|formerly(?: at)?|alumni of|alums? of|previously at)[- ]+(?:anthropic|openai)\b"
+    r"(?:(?:(?!\b(?:to|we|with|using|built|build|for|that|our)\b)[^.)\n;]){0,40}?\b(?:anthropic|openai)\b)?",
+    re.IGNORECASE,
+)
+
+
+def _strip_no_evidence(lower: str) -> str:
+    return _NOT_A_NEED_RE.sub(" ", _NAMED_ONLY_RE.sub(lambda m: _VENDOR_RE.sub(" ", m.group(0)), lower))
+
+
 def match_services(text: str | None) -> list[ServiceMatch]:
     """Return services evidenced by the text, strongest first."""
     if not text:
         return []
-    lower = _NOT_A_NEED_RE.sub(" ", text.lower().replace("\u2019", "'"))
+    lower = _strip_no_evidence(text.lower().replace("\u2019", "'"))
     found: dict[str, list[tuple[str, int, list[tuple[int, int]]]]] = {}
     for svc in SERVICES.values():
         for kw, weight in [(k, 2) for k in svc.strong] + [(k, 1) for k in svc.weak]:
@@ -153,7 +167,7 @@ _NOT_AN_INDUSTRY_RE = re.compile(
 
 def _about_the_industry(text: str) -> str:
     """What a text says of the company's industry: what it denies or merely mentions does not count ("we're not a SaaS company")."""
-    return _NOT_AN_INDUSTRY_RE.sub(" ", _NOT_A_NEED_RE.sub(" ", text.lower().replace("’", "'")))
+    return _NOT_AN_INDUSTRY_RE.sub(" ", _strip_no_evidence(text.lower().replace("\u2019", "'")))
 
 
 def industry_evidenced(industry: str | None, text: str | None) -> bool:
