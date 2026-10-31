@@ -41,7 +41,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from aime.crm_ops import log_activity, suppress
-from aime.inbox import AUTO_SUBJECT, BOUNCE_SENDERS, below_header_copy, is_address, own_text, rest_of_reply
+from aime.inbox import AUTO_SUBJECT, BOUNCE_SENDERS, LARGE_MARK, below_header_copy, is_address, own_text, rest_of_reply
 from aime.llm.base import LLMError
 from aime.models import Alert, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity, SkippedMail
 from aime.notify import notify_event
@@ -193,8 +193,10 @@ LEGAL_MENTION = re.compile(r"\b(spam|lawyers?|attorneys?|legal|illegal|unlawful|
 OOO = re.compile(r"\b(out of (the )?office|on (vacation|holiday|leave)|limited access to (my )?email|"
                  r"will be back|returning on|away until|automatic reply)\b", re.I)
 CALENDLY = re.compile(r"calendly\.com", re.I)
-# Calendly's own subject, also forwarded ("Fwd: New Event: ..."); a reply ("Re: ...") never starts like this
-CALENDLY_NOTICE = re.compile(r"\s*(?:(?:fwd?|fw)\s*:\s*)*(?:new event|cancel+ed|rescheduled|updated)\s*:", re.I)
+# Calendly's own subject, also forwarded, in any mail program's language ("Fwd:", "WG:", "RV:", "TR:", "SV:", "AW:"); a reply in
+# English ("Re: ...") never starts like this. Whether a notice is believed is decided elsewhere, and this changes nothing of that.
+CALENDLY_NOTICE = re.compile(r"\s*(?:(?:fwd?|fw|wg|rv|tr|sv|aw)\s*:\s*)*(?:new event|cancel+ed|rescheduled|updated)\s*:", re.I)
+NO_REPLY = re.compile(r"(no-?reply|do-?not-?reply)", re.I)
 # Asking for a meeting, a call or a demo in everyday wording (and without the article: "schedule meeting").
 _TALK = r"(talk|chat|speak|meet|connect|discuss|catch up|hop on a call|jump on a call)"
 _THING = r"(time|meeting|call|demo|chat|session|appointment|slot|conversation|walkthrough|presentation)"
@@ -263,6 +265,8 @@ def recommended_for(row: InboundEmail) -> str | None:
     """What the lead should become, in words; a receipt is filed with the automatic replies but nobody is away."""
     if getattr(row, "mail_kind", None) == "receipt" and row.category == "out_of_office":
         return RECOMMENDED["receipt"]
+    if getattr(row, "mail_kind", None) == "calendar" and row.category == "other":
+        return RECOMMENDED["calendar"]
     return row.recommended_status
 
 
@@ -298,6 +302,7 @@ RECOMMENDED = {
     "out_of_office": "Wait until they are back",
     "receipt": "Nothing to do: the email arrived",
     "calendly": "Meeting booked: prepare for it",
+    "calendar": "Answer the invitation in your calendar and record the meeting: nothing is booked by itself",
     "other": "A person reviews it",
 }
 
@@ -924,6 +929,9 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             if "calendly.com/" in body.lower():
                 draft.purpose = "booking_link"
             notes.append("suggested reply waiting for your approval")
+            if row.reply_to and NO_REPLY.match(row.from_email or ""):
+                notes.append(f"this draft goes to a no-reply address, where nobody may read it. They ask for answers to go to "
+                             f"{row.reply_to}. Nothing goes there by itself: a person decides")
         row.status = "actioned" if row.confidence == "high" and row.category in ("interested", "not_interested") else "needs_review"
         if row.intent == "pricing_request":
             row.status = "needs_review"
@@ -934,6 +942,15 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         if opted_out:  # still suppressed: only a person can take that back
             row.status = "needs_review"
             notes.append("they opted out earlier and stay suppressed: a person decides")
+    if getattr(row, "mail_kind", None) == "calendar" and row.category == "other" and not row.is_simulated:
+        who = f"{row.from_email} ({row.lead.company.name})" if row.lead_id and row.lead else row.from_email
+        session.add(Alert(level="info", source="inbox", message=f"A calendar invitation or answer from {who}: please answer it in your "
+                          "calendar and record the meeting. Nothing is booked by itself. It is on Replies."[:500]))
+        notes.append("calendar invitation: a person answers it in their calendar and records the meeting; nothing is booked by itself")
+    if getattr(row, "in_junk", None):
+        notes.append("found in the mailbox's junk folder")
+    if LARGE_MARK in (getattr(row, "mail_note", None) or "") and row.status == "actioned":
+        row.status = "needs_review"  # what was done went by the part that was read
     if getattr(row, "mail_note", None) and row.mail_kind != "sending_problem":
         notes.append(row.mail_note)
     row.action_note = "; ".join(notes) or None

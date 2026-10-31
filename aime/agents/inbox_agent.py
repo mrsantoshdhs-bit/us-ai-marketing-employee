@@ -18,13 +18,14 @@ from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent, RetryPolicy
 from aime.db import kv_get, kv_set
-from aime.inbox import HEADER_LIMIT, NO_ADDRESS, Mailbox, ParsedEmail, new_text, parse_message
+from aime.inbox import HEADER_LIMIT, NO_ADDRESS, Mailbox, ParsedEmail, large_note, new_text, parse_headers, parse_message
 from aime.mail_auth import sender_signed
 from aime.meetings import check_double_bookings
 from aime.models import Alert, Contact, FollowUp, InboundEmail, SkippedMail
 from aime.monitoring import alert_once, resolve_alerts
-from aime.reply_intel import (BOOKING_NOTICE_DAYS, CALENDLY_NOTICE, UNSUBSCRIBE_SUBJECT, booking_links_without_notice, company_leads,
-                              forget_old_skipped_mail, process_pending, remembered_lead_id, sent_with_our_subject, subdomain_leads)
+from aime.reply_intel import (BOOKING_NOTICE_DAYS, CALENDLY_NOTICE, NO_REPLY, UNSUBSCRIBE_SUBJECT, booking_links_without_notice,
+                              company_leads, forget_old_skipped_mail, process_pending, remembered_lead_id, sent_with_our_subject,
+                              subdomain_leads)
 from aime.timeutil import utcnow
 
 
@@ -137,7 +138,10 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
 
         return auth_results(raw)
 
-    def _store(self, session: Session, key: str, raw: bytes, own: set[str], out: InboxOutput) -> None:
+    def _store(self, session: Session, key: str, raw: bytes, own: set[str], out: InboxOutput, large: int | None = None,
+               junk: bool = False) -> None:
+        """`large`: the size of an email read only as far as its start. `junk`: it came from the junk folder, where only sales
+        mail is kept and the rest leaves no trace (the folder would flood the list of skipped mail)."""
         p = parse_message(raw, own)
         # Our own mail is no reply, but a Calendly notice forwarded by hand from this mailbox is a notice.
         if p.from_email in own and not (CALENDLY_NOTICE.match(p.subject or "") and looks_like_calendly(p)):
@@ -146,13 +150,13 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         if p.message_id and session.execute(select(InboundEmail.id).where(
                 InboundEmail.message_id == p.message_id)).first():
             return
-        if self.settings.inbox_scope != "all" and not sales_related(session, p):
-            out.skipped_unrelated += 1  # read once (the mailbox position moves on): only who, what about and when is kept
-            if not session.execute(select(SkippedMail.id).where(SkippedMail.message_id == p.message_id)).first():
-                session.add(SkippedMail(mailbox_uid=key, message_id=p.message_id, from_email=p.from_email,
-                                        subject=p.subject, received_at=p.received_at))
+        # What decides may lie in the part of a large email that was not read: it is kept for a person, on what its headers say.
+        if (junk or self.settings.inbox_scope != "all") and not sales_related(session, p) and (junk or not (large and needs_the_body(session, p))):
+            if not junk:
+                self._note_unrelated(session, key, p, out)
             return
         authentication = self._authentication(raw, p)
+        note = " ".join(x for x in (large_note(large) if large else None, p.note) if x)
         session.add(InboundEmail(
             mailbox_uid=key, message_id=p.message_id,
             in_reply_to=p.bounced_message_id if p.is_bounce and p.bounced_message_id else p.in_reply_to,
@@ -160,8 +164,39 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
             subject=p.subject, received_at=p.received_at, body_text=p.body_text, new_text=new_text(p.body_text),
             auto_submitted=p.auto_submitted, bounced_addresses=p.bounced_addresses, status="new",
             auth_results=authentication, sender_verified=sender_signed(p.from_email, authentication),
-            mail_kind=p.kind, mail_note=p.note[:400] if p.note else None))
+            mail_kind=p.kind, mail_note=note[:400] or None, reply_to=p.reply_to, in_junk=junk or None))
         out.stored += 1
+
+    @staticmethod
+    def _note_unrelated(session: Session, key: str, p: ParsedEmail, out: InboxOutput) -> None:
+        out.skipped_unrelated += 1  # read once (the mailbox position moves on): only who, what about and when is kept
+        if not session.execute(select(SkippedMail.id).where(SkippedMail.message_id == p.message_id)).first():
+            session.add(SkippedMail(mailbox_uid=key, message_id=p.message_id, from_email=p.from_email,
+                                    subject=p.subject, received_at=p.received_at))
+
+    def _pass_on_headers(self, session: Session, key: str, head: bytes, own: set[str], out: InboxOutput) -> None:
+        """An email whose header lines show it is no sales mail: recorded as _store would have, without its body."""
+        p = parse_headers(head, own)
+        if p.from_email in own:
+            out.skipped_own += 1
+        elif not (p.message_id and session.execute(select(InboundEmail.id).where(InboundEmail.message_id == p.message_id)).first()):
+            self._note_unrelated(session, key, p, out)
+
+    def _wanted(self, session: Session, own: set[str], junk: bool = False):
+        """Is this email's body needed, going by its header lines? When in doubt it is."""
+        everything = not junk and self.settings.inbox_scope == "all"
+
+        def wanted(head: bytes) -> bool:
+            if everything:
+                return True
+            try:
+                p = parse_headers(head, own)
+            except Exception:  # noqa: BLE001 -- whatever a stranger's header lines do, the whole email decides
+                return True
+            if p.from_email in own:  # as in _store: only a notice forwarded from here is more than our own mail
+                return bool(CALENDLY_NOTICE.match(p.subject or ""))
+            return needs_the_body(session, p) or sales_related(session, p)
+        return wanted
 
     def _keep_unreadable(self, session: Session, key: str, raw: bytes, own: set[str], exc: Exception,
                          out: InboxOutput) -> None:
@@ -188,8 +223,16 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         scheduler's limit, a reboot, out of memory) therefore loses nothing, and after READ_TRIES such runs that email is
         set aside with an alert, so an opt-out behind it is still read."""
         before = kv_get(session, state_key)
-        raws, state = box.fetch_new(before, token=token)
-        out.fetched += len(raws)
+        with box.connected(token) as conn:
+            raws, state = box.read_folder(conn, box.settings.imap_folder, before, self._wanted(session, own))
+            self._handle_inbox(session, state_key, before, raws, state, own, out)
+            # The inbox is dealt with, so nothing that happens in the junk folder can cost it anything.
+            self._read_junk(session, box, conn, state_key, own, out)
+
+    def _handle_inbox(self, session: Session, state_key: str, before: dict | None, raws: list, state: dict, own: set[str],
+                      out: InboxOutput) -> None:
+        passed = state.pop("unrelated", None) or {}
+        out.fetched += len(raws) + len(passed)
         out.read_to_end = bool(state.pop("complete", True)) and out.read_to_end
         connection_lost = state.pop("connection_lost", None)
         given_up_on = state.pop("skipped_headers", None) or {}
@@ -209,8 +252,15 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                                   f"after several tries and was skipped ({state_key}): please look for it in the mailbox."))
         position = int(before.get("last_uid", 0)) if same_numbering else 0
         reading = dict(state.pop("reading", None) or {})
-        for key, raw in raws:
-            uid = int(key.rsplit(":", 1)[1])
+        large = state.pop("large", None) or {}
+        # In UID order: what is passed on its headers is written in the same step as the position that goes past it.
+        items = [(int(uid), f"{state.get('uidvalidity')}:{uid}", head, True) for uid, head in passed.items()]
+        items += [(int(key.rsplit(":", 1)[1]), key, raw, False) for key, raw in raws]
+        for uid, key, raw, on_headers in sorted(items, key=lambda item: item[0]):
+            if on_headers:
+                self._pass_on_headers(session, key, raw, own, out)
+                position = uid
+                continue
             tries = int(reading.get(str(uid), 0))
             if tries >= READ_TRIES:
                 self._keep_unreadable(session, key, raw, own, _StoppedTheJob(f"the job stopped on it {tries} times, so it was set aside"), out)
@@ -220,7 +270,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                 kv_set(session, state_key, {**state, "last_uid": position, "reading": {str(uid): tries + 1}})
                 session.commit()
                 try:
-                    self._store(session, key, raw, own, out)
+                    self._store(session, key, raw, own, out, large=large.get(str(uid)))
                     session.commit()
                 except SQLAlchemyError:  # the database, not the email: the position stays, and it is read again next run
                     session.rollback()
@@ -241,6 +291,70 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                            "connection holds. Please look for it in the mailbox.", self.settings)
                 session.commit()
             raise ConnectionError(f"the connection to the mailbox dropped while fetching email UID {connection_lost}")
+
+    def _read_junk(self, session: Session, box: Mailbox, conn, state_key: str, own: set[str], out: InboxOutput) -> None:
+        """A real answer filtered as spam must not be lost, so what is sales mail in the junk folder is handled like mail in the
+        inbox. The folder is read a little each run, with a position of its own. It says nothing about the inbox, so trouble with
+        it raises one warning, fails nothing, and holds nothing: a false hold stops real work."""
+        junk_key, alert = f"{state_key}.junk", f"mailbox_junk:{state_key}:"
+        trouble: set[str] = set()
+        try:
+            folder = box.junk_folder(conn)
+            if folder is not None:
+                self._handle_junk(session, box, conn, folder, junk_key, own, out, alert, trouble)
+            resolve_alerts(session, (alert,), trouble)
+            session.commit()
+        except Exception as exc:  # noqa: BLE001 -- the inbox has been read: this must not fail the run
+            session.rollback()
+            self.log.warning("The junk folder (%s) could not be read (%s)", state_key, type(exc).__name__)
+            try:
+                alert_once(session, "warning", self.name, f"The junk folder of a sales mailbox could not be read ({type(exc).__name__}), so a "
+                           "real answer filtered as spam may be waiting there. The inbox itself was read, and sending is not held. "
+                           "Please look in the junk folder if this stays.", self.settings, key=alert)
+                session.commit()
+            except SQLAlchemyError:
+                session.rollback()
+
+    def _handle_junk(self, session: Session, box: Mailbox, conn, folder: str, junk_key: str, own: set[str], out: InboxOutput,
+                     alert: str, trouble: set[str]) -> None:
+        before = kv_get(session, junk_key)
+        raws, state = box.read_junk(conn, folder, before, self._wanted(session, own, junk=True))
+        for transient in ("complete", "unrelated"):  # nothing waits on this folder, and what is no sales mail leaves no trace
+            state.pop(transient, None)
+        lost = state.pop("connection_lost", None)
+        given_up_on = state.pop("skipped_headers", None) or {}
+        large = state.pop("large", None) or {}
+        position = int(before.get("last_uid", 0)) if before and before.get("uidvalidity") == state.get("uidvalidity") else 0
+        reading = dict(state.pop("reading", None) or {})
+        new_gaps = [uid for uid in state.get("skipped_uids") or [] if uid not in ((before or {}).get("skipped_uids") or [])]
+        if new_gaps:
+            names = ", ".join(_sender_of_unreadable(given_up_on.get(str(uid), b"")) for uid in new_gaps[:3])
+            trouble.add(alert)
+            alert_once(session, "warning", self.name, f"An email in the junk folder could not be fetched after several tries and was skipped "
+                       f"({names}). Please look for it there. Sending is not held.", self.settings, key=alert)
+        for key, raw in raws:
+            uid = int(key.rsplit(":", 1)[1])
+            tries = int(reading.get(str(uid), 0))
+            if tries < READ_TRIES:  # one that every run dies on is passed: this folder holds any stranger's mail
+                position = max(position, uid - 1)
+                kv_set(session, junk_key, {**state, "last_uid": position, "reading": {str(uid): tries + 1}})
+                session.commit()
+                try:
+                    self._store(session, key, raw, own, out, large=large.get(str(uid)), junk=True)
+                    session.commit()
+                    out.fetched += 1
+                except SQLAlchemyError:
+                    session.rollback()
+                    self._undo_mark(session, junk_key, {**state, "last_uid": position})
+                    raise
+                except Exception as exc:  # noqa: BLE001 -- spam may be built to break a parser: it never stops the rest
+                    session.rollback()
+                    self.log.warning("An email in the junk folder could not be read (%s)", type(exc).__name__)
+            position = uid
+        kv_set(session, junk_key, state)
+        session.commit()
+        if lost is not None:
+            raise ConnectionError(f"the connection dropped while fetching junk email UID {lost}")
 
     @staticmethod
     def _undo_mark(session: Session, state_key: str, state: dict) -> None:
@@ -271,6 +385,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         # What an earlier run stored and could not finish (it died on the email behind them) is handled first.
         categories = process_pending(session, self.settings, self.name, llm=self.ctx.llm)
         forget_old_skipped_mail(session)
+        session.commit()  # no database lock is held while the mailbox is read over the network
         sources = self._sources(session) if self.settings.network_enabled else []
         if sources:
             out.mailbox = "; ".join(name for name, *_ in sources) + " (read-only)"
@@ -297,7 +412,6 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
 
 CALENDLY_SUBJECT = re.compile(r"\b(new event|canceled|cancelled|rescheduled|invitee)\b", re.I)
 REPLY_SUBJECT = re.compile(r"\s*(re|aw|sv|antw|fwd?|fw|wg|tr|rv)\s*:", re.I)
-NO_REPLY = re.compile(r"(no-?reply|do-?not-?reply)", re.I)
 OUR_FOOTER_QUOTED = re.compile(r"to stop receiving emails from us", re.I)  # the line every email of ours ends with
 
 
@@ -318,6 +432,14 @@ def _sender_of_unreadable(raw: bytes) -> str:
     found = re.search(rb"(?im)^from:([^\r\n]{0,%d})" % HEADER_LIMIT, raw[:256 * 1024])
     address = re.search(rb"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", found.group(1)) if found else None
     return address.group(0).decode("ascii", "replace").lower() if address else NO_ADDRESS
+
+
+def needs_the_body(session: Session, p: ParsedEmail) -> bool:
+    """What sales_related decides from an email's body or parts, and so cannot decide from its header lines: a quoted footer under
+    a reply's subject, calendly.com in a notice's text, and what kind of mail a sender at a lead's sub-domain writes."""
+    subject = p.subject or ""
+    return bool(REPLY_SUBJECT.match(subject) or CALENDLY_SUBJECT.search(subject) or CALENDLY_NOTICE.match(subject)
+                or subdomain_leads(session, p.from_email))
 
 
 def sales_related(session: Session, p: ParsedEmail) -> bool:

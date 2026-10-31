@@ -5,6 +5,10 @@ marked read, moved or deleted. Progress is tracked by UID (with UIDVALIDITY); th
 back `first_run_days`. Delivery-status reports (bounces) are recognised and their failed recipients and
 original Message-ID extracted, and told apart from delays, read and delivery receipts and refusals about our own sending.
 
+Each email's header lines and size are read first. What they show to be no sales mail is noted and passed without its body, so a
+pile of unrelated mail neither delays a real reply nor holds sending. What only the body can settle has its body fetched. A very
+large email is read only as far as its start. The mailbox's junk folder is read the same way, a little each run.
+
 Anyone can send anything: every header and part is cut to a fixed size before any pattern or parser reads it, and HTML
 is read in one pass, so the time taken grows with the size of the email and no faster.
 """
@@ -15,6 +19,8 @@ import email
 import hashlib
 import imaplib
 import re
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from email.errors import HeaderParseError
@@ -74,6 +80,7 @@ class ParsedEmail:
     auth_results: str | None = None  # the topmost Authentication-Results header: added by the receiving server
     kind: str | None = None  # bounce | delay | receipt | sending_problem (see _delivery_notice) | calendar | list
     note: str | None = None  # what a person should know: no readable text, or why a delivery failed
+    reply_to: str | None = None  # where they ask answers to go, when that is not the sender: shown, never written to by itself
 
 
 def _header(msg: Message, name: str, default: str = "") -> str:
@@ -364,6 +371,7 @@ def parse_message(raw: bytes, own: frozenset[str] | set[str] = frozenset()) -> P
     references = list(dict.fromkeys([*answers[1:], *_thread_ids(_header(msg, "References"))]))
     # "From: somecompany.com" names no mailbox: the sender is recorded as unknown (a mail system may have no domain)
     from_email = sender if is_address(sender) or BOUNCE_SENDERS.search(sender) else NO_ADDRESS
+    answer_to = next((a.lower() for _, a in getaddresses([_header(msg, "Reply-To")[:HEADER_LIMIT]]) if a), "")
     # Without a Message-ID a second delivery of the same email would be a new email: the same content gets the same id.
     message_id = _message_id(_header(msg, "Message-ID")) or _stand_in_id(from_email, _header(msg, "Date")[:200], subject, in_reply_to, body)
     shown_name = " ".join(_decoded(name or ("" if from_email != NO_ADDRESS else raw_from)).split())[:200]
@@ -373,7 +381,14 @@ def parse_message(raw: bytes, own: frozenset[str] | set[str] = frozenset()) -> P
         subject=subject[:300], received_at=received,
         body_text=body, auto_submitted=auto, is_bounce=is_bounce, bounced_addresses=bounced,
         bounced_message_id=original, auth_results=(_header(msg, "Authentication-Results").strip()[:2000] or None),
-        kind=kind, note=reason if kind == "sending_problem" else _no_text_note(body, files))
+        kind=kind, note=reason if kind == "sending_problem" else _no_text_note(body, files),
+        reply_to=answer_to if is_address(answer_to) and answer_to != from_email else None)
+
+
+def parse_headers(head: bytes, own: frozenset[str] | set[str] = frozenset()) -> ParsedEmail:
+    """An email as far as its header lines tell, for deciding whether its body is needed. They are few and cut to a fixed size
+    (HEAD_LIMIT), so this cannot be what stops a run."""
+    return parse_message(head + b"\r\n\r\n", own)
 
 
 def _stand_in_id(*fields: str | None) -> str:
@@ -451,6 +466,78 @@ def rest_of_reply(body: str) -> str:
 
 
 FETCH_TRIES = 3  # a message that cannot be fetched is tried again on this many runs, then skipped
+DROP_TRIES = 6  # the connection dropped this many times on one email's body, its header lines coming fine: it is named, and passed
+HEADERS_PER_RUN = 500  # emails looked at in one run; those behind them wait for the next
+HEAD_LIMIT = 64_000  # bytes of an email's header lines read: References in the longest real thread fits, a stranger's megabyte does not
+# Every line sales_related and parse_message go by. Reply-To and the rest are read with the body, of the mail that gets that far.
+HEAD_FIELDS = ("FROM", "TO", "SUBJECT", "DATE", "MESSAGE-ID", "IN-REPLY-TO", "REFERENCES", "CONTENT-TYPE", "AUTO-SUBMITTED",
+               "X-AUTOREPLY", "PRECEDENCE", "LIST-UNSUBSCRIBE", "LIST-ID")
+HEAD_PLAIN = f"RFC822.SIZE BODY.PEEK[HEADER.FIELDS ({' '.join(HEAD_FIELDS)})]<0.{HEAD_LIMIT}>"
+HEAD_ITEMS = f"(BODYSTRUCTURE {HEAD_PLAIN})"
+LARGE_MESSAGE = 10_000_000  # bytes: an email larger than this is read only as far as LARGE_READ
+LARGE_READ = 4_000_000  # room for the longest text part read (PART_LIMIT) in base64 under its header lines
+RUN_BYTES = 64_000_000  # bytes of email bodies held in memory by one run; the rest wait for the next
+JUNK_HEADS_PER_RUN = 100  # the junk folder may hold thousands, and no tick waits for them
+JUNK_BODIES_PER_RUN = 10
+JUNK_BYTES = 16_000_000
+JUNK_NAMES = ("junk", "spam", "inbox.junk", "inbox.spam", "junk e-mail", "junk email", "[gmail]/spam")
+LARGE_MARK = "only its start was read"  # in the note of an email cut short: a person opens it
+
+
+def large_note(size: int) -> str:
+    return f"This email is very large (about {max(size // 1_000_000, 1)} MB): {LARGE_MARK}. Open it in the mailbox for the rest."
+
+
+_BODY_ITEM = re.compile(rb"BODY\[[^\]]*\](?:<\d+>)?\s*\{\d+\}\s*$", re.I)
+_SIZE_ITEM = re.compile(rb"RFC822\.SIZE\s+(\d+)", re.I)
+_REPORT_PART = re.compile(rb"DELIVERY-STATUS", re.I)
+_BLANK_LINE = re.compile(rb"\r?\n\r?\n")
+_LIST_LINE = re.compile(rb'^\(([^)]*)\)\s+(?:"(?:[^"\\]|\\.)*"|NIL)\s*(.*)$', re.I | re.S)
+
+
+def _literal(parts) -> bytes | None:
+    """The email data in a FETCH answer. BODYSTRUCTURE can bring a literal of its own (an odd file name), so the one that
+    follows a BODY[...] item is taken; a server that answers in another form has its first."""
+    found = [p for p in parts or [] if isinstance(p, tuple) and len(p) > 1]
+    for prefix, data in found:
+        if isinstance(prefix, bytes) and _BODY_ITEM.search(prefix):
+            return data
+    return found[0][1] if found else None
+
+
+def _around_literals(parts) -> bytes:
+    """A FETCH answer without the email data: what the server says itself, which nothing a sender writes can pass for."""
+    return b" ".join(p[0] if isinstance(p, tuple) else p for p in parts or []
+                     if isinstance(p, bytes) or (isinstance(p, tuple) and isinstance(p[0], bytes)))
+
+
+def _only_the_body_can_tell(head: bytes, structure: bytes | None) -> bool:
+    """A report can lie deep inside a multipart (a gateway's wrapper) or an attached email, where the header lines do not show it.
+    The server's BODYSTRUCTURE does; without it, or with header lines cut short or missing, the body is fetched."""
+    if not head.strip() or len(head) >= HEAD_LIMIT:
+        return True
+    maintype = email.message_from_bytes(_MIME_LINE.sub(lambda m: m.group(0)[:HEADER_LIMIT], head + b"\r\n\r\n")).get_content_maintype()
+    return maintype in ("multipart", "message") and (structure is None or bool(_REPORT_PART.search(structure)))
+
+
+def _quoted(folder: str) -> str:
+    return '"' + folder.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _listed_folders(data) -> list[tuple[set[bytes], str]]:
+    """(flags, name) of each line of a LIST answer. The name comes bare, quoted, or as a literal (imaplib then gives a pair)."""
+    out = []
+    for item in data or []:
+        line, literal = item if isinstance(item, tuple) and len(item) > 1 else (item, None)
+        found = _LIST_LINE.match(line) if isinstance(line, bytes) else None
+        if not found:
+            continue
+        name = literal if isinstance(literal, bytes) else found.group(2).strip()
+        if literal is None and name[:1] == b'"' and name[-1:] == b'"' and len(name) > 1:
+            name = re.sub(rb"\\(.)", rb"\1", name[1:-1])
+        if name and name.isascii():  # a name is mailbox-encoded, so plain ASCII; anything else could not be asked for anyway
+            out.append(({f.lower() for f in found.group(1).split()}, name.decode("ascii")))
+    return out
 
 
 class Mailbox:
@@ -459,7 +546,11 @@ class Mailbox:
 
     new_state also says how the read went, for the caller to take out before it saves the rest: "complete" (False: more mail
     is waiting, so nobody may act as if the mailbox had been read), "connection_lost" (the UID being fetched when the
-    connection dropped) and "skipped_headers" (the header lines of emails given up on, so they can be named)."""
+    connection dropped), "skipped_headers" (the header lines of emails given up on, so they can be named), "unrelated"
+    (the header lines of emails passed without their body, which the caller records in the same step as the position it saves)
+    and "large" (the size of each email read only as far as its start).
+
+    `wanted(header lines)` says whether an email's body is needed. Without it every body is fetched."""
 
     def __init__(self, settings, imap_factory=imaplib.IMAP4_SSL, first_run_days: int = 14, batch: int = 50):
         self.settings = settings
@@ -467,7 +558,8 @@ class Mailbox:
         self.first_run_days = first_run_days
         self.batch = batch
 
-    def fetch_new(self, state: dict | None, token=None) -> tuple[list[tuple[str, bytes]], dict]:
+    @contextmanager
+    def connected(self, token=None) -> Iterator:
         s = self.settings
         user, password = s.imap_credentials
         conn = self.imap_factory(s.imap_host, s.imap_port, ssl_context=tls_context(), timeout=MAIL_TIMEOUT)
@@ -481,67 +573,157 @@ class Mailbox:
                 conn.authenticate("XOAUTH2", lambda _challenge: xoauth2(user, bearer).encode())
             else:
                 conn.login(user, password)
-            typ, data = conn.select(f'"{s.imap_folder}"', readonly=True)  # EXAMINE: never changes the mailbox
-            if typ != "OK":
-                raise RuntimeError(f"cannot open mailbox folder {s.imap_folder}")
-            validity = self._uidvalidity(conn)
-            state = dict(state or {})
-            if state.get("uidvalidity") != validity:
-                since = utcnow() - timedelta(days=self.first_run_days)
-                if state.get("read_at"):  # numbered anew (moved or rebuilt): from our last reading, if that was longer ago
-                    since = min(since, datetime.fromisoformat(state["read_at"]) - timedelta(days=1))
-                state = {"uidvalidity": validity, "last_uid": 0}
-                typ, data = conn.uid("SEARCH", None, "SINCE", since.strftime("%d-%b-%Y"))
-            else:
-                typ, data = conn.uid("SEARCH", None, f"UID {int(state['last_uid']) + 1}:*")
-            found = sorted(int(u) for u in (data[0] or b"").split() if int(u) > int(state.get("last_uid", 0)))
-            uids = found[: self.batch]
-            complete = len(found) <= self.batch
-            out = []
-            failed = dict(state.get("failed") or {})
-            skipped_headers = {}
-            for uid in uids:
-                broken = False
-                try:
-                    typ, parts = conn.uid("FETCH", str(uid), "(BODY.PEEK[])")
-                except (imaplib.IMAP4.abort, OSError):  # the connection dropped, which says nothing about this email: not counted
-                    state["connection_lost"] = uid
-                    dropped = dict(state.get("dropped") or {})
-                    state["dropped"] = {str(uid): int(dropped.get(str(uid), 0)) + 1}
-                    complete = False
-                    break
-                except (imaplib.IMAP4.error, MemoryError) as exc:  # about this email (BAD, or too big): counted like a refusal
-                    typ, parts = "NO", None
-                    broken = isinstance(exc, MemoryError)  # what the connection holds next is unknown
-                raw = next((p[1] for p in parts or [] if isinstance(p, tuple) and len(p) > 1), None)
-                if typ == "OK" and raw:
-                    out.append((f"{validity}:{uid}", raw))
-                    failed.pop(str(uid), None)
-                    state.pop("dropped", None)
-                else:
-                    tries = failed.get(str(uid), 0) + 1
-                    if tries < FETCH_TRIES:  # stop here: this message (and the ones after it) are fetched next run
-                        failed[str(uid)] = tries
-                        complete = False
-                        break
-                    failed.pop(str(uid), None)
-                    state["skipped_uids"] = (list(state.get("skipped_uids") or []) + [uid])[-20:]
-                    if not broken and (head := self._header_lines(conn, uid)):
-                        skipped_headers[str(uid)] = head
-                state["last_uid"] = uid
-                if broken:  # the rest wait for the next run
-                    complete = False
-                    break
-            state["failed"] = failed
-            state["complete"] = complete
-            state["skipped_headers"] = skipped_headers
-            state["read_at"] = utcnow().isoformat(timespec="seconds")
-            return out, state
+            yield conn
         finally:
             try:
                 conn.logout()
             except Exception:  # noqa: S110 -- closing a broken connection: nothing else to do
                 pass
+
+    def fetch_new(self, state: dict | None, token=None, wanted: Callable[[bytes], bool] | None = None) -> tuple[list[tuple[str, bytes]], dict]:
+        with self.connected(token) as conn:
+            return self.read_folder(conn, self.settings.imap_folder, state, wanted)
+
+    def junk_folder(self, conn) -> str | None:
+        """The mailbox's junk folder: the one the server flags as such, else one by a common name. None is a normal state."""
+        lister = getattr(conn, "list", None)
+        if lister is None:
+            return None
+        typ, data = lister()
+        if typ != "OK":
+            raise RuntimeError("the server would not list its folders")
+        inbox = self.settings.imap_folder.lower()
+        usable = [(flags, name) for flags, name in _listed_folders(data)
+                  if not flags & {b"\\noselect", b"\\nonexistent"} and name.lower() != inbox]
+        flagged = [name for flags, name in usable if flags & {b"\\junk", b"\\spam"}]
+        if flagged:
+            return flagged[0]
+        named = {name.lower(): name for _, name in reversed(usable)}
+        return next((named[n] for n in JUNK_NAMES if n in named), None)
+
+    def read_junk(self, conn, folder: str, state: dict | None, wanted: Callable[[bytes], bool] | None) -> tuple[list[tuple[str, bytes]], dict]:
+        return self.read_folder(conn, folder, state, wanted, batch=JUNK_BODIES_PER_RUN, heads=JUNK_HEADS_PER_RUN,
+                                run_bytes=JUNK_BYTES, label="junk:")
+
+    def read_folder(self, conn, folder: str, state: dict | None, wanted: Callable[[bytes], bool] | None = None, batch: int | None = None,
+                    heads: int = HEADERS_PER_RUN, run_bytes: int = RUN_BYTES, label: str = "") -> tuple[list[tuple[str, bytes]], dict]:
+        typ, data = conn.select(_quoted(folder), readonly=True)  # EXAMINE: never changes the mailbox
+        if typ != "OK":
+            raise RuntimeError(f"cannot open mailbox folder {folder}")
+        validity = self._uidvalidity(conn)
+        state = dict(state or {})
+        if state.get("uidvalidity") != validity:
+            since = utcnow() - timedelta(days=self.first_run_days)
+            if state.get("read_at"):  # numbered anew (moved or rebuilt): from our last reading, if that was longer ago
+                since = min(since, datetime.fromisoformat(state["read_at"]) - timedelta(days=1))
+            state = {"uidvalidity": validity, "last_uid": 0}
+            typ, data = conn.uid("SEARCH", None, "SINCE", since.strftime("%d-%b-%Y"))
+        else:
+            typ, data = conn.uid("SEARCH", None, f"UID {int(state['last_uid']) + 1}:*")
+        found = sorted(int(u) for u in (data[0] or b"").split() if int(u) > int(state.get("last_uid", 0)))
+        batch = self.batch if batch is None else batch
+        complete = len(found) <= heads
+        out, unrelated, large, skipped_headers = [], {}, {}, {}
+        failed = dict(state.get("failed") or {})
+        bodies, held = 0, 0
+        for uid in found[:heads]:
+            body_drops = int((state.get("dropped_on_body") or {}).get(str(uid), 0))
+            # An email of thousands of parts can have a BODYSTRUCTURE too long for imaplib's line limit: after a drop it is left out.
+            items = f"({HEAD_PLAIN})" if str(uid) in (state.get("dropped") or {}) else HEAD_ITEMS
+            try:
+                head, size, structure = self._head(conn, uid, items)
+            except (imaplib.IMAP4.abort, OSError):
+                self._connection_lost(state, uid)
+                complete = False
+                break
+            except (imaplib.IMAP4.error, MemoryError):  # about this email: its body is asked for, and counted if that fails too
+                head, size, structure = None, None, None
+            if head is not None and wanted is not None and not _only_the_body_can_tell(head, structure) and not wanted(head):
+                unrelated[str(uid)] = head
+                failed.pop(str(uid), None)
+                self._connection_held(state)
+                state["last_uid"] = uid
+                continue
+            if head is not None and body_drops >= DROP_TRIES:  # its body takes the connection down each time: it is named, and the mail behind it read
+                state["skipped_uids"] = (list(state.get("skipped_uids") or []) + [uid])[-20:]
+                skipped_headers[str(uid)] = head[:HEADER_LIMIT]
+                self._connection_held(state)
+                state["last_uid"] = uid
+                continue
+            if bodies >= batch or held >= run_bytes:  # only mail that may matter counts against what one run takes in
+                complete = False
+                break
+            # A stalled fetch or a dropped connection is tried again for the start alone: that is what holds the words.
+            limit = LARGE_READ if body_drops or (size is not None and size > LARGE_MESSAGE) else None
+            broken = False
+            try:
+                typ, parts = conn.uid("FETCH", str(uid), f"(BODY.PEEK[]<0.{limit}>)" if limit else "(BODY.PEEK[])")
+            except (imaplib.IMAP4.abort, OSError):  # the connection dropped, which says nothing about this email: not counted
+                self._connection_lost(state, uid)
+                state["dropped_on_body"] = {str(uid): body_drops + 1}
+                complete = False
+                break
+            except (imaplib.IMAP4.error, MemoryError) as exc:  # about this email (BAD, or too big): counted like a refusal
+                typ, parts = "NO", None
+                broken = isinstance(exc, MemoryError)  # what the connection holds next is unknown
+            raw = _literal(parts)
+            if typ == "OK" and raw:
+                out.append((f"{label}{validity}:{uid}", raw))
+                bodies += 1
+                held += len(raw)
+                if limit and len(raw) >= limit:
+                    large[str(uid)] = max(size or 0, len(raw))
+                failed.pop(str(uid), None)
+                self._connection_held(state)
+            else:
+                tries = failed.get(str(uid), 0) + 1
+                if tries < FETCH_TRIES:  # stop here: this message (and the ones after it) are fetched next run
+                    failed[str(uid)] = tries
+                    complete = False
+                    break
+                failed.pop(str(uid), None)
+                state["skipped_uids"] = (list(state.get("skipped_uids") or []) + [uid])[-20:]
+                if not broken and (lines := self._header_lines(conn, uid)):
+                    skipped_headers[str(uid)] = lines
+            state["last_uid"] = uid
+            if broken:  # the rest wait for the next run
+                complete = False
+                break
+        state["failed"] = failed
+        state["complete"] = complete
+        state["skipped_headers"] = skipped_headers
+        state["unrelated"] = unrelated
+        state["large"] = large
+        state["read_at"] = utcnow().isoformat(timespec="seconds")
+        return out, state
+
+    @staticmethod
+    def _connection_lost(state: dict, uid: int) -> None:
+        state["connection_lost"] = uid
+        dropped = dict(state.get("dropped") or {})
+        state["dropped"] = {str(uid): int(dropped.get(str(uid), 0)) + 1}
+
+    @staticmethod
+    def _connection_held(state: dict) -> None:
+        state.pop("dropped", None)
+        state.pop("dropped_on_body", None)
+
+    @staticmethod
+    def _head(conn, uid: int, items: str = HEAD_ITEMS) -> tuple[bytes | None, int | None, bytes | None]:
+        """(header lines, size, the server's account of the parts), each None when the server does not give it. A server that
+        answers with the whole email has it cut at its first empty line."""
+        typ, parts = conn.uid("FETCH", str(uid), items)
+        if typ != "OK":
+            return None, None, None
+        said = _around_literals(parts)
+        sizes = _SIZE_ITEM.findall(said)  # the largest: an attached email's subject inside BODYSTRUCTURE can only raise it
+        size = max(int(n) for n in sizes) if sizes else None
+        structure = said if b"BODYSTRUCTURE" in said.upper() else None
+        raw = _literal(parts)
+        if not raw:
+            return None, size, structure
+        cut = _BLANK_LINE.split(raw, maxsplit=1)
+        return (None if len(cut) == 1 and len(raw) >= HEAD_LIMIT else cut[0]), size, structure
 
     @staticmethod
     def _header_lines(conn, uid: int) -> bytes | None:

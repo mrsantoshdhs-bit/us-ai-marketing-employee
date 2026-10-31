@@ -208,8 +208,10 @@ def erase_person(session: Session, email: str, actor: str) -> dict[str, int]:
             inq.payload = {"erased": True}
             counts["inquiries"] += 1
     for e in session.execute(select(InboundEmail).where(InboundEmail.from_email == email)).scalars():
-        e.from_email, e.subject, e.body_text, e.new_text = ERASED, ERASED, ERASED, ERASED
+        e.from_email, e.subject, e.body_text, e.new_text, e.reply_to = ERASED, ERASED, ERASED, ERASED, None
         counts["emails_received"] += 1
+    for e in session.execute(select(InboundEmail).where(InboundEmail.reply_to == email)).scalars():
+        e.reply_to = None
     for skipped in session.execute(select(SkippedMail).where(SkippedMail.from_email == email)).scalars().all():
         session.delete(skipped)  # the short record of mail read as unrelated: sender, subject and date, nothing else
         counts["emails_received"] += 1

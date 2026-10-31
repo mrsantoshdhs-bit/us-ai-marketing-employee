@@ -397,16 +397,13 @@ def test_defect_an_unread_reply_is_not_lost_when_uidvalidity_changes(make_ctx):
     assert "<old-unread@x.example>" in stored or any("position" in a.lower() or "uidvalidity" in a.lower() for a in alerts(ctx))
 
 
-def test_ok_an_opt_out_behind_many_unrelated_emails_is_reached_within_the_batches(make_ctx):
+def test_ok_an_opt_out_behind_many_unrelated_emails_is_read_in_the_first_run(make_ctx):
     ctx, _, sent = contacted(make_ctx)
     v = vars_for(sent)
     FakeIMAP.messages = {i: K.msg("News <news@unrelated.example>", f"Offer {i}", "Buy now.", tag="news") for i in range(1, 121)}
     FakeIMAP.messages[121] = K.thr(v, K.OPT)
-    seen = []
-    for _ in range(3):
-        out = run_inbox(ctx)
-        seen.append((out.fetched, DAVID in suppressed_values(ctx)))
-    assert seen == [(50, False), (50, False), (21, True)]
+    out = run_inbox(ctx)
+    assert (out.fetched, out.read_to_end, DAVID in suppressed_values(ctx)) == (121, True, True)
 
 
 def test_ok_a_fetch_answered_no_is_retried_then_skipped_with_an_alert(make_ctx):

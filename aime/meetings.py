@@ -116,7 +116,7 @@ def parse_calendly(subject: str, body: str, own: set[str], default_tz: str = "Am
     """{kind, invitee_name, invitee_email, starts_at, ends_at (UTC naive), event, tz, previous_starts_at} or None.
     kind: booked | cancelled | rescheduled. Without an end time the length comes from the event type
     ("30 Minute Meeting"), else `default_minutes`."""
-    subject = re.sub(r"^\s*(?:(?:fwd?|fw)\s*:\s*)+", "", subject, flags=re.I)  # a notice forwarded to the sales mailbox
+    subject = re.sub(r"^\s*(?:(?:fwd?|fw|wg|rv|tr|sv|aw)\s*:\s*)+", "", subject, flags=re.I)  # a notice forwarded to the sales mailbox
     kind = ("cancelled" if re.match(r"\s*cancel+ed\s*:", subject, re.I)
             else "booked" if re.match(r"\s*new event\s*:", subject, re.I)
             else "rescheduled" if re.match(r"\s*(?:rescheduled|updated)\s*:", subject, re.I) else None)
