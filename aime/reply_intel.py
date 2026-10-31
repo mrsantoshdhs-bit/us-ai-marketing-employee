@@ -619,7 +619,9 @@ def _hold_unproven_in_junk(session: Session, settings, row: InboundEmail, contac
 
     report = row.category == "bounce"
     reading = "a delivery failure" if report else (row.category or "other").replace("_", " ")
-    tied = lead or next(iter(company_leads(session, row.from_email)), None) or lead_from_our_subject(session, row)[0]
+    # A company's own newsletter, saying nothing to us, is no reason to stop writing to it: in the inbox it changes nothing either.
+    newsletter = getattr(row, "mail_kind", None) == "list" and reading == "other"
+    tied = None if newsletter else lead or next(iter(company_leads(session, row.from_email)), None) or lead_from_our_subject(session, row)[0]
     row.followup_id, row.contact_id = None, contact.id if contact else None
     row.lead_id, row.company_id = (tied.id, tied.company_id) if tied else (None, contact.company_id if contact else None)
     row.reasons = [*(row.reasons or []), f"found in the junk folder, unsigned and outside our thread: it reads as {reading}, but it may be forged"]
@@ -636,7 +638,7 @@ def _hold_unproven_in_junk(session: Session, settings, row: InboundEmail, contac
     row.action_note = ("Found in the mailbox's junk folder, unsigned and outside our thread, so it may be forged. Nothing was changed. "
                        + (f"{tied.company.name}'s emails wait until a person decides: Mark reviewed if it is junk, or reclassify it to apply it"
                           if hold else "Mark reviewed if it is junk, or reclassify it to apply it"))
-    if not (row.subject or "").startswith("(could not be read"):  # that one has its own alert
+    if not newsletter and not (row.subject or "").startswith("(could not be read"):  # that one has its own alert
         where = f" about {tied.company.name}" if tied else ""
         alert_once(session, "warning", "inbox", f"An email from {row.from_email}{where} was found in the junk folder and may be forged: it reads "
                    f"as {reading}, but it is unsigned and outside our thread. Nothing was changed"

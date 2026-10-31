@@ -1081,6 +1081,15 @@ def test_the_same_mail_in_the_inbox_acts_as_before(make_ctx, server, name):
     assert not latest_reply(ctx).in_junk
 
 
+def test_a_prospects_own_newsletter_in_junk_holds_nothing_and_raises_no_alert(make_ctx, server):
+    ctx, _, _, v = scene(make_ctx)
+    raw = K.msg(f"news@{v.dom}", "Our autumn sale", "Great deals this autumn.\n\nUnsubscribe here.", tag="nl", extra=("List-Unsubscribe: <https://x.example/u>",))
+    assert read(ctx, server({"INBOX": {}, "Junk": {1: raw}})).ok
+    with ctx.db.session() as s:
+        assert not lead_on_hold(s, lead_of(ctx).id)
+    assert not [a for a in alerts(ctx) if "forged" in a] and latest_reply(ctx).status == "needs_review"
+
+
 def test_a_held_email_cannot_send_and_mark_reviewed_lets_the_lead_go_on(make_ctx, monkeypatch, clock, server):
     from aime import workflows
 
