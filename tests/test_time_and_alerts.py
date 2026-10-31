@@ -105,8 +105,9 @@ def test_only_the_followups_job_sends(make_ctx, monkeypatch, clock):
     ctx = mail_world(make_ctx, monkeypatch)
     clock(IN_WINDOW)
     fid = add_mail(ctx, add_lead(ctx, stage="approved"))
-    monkeypatch.setattr(workflows, "USBusinessResearchAgent", lambda c: SalesWorkflowAgent(c))  # any "ok" research step
-    assert workflows.SalesWorkflowAgent(ctx).run({"send": False}).ok
+    import aime.agents.research as research_module
+    monkeypatch.setattr(research_module, "get_sources", lambda c, names=None: [])
+    assert not workflows.job_research(ctx).failed
     assert FakeSMTP.sent == [] and status_of(ctx, fid)[0] == "approved"
     workflows.job_inbox(ctx)
     workflows.job_followups(ctx)

@@ -184,8 +184,9 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
     @staticmethod
     def _human_touched(session: Session, lead: Lead) -> bool:
         """A person worked on this lead, or an email a person approved may have reached it."""
-        if session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
-                                                     FollowUp.status.in_(("sent", "sending", "uncertain")))).first():
+        if lead.outreach_status == "contacted" or session.execute(select(FollowUp.id).where(
+                FollowUp.lead_id == lead.id, FollowUp.channel == "email",
+                FollowUp.status.in_(("sent", "sending", "uncertain")))).first():
             return True
         actors = session.execute(select(Activity.actor).where(Activity.lead_id == lead.id).distinct()).scalars()
         return any((actor or "") not in NOT_A_PERSON for actor in actors)
