@@ -27,6 +27,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from aime.db import kv_set
 from aime.models import User
 from aime.permissions import BUILTIN_ROLES, permissions_of
 from aime.visibility import EVERYTHING, org_page, record_visible, scope_for
@@ -137,6 +138,8 @@ def authenticate(session: Session, username: str, password: str) -> tuple[User |
         if user.failed_logins >= MAX_FAILED:
             user.locked_until, user.failed_logins = now + timedelta(minutes=LOCK_MINUTES), 0
         return None, SIGN_IN_FAILED
+    if user.last_login_at:  # for "since you last signed in" on Manager Today: this sign-in is about to replace it
+        kv_set(session, f"signin.previous.{user.id}", user.last_login_at.isoformat())
     user.failed_logins, user.locked_until, user.last_login_at = 0, None, now
     if not user.password_hash.startswith(f"scrypt${SCRYPT_N}$"):
         user.password_hash = hash_password(password)  # same password, today's work factor; sessions stay valid

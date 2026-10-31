@@ -228,7 +228,7 @@ def _classify(row: InboundEmail, text: str | None = None) -> tuple[str, str, lis
     if row.bounced_addresses:
         return "bounce", "high", ["delivery failure report"]
     if re.match(r"^(mailer-daemon|postmaster)@", row.from_email or "", re.I):
-        return "bounce", "low", ["delivery report without a permanently failed address (for example a delay)"]
+        return "bounce", "low", ["delivery report: no failed address could be read from it"]
     if CALENDLY.search(row.from_email or "") or (CALENDLY.search(row.body_text or "")  # also a forwarded notice
                                                   and CALENDLY_NOTICE.match(subject)):
         return "calendly", "high", ["Calendly notification"]
@@ -480,8 +480,8 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         if failed and lead and lead.outreach_status:
             stop_sequence(session, lead, "bounced", "Email bounced", actor)
         if not failed:
-            notes.append("No permanently failed address found (for example a delay notice): nothing suppressed; "
-                         "check it, and reclassify it as a bounce if delivery failed")
+            notes.append("Could not read a failed address from this delivery report, so nothing was suppressed. It may be a "
+                         "delay or a failure: read it, and reclassify it as a bounce if delivery failed")
         row.status = "actioned" if failed and (f or contact) else "needs_review"  # unmatched: a person checks
     elif row.category == "unsubscribe":
         # Test mode (OUTBOUND_TEST_RECIPIENTS): every lead's email went to the owner's own test address, so an opt-out

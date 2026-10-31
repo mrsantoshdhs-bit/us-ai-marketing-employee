@@ -5,16 +5,35 @@ All commands run from the project folder with the virtual environment's Python:
 
 ## Daily routine (5 minutes)
 
-1. Open the dashboard (`scripts\start_dashboard.ps1` → http://127.0.0.1:8765) and sign in.
-   **Today** is the home page: a health strip (scheduler, jobs, local AI model, images, LinkedIn,
-   publishing, email, backups), everything waiting for you (posts with their quality-check result,
-   reply drafts, outcomes that need checking), open alerts, the pipeline funnel and companies to review.
-2. **Content** → approve or edit posts waiting for approval. Nothing is published without approval
-   *and* an authorized LinkedIn connection with `PUBLISHING_ENABLED=true`.
-3. **Follow-ups** → approve reply drafts to people who contacted you; work the "Review …" tasks for
-   qualified research leads (never contacted automatically).
-4. **Today** → acknowledge alerts; anything red needs attention. Job runs and agent performance
-   are on **System**.
+1. Open the dashboard (`scripts\start_dashboard.ps1` → http://127.0.0.1:8765) and sign in. **Dashboard** is the home
+   page: open alerts first (acknowledge them there or on **System health**), then the last 7 or 30 days: the big number
+   of each card is that period, the small one the total.
+2. **Manager Today**: **Needs you** lists what only a person can decide, the most urgent first (an interested prospect
+   waiting for an answer comes before anything else), each with its reason. **Automation health** says what is really
+   running, and **Failures and alerts** adds what failed since you last signed in.
+3. **Approval Queue**: read, then approve or reject the emails and LinkedIn posts waiting. Nothing goes out without a
+   person: B2B outreach, follow-ups and answers to replies all wait here (and on **Follow-ups**, which also shows how long
+   each draft has waited). Posts also need `PUBLISHING_ENABLED=true` and a LinkedIn connection.
+4. **Conversations**: read the replies marked for review.
+5. **Follow-ups**: work the "Review …" tasks: qualified leads no email can go to yet.
+
+A salesperson starts on **My work**: their leads and what happens next with each, deals, tasks, meetings, one "Do this
+next" line, and anything handed over to them. **Mine** is what they own, **Team** what their team shares.
+
+**First sign-in of a new person.** On **Users & teams** create the account (it gives a one-time link to choose a
+password), or on this PC: `python -m aime user create --username <name>` for a new account and
+`python -m aime user set-password --username <name>` for an existing one (for example a built-in `sales1`). They then
+sign in at the dashboard's address.
+
+## PC facts
+
+- **The send window needs this PC awake in the evening, India time.** Emails go out 08:00 to 18:00 New York time on
+  weekdays: 18:30 to 04:30 IST in US winter (17:30 to 03:30 in US summer). If the PC sleeps through it, approved emails
+  simply wait; Manager Today says so. Jobs that were due run at the next check-in.
+- **Mail in the Junk folder is not read.** Only the inbox is. Check Junk now and then, and move a prospect's reply out of
+  it so that the next mailbox check reads it.
+- **Keep the backup passphrase somewhere other than this PC.** The off-machine backup cannot be opened without it, and
+  this PC is what the backup protects you from losing.
 
 ## Health checks
 
@@ -176,10 +195,10 @@ Nothing is sent while `OUTBOUND_EMAIL_ENABLED=false`.
 - **Lead outreach stage** (lead page): drafted, approved, contacted, then replied / stopped. "They replied"
   stops the sequence.
 
-## Replies, unsubscribes and bounces (sales mailbox)
+## Conversations: replies, unsubscribes and bounces (sales mailbox)
 
 Setup: `docs/SALES_SETUP.md`. The `inbox` job (every 15 minutes) reads the mailbox read-only and matches
-each email to a lead by thread, then by address. **Replies** page: category, confidence, the new text,
+each email to a lead by thread, then by address. **Conversations** page: category, confidence, the new text,
 and what was done.
 
 - Any human reply stops the automated sequence. Interested: the lead becomes *interested*, an
@@ -195,7 +214,7 @@ and what was done.
   opinion, shown in the reply's reasons ("AI … suggests: interested, asks for a meeting (please check)").
   It never acts by itself: such a reply stays in review, with a "Possible interest" alert, until you
   reclassify it. At most five replies per run get a second opinion (a few seconds each).
-- Reclassify on the Replies page applies the right actions and is logged.
+- Reclassify on the Conversations page applies the right actions and is logged.
 - Limits on approved outreach: 20 a day, one per company domain a day, five per run (`[outreach]`).
 - Test mode (`OUTBOUND_TEST_RECIPIENTS`): every email goes only to your test addresses, marked
   `[TEST for <intended recipient>]`. `aime simulate-reply --lead <id> --text "..."` processes a reply

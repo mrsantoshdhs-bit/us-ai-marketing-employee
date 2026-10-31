@@ -83,7 +83,7 @@ class EmailSender:
     def status(self) -> tuple[bool, str]:
         s = self.settings
         if not s.outbound_email_enabled:
-            return False, "DISABLED: OUTBOUND_EMAIL_ENABLED=false"
+            return False, "DISABLED: sending is switched off"
         if not s.smtp_host or not s.smtp_from:
             return False, "NOT CONFIGURED: SMTP_HOST / SMTP_FROM missing"
         if not s.company_postal_address:

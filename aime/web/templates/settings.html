@@ -2,8 +2,8 @@
 {% block title %}Settings · AI Sales Employee{% endblock %}
 {% block content %}
 <div class="page-head"><div><h1>Settings</h1>
-  <p class="subtitle">How this installation is configured, read from its settings. Passwords and keys are never shown. Change the mode and automation on <a href="/automation">Automation Control</a>; other values live in <code>.env</code> and <code>config/*.toml</code>.</p></div>
-  <div class="head-actions"><a class="btn secondary" href="/integrations">Integrations</a><a class="btn secondary" href="/system">System health</a></div></div>
+  <p class="subtitle">How this installation is configured, read from its settings. Passwords and keys are never shown. Change the mode and automation on {% if can_view_all %}<a href="/automation">Automation Control</a>{% else %}Automation Control (a manager who sees all records opens it){% endif %}; other values live in <code>.env</code> and <code>config/*.toml</code>.</p></div>
+  <div class="head-actions"><a class="btn secondary" href="/integrations">Integrations</a>{% if can_view_all %}<a class="btn secondary" href="/system">System health</a>{% endif %}</div></div>
 <div class="two">
   {% for title, rows in sections %}
   <div class="card"><div class="card-head"><h3>{{ title }}</h3></div>

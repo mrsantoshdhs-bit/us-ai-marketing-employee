@@ -1,7 +1,7 @@
 {% extends "base.html" %}{% from "_macros.html" import grade, ext %}
 {% block title %}Companies · AI Sales Employee{% endblock %}
 {% block content %}
-<h1>Companies <span class="muted small">{{ rows|length }} shown (latest 300)</span></h1>
+<h1>Companies <span class="muted small">{{ total }} matching</span></h1>
 <form class="filters" method="get">
   <input name="q" placeholder="Company name" value="{{ f.q }}">
   <select name="state"><option value="">Any state</option>{% for code, name in STATES|dictsort %}<option value="{{ code }}" {{ 'selected' if f.state == code }}>{{ code }} · {{ name }}</option>{% endfor %}</select>
@@ -16,4 +16,7 @@
       <td>{{ c.source }} · {{ ext(c.source_url) }}</td><td>{{ c.lifecycle_stage }}</td><td>{% if l %}{{ grade(l.grade) }} {{ l.score }}{% else %}—{% endif %}</td><td class="small">{{ c.created_at|local }}</td></tr>
   {% else %}<tr><td colspan="9" class="muted">No companies yet.</td></tr>{% endfor %}
 </table></div>
+{% set qs %}{% for k, v in f.items() if v %}{{ k }}={{ v|urlencode }}&{% endfor %}{% endset %}
+{% if total > 100 %}<p>{% if page > 1 %}<a href="?{{ qs }}page={{ page - 1 }}">← Previous</a>{% endif %}
+  Page {{ page }} {% if page * 100 < total %}<a href="?{{ qs }}page={{ page + 1 }}">Next →</a>{% endif %}</p>{% endif %}
 {% endblock %}

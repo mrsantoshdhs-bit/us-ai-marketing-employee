@@ -1,25 +1,26 @@
 {% extends "base.html" %}{% from "_macros.html" import status_pill, state_pill, qc_pill, ext %}
 {% block title %}Follow-ups · AI Sales Employee{% endblock %}
 {% block content %}
-<h1>Follow-ups and tasks</h1>
+<h1>Follow-ups and tasks{% if show == 'sent' %} <span class="muted small">{{ sent_total }} sent email{{ 's' if sent_total != 1 }}</span>{% endif %}</h1>
 <div class="card small">
-  Outbound email: {{ state_pill('READY' if email_ready else 'DISABLED') }} {{ email_reason }}.
+  Outbound email: {{ state_pill('READY' if email_ready else 'DISABLED' if 'DISABLED' in email_reason else 'BLOCKED' if 'refused' in email_reason else 'NOT CONFIGURED') }} {{ email_reason|plain }}.
   Replies are drafted for people who contacted you; B2B outreach is drafted for researched decision-makers whose
   company publishes their business email, quoting only what the company published. Every email needs your approval.
   Leads that cannot be contacted get a review task instead.
-  <a href="?show={{ 'all' if show == 'open' else 'open' }}">{{ 'Show all' if show == 'open' else 'Show open only' }}</a>
+  {% if show != 'open' %}<a href="?show=open">Show open only</a> {% endif %}{% if show != 'all' %}<a href="?show=all">Show all</a> {% endif %}{% if show != 'sent' %}<a href="?show=sent">Show sent mail</a>{% endif %}
 </div>
 {% if hidden > 0 %}<div class="flash">Emails awaiting approval and uncertain sends are always listed first. Of the other
   items, the {{ page_size }} due soonest are shown: {{ hidden }} more not shown.</div>{% endif %}
 {% for f in rows %}
 <div class="card" id="f{{ f.id }}">
   <div class="filters" style="justify-content:space-between">
-    <div><strong>{{ f.subject }}</strong> {{ status_pill(f.status) }}{% if f.delivery_status in ('bounced', 'replied') %} <span class="pill {{ 'bad' if f.delivery_status == 'bounced' else 'ok' }}">{{ f.delivery_status }}</span>{% endif %} <span class="pill">{% if f.purpose == 'reengage' %}re-engagement · once{% else %}{{ 'outreach' if f.kind == 'outreach' else f.channel }} · step {{ f.step }}{% endif %}</span>
+    <div><strong>{{ f.subject }}</strong> {{ status_pill(f.status) }}{% if f.delivery_status in ('bounced', 'replied') %} <span class="pill {{ 'bad' if f.delivery_status == 'bounced' else 'ok' }}">{{ f.delivery_status }}</span>{% endif %} {% if f.status == 'awaiting_approval' %}<span class="pill warn" title="Since this draft was written">waiting {{ f.created_at|waited }}</span> {% endif %}{% if f.id in simulated %}<span class="pill bad">SIMULATED</span> {% endif %}<span class="pill">{% if f.purpose == 'reengage' %}re-engagement · once{% else %}{{ 'outreach' if f.kind == 'outreach' else f.channel }} · step {{ f.step }}{% endif %}</span>
       {% if f.quality and f.quality.qc %}{{ qc_pill(f.quality.qc.status) }}{% endif %}
       {% if f.channel == 'email' %}<span class="pill" title="Who wrote this text">{{ 'Template draft · no AI model' if (f.generator or 'template') == 'template' else (f.generator|replace('template, ', 'Template · ')) }}</span>{% endif %}
       {% if f.contact and f.contact.email_status == 'user_provided' %}<span class="pill warn" title="An address given to us, not published by the company">test contact: goes out only with your approval and an active campaign authorization naming this exact address</span>{% endif %}
       <div class="small muted">Lead: <a href="/leads/{{ f.lead_id }}">{{ f.lead.company.name }}</a>{% if f.contact %} · to {{ f.contact.display_name }} &lt;{{ f.to_email or f.contact.email }}&gt;{% if f.kind == 'outreach' %} ({{ (f.contact.email_status or '')|replace('_', ' ') }}{% if f.contact.email_confidence %}, {{ f.contact.email_confidence }}{% endif %}, {{ ext(f.contact.email_source_url, 'where published') }}){% endif %}{% endif %} · due {{ f.due_at|local }}</div>
-      {% if f.blocked_reason %}<div class="small"><span class="pill warn">{{ f.blocked_reason }}</span></div>{% endif %}
+      {% if reply_to.get(f.id) %}<div class="small muted">They asked for answers to go to {{ reply_to[f.id] }}; this draft goes to the address above.</div>{% endif %}
+      {% if f.blocked_reason %}<div class="small"><span class="pill warn">{{ f.blocked_reason|plain }}</span></div>{% endif %}
     </div>
   </div>
   {% if f.kind == 'outreach' %}
