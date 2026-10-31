@@ -425,3 +425,34 @@ def test_the_morning_check_flags_a_company_on_file_and_logs_the_phrase(make_ctx)
     with ctx.db.session() as s:
         assert s.get(Company, cid).is_competitor
         assert s.query(Activity).filter(Activity.subject.like("Marked as a possible competitor%IT consulting firm%")).count() == 1
+
+
+@pytest.mark.parametrize("post", [
+    "Experience in an IT consulting firm is a plus.",
+    "Prior work with a software consulting company helps.",
+    "Our customer, a leading IT consulting firm, runs on our product.",
+    "Our customer is a leading IT consulting firm.",
+    "We sell to a technology consulting company.",
+    "No agencies, no outstaffing please.",
+    "We aren't an outsourcing company.",
+    "We replaced an outsourcing firm last year.",
+    "10 years of experience in IT services and consulting.",
+    "You will lead AI and software development for autonomous drones.",
+])
+def test_a_post_naming_such_a_firm_is_not_the_firm(post):
+    assert competitor_in_post(post) is None
+
+
+@pytest.mark.parametrize("post", [
+    "We are a people-first, boutique tech agency creating teams for clients.",
+    "We’re a small IT consulting firm in regulated environments.",
+    "Acme is a boutique outsourcing company based abroad.",
+    "We are an outstaffing company.",
+    "Acme is a small R&D company specializing in AI/ML and software development for defense and healthcare.",
+])
+def test_a_post_saying_it_is_such_a_firm_still_counts(post):
+    assert competitor_in_post(post) is not None
+
+
+def test_engineering_services_of_another_trade_are_no_competitor():
+    assert competitor_evidence("An environmental services and consulting company.") is None

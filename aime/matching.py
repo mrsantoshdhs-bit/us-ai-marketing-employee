@@ -11,6 +11,7 @@ from aime.knowledge.services import SERVICES
 
 # Only firms that sell software or AI work to clients count as competitors (the owner's rule, 31 Oct 2026). A company selling
 # its own product stays a prospect, even when that product uses AI agents.
+_SAYS_IT_IS = r"(?:\bwe are|\bwe['\u2019]re|(?<!customer )(?<!client )(?<!partner )(?<!vendor )\bis) an? (?:[\w&]+[ ,-]+){0,3}?"
 COMPETITOR_PATTERNS = [
     r"software (?:development|engineering) (?:agency|firm|company|services)",
     r"dev(?:elopment)? shop",
@@ -22,15 +23,11 @@ COMPETITOR_PATTERNS = [
     r"\b(?:applied[- ]ai|ai|ai transformation|digital transformation|automation) (?:advisory|consulting|consultancy|"
     r"implementation|transformation) (?:firm|company|agency|studio|partner)\b",
     r"\bai transformation firm\b",
-    r"\bboutique (?:tech(?:nology)?|software|it|ai|digital|engineering|dev(?:elopment)?|outsourcing) "
+    # These say who the company is, so they need it saying so: a post also names firms it sold to, replaced or wants experience of.
+    _SAYS_IT_IS + r"(?:boutique )?(?:(?:it|tech|technology|software) consulting|outsourcing|outstaffing) (?:firm|company)\b",
+    _SAYS_IT_IS + r"boutique (?:tech(?:nology)?|software|it|ai|digital|engineering|dev(?:elopment)?) "
     r"(?:agency|firm|company|consultancy|studio|shop)\b",
-    r"\b(?:technology|tech|it) services (?:&|and) consulting\b",
-    # who it is, not where someone worked or whom it sells to: "experience at a software consulting firm", "for an IT consulting firm"
-    r"(?<!at a )(?<!at an )(?<!from a )(?<!from an )(?<!for a )(?<!for an )(?<!not a )(?<!not an )"
-    r"\b(?:it|technology|tech|software) consulting (?:firm|company)\b",
-    r"\b(?:ai/ml|ai|ml|machine learning) (?:and|&) software development for (?!our\b|your\b|the\b)",
-    r"\boutstaffing\b",
-    r"(?<!not )\ban outsourcing (?:company|firm)\b",
+    r"\b(?:specializ\w+ in|we (?:do|offer|provide)) (?:ai/ml|ai|ml|machine learning) (?:and|&) software development for (?!our\b|your\b)",
 ]
 _COMPETITOR_RE = re.compile("|".join(COMPETITOR_PATTERNS), re.IGNORECASE)
 # What a company says it sells on its own website: software work, or developers for hire. A hiring post can describe the job
@@ -42,6 +39,8 @@ OWN_SITE_COMPETITOR_PATTERNS = [
     r"\bfractional (?:cto|cio|caio|chief)\b",
     r"\bcustom ai (?:development|solutions|systems|agents?)\b",
     r"\bdone[- ]for[- ]you,? by ai\b",
+    r"\b(?:technology|tech|it) services (?:&|and) (?:it )?consulting\b",
+    r"\boutstaffing (?:partner|company|firm|provider)\b",
     *COMPETITOR_PATTERNS,
 ]
 _OWN_SITE_COMPETITOR_RE = re.compile("|".join(OWN_SITE_COMPETITOR_PATTERNS), re.IGNORECASE)
