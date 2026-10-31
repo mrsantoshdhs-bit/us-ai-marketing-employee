@@ -222,7 +222,7 @@ def admin_only(method: str, path: str) -> bool:
 # and custom roles an administrator defines. What each request needs:
 # - configure_system: mailboxes, sales settings, LinkedIn Lead Sync;  admin_ops: jobs, automation, integrations;
 # - manage_users: accounts, teams and roles;  assign_leads: moving a lead or deal to someone else;
-# - approve_outbound: approving, confirming or resending what goes out to customers, and campaigns;
+# - approve_outbound: approving, confirming or resending what goes out to customers, campaigns, reopening a stopped lead;
 # - approve_outbound or reject_outbound: rejecting or cancelling an email (decided in the route: the same URL also
 #   cancels a task, which edit_records is enough for);
 # - edit_records: every other change. Without it (a Read-Only Analyst) a user can only look and sign out.
@@ -234,7 +234,8 @@ ADMIN_ROLES = tuple(k for k, v in BUILTIN_ROLES.items() if "admin_ops" in v["per
 READ_METHODS = ("GET", "HEAD")
 _APPROVALS = re.compile(r"/(?:followups/\d+/(?:approve|reconfirm|mark_sent|requeue)"
                         r"|content/\d+/(?:approve|confirm_published|requeue)|campaigns(?:/\d+/(?:status|audience))?"
-                        r"|meetings/proposals/\d+/book|meetings/\d+/move|inbox/\d+/(?:reclassify|apply_calendly))/?")
+                        r"|meetings/proposals/\d+/book|meetings/\d+/move|inbox/\d+/(?:reclassify|apply_calendly)"
+                        r"|leads/\d+/reopen_outreach)/?")
 # one record in the URL: /leads/7, /opportunities/3, /followups/12/approve, /inbox/5/reviewed, /meetings/2/held,
 # /meetings/proposals/4/book, /meetings/requests/9/propose, /companies/6/not_competitor
 _RECORD = re.compile(r"/(?:meetings/)?(leads|opportunities|followups|inbox|meetings|proposals|requests|companies)/(\d+)(?:/|$)")

@@ -46,6 +46,7 @@ class Company(Timestamped, Base):
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
     is_competitor: Mapped[bool] = mapped_column(Boolean, default=False)
     competitor_cleared_by: Mapped[str | None] = mapped_column(String(80))  # a person said "not a competitor"
+    name_set_by: Mapped[str | None] = mapped_column(String(80))  # a person corrected the name: nothing automatic changes it
     is_sample: Mapped[bool] = mapped_column(Boolean, default=False)
     lifecycle_stage: Mapped[str] = mapped_column(String(30), default="prospect")
     merged_into_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"))

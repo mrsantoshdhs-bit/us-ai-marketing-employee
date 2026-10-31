@@ -247,7 +247,7 @@ ORG_PAGES = ("/", "/manager", "/audit", "/system", "/automation", "/api/stats")
 ORG_PREFIXES = ("/command-center", "/reports", "/agents", "/jobs")
 APPROVALS = re.compile(r"/(followups/\d+/(approve|reconfirm|mark_sent|requeue)|content/\d+/(approve|confirm_published|requeue)"
                        r"|campaigns|campaigns/\d+/(status|audience)|meetings/proposals/\d+/book|meetings/\d+/move"
-                       r"|inbox/\d+/(reclassify|apply_calendly))")
+                       r"|inbox/\d+/(reclassify|apply_calendly)|leads/\d+/reopen_outreach)")
 
 
 def required(method: str, path: str) -> str | None:

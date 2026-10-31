@@ -163,6 +163,10 @@ resumes by itself. If the clock is right (a holiday longer than two weeks), run 
 - **Watchdog:** `scheduler install-watchdog` adds an hourly task that shows a desktop notification if
   ticks have stopped for 45 minutes or the dashboard is not running (log: `data/logs/watchdog.log`).
   Remove: `scheduler uninstall-watchdog`.
+- **A clock wrong by less than the stop notices.** Web servers answer each request research and the website checks make with
+  their time. When two or more sites differ from this PC by over an hour by the same amount, and they outnumber the sites
+  that agree with it, one warning names the clock. It stops nothing, and closes when two sites agree with the clock again or
+  after `python -m aime confirm-clock`.
 - **Dashboard restart:** the dashboard is a separate process, and nothing restarts it by default (on 26–27 Oct
   it was down for about 5 hours after the window running it closed). `scheduler install-dashboard` adds a
   task that starts it at logon and every 15 minutes if it is not answering; it never starts it during a
@@ -238,7 +242,18 @@ Nothing is sent while `OUTBOUND_EMAIL_ENABLED=false`.
   prospect says stop. At send time each email is re-checked: if the contact, address, grade,
   suppression or policy changed, it is cancelled with the reason.
 - **Lead outreach stage** (lead page): drafted, approved, contacted, then replied / stopped. "They replied"
-  stops the sequence.
+  stops the sequence. The page says why the stage is what it is, where that is on record.
+- **Reopening a stopped lead.** On the page of a lead whose stage is *stopped*, someone who may approve outbound email
+  (a Sales Executive never sees this) types the reason and clicks **Reopen outreach**. The stage goes back to *contacted* if
+  an outreach email went out, otherwise to none, with an Activity line and an audit event (`outreach_reopen`) saying who
+  and why. It approves, drafts and sends nothing, and cancelled emails stay cancelled: any next email is drafted as usual
+  and waits for a person's approval. Nothing automatic ever reopens a lead. It refuses, says why and changes nothing when:
+  anyone at the company has opted out; an address or the domain of the lead is on the do-not-contact list; the stage is
+  *unsubscribed* or *bounced*; the contact's address bounced; someone at the company asked not to be contacted, or any email
+  on the lead was read as an unsubscribe; the lead is disqualified, merged, converted or a possible competitor; or an email
+  on Conversations still waits for a person (one that holds sending, or a delivery failure report).
+- **Correcting a company's name** (lead page, anyone who may edit records): it is logged in Activity, and research and
+  clean-ups leave a corrected name alone. Emails already waiting keep their words: edit those on Follow-ups.
 
 ## Conversations: replies, unsubscribes and bounces (sales mailbox)
 
@@ -264,6 +279,13 @@ and what was done.
 - Test mode (`OUTBOUND_TEST_RECIPIENTS`): every email goes only to your test addresses, marked
   `[TEST for <intended recipient>]`. `aime simulate-reply --lead <id> --text "..."` processes a reply
   that is labelled SIMULATED everywhere.
+
+## How fast replies leave
+
+`replies_per_run` under `[followup]` in `config/business.toml` (10): approved replies to people who wrote to us leave at
+most this many per follow-ups run, so that a full approval page does not all go in one minute. The rest stay approved, say
+"Nothing is lost: it goes out on the next run", and go then. Notes about a booked meeting go first and are not counted. No
+approval or check is skipped.
 
 ## Meetings, pipeline automation and sales reporting
 
@@ -336,6 +358,19 @@ not passed, at most 3 posts in any 7 days and 20 h apart.
 permissive* (it would have published a post you rejected) and *too strict*. CLI: `policy` to show,
 `policy evaluate` to check now. `doctor` warns if the mode is set to anything other than `shadow`
 (other modes are not supported and are treated as shadow).
+
+## Logs
+
+`aime.log` keeps 5 older copies of 2 MB, `agent_runs.jsonl` 5 of 10 MB, and the dashboard's own `dashboard.log` (when the
+task runs it) 5 of 5 MB. On Windows `aime.log` turns over only at a moment no other process has it open, so it can run past
+its size for a while.
+
+`python -m aime scrub-logs` takes query strings out of old access lines in `dashboard.log` and its older copies (they could
+hold sign-in codes and one-time links; new lines never have them). `--file <path>` names another log instead. It prints
+counts, never a line, keeps every other byte, and running it twice changes nothing more. It writes a cleaned copy and swaps
+it in. A dashboard of this version holds the file only for the moment of each write, so it can run meanwhile, and what it
+writes during the work is kept. A dashboard started by an older version holds the file open: Windows then refuses the swap
+and the command says "in use" with the log unchanged, so run it again after that dashboard has restarted.
 
 ## Keeping secrets out of GitHub
 
