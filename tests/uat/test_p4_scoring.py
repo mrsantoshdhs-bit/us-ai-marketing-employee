@@ -309,7 +309,7 @@ def test_the_page_says_plainly_why_an_outside_us_lead_cannot_be_reopened(make_ct
         s.flush()
         lead_id = lead.id
     where = _set_status(ctx, lead_id, "qualified")
-    assert "Status not changed" in where and "outside the US" in where and "administrator" in where
+    assert "Status not changed" in where and "outside the US" in where and "cannot be changed" in where and "administrator" not in where
     assert _status(ctx, lead_id)[0] == "disqualified"
     LeadQualificationAgent(ctx).run({"rescore_all": True})
     assert _status(ctx, lead_id)[0] == "disqualified"
@@ -495,3 +495,23 @@ def test_a_persons_note_keeps_the_flag(make_ctx):
         s.add(Activity(subject="Note", actor="owner", type="note", body="Confirmed by phone, do not reopen", company_id=ca, lead_id=a))
     _review(ctx)
     assert _state(ctx, a, ca)[:2] == (True, "disqualified")
+
+
+def test_a_refused_status_keeps_the_note_the_person_typed(make_ctx):
+    ctx = make_ctx()
+    lead_id, cid = _hn_lead(ctx, days_old=5, status="disqualified", competitor=True)
+    client = TestClient(create_app(ctx), base_url="http://127.0.0.1", follow_redirects=False, headers={"origin": "http://127.0.0.1"})
+    where = unquote(client.post(f"/leads/{lead_id}/status", data={"status": "qualified", "note": "They asked us to call"}).headers["location"])
+    assert "Your note was saved" in where
+    with ctx.db.session() as s:
+        assert s.query(Activity).filter(Activity.type == "note", Activity.lead_id == lead_id, Activity.body == "They asked us to call").count() == 1
+    assert _status(ctx, lead_id)[0] == "disqualified"
+
+
+def test_the_suppression_refusal_promises_nothing_that_does_not_exist(make_ctx):
+    ctx = make_ctx()
+    lead_id, cid = _hn_lead(ctx, days_old=5, status="disqualified")
+    with ctx.db.session() as s:
+        s.add(Suppression(value="acme.example", kind="domain", reason="opt-out"))
+    where = _set_status(ctx, lead_id, "qualified")
+    assert "suppression list" in where and "no way to take" in where and "administrator" not in where
