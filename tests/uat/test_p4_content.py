@@ -16,7 +16,8 @@ from aime.models import Activity, Campaign, Company, Contact, ContentItem, Follo
 from aime.outreach import draft_outreach, sent_earlier
 from aime.qc.checks import check_claims
 from aime.qc.email_checks import run_email_checks
-from aime.reply_intel import (QUESTION_PLACEHOLDER, _month_due, check_back_month, classify, first_name, intent_of, note_now, offered_day, recommended_for, reply_footer,
+from aime.inbox import new_text
+from aime.reply_intel import (QUESTION_PLACEHOLDER, _month_due, _nothing_new, check_back_month, check_back_when, classify, first_name, intent_of, note_now, offered_day, recommended_for, reply_footer,
                               sentiment_and_recommendation, suggest)
 from aime.timeutil import utcnow
 from aime.web.app import create_app
@@ -138,6 +139,23 @@ def test_re_passes_only_on_an_answer_to_an_email_really_sent(subject, sent, stat
     assert checks(subject, sent)["status"] == status
 
 
+@pytest.mark.parametrize("subject", ["RE[2]: Foo at Acme", "RE(2): Foo at Acme", "AW: Foo at Acme", "SV: Foo at Acme", "Re\uff1a Foo at Acme", "Re - Foo at Acme", "\u200bRe: Foo at Acme", "R\u200be: Foo at Acme",
+                                     "Re: Re: Foo at Acme", "Fwd: Foo at Acme", "Re: Foo at Acme\u200b", "Re:Foo at Acme\nBcc: a@b.example"])
+@pytest.mark.parametrize("sent", [["Foo at Acme"], ["Foo at Acme", "Re: Foo at Acme"], []])
+def test_a_hand_cannot_slip_a_fake_reply_past_the_check(subject, sent):
+    assert checks(subject, sent)["status"] == "fail", (subject, sent)
+
+
+@pytest.mark.parametrize("sent", [["Foo at Acme"], ["Foo at Acme", "Re: Foo at Acme"], ["Foo at Acme", "Following up: Foo"]])
+def test_the_real_answer_passes_and_only_under_the_first_subject(sent):
+    assert checks("Re: Foo at Acme", sent)["status"] == "pass"
+    assert checks("Re: Following up: Foo", sent)["status"] == "fail"
+
+
+def test_invisible_characters_fail_without_any_reply_word():
+    assert checks("Foo\u200b at Acme")["status"] == "fail"
+
+
 def test_the_two_characters_of_re_do_not_push_a_full_length_subject_over_the_limit():
     first = "Question about tools " * 3 + "abcdefg"
     assert len(first) == 70 and checks(f"Re: {first}", [first])["status"] == "pass"
@@ -187,6 +205,17 @@ def test_what_was_sent_before_comes_only_from_this_lead_and_only_if_it_went_out(
         s.get(FollowUp, sent.id).status = "uncertain"
         assert sent_earlier(s, sent.lead_id, sent.message_id) == []
         s.rollback()
+
+
+def test_in_test_mode_the_panel_names_who_really_received_it(make_ctx):
+    ctx, sender, sent = contacted(make_ctx)
+    with ctx.db.session() as s:
+        s.get(FollowUp, sent.id).delivered_to = "owner@test.example"
+    run(ctx, sender, TUESDAY_11AM_ET + timedelta(days=4, minutes=5))
+    page = TestClient(create_app(ctx)).get("/followups").text
+    panel = page[page.index("Already sent in this thread"):]
+    panel = panel[:panel.index("</details>")]
+    assert "owner@test.example" in panel and sent.to_email not in panel
 
 
 def test_the_approval_page_shows_the_sent_text_read_only_in_both_kinds_of_draft(make_ctx):
@@ -328,6 +357,104 @@ def test_the_month_due_is_the_coming_one():
     assert _month_due(3, now) == datetime(2027, 3, 1, 14)
     assert _month_due(11, now) == datetime(2026, 11, 1, 14)
     assert _month_due(10, now) == now
+
+
+@pytest.mark.parametrize("text, due, words", [
+    ("Please check back in March 2028.", datetime(2028, 3, 1, 14), "in March 2028"), ("Please check back after December.", datetime(2027, 1, 1, 14), "after December"),
+    ("Check back after October please.", datetime(2026, 11, 1, 14), "after October"), ("Check back after December 2027.", datetime(2028, 1, 1, 14), "after December 2027"),
+    ("Try us again in mid-September.", datetime(2027, 9, 15, 14), "in mid-September"), ("Check back in late March.", datetime(2027, 3, 25, 14), "in late March"),
+    ("Check back in early May.", datetime(2027, 5, 1, 14), "in early May"), ("Check back after March.", datetime(2027, 4, 1, 14), "after March"),
+])
+def test_the_date_is_never_earlier_than_they_asked_and_says_what_they_said(st, text, due, words):
+    r = row(text)
+    when = check_back_when(r)
+    assert when["words"] == words
+    now = datetime(2026, 10, 31, 9)
+    assert _month_due(when["month"], now, when["year"], when["after"], when["part"]) == due
+    r.category, r.intent = classify(r)[0], None
+    if r.category == "objection":
+        assert f"I will check back {words}, as you suggest." in suggest(st, r.category, r, None, lead())[1]
+
+
+@pytest.mark.parametrize("text", ["You needn't check back in March.", "Do not, under any circumstances, check back in March.", "No need for you to check back in March.",
+                                  "It is pointless to follow up in March.", "Our CFO will get back to you in March.", "Sam will reach out in March if needed.", "You shouldn't check back in March.",
+                                  "There's no point trying again in March.", "I doubt it's worth checking back in March.", "Sam can reach out in March."])
+def test_a_refused_check_back_is_no_promise_and_no_task(st, make_ctx, text):
+    r = row(text)
+    assert check_back_month(r) is None
+    r.category, r.intent = classify(r)[0], None
+    suggested = suggest(st, r.category, r, None, lead())
+    assert suggested is None or ("will check back" not in suggested[1] and "checked back" not in suggested[1])
+    ctx, _sender, sent = contacted(make_ctx)
+    deliver(ctx, in_thread(sent, text))
+    with ctx.db.session() as s:
+        assert not s.execute(select(FollowUp).where(FollowUp.channel == "task", FollowUp.lead_id == sent.lead_id, FollowUp.subject.like("Check back%"))).first()
+
+
+@pytest.mark.parametrize("text", ["Actually, let's reconnect in March.", "Can we reconnect in June?", "You can check back in May.", "Don't call now. Please check back in March.", "If you can check back in March, please do."])
+def test_a_real_request_still_counts(text):
+    assert check_back_month(row(text))
+
+
+@pytest.mark.parametrize("text", ["I won't be forwarding this to anyone.", "We are not sharing this with the team.", "I never forwarded your email.", "I am no longer the right person.",
+                                  "I'm not really sure that I would be the right person."])
+def test_no_referral_is_claimed_where_none_was_made(st, text):
+    r, suggested = answer(st, text)
+    assert r.category == "other" and suggested is None, r.category
+
+
+def test_a_refused_pass_on_then_a_real_direction_is_still_asked(st):
+    r, (_, body) = answer(st, "Sorry, I can't pass this on. Please reach out to our office.")
+    assert r.category == "referral" and "Thank you for passing" not in body and "best way to reach them" in body
+
+
+@pytest.mark.parametrize("text", ["Not me but Sam is the right person for this.", "I'm not the right person, you should talk to Sam Ray."])
+def test_a_real_direction_beside_those_words_stays_a_referral(text):
+    assert classify(row(text))[0] == "referral"
+
+
+def later_no(ctx, sent, raw):
+    FakeIMAP.messages[max(FakeIMAP.messages) + 1] = raw
+    run_inbox(ctx)
+    with ctx.db.session() as s:
+        return s.execute(select(FollowUp).where(FollowUp.channel == "task")).scalars().one().status
+
+
+def asked_march(make_ctx):
+    ctx, _sender, sent = contacted(make_ctx)
+    FakeIMAP.messages = {1: mail(f"David Chen <{TO}>", f"Re: {sent.subject}", "Please check back in March.", in_reply_to=sent.message_id, msg_id="<a@x.example>")}
+    run_inbox(ctx)
+    return ctx, sent
+
+
+def test_a_later_no_closes_the_task_whichever_way_it_comes(make_ctx):
+    ctx, sent = asked_march(make_ctx)
+    assert later_no(ctx, sent, mail(f"David Chen <{TO}>", f"Re: {sent.subject}", "Not interested, thanks.", in_reply_to=sent.message_id, msg_id="<b@x.example>")) == "cancelled"
+    ctx, sent = asked_march(make_ctx)
+    assert later_no(ctx, sent, mail(f"Jane <jane@{TO.split('@')[1]}>", "Remove us", "Please remove us from your mailing list.", msg_id="<c@x.example>")) == "cancelled"
+    ctx, sent = asked_march(make_ctx)
+    assert later_no(ctx, sent, bounce_for(TO, sent.message_id)) == "cancelled"
+    ctx, sent = asked_march(make_ctx)
+    assert later_no(ctx, sent, mail("Sam <sam@other.example>", f"Re: {sent.subject}", "Thanks.", msg_id="<d@x.example>")) == "pending"  # a stranger's word closes nothing
+
+
+def test_a_person_confirming_an_opt_out_closes_it_too(make_ctx):
+    ctx, sent = asked_march(make_ctx)
+    FakeIMAP.messages[2] = mail("Sam <sam@other.example>", f"Re: {sent.subject}", "Please take me off your list.", msg_id="<e@x.example>")
+    run_inbox(ctx)
+    r = latest_reply(ctx)
+    TestClient(create_app(ctx), headers=ORIGIN).post(f"/inbox/{r.id}/reclassify", data={"category": "unsubscribe"})
+    with ctx.db.session() as s:
+        assert s.execute(select(FollowUp).where(FollowUp.channel == "task")).scalars().one().status == "cancelled"
+
+
+def test_the_task_holds_no_address_and_no_words_of_theirs(make_ctx):
+    ctx, _sender, sent = contacted(make_ctx)
+    FakeIMAP.messages = {1: mail(f"Jane <jane@{TO.split('@')[1]}>", f"Re: {sent.subject}", "Secret plans aside, please check back in March.", in_reply_to=sent.message_id, msg_id="<a@x.example>")}
+    run_inbox(ctx)
+    with ctx.db.session() as s:
+        task = s.execute(select(FollowUp).where(FollowUp.channel == "task")).scalars().one()
+        assert "jane" not in f"{task.subject} {task.body}".lower() and "Secret" not in task.body and task.to_email is None
 
 
 def test_check_back_in_march_leaves_a_task_for_a_person_and_nothing_else(make_ctx):
@@ -483,6 +610,19 @@ def test_a_post_that_passes_today_is_as_it_was_and_a_stored_failure_is_not_lifte
         assert s.get(ContentItem, clean).status == "approved"
 
 
+def test_a_post_never_checked_does_not_claim_it_was(make_ctx):
+    ctx = make_ctx()
+    with ctx.db.session() as s:
+        item = ContentItem(title="T", body=CLAIM, status="awaiting_approval", hashtags=[], service="custom_crm", industry="real_estate",
+                           scheduled_for=utcnow() + timedelta(days=1), generator="template", fingerprint="p4-undated", quality={})
+        s.add(item)
+        s.flush()
+        pid = item.id
+        assert "checked_at" not in item.qc
+    page = TestClient(create_app(ctx)).get(f"/content/{pid}").text
+    assert "Checked " not in page and "Not checked yet" in page and "claims first-hand experience" in page
+
+
 def test_a_post_never_checked_that_makes_a_claim_is_held_too(make_ctx):
     ctx = make_ctx()
     with ctx.db.session() as s:
@@ -540,8 +680,8 @@ def test_decision_makers_do_not_count_people_who_decide_nothing_and_drafted_no_c
         co = Company(name="Co", normalized_name="co", source="test", domain="co.example")
         s.add(co)
         s.flush()
-        titles = ["CEO", None, "Chief Performance Officer", "Former CEO", "CEO (former)", "Formerly CTO", "Executive Assistant", "Office Manager",
-                  "Social Media Manager", "Ex-CEO", "Co-founder, former CTO"]
+        titles = ["CEO", None, "Chief Performance Officer", "Assistant Vice President", "Founder (formerly at Globex)", "Former CEO", "CEO (former)", "Formerly CTO", "Executive Assistant",
+                  "Office Manager", "Social Media Manager", "Ex-CEO", "Co-founder, former CTO", "Former Assistant Vice President", "Assistant to the CEO"]
         for i, title in enumerate(titles):
             s.add(Contact(company_id=co.id, first_name="A", last_name=f"B{i}", email=f"a{i}@co.example", source="website", title=title))
         lead = Lead(company_id=co.id, source="research", status="qualified", score=70, grade="B")
@@ -550,7 +690,7 @@ def test_decision_makers_do_not_count_people_who_decide_nothing_and_drafted_no_c
         for status, approved in (("awaiting_approval", None), ("sent", utcnow()), ("cancelled", None), ("cancelled", utcnow()), ("rejected", None)):
             s.add(FollowUp(lead_id=lead.id, company_id=co.id, channel="email", kind="outreach", step=1, due_at=utcnow(), status=status, subject="s", body="b", approved_at=approved))
     k = kpis(ctx)
-    assert k["decision_makers_total"] == k["decision_makers_period"] == 3
+    assert k["decision_makers_total"] == k["decision_makers_period"] == 5
     assert k["outreach_drafted_total"] == k["outreach_drafted_period"] == 4
 
 
@@ -696,6 +836,144 @@ def test_an_opt_out_under_a_signature_line_keeps_nothing_and_a_disclaimer_there_
     ctx, sent, lead_id = interested(make_ctx)
     second(ctx, sent, "My colleague will join us.\n--\nDavid\nIf you are not the intended recipient please delete this email.")
     assert [s for _i, s in answer_of(ctx, lead_id)] == ["awaiting_approval"]
+
+
+# The review's list: each of these kept the booking link while the keep rule was a list of what may mean no.
+ANYTHING_ELSE = ["Go away.", "Please go away.", "We'll pass.", "Thanks, we'll pass.", "Pass, thanks.", "Please disregard my last email.", "Ignore my previous email.", "Scratch that.",
+                 "We went with another vendor.", "We chose someone else.", "We've decided against it.", "Decided to go another way.", "Please hold off.", "Hold off for now.",
+                 "Pat has left the company.", "I have left Acme.", "Pat retired last month.", "Pat passed away in March.", "I have moved to another company.", "Incorrect address.",
+                 "You emailed me by mistake.", "This reached me in error.", "Enough already.", "Quit it.", "Please cease.", "We wont be proceeding.", "Cant help you.", "Doesnt apply to us.",
+                 "We are out of budget.", "We have a budget freeze.", "Our budget has been cut.", "Actually, let's reconnect in March.", "Please try me again in June.",
+                 "Bitte aufhoeren.", "Bitte aufh\u00f6ren.", "H\u00f6ren Sie auf.", "Stopp.", "Dejen de escribirme.", "Basta.", "D\u00e9jenme en paz.", "Arr\u00eatez.", "Arr\u00eatez de m'\u00e9crire.",
+                 "Laissez-moi tranquille.", "Smettete di scrivermi.", "Pare de me enviar e-mails.", "Bas karo.", "\u0915\u0943\u092a\u092f\u093e \u092e\u0947\u0932 \u092e\u0924 \u092d\u0947\u091c\u093f\u090f",
+                 "\u8bf7\u4e0d\u8981\u518d\u53d1\u90ae\u4ef6\u4e86", "\u3082\u3046\u9001\u3089\u306a\u3044\u3067\u304f\u3060\u3055\u3044", "\u041d\u0435 \u043f\u0438\u0448\u0438\u0442\u0435 \u043c\u043d\u0435",
+                 "See subject.", "Thanks, but no.", "Great, stop now.", "Thanks. Go away", "Okay then, goodbye.", "Thanks\nGo away"]
+HARMLESS_WORDS = ["Thanks.", "Thank you!", "Thank you very much.", "OK", "Okay, thanks", "Sounds great.", "Great.", "Got it, thanks.", "My colleague will join us.", "My colleague will join.",
+                  "Sorry, one more thing, my colleague will join us.", "I'll bring a colleague.", "I will bring my colleague along.", "A colleague will join the call. Thanks!",
+                  "Thanks,\nDavid", "Thanks,\nDavid Chen", "Great, thank you.\n\nBest regards,\nDavid"]
+
+
+def small_row(text, subject="Re: Question about internal tools at Acme"):
+    body = text
+    r = NS(new_text=new_text(body), body_text=body, subject=subject, bounced_addresses=[], auto_submitted=False, from_email="b@x.example", from_name="David Chen",
+           is_simulated=False, mail_kind=None, in_junk=None, mail_note=None, sender_verified=False)
+    r.category, r.confidence, r.reasons = classify(r)
+    return r
+
+
+@pytest.mark.parametrize("text", ANYTHING_ELSE)
+def test_anything_off_the_short_list_is_not_nothing_new(text):
+    assert not _nothing_new(small_row(text), object(), NS(outreach_status="interested"), False)
+
+
+@pytest.mark.parametrize("text", [t for t in HARMLESS_WORDS if t != "Sounds great."])
+def test_the_short_list_is_nothing_new(text):
+    assert _nothing_new(small_row(text), object(), NS(outreach_status="interested"), False)
+
+
+@pytest.mark.parametrize("text", ["Go away.", "We'll pass.", "Dejen de escribirme.", "\u8bf7\u4e0d\u8981\u518d\u53d1\u90ae\u4ef6\u4e86", "Pat has left the company.", "We are out of budget.", "Please try me again in June."])
+def test_those_really_cancel_the_answer_and_lower_the_stage(make_ctx, text):
+    ctx, sent, lead_id = interested(make_ctx)
+    second(ctx, sent, text)
+    assert [s for _i, s in answer_of(ctx, lead_id)][0] == "cancelled" and lead_of(ctx).outreach_status != "interested"
+
+
+@pytest.mark.parametrize("subject", ["STOP", "Please stop", "Go away", "Wrong address", "Remove"])
+@pytest.mark.parametrize("text", ["See subject.", "Thanks."])
+def test_a_stop_written_only_in_the_subject_cancels(make_ctx, subject, text):
+    ctx, sent, lead_id = interested(make_ctx)
+    second(ctx, sent, text, subject=subject)
+    assert [s for _i, s in answer_of(ctx, lead_id)] == ["cancelled"] and lead_of(ctx).outreach_status != "interested"
+
+
+def test_words_below_a_copied_header_keep_nothing(make_ctx):
+    ctx, sent, lead_id = interested(make_ctx)
+    second(ctx, sent, "Thanks\n\nFrom: S <s@e.example>\nSent: Monday\nTo: b@x.example\nSubject: hi\n\nHi Bob pitch\n\nPlease remove me from your mailing list")
+    assert [s for _i, s in answer_of(ctx, lead_id)] == ["cancelled"]
+
+
+@pytest.mark.parametrize("text", ["Sounds interesting, but we are out of budget.", "Sounds good but we have a budget freeze.", "Sounds great, though our budget has been cut."])
+def test_interest_beside_no_budget_stays_on_the_review_list(make_ctx, text):
+    ctx, _sender, sent = contacted(make_ctx)
+    FakeIMAP.messages = {1: mail(f"David Chen <{TO}>", f"Re: {sent.subject}", text, in_reply_to=sent.message_id)}
+    run_inbox(ctx)
+    r = latest_reply(ctx)
+    assert r.status == "needs_review" and r.confidence != "high", (r.category, r.confidence, r.status)
+
+
+def test_approving_waits_until_a_person_has_read_the_later_reply(make_ctx):
+    ctx, sent, lead_id = interested(make_ctx)
+    r = second(ctx, sent, "My colleague will join us.")
+    fid = answer_of(ctx, lead_id)[0][0]
+    assert followup(ctx, fid).blocked_reason == "They wrote again after this draft: read it on Replies"
+    web = TestClient(create_app(ctx), headers=ORIGIN, follow_redirects=False)
+    for page in ("/followups", "/approvals"):
+        text = web.get(page).text
+        assert "My colleague will join us." in text and "They wrote again after this draft" in text, page
+    d = followup(ctx, fid)
+    web.post(f"/followups/{fid}/approve", data={"subject": d.subject, "body": d.body})
+    assert followup(ctx, fid).status == "awaiting_approval" and followup(ctx, fid).approved_by is None
+    web.post(f"/followups/{fid}/reconfirm")
+    assert followup(ctx, fid).status == "awaiting_approval"
+    web.post(f"/inbox/{r.id}/reviewed")
+    assert followup(ctx, fid).blocked_reason is None
+    assert "They wrote again" not in web.get("/followups").text
+    web.post(f"/followups/{fid}/approve", data={"subject": d.subject, "body": d.body})
+    assert followup(ctx, fid).status == "approved"
+
+
+def test_a_person_reclassifying_it_to_other_releases_the_answer_too(make_ctx):
+    ctx, sent, lead_id = interested(make_ctx)
+    r = second(ctx, sent, "My colleague will join us.")
+    TestClient(create_app(ctx), headers=ORIGIN).post(f"/inbox/{r.id}/reclassify", data={"category": "other"})
+    assert followup(ctx, answer_of(ctx, lead_id)[0][0]).blocked_reason is None
+
+
+def test_the_send_path_holds_an_answer_with_a_later_reply_unread(make_ctx):
+    from aime.integrations.email_smtp import EmailSender
+
+    ctx, sent, lead_id = interested(make_ctx)
+    r = second(ctx, sent, "My colleague will join us.")
+    fid = answer_of(ctx, lead_id)[0][0]
+    with ctx.db.session() as s:  # however it came to be approved: the send looks for itself
+        f = s.get(FollowUp, fid)
+        f.status, f.approved_by, f.approved_at = "approved", "sam", utcnow()
+    sender = EmailSender(ctx.settings, smtp_factory=FakeSMTP)
+    before = len(FakeSMTP.sent)
+    run(ctx, sender, TUESDAY_11AM_ET + timedelta(hours=1))
+    assert len(FakeSMTP.sent) == before and followup(ctx, fid).status == "approved"
+    TestClient(create_app(ctx), headers=ORIGIN).post(f"/inbox/{r.id}/reviewed")
+    run(ctx, sender, TUESDAY_11AM_ET + timedelta(hours=2))
+    assert len(FakeSMTP.sent) == before + 1 and followup(ctx, fid).status == "sent"
+
+
+def test_a_campaign_does_not_approve_an_answer_with_a_later_reply_unread(make_ctx, monkeypatch):
+    from aime import automation as am
+
+    ctx, sent, lead_id = interested(make_ctx)
+    with ctx.db.session() as s:
+        f = s.get(FollowUp, answer_of(ctx, lead_id)[0][0])
+        f.body = f"{f.body} https://calendly.com/uat/30min"
+        a = NS(id=1, name="c", daily_limit=9, total_limit=9, recipients=[f.to_email.lower()], kinds=[am.email_kind(f)], rule=None)
+        monkeypatch.setattr(am, "active_authorizations", lambda *_a, **_k: [a])
+        monkeypatch.setattr(am, "committed_counts", lambda *_a, **_k: (0, 0))
+        assert am.campaign_for(s, f, "automatic", utcnow(), {})[0] is a  # without a later reply it would go
+    second(ctx, sent, "My colleague will join us.")
+    with ctx.db.session() as s:
+        f = s.get(FollowUp, answer_of(ctx, lead_id)[0][0])
+        assert "wrote again" in am.campaign_for(s, f, "automatic", utcnow(), {})[1]
+
+
+@pytest.mark.parametrize("status, words", [("sent", "it is sent"), ("rejected", "it is rejected"), ("cancelled", "it is cancelled")])
+def test_the_kept_answers_note_tells_the_truth_once_it_has_moved_on(make_ctx, status, words):
+    ctx, sent, lead_id = interested(make_ctx)
+    second(ctx, sent, "My colleague will join us.")
+    web = TestClient(create_app(ctx), headers=ORIGIN)
+    assert "still waits for your approval" in web.get("/inbox?show=all").text
+    with ctx.db.session() as s:
+        s.get(FollowUp, answer_of(ctx, lead_id)[0][0]).status = status
+    page = web.get("/inbox?show=all").text
+    assert "still waits for your approval" not in page and f"the answer to their earlier email no longer waits: {words}" in page
 
 
 def test_a_stranger_writing_with_their_address_and_no_thread_keeps_nothing(make_ctx):

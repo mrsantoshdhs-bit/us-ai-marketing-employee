@@ -32,6 +32,11 @@
     {% endfor %}{% endif %}
   </div>
   {% endif %}
+  {% if later.get(f.id) %}
+  <div class="flash" style="margin-top:8px"><b>They wrote again after this draft</b> <span class="small muted">{{ later[f.id].at|local }}</span>
+    <div class="post small">{{ later[f.id].text }}</div>
+    <div class="small">It cannot be approved until this is read: <a href="/inbox">read it on Replies and mark it reviewed</a>.</div></div>
+  {% endif %}
   {% if earlier.get(f.id) %}
   <details class="small" open style="margin-top:8px"><summary>Already sent in this thread ({{ earlier[f.id]|length }})</summary>
     {% for e in earlier[f.id] %}<div class="row-item"><b>{{ e.subject }}</b> <span class="muted">sent {{ e.sent_at|local }}{% if e.to %} to {{ e.to }}{% endif %}</span>
@@ -44,7 +49,7 @@
     <textarea name="body">{{ f.body }}</textarea>
     {% if can_approve and f.quality and f.quality.qc and f.quality.qc.status in ['held', 'failed'] %}
     <label class="small"><input type="checkbox" name="qc_override" value="yes"> I reviewed the quality findings</label>{% endif %}
-    <div class="row-actions" style="margin-top:8px"><button {{ 'disabled' if not can_approve }} {% if not can_approve %}title="A Sales Manager approves what goes out to customers"{% endif %}>Approve{% if not email_ready %} (send when enabled){% endif %}</button>
+    <div class="row-actions" style="margin-top:8px"><button {{ 'disabled' if not can_approve or later.get(f.id) }} {% if not can_approve %}title="A Sales Manager approves what goes out to customers"{% elif later.get(f.id) %}title="They wrote again after this draft: read it on Replies first"{% endif %}>Approve{% if not email_ready %} (send when enabled){% endif %}</button>
       {% if f.kind == 'outreach' %}<button class="secondary" formaction="/followups/{{ f.id }}/save">Save changes</button>{% endif %}
       {% if can_reject %}<button class="danger" formaction="/followups/{{ f.id }}/reject">Reject</button>{% endif %}</div>
   </form>

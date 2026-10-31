@@ -36,7 +36,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from aime.crm_ops import is_suppressed
+from aime.crm_ops import is_suppressed, later_reply_waiting
 from aime.db import kv_get, kv_set
 from aime.models import AuditEvent, CampaignAuthorization, FollowUp, InboundEmail
 from aime.timeutil import utcnow
@@ -391,6 +391,8 @@ def campaign_for(session: Session, f: FollowUp, mode: str, now: datetime,
         return None, f"its quality checks {qc}"
     if (f.contact and f.contact.consent_status == "opted_out") or is_suppressed(session, to):
         return None, "the recipient opted out or is suppressed"
+    if later_reply_waiting(session, f):
+        return None, "they wrote again after this draft, and no person has read it yet"
     for a in camps:
         day, total = committed_counts(session, a, now)
         if f.status == "approved" and f.authorization_id == a.id:  # its own approval is already counted

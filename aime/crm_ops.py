@@ -188,6 +188,23 @@ def suppress(session: Session, value: str, reason: str) -> None:
 ERASED = "[erased on request]"
 
 
+WROTE_AGAIN = "They wrote again after this draft: read it on Replies"
+
+
+def later_reply_waiting(session: Session, f: FollowUp) -> InboundEmail | None:
+    """A reply from the person this answer goes to, written after the email it answers, that no person has read yet. The answer was written
+    without it: it is not approved or sent until someone has."""
+    if f.kind != "response" or not f.to_email or not f.lead_id:
+        return None
+    answered = session.execute(select(InboundEmail.id).where(or_(InboundEmail.suggested_followup_id == f.id, InboundEmail.message_id == f.in_reply_to))
+                               .order_by(InboundEmail.id)).scalars().first()
+    if answered is None:
+        return None
+    return session.execute(select(InboundEmail).where(
+        InboundEmail.lead_id == f.lead_id, InboundEmail.id > answered, InboundEmail.status == "needs_review",
+        func.lower(InboundEmail.from_email) == f.to_email.lower()).order_by(InboundEmail.id.desc())).scalars().first()
+
+
 def erase_person(session: Session, email: str, actor: str) -> dict[str, int]:
     """A person asked us to delete their data (LinkedIn's API terms for lead form data; privacy laws): their contact
     details, the inquiries and emails they sent us, our emails to them and the activity lines naming them are erased.

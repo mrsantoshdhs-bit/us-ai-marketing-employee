@@ -40,14 +40,14 @@ from datetime import datetime, timedelta
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from aime.crm_ops import log_activity, suppress
+from aime.crm_ops import WROTE_AGAIN, later_reply_waiting, log_activity, suppress
 from aime.dedupe import company_to_address
 from aime.inbox import AUTO_SUBJECT, BOUNCE_SENDERS, LARGE_MARK, below_header_copy, is_address, own_text, rest_of_reply
 from aime.llm.base import LLMError
 from aime.models import Alert, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity, SkippedMail
 from aime.notify import notify_event
 from aime.integrations.email_smtp import sender_line
-from aime.outreach import TOPICS, stop_sequence
+from aime.outreach import CHECK_BACK_TASK, TOPICS, close_check_back_tasks, stop_sequence
 from aime.stages import move, opened
 from aime.timeutil import utcnow
 
@@ -62,6 +62,9 @@ REMOVAL_WORDS = re.compile(r"\b(remov(e|ed|al)|unsubscrib\w*|delet(e|ed)|stop|op
                            r"(off|from) (your|the|this) \w*\s?list)\b", re.I)
 # "How much longer do I have to put up with this?" asks for no price.
 _HOW_MUCH = r"how much(?! longer| more (of|time|do|can|must)| (do|must|can|should) i\b)"
+# Having no money for it, in everyday wording.
+_NO_BUDGET = (r"\b(no|zero|without( a| any)?|out of|(do not|don'?t|doesn'?t|did not|didn'?t) (have|get)( a| any| the)?|have not got( a| any| the)?)\s+budget\b|"
+              r"\bbudget (is|was|has been) (\w+ )?(gone|tight|frozen|cut|spent|used up|exhausted|allocated|limited|locked|closed)\b|\bbudget freeze\b")
 PATTERNS: list[tuple[str, re.Pattern]] = [
     # Opt-outs in everyday wording and with typos ("unsubcribe", "remove my email from your list", "no more emails").
     # "drop me a line", "take us through it" and "one from the list you sent" are not opt-outs.
@@ -107,14 +110,16 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
                               r"set up a (call|meeting)|tell me more|send (me )?(more|some) (info|details)|"
                               rf"what (does it|would it) cost|{_HOW_MUCH}|pricing|availab(le|ility)|free (on|next)|"
                               r"(monday|tuesday|wednesday|thursday|friday) (works|at|morning|afternoon))\b", re.I)),
-    ("objection", re.compile(r"\b(too expensive|no budget|(do not|don'?t) have (a |any |the )?budget|budget (is|was)|not (a priority|right now|now)|maybe later|"
+    ("objection", re.compile(rf"{_NO_BUDGET}|" r"\b(too expensive|budget (is|was)|not (a priority|right now|now)|maybe later|"
                              r"next (quarter|year)|bad timing|already (work|working|use|using|have)|in-house|"
                              r"circle back|check back)\b", re.I)),
     ("referral", re.compile(r"\b(you should (talk|speak|reach out) to|reach out to|the right person|"
                             r"(cc|cc'?ing|copying|looping in)\b|forward(ed|ing)? (this|your)|contact our)", re.I)),
 ]
 # "I'm not the right person" points nowhere: nobody is referred, and a person reads it like "Wrong person, sorry".
-NOT_THE_RIGHT_PERSON = re.compile(r"(\bnot|n't|\bnever)( [\w']+){0,3} the right person\b", re.I)
+NOT_THE_RIGHT_PERSON = re.compile(r"(\bnot|n't|\bnever|\bno longer)( (?!but\b|however\b|though\b)[\w']+){0,6} the right person\b", re.I)
+# "I won't be forwarding this", "I never forwarded your email": nothing was passed on, and nobody is referred.
+NOT_PASSED_ON = re.compile(r"(\bnot|\bno\b|n't|\bnever|\bno longer)( (?!but\b|however\b|though\b)[\w']+){0,4} (forward|pass|shar)\w*\b( on)?( (this|your|it|the)\b)?", re.I)
 # Asking when we are free is a question, not interest, unless it is for a call they want ("your availability for a call").
 OUR_AVAILABILITY = re.compile(r"\b((what|how|when)\b[^.?!]{0,30}\byour( team'?s)? availability|(do|does) (you|your team) have (any )?availability)\b"
                               r"(?![^.?!]*\b(call|meeting|chat|demo)\b)[^.?!]*\?", re.I)
@@ -214,8 +219,7 @@ _WHEN = r"(monday|tuesday|wednesday|thursday|friday|tomorrow|today|this week|nex
 PRICING = re.compile(rf"\b(pric(e|es|ing)|{_HOW_MUCH}|cost(s)?|quote|quotation|rates|fees|budget|estimate|ballpark|"
                      r"discount(s|ed)?|cheaper|rebate|coupon|\d+\s?% off)\b", re.I)
 # Having no money for it says no, and asks no price: "No budget at the moment. How much is it?" still asks.
-NO_BUDGET = re.compile(r"\b(no|zero|without( a| any)?|out of|(do not|don'?t|doesn'?t|did not|didn'?t) (have|get)( a| any| the)?|have not got( a| any| the)?)\s+budget\b|"
-                       r"\bbudget (is|was|has been) (\w+ )?(gone|tight|frozen|cut|spent|used up|exhausted|allocated|limited|locked|closed)\b|\bbudget freeze\b", re.I)
+NO_BUDGET = re.compile(_NO_BUDGET, re.I)
 MORE_INFO = re.compile(r"\b(more (info|information|details)|tell me more|learn more|any (info|details)|"
                        r"send (me |us )?(some |more |a |the )?(info|information|details|deck|case stud(y|ies)|brochure|"
                        r"materials?|examples?))\b", re.I)
@@ -279,7 +283,7 @@ def recommended_for(row: InboundEmail) -> str | None:
     if getattr(row, "mail_kind", None) == "calendar" and row.category == "other":
         return RECOMMENDED["calendar"]
     if row.category == "referral":
-        if PASSED_ON.search(_flat(row.new_text or own_text(row.body_text or ""))):
+        if passed_on(row.new_text or own_text(row.body_text or "")):
             return "Wait to hear from the person they passed it to"
         if named_addresses(row):
             return "A person decides whether to write to the address they gave: nothing goes there by itself"
@@ -305,6 +309,18 @@ def intent_of(row: InboundEmail) -> str | None:
 PASSED_ON = re.compile(r"\b(forward(ed|ing)|pass(ed|ing)( on)?|shar(ed|ing)) (this|your|it|the)\b|\b(i'?ll|i will|we'?ll|we will) (forward|pass)\b|"
                        r"\b(looping|looped|copying|copied) in\b|\bcc'?(d|ed|ing)\b|\bcopying\b|\bon (cc|copy)\b", re.I)
 _ADDRESS = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# A word before it, in the same sentence, that takes it back: "You needn't check back", "I won't be forwarding", "It is pointless to follow up".
+_TAKEN_BACK = re.compile(r"\b(no|not|never|nor|neither|none|nobody|hardly|cannot|dont|needn'?t|\w+n't|without|pointless|useless|unnecessary|doubt|waste|avoid|instead|rather than|stop)\b", re.I)
+
+
+def _before_in_sentence(said: str, at: int) -> str:
+    return re.split(r"[.!?\n]", said[:at])[-1]
+
+
+def passed_on(text: str) -> bool:
+    """They say they passed it on or copied someone in, and do not say they did not."""
+    said = _flat(text)
+    return any(not _TAKEN_BACK.search(_before_in_sentence(said, m.start())) for m in PASSED_ON.finditer(said))
 
 
 def named_addresses(row: InboundEmail) -> list[str]:
@@ -318,17 +334,39 @@ _MONTHS = ("january", "february", "march", "april", "may", "june", "july", "augu
 # Asked to come back in a month they name. Only the writer's request: "we'll get back to you in March" asks nothing of us.
 CHECK_BACK = re.compile(r"\b((check|circle|come|get) back|touch base|reach (back )?out|follow[- ]?up|try (me |us )?again|reconnect|revisit|"
                         r"(ping|write to|contact|email|e-mail|call) (me|us))\b( \w+){0,4}? "
-                        rf"(in|around|after|until|till|by|from)( (early|mid|late|the start of|the end of))?[ -]({'|'.join(_MONTHS)})\b", re.I)
-_NOT_ASKED = re.compile(r"\b(do not|don'?t|no need to|never|not|(i|we)('ll| will| shall))( \w+){0,2} $", re.I)
+                        rf"(?P<prep>in|around|after|until|till|by|from)( (?P<part>early|mid|late|the start of|the end of))?[ -](?P<month>{'|'.join(_MONTHS)})\b( (?P<year>20\d\d)\b)?", re.I)
+# Someone else will write, or they will: "Our CFO will get back to you in March", "Sam can reach out in March". Not "you can", not "can we".
+_SOMEONE_WILL = re.compile(r"\b(?!you\b|we\b)[\w']+('ll| will| shall| would| might| may| is going to| are going to| can| could)( \w+){0,2} $|"
+                           r"\b(i|we)('ll| will| shall| am going to| are going to)( \w+){0,2} $", re.I)
+_PART_DAY = {"early": 1, "the start of": 1, "mid": 15, "late": 25, "the end of": 25}
+_PART_WORD = {"early": "early ", "the start of": "early ", "mid": "mid-", "late": "late ", "the end of": "late "}
+
+
+def check_back_when(row: InboundEmail) -> dict | None:
+    """What they ask: {month 1-12, year or None, part of the month, after: past that month, words: as we write it}. None when nobody asks
+    us to: a word that takes it back or someone else's promise makes no promise of ours, and no task."""
+    said = _flat(row.new_text or own_text(row.body_text or ""))
+    for asked in CHECK_BACK.finditer(said):
+        before = _before_in_sentence(said, asked.start())
+        if _TAKEN_BACK.search(before) or _SOMEONE_WILL.search(before):
+            continue
+        month, year = _MONTHS.index(asked.group("month").lower()) + 1, asked.group("year")
+        part, after = (asked.group("part") or "").lower(), asked.group("prep").lower() == "after"
+        name = asked.group("month").capitalize() + (f" {year}" if year else "")
+        return {"month": month, "year": int(year) if year else None, "part": part, "after": after,
+                "words": f"after {name}" if after else f"in {_PART_WORD.get(part, '')}{name}"}
+    return None
 
 
 def check_back_month(row: InboundEmail) -> int | None:
     """The month (1-12) they ask to hear from us again in, if they name one."""
-    said = _flat(row.new_text or own_text(row.body_text or ""))
-    asked = CHECK_BACK.search(said)
-    if not asked or _NOT_ASKED.search(said[:asked.start()][-30:]):
-        return None
-    return _MONTHS.index(asked.group(asked.lastindex).lower()) + 1
+    when = check_back_when(row)
+    return when["month"] if when else None
+
+
+def check_back_refused(row: InboundEmail) -> bool:
+    """They name a month and say not to, or that someone else will: asking whether to check back would be asking what they just answered."""
+    return bool(CHECK_BACK.search(_flat(row.new_text or own_text(row.body_text or "")))) and not check_back_when(row)
 
 
 UNSUBSCRIBE_SUBJECT = re.compile(r"^\s*((re|fwd?|aw)\s*:\s*)*(unsubscribe|opt[- ]?out|remove me|stop)\s*[.!]?\s*$", re.I)
@@ -412,7 +450,7 @@ def _classify(row: InboundEmail, text: str | None = None) -> tuple[str, str, lis
     text = _flat(text)
     said = _flat(f"{subject}\n{text}")
     complaint = COMPLAINT.search(SPAM_ASIDE.sub(" ", said))
-    heard = {"referral": NOT_THE_RIGHT_PERSON.sub(" ", said), "interested": OUR_AVAILABILITY.sub(" ", said)}  # never the opt-outs
+    heard = {"referral": NOT_PASSED_ON.sub(" ", NOT_THE_RIGHT_PERSON.sub(" ", said)), "interested": OUR_AVAILABILITY.sub(" ", said)}  # never the opt-outs
     hits = {name: m.group(0) for name, rx in PATTERNS if (m := rx.search(heard.get(name, said)))}
     if just_stop:
         hits.setdefault("unsubscribe", "stop")
@@ -844,16 +882,16 @@ def suggest(settings, category: str, row: InboundEmail, contact: Contact | None,
             body = (f"Hi {name},\n\nThank you for getting back to me. I would be glad to talk{topic}. Could you share "
                     f"two or three times {when}that suit you for a {minutes}-minute call?\n\n{sign}")
     elif category == "objection":
-        month = check_back_month(row)
-        if month:  # they said when: asking again whether to write would be asking twice
-            body = (f"Hi {name},\n\nThank you for letting me know. I will check back in {_MONTHS[month - 1].capitalize()}, as you suggest."
-                    f"\n\n{sign}")
+        when = check_back_when(row)
+        if when:  # they said when: asking again whether to write would be asking twice
+            body = f"Hi {name},\n\nThank you for letting me know. I will check back {when['words']}, as you suggest.\n\n{sign}"
+        elif check_back_refused(row):
+            body = f"Hi {name},\n\nThank you for letting me know.\n\n{sign}"
         else:
             body = (f"Hi {name},\n\nThank you for the honest answer. Would it be useful if I checked back in a few months, "
                     f"or would you rather I did not? Either is fine.\n\n{sign}")
     elif category == "referral":
-        said = _flat(row.new_text or own_text(row.body_text or ""))
-        if PASSED_ON.search(said):
+        if passed_on(row.new_text or own_text(row.body_text or "")):
             body = f"Hi {name},\n\nThank you for passing my note along. There is nothing more you need to do.\n\n{sign}"
         elif named_addresses(row):
             body = f"Hi {name},\n\nThank you for pointing me in the right direction. There is nothing more you need to do.\n\n{sign}"
@@ -874,29 +912,30 @@ def suggest(settings, category: str, row: InboundEmail, contact: Contact | None,
 
 
 BOOK_A_MEETING = "Book a meeting: approve the suggested reply with your booking link"
-CHECK_BACK_TASK = "Check back with "  # how a task of this kind starts: an opt-out afterwards closes it
+def _month_due(month: int, now: datetime, year: int | None = None, after: bool = False, part: str = "") -> datetime:
+    """When to write, never earlier than they asked: that month (the part of it they said) in the year they said, else its next coming, or
+    the first of the month after it for "after December". This month means now, unless they said a later part of it or "after"."""
+    if not year or year < now.year:
+        year = now.year if month >= now.month else now.year + 1
+    if after:
+        return datetime(year + 1, 1, 1, 14) if month == 12 else datetime(year, month + 1, 1, 14)
+    return max(datetime(year, month, _PART_DAY.get(part, 1), 14), now)
 
 
-def _month_due(month: int, now: datetime) -> datetime:
-    """The start of that month, next year's if it has passed; this month means now."""
-    if month == now.month:
-        return now
-    return datetime(now.year + (month < now.month), month, 1, 14)
-
-
-def _check_back_task(session: Session, row: InboundEmail, lead: Lead, contact: Contact | None, month: int, actor: str) -> str:
-    """A task for a person, due in the month they named. A task only: nothing is drafted or sent when it falls due."""
-    name = _MONTHS[month - 1].capitalize()
-    subject = f"{CHECK_BACK_TASK}{lead.company.name} in {name}"[:300]
+def _check_back_task(session: Session, row: InboundEmail, lead: Lead, contact: Contact | None, when: dict, actor: str) -> str:
+    """A task for a person, due when they said. A task only: nothing is drafted or sent when it falls due. Their words stay on the reply,
+    which a request to erase them reaches: a colleague's address and words are not copied here."""
+    words = when["words"]
+    subject = f"{CHECK_BACK_TASK}{lead.company.name} {words}"[:300]
     if session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task", FollowUp.subject == subject,
                                                  FollowUp.status == "pending").limit(1)).first():
-        return f"a task to check back in {name} is already open"
+        return f"a task to check back {words} is already open"
     session.add(FollowUp(lead_id=lead.id, contact_id=contact.id if contact else None, company_id=lead.company_id, channel="task", step=1,
-                         due_at=_month_due(month, utcnow()), status="pending", subject=subject,
-                         body=(f"{row.from_email} asked us to check back in {name}. They wrote: {(row.new_text or '')[:500]}\n\nFirst check that they "
-                               "have not opted out since. Nothing goes out by itself: writing to them is a person's decision.")))
-    log_activity(session, f"Task created: check back in {name}", actor, type_="task", company_id=lead.company_id, lead_id=lead.id)
-    return f"they asked us to check back in {name}: a task is due then, and nothing goes out by itself"
+                         due_at=_month_due(when["month"], utcnow(), when["year"], when["after"], when["part"]), status="pending", subject=subject,
+                         body=(f"Someone at this company asked us to check back {words}: their reply is on this lead's page. First check that they have not opted "
+                               "out since. Nothing goes out by itself: writing to them is a person's decision.")))
+    log_activity(session, f"Task created: check back {words}", actor, type_="task", company_id=lead.company_id, lead_id=lead.id)
+    return f"they asked us to check back {words}: a task is due then, and nothing goes out by itself"
 
 
 def ensure_opportunity(session: Session, lead: Lead, actor: str) -> Opportunity:
@@ -1005,22 +1044,39 @@ def _tie_to_lead(row: InboundEmail, lead: Lead) -> None:
 
 
 SUGGESTED_WAITS = "suggested reply waiting for your approval"
+KEPT_ANSWER = "the answer to their earlier email (#{}) still waits for your approval: read this one first"
+_KEPT_ANSWER = re.compile(r"the answer to their earlier email \(#(\d+)\) still waits for your approval: read this one first")
 NO_CLEAR_SIGNAL = "no clear signal"
 # Stages a line that says nothing new does not lower: what they said before still stands.
 STAGES_THAT_STAND = ("interested", "meeting")
-# What can mean no, in words the rules do not read as a no ("You can stop now", "Never mind", "Kein Bedarf"). Any of it: the reply counts as
-# something new, whatever else it says, and is handled as every reply was before.
-MAY_MEAN_NO = re.compile(r"\b(no|nope|not|never|none|nothing|cannot|dont|cancel\w*|mind|off|stop\w*|wrong|busy|later|\w+n't|"
-                         r"kein\w*|nicht|nein|non|pas|nahi|nahin|mat|nada|sin)\b", re.I)
-
-
+# The only replies that say nothing new: a short acknowledgement, or that a colleague comes along. Anything else, in any language, stops
+# everything as every reply does: a list of what may mean no would always miss one ("Go away", "We'll pass", "Dejen de escribirme").
+_ACK = r"(thanks( a lot| so much| very much)?|thank you( so much| very much)?|many thanks|ok|okay|sounds good|sounds great|great|perfect|got it|noted|received)"
+_JOINING = (r"((my|a|our) colleague (will|can|may|might|would like to|is going to) (also )?(join|be joining|attend)( us| me| the call| the meeting| in| too| as well)*|"
+            r"my colleague is joining( us| me)?( too| as well)?|"
+            r"(i'll|i will|i'd like to|i would like to) (also )?bring (along )?(my |a )colleague( along| with me| too)*)")
+_BETWEEN = r"[\s,.!;:-]*"
+HARMLESS = re.compile(rf"(?:(?:hi|hello){_BETWEEN})?(?:{_ACK}{_BETWEEN})*(?:(?:(?:sorry|one more thing|also|fyi|by the way|btw|just so you know){_BETWEEN})*{_JOINING}{_BETWEEN})?"
+                      rf"(?:{_ACK}{_BETWEEN})*", re.I)
+_SIGN_OFF = re.compile(r"[\s,.!-]*\b(best regards|kind regards|regards|best|cheers|sincerely)\W*$", re.I)
+_MOST_HARMLESS_CHARS = 160
+# Below a "--" line is a signature to every other rule, and a disclaimer there says "not" and "delete". An opt-out there still counts here.
 SIGNED_STOP = re.compile(r"\b(stop|take off)\b", re.I)
 
 
+def says_only_something_harmless(text: str, from_name: str | None) -> bool:
+    """The whole text is on the short list, with at most their sign-off and their own name after it."""
+    said = _flat(text).strip()
+    for word in reversed(re.findall(r"\w+", from_name or "")):
+        said = re.sub(rf"[\s,.!-]*\b{re.escape(word)}\W*$", "", said, flags=re.I)
+    said = _SIGN_OFF.sub("", said).strip()
+    return bool(said) and len(said) <= _MOST_HARMLESS_CHARS and bool(re.search(rf"{_ACK}|{_JOINING}", said, re.I)) and bool(HARMLESS.fullmatch(said))
+
+
 def _nothing_new(row: InboundEmail, f: FollowUp | None, lead: Lead, person: bool) -> bool:
-    """One more line from someone in the conversation that the rules read as nothing at all ("my colleague will join us"). Every doubt
-    says no, and then this reply stops everything as any reply does: what may be a no, a footer's opt-out, mail only partly read, a
-    newsletter, an AI that reads it as a no, a sender who is not proven, an address that opted out or bounced."""
+    """One more line from someone in the conversation that says nothing new ("my colleague will join us"). Every doubt says no, and then
+    this reply stops everything as any reply does: anything off the short list, words below the quote or under a signature that may be an
+    opt-out, a reading the AI finds negative, a newsletter, mail only partly read, a sender who is not proven, an address that opted out."""
     reasons = list(row.reasons or [])
     if row.category != "other" or not reasons or reasons[0] != NO_CLEAR_SIGNAL or row.is_simulated:
         return False
@@ -1030,12 +1086,13 @@ def _nothing_new(row: InboundEmail, f: FollowUp | None, lead: Lead, person: bool
         return False
     if lead.outreach_status in ("unsubscribed", "bounced") or not (f is not None or row.sender_verified or person):
         return False
-    # Below a "--" line is a signature to every other rule, and a disclaimer there says "not" and "delete". An opt-out there still counts here.
-    signed = own_text(re.sub(r"(?m)^\s*--\s*$", "", row.body_text or ""))
-    if JUST_STOP.search(signed) or any(rx.search(_flat(signed)) for rx in (dict(PATTERNS)["unsubscribe"], ELSEWHERE_OPT_OUT, COMPLAINT, SIGNED_STOP)):
+    body = row.body_text or ""
+    if rest_of_reply(body):  # they wrote below the quote too
         return False
-    said = _flat(f"{row.new_text or own_text(row.body_text or '')}\n{rest_of_reply(row.body_text or '')}")
-    return not (MAY_MEAN_NO.search(said) or REMOVAL_WORDS.search(said) or UPSET.search(said) or LEGAL_MENTION.search(said))
+    for part in (own_text(re.sub(r"(?m)^\s*--\s*$", "", body)), below_header_copy(body)):
+        if JUST_STOP.search(part) or any(rx.search(_flat(part)) for rx in (dict(PATTERNS)["unsubscribe"], ELSEWHERE_OPT_OUT, COMPLAINT, SIGNED_STOP)):
+            return False
+    return says_only_something_harmless(row.new_text or own_text(body), getattr(row, "from_name", None))
 
 
 def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
@@ -1071,10 +1128,8 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             contact.consent_status, contact.consent_at = "opted_out", utcnow()
         if lead and lead.outreach_status:
             stop_sequence(session, lead, "unsubscribed", "Asked not to be contacted", actor)
-        if lead:  # they said "check back in March", then this: nobody is reminded to write
-            for task in session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task", FollowUp.status == "pending",
-                                                               FollowUp.subject.startswith(CHECK_BACK_TASK, autoescape=True))).scalars():
-                task.status, task.blocked_reason = "cancelled", "They asked not to be contacted"
+        if lead:  # also a lead with no stage yet, which the line above leaves alone
+            close_check_back_tasks(session, lead, "They asked not to be contacted")
         # Anyone can write "From: david@...". In our thread, or with a verified signature, it is them; otherwise the address
         # is suppressed all the same (the safe side) but only a person closes a deal on it.
         proven = f is not None or bool(row.sender_verified) or person
@@ -1093,6 +1148,7 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         colleagues = company_leads(session, row.from_email) if unmatched else []
         for other in colleagues:
             stop_sequence(session, other, "stopped", f"{row.from_email} at this company asked not to be contacted", actor)
+            close_check_back_tasks(session, other, "Someone at this company asked not to be contacted")
         if colleagues:
             _tie_to_lead(row, colleagues[0])
             notes.append(f"{colleagues[0].company.name}: sequence stopped; a person decides whether it speaks for the company")
@@ -1147,16 +1203,23 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         stage = "replied" if automatic_simulation else OUTREACH_STAGE.get(row.category, "replied")
         answers = []
         if _nothing_new(row, f, lead, person):  # the answer to what they asked still stands; the follow-ups stop, as for any reply
-            answers = session.execute(select(FollowUp.id).where(
+            drafts = session.execute(select(FollowUp).where(
                 FollowUp.lead_id == lead.id, FollowUp.channel == "email", FollowUp.kind == "response", FollowUp.status == "awaiting_approval",
                 func.lower(FollowUp.to_email) == (row.from_email or "").lower())).scalars().all()
-            if lead.outreach_status in STAGES_THAT_STAND:
+            # A subject of their own may say it all ("STOP", with "Thanks" below): only the conversation's own subject says nothing.
+            subject = _bare_subject(row.subject)
+            answers = [d.id for d in drafts if _bare_subject(d.subject) == subject]
+            same_subject = bool(answers) or (f is not None and _bare_subject(f.subject) == subject)
+            if same_subject and lead.outreach_status in STAGES_THAT_STAND:
                 stage = lead.outreach_status
         cancelled = stop_sequence(session, lead, stage, f"{label} received ({row.category.replace('_', ' ')})", actor, keep=tuple(answers))
         if cancelled:
             notes.append(f"{cancelled} queued follow-up(s) cancelled")
         if answers:
-            notes.append("the answer to their earlier email still waits for your approval: read this one with it")
+            for draft in drafts:
+                if draft.id in answers:
+                    draft.blocked_reason = WROTE_AGAIN
+            notes.append(KEPT_ANSWER.format(answers[-1]))
         lead.last_activity_at = utcnow()
         if row.category == "interested" and automatic_simulation:
             msg = f"SIMULATED: Interested reply from {row.from_email} ({lead.company.name})"
@@ -1179,8 +1242,8 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
                 lead.status = "nurture"
             notes.append("lead moved to nurture")
             notes += close_opportunities(session, lead, "Not interested", actor, sure=row.confidence == "high")
-        if not automatic_simulation and not opted_out and (month := check_back_month(row)):
-            notes.append(_check_back_task(session, row, lead, contact, month, actor))
+        if not automatic_simulation and not opted_out and (when := check_back_when(row)):
+            notes.append(_check_back_task(session, row, lead, contact, when, actor))
         booked = None
         if row.category == "interested":
             from aime.meetings import next_meeting
@@ -1233,11 +1296,30 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
                  actor, type_="reply", body=(row.new_text or "")[:2000], company_id=row.company_id, lead_id=row.lead_id)
 
 
-def note_now(note: str | None, draft_status: str | None) -> str | None:
+def kept_answer_id(note: str | None) -> int | None:
+    found = _KEPT_ANSWER.search(note or "")
+    return int(found.group(1)) if found else None
+
+
+def note_now(note: str | None, draft_status: str | None, kept_status: str | None = None) -> str | None:
     """A reply's note as it reads today: the note was written once, and its draft may have moved on since."""
-    if not note or SUGGESTED_WAITS not in note or draft_status in (None, "awaiting_approval"):
+    if not note:
         return note
-    return note.replace(SUGGESTED_WAITS, f"the suggested reply no longer waits: it is {draft_status.replace('_', ' ')}")
+    if SUGGESTED_WAITS in note and draft_status not in (None, "awaiting_approval"):
+        note = note.replace(SUGGESTED_WAITS, f"the suggested reply no longer waits: it is {draft_status.replace('_', ' ')}")
+    if _KEPT_ANSWER.search(note) and kept_status not in (None, "awaiting_approval"):
+        note = _KEPT_ANSWER.sub(f"the answer to their earlier email no longer waits: it is {kept_status.replace('_', ' ')}", note)
+    return note
+
+
+def release_answers(session: Session, row: InboundEmail) -> None:
+    """A person has read this reply: an answer that waited only for that can be approved again."""
+    if not row.lead_id:
+        return
+    for draft in session.execute(select(FollowUp).where(FollowUp.lead_id == row.lead_id, FollowUp.kind == "response", FollowUp.status == "awaiting_approval",
+                                                        FollowUp.blocked_reason == WROTE_AGAIN)).scalars():
+        if not later_reply_waiting(session, draft):
+            draft.blocked_reason = "Write your answer before approving" if QUESTION_PLACEHOLDER in (draft.body or "") else None
 
 
 def _hold_for_a_person(session: Session, row: InboundEmail, read: tuple | None, exc: Exception, actor: str) -> None:
