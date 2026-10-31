@@ -754,7 +754,8 @@ def test_ok_meeting_wrong_input_is_refused_and_a_repeat_is_one_meeting(org):
         assert m.ends_at - m.starts_at == timedelta(minutes=5)
         mid = m.id
     assert post(eva, f"/meetings/{mid}/held").status_code == 303
-    for action in ("held", "no_show", "cancel", "nonsense"):  # already recorded: refused, not changed
+    assert "Already marked" in where(post(eva, f"/meetings/{mid}/held"))  # the same outcome again: a double click, nothing changes
+    for action in ("no_show", "cancel", "nonsense"):  # another outcome once recorded: refused, not changed
         assert post(eva, f"/meetings/{mid}/{action}").status_code == 400
     with org.db.session() as s:
         assert s.get(Meeting, mid).status == "completed"
