@@ -715,28 +715,30 @@ class Mailbox:
                 break
             drops = int((state.get("dropped") or {}).get(str(uid), 0))
             body_drops = int((state.get("dropped_on_body") or {}).get(str(uid), 0))
+            connection_proven = False
             if drops - body_drops >= DROP_TRIES:
                 try:  # asks nothing of the email itself: if even this drops, the connection is down and no email is to blame
                     conn.uid("FETCH", str(uid), "(UID)")
+                    connection_proven = True
                 except (imaplib.IMAP4.abort, OSError):
                     self._connection_lost(state, uid)
                     complete = False
                     break
                 except imaplib.IMAP4.error:
                     pass
-                state["skipped_uids"] = (list(state.get("skipped_uids") or []) + [uid])[-20:]
-                if lines := self._header_lines(conn, uid):
-                    skipped_headers[str(uid)] = lines
-                failed.pop(str(uid), None)
-                self._connection_held(state)
-                state["last_uid"] = uid
-                continue
             # An email of thousands of parts can have a BODYSTRUCTURE too long for imaplib's line limit: after a drop it is left out.
             items = f"({HEAD_PLAIN})" if str(uid) in (state.get("dropped") or {}) else HEAD_ITEMS
             try:
                 head, size, structure = self._head(conn, uid, items)
             except (imaplib.IMAP4.abort, OSError):
-                self._connection_lost(state, uid)
+                if connection_proven:  # the connection held a moment ago: only this email's header lines take it down. It is passed, with an alert
+                    state["skipped_uids"] = (list(state.get("skipped_uids") or []) + [uid])[-20:]
+                    failed.pop(str(uid), None)
+                    self._connection_held(state)
+                    state["last_uid"] = uid
+                    state["connection_lost"] = uid
+                else:
+                    self._connection_lost(state, uid)
                 complete = False
                 break
             except (imaplib.IMAP4.error, MemoryError):  # about this email: its body is asked for, and counted if that fails too
