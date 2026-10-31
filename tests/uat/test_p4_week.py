@@ -12,17 +12,18 @@ from aime.agents.analytics import AnalyticsReportingAgent
 from aime.agents.sales_workflow import SalesWorkflowAgent
 from aime.assignment import assign_new
 from aime.crm_ops import log_activity, suppress
-from aime.models import Activity, Assignment, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity, User
+from aime.integrations import calendar as calendar_module
+from aime.models import Activity, Assignment, Company, Contact, CustomRole, FollowUp, InboundEmail, Lead, Meeting, Opportunity, User
 from aime.pipeline import NO_REPLY, REPLY_SENT, REPLY_WAITING, settle_next_steps
 from aime.permissions import permissions_of
 from aime.timeutil import utcnow
 from aime.visibility import can_see_lead, scope_for
 from aime.web.app import activity_words
-from tests.test_inbound_sales import TUESDAY_11AM_ET
+from tests.test_inbound_sales import TUESDAY_11AM_ET, FakeSMTP
 from tests.test_inbox import DAVID, FakeIMAP, contacted, mail, run_inbox
 from tests.test_outreach import lead_of
 from tests.uat.test_uat_email import ORIGIN, web
-from tests.uat.test_uat_sales_journey import TOKEN, add_people, client, lead_row, make_deal, make_draft, make_lead, opp_row, post
+from tests.uat.test_uat_sales_journey import HASH, TOKEN, add_people, client, lead_row, make_deal, make_draft, make_lead, opp_row, post
 
 
 @pytest.fixture
@@ -147,7 +148,12 @@ def test_an_ended_meeting_marked_held_reaches_the_deal_and_the_report(org):
     with org.db.session() as s:
         assert s.get(Meeting, mid).status == "completed" and s.get(Opportunity, oid).next_step.startswith("Meeting held")
     assert f"/meetings/{mid}/held" not in eva.get("/meetings").text
-    assert post(eva, f"/meetings/{mid}/held").status_code == 400  # once only
+    again = post(eva, f"/meetings/{mid}/held", notes="Second click")  # a double click: no error, and nothing changes
+    assert again.status_code == 303 and "Already marked" in unquote(again.headers["location"])
+    with org.db.session() as s:
+        assert s.get(Meeting, mid).notes == "Went well"
+        assert len(s.execute(select(Activity.id).where(Activity.lead_id == lid, Activity.type == "meeting")).scalars().all()) == 1
+    assert post(eva, f"/meetings/{mid}/no_show").status_code == 400  # another outcome on a marked meeting is still refused
     res = AnalyticsReportingAgent(org).run({"kind": "daily"})
     assert res.ok and res.output.kpis["meetings_held_total"] == 1
 
@@ -271,6 +277,8 @@ def test_a_corrected_name_logs_the_deal_and_leaves_what_a_person_named_or_closed
     exact = make_deal(org, lid, stage="discovery", name="Acme")
     named = make_deal(org, lid, stage="discovery", name="Big renewal for Acme")
     longer = make_deal(org, lid, stage="discovery", name="Acme2 pilot")
+    already = make_deal(org, lid, stage="discovery", name="Acme Inc — CRM")
+    other = make_deal(org, lid, stage="discovery", name="Acme Robotics pilot")
     closed = make_deal(org, lid, stage="won", name="Acme — old project")
     with org.db.session() as s:
         company_id = s.get(Lead, lid).company_id
@@ -278,6 +286,7 @@ def test_a_corrected_name_logs_the_deal_and_leaves_what_a_person_named_or_closed
     assert opp_row(org, follows).name == "Acme Inc — CRM" and opp_row(org, exact).name == "Acme Inc"
     assert opp_row(org, named).name == "Big renewal for Acme" and opp_row(org, longer).name == "Acme2 pilot"
     assert opp_row(org, closed).name == "Acme — old project"
+    assert opp_row(org, already).name == "Acme Inc — CRM" and opp_row(org, other).name == "Acme Robotics pilot"
     with org.db.session() as s:
         logged = s.execute(select(Activity.subject).where(Activity.opportunity_id == follows)).scalars().all()
     assert "Deal renamed with its company: Acme — CRM → Acme Inc — CRM" in logged
@@ -340,7 +349,7 @@ def test_marking_someone_unavailable_says_how_much_work_they_hold(org):
     boss = client(org, "boss")
     r = post(boss, f"/admin/users/{uid}/edit", role="sales_executive", available="")
     said = unquote(r.headers["location"])
-    assert "1 open lead, 1 open deal, 1 email waiting for approval" in said and "reassign" in said
+    assert "1 open lead, 1 open deal, 1 email waiting for approval" in said and "reassign" in said and "new deal" in said
     again = post(boss, f"/admin/users/{uid}/edit", role="sales_executive", available="")  # already away: nothing new to say
     assert "open lead" not in unquote(again.headers["location"])
     with org.db.session() as s:
@@ -484,3 +493,102 @@ def test_an_approve_refused_for_a_removed_footer_shows_what_to_put_back(make_ctx
     said = unquote(r.headers["location"])
     assert "Cannot approve" in said and 'reply with "unsubscribe"' in said and ctx.settings.company_postal_address in said
     assert [st for i, st in answer_of(ctx, lead_id) if i == fid] == ["awaiting_approval"]
+
+
+# ------------------------------------------------------------------ the independent review
+def test_they_replied_cancels_an_approved_answer_and_nothing_is_sent(make_ctx):
+    ctx, sender, sent = contacted(make_ctx)
+    FakeIMAP.messages = {1: mail(f"David Chen <{DAVID}>", f"Re: {sent.subject}", "Sounds good, can we talk on Thursday?",
+                                 in_reply_to=sent.message_id)}
+    run_inbox(ctx)
+    lead_id = lead_of(ctx).id
+    fid = answer_of(ctx, lead_id)[0][0]
+    client = web(ctx)
+    assert client.post(f"/followups/{fid}/approve", headers=ORIGIN, follow_redirects=False).status_code == 303
+    r = client.post(f"/leads/{lead_id}/replied", headers=ORIGIN, follow_redirects=False)
+    said = unquote(r.headers["location"])
+    assert "still waits" not in said and "will not go out" in said
+    assert answer_of(ctx, lead_id) == [(fid, "cancelled")]
+    FakeSMTP.sent = []
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": (TUESDAY_11AM_ET + timedelta(days=1)).isoformat()})
+    assert FakeSMTP.sent == [] and answer_of(ctx, lead_id) == [(fid, "cancelled")]
+
+
+def test_a_stopped_lead_with_a_logged_reply_cannot_be_reopened(make_ctx):
+    ctx = contacted(make_ctx)[0]
+    client = web(ctx)
+    lead_id = lead_of(ctx).id
+    client.post(f"/leads/{lead_id}/stop_outreach", headers=ORIGIN, follow_redirects=False)
+    client.post(f"/leads/{lead_id}/replied", headers=ORIGIN, follow_redirects=False)
+    assert lead_of(ctx).outreach_status == "stopped"
+    page = client.get(f"/leads/{lead_id}").text
+    assert "/reopen_outreach" not in page and "a person logged that this company replied" in page
+    r = client.post(f"/leads/{lead_id}/reopen_outreach", data={"reason": "try again"}, headers=ORIGIN, follow_redirects=False)
+    assert "Not reopened" in unquote(r.headers["location"]) and lead_of(ctx).outreach_status == "stopped"
+
+
+class FakeCalendar:
+    name = "google"
+    cancelled: list[str] = []
+
+    def cancel_event(self, event_id):
+        FakeCalendar.cancelled.append(event_id)
+
+
+def calendar_meeting(ctx, lead_id, start, event_id):
+    with ctx.db.session() as s:
+        lead = s.get(Lead, lead_id)
+        m = Meeting(lead_id=lead_id, company_id=lead.company_id, invitee_email=DAVID, starts_at=start, ends_at=start + timedelta(minutes=30),
+                    status="scheduled", source="calendar", title="Intro call", event_id=event_id, provider="google")
+        s.add(m)
+        s.flush()
+        return m.id
+
+
+def test_cancelled_on_an_ended_calendar_meeting_changes_the_crm_only(make_ctx, monkeypatch):
+    ctx, _sent, lead_id = interested(make_ctx)
+    monkeypatch.setattr(calendar_module, "calendar_for", lambda *a, **k: FakeCalendar())
+    FakeCalendar.cancelled = []
+    ended = calendar_meeting(ctx, lead_id, utcnow() - timedelta(days=1), "ev-ended")
+    client = web(ctx)
+    assert client.post(f"/meetings/{ended}/cancel", headers=ORIGIN, data={"notes": ""}, follow_redirects=False).status_code == 303
+    with ctx.db.session() as s:
+        assert s.get(Meeting, ended).status == "cancelled"
+        assert not s.execute(select(FollowUp.id).where(FollowUp.lead_id == lead_id, FollowUp.purpose == "meeting_cancel")).first()
+    assert FakeCalendar.cancelled == []
+    ahead = calendar_meeting(ctx, lead_id, utcnow() + timedelta(days=2), "ev-ahead")
+    assert client.post(f"/meetings/{ahead}/cancel", headers=ORIGIN, data={"notes": ""}, follow_redirects=False).status_code == 303
+    assert FakeCalendar.cancelled == ["ev-ahead"]  # one still to come is cancelled in the calendar, as before
+
+
+@pytest.mark.parametrize("oldest_first, expected", [(("sent", "rejected"), NO_REPLY), (("rejected", "sent"), REPLY_SENT),
+                                                    (("sent", "cancelled"), NO_REPLY)])
+def test_a_deals_next_step_goes_by_the_newest_reply(make_ctx, oldest_first, expected):
+    ctx = contacted(make_ctx)[0]
+    lead_id = lead_of(ctx).id
+    with ctx.db.session() as s:
+        lead = s.get(Lead, lead_id)
+        opp = Opportunity(company_id=lead.company_id, lead_id=lead_id, name="Deal", stage="discovery", probability=20, next_step=REPLY_SENT)
+        s.add(opp)
+        s.flush()
+        oid = opp.id
+        for status in oldest_first:
+            s.add(FollowUp(lead_id=lead_id, company_id=lead.company_id, channel="email", kind="response", step=1, status=status,
+                           subject="Answer", body="Words", to_email=DAVID))
+            s.flush()
+    with ctx.db.session() as s:
+        settle_next_steps(s, lead_id)
+    assert opp_row(ctx, oid).next_step == expected
+
+
+def test_an_unlinked_replys_words_stay_from_a_role_that_cannot_open_it(org):
+    lid = make_lead(org, owner="eva", email="dana@acme.example", company="Acme", domain="acme.example")
+    with org.db.session() as s:
+        s.add(CustomRole(name="own_only", label="Own only", permissions=["view_own", "edit_records"]))
+        s.add(User(username="owny", password_hash=HASH, role="own_only"))
+        lead = s.get(Lead, lid)
+        lead.owner = "owny"
+        log_activity(s, "Reply from other@acme.example", "inbox", type_="reply", body="UNLINKED-WORDS", company_id=lead.company_id, lead_id=None)
+    page = client(org, "owny").get(f"/leads/{lid}").text
+    assert "Reply from other@acme.example" in page and "UNLINKED-WORDS" not in page
+    assert "UNLINKED-WORDS" in client(org, "boss").get(f"/leads/{lid}").text  # one who sees everything reads it, as before

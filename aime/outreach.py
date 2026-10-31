@@ -405,6 +405,9 @@ def reopen_refusal(session: Session, lead: Lead) -> str | None:
         return "someone at this company asked not to be contacted"
     if any(m.category == "not_interested" for m in mail):
         return "someone at this company said they are not interested"
+    if session.execute(select(Activity.id).where(Activity.lead_id.in_(leads), Activity.type == "reply",
+                                                 Activity.subject.startswith("Contact replied (logged manually)")).limit(1)).first():
+        return "a person logged that this company replied"
     waiting = [m for m in mail if m.status in ("new", "needs_review")]
     if any(m.holds_sending for m in waiting):
         return "an email about this company waits for review on Conversations, and it holds sending"

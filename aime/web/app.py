@@ -305,13 +305,14 @@ ANSWERED_REPLIES = ("interested", "question", "objection", "referral", "other")
 
 
 def answers_to_keep(s, lead: Lead) -> set[int]:
-    """The drafted answers on this lead to an email a person really wrote. Never on a closed stage or to an address that opted
-    out or is suppressed: those are cancelled as before, and every send gate still applies to what stays."""
+    """The drafts still waiting for a person that answer an email someone really wrote. An approved one is not among them: it
+    would go out on the next job, after a person said to stop. Never on a closed stage or to an address that opted out or is
+    suppressed: all of those are cancelled as before, and approving what stays passes every gate."""
     if lead.outreach_status in CLOSED_ON_REPLY:
         return set()
     kept = set()
     for f in s.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email", FollowUp.kind == "response",
-                                              FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
+                                              FollowUp.status == "awaiting_approval")).scalars():
         real = s.execute(select(InboundEmail.id).where(InboundEmail.suggested_followup_id == f.id, InboundEmail.is_simulated.is_(False),
                                                        InboundEmail.category.in_(ANSWERED_REPLIES))).first()
         opted_out = (f.contact and f.contact.consent_status == "opted_out") or is_suppressed(s, f.to_email)
@@ -761,6 +762,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             # the company's history can hold a note on another lead of it: its words only for who may open that lead
             others = {a.lead_id for a in acts if a.lead_id and a.lead_id != lead.id}
             not_mine = {i for i in others if not can_see_lead(s, sc, i)}
+            if not sc.all and not sc.unassigned:  # a row tied to no lead: a role that cannot open unlinked mail does not read it here
+                not_mine.add(None)
             # who this user may hand the lead to: anyone active who can work it (view_all), else their team
             assignees = owner_choices(s, sc, lead.owner)
             # both directions in time order: what we sent (or may have sent) and what they wrote back
@@ -843,11 +846,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         with C().db.session() as s:
             lead = s.get(Lead, lead_id) or _404()
             kept = answers_to_keep(s, lead)
+            approved_gone = False
             if lead.outreach_status and lead.outreach_status not in STAGE_STAYS_ON_REPLY:
                 set_outreach_status(s, lead, "replied", who(request), "Contact replied (logged manually); sequence stopped")
             for f in s.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
                                                       FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
                 if f.id not in kept:
+                    approved_gone = approved_gone or (f.kind == "response" and f.status == "approved")
                     f.status, f.blocked_reason = "cancelled", "Contact replied; sequence stopped"
             for o in s.execute(select(Opportunity).where(Opportunity.lead_id == lead.id, Opportunity.stage == "new")).scalars():
                 move_stage(s, o, "discovery", who(request), "contact replied (logged manually)")
@@ -856,7 +861,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                          + ("; the drafted answer to their email stays" if kept else ""), who(request),
                          type_="reply", company_id=lead.company_id, lead_id=lead.id)
         return back(f"/leads/{lead_id}", "Reply logged and sequence stopped"
-                    + ("; the drafted answer to their email still waits on Follow-ups" if kept else ""))
+                    + ("; the drafted answer to their email still waits on Follow-ups" if kept else "")
+                    + ("; the answer already approved was cancelled and will not go out" if approved_gone else ""))
 
     @app.get("/companies", response_class=HTMLResponse)
     def companies(request: Request, q: str = "", state: str = "", industry: str = "", page: int = 1):
@@ -1004,9 +1010,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         with C().db.session() as s:
             take_write_lock(s)
             m = s.get(Meeting, mid) or _404()
-            if action not in ("held", "no_show", "cancel") or m.status != "scheduled":
+            outcome = {"held": "completed", "no_show": "no_show", "cancel": "cancelled"}.get(action)
+            if outcome and m.status == outcome:  # the second request of a double click
+                return back("/meetings", "Already marked: nothing changed")
+            if not outcome or m.status != "scheduled":
                 raise HTTPException(400, "Action not allowed in the current state")
-            m.status = {"held": "completed", "no_show": "no_show", "cancel": "cancelled"}[action]
+            m.status = outcome
             m.notes = (notes or m.notes or "")[:2000] or None
             opp = s.get(Opportunity, m.opportunity_id) if m.opportunity_id else None
             if opp and opp.stage not in ("won", "lost"):
@@ -1017,7 +1026,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     opp.next_step = "No-show: follow up to rebook"
             if action == "cancel":  # as for a cancellation Calendly reports: the lead reopens unless another is booked
                 reopen_after_cancel(s, m, who(request))
-                if m.event_id:  # booked through the calendar: cancel the event too (a person clicked Cancel)
+                # booked through the calendar and still ahead: cancel the event too (a person clicked Cancel). One that has ended
+                # changes here only: no call to the calendar, and no apology to the attendee
+                if m.event_id and m.ends_at >= utcnow():
                     from aime import booking
                     from aime.integrations.calendar import CalendarError, calendar_for
                     with C().http() as http:
@@ -1157,7 +1168,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                              company_id=company.id, lead_id=lead.id if lead else None)
                 # an open deal still named after the old name follows; one a person named differently, or a closed one, stays
                 for o in s.execute(select(Opportunity).where(Opportunity.company_id == company.id, Opportunity.stage.not_in(("won", "lost")))).scalars():
-                    if o.name == old or o.name.startswith(f"{old} "):
+                    if o.name == old or o.name.startswith(f"{old} — "):
                         was, o.name = o.name, f"{new}{o.name[len(old):]}"[:Opportunity.name.type.length]
                         log_activity(s, f"Deal renamed with its company: {was} → {o.name}", who(request), type_="opportunity",
                                      company_id=company.id, lead_id=o.lead_id, opportunity_id=o.id)

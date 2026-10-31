@@ -81,7 +81,7 @@ def _remind_about_drafts(session: Session, settings, actor: str) -> None:
 ASKS_FOR_APPROVAL = ("Book a meeting: approve the suggested reply with your booking link", "Review the drafted reply and send once approved")
 REPLY_WAITING = "Read the reply waiting on Follow-ups, then approve or reject it"
 REPLY_SENT = "Reply sent: wait for their answer, or log the meeting when one is booked"
-NO_REPLY = "No reply went out and none is waiting: decide the next step"
+NO_REPLY = "No reply is waiting and the latest did not go out: decide the next step"
 
 
 def settle_next_steps(session: Session, lead_id: int | None = None) -> None:
@@ -90,13 +90,13 @@ def settle_next_steps(session: Session, lead_id: int | None = None) -> None:
     stmt = select(Opportunity).where(Opportunity.stage.not_in(("won", "lost")), Opportunity.lead_id.is_not(None),
                                      Opportunity.next_step.in_((*ASKS_FOR_APPROVAL, REPLY_WAITING, REPLY_SENT, NO_REPLY)))
     for opp in session.execute(stmt.where(Opportunity.lead_id == lead_id) if lead_id else stmt).scalars().all():
-        emails = set(session.execute(select(FollowUp.status).where(
+        emails = session.execute(select(FollowUp.status).where(
             FollowUp.lead_id == opp.lead_id, FollowUp.channel == "email",
-            or_(FollowUp.kind.is_(None), FollowUp.kind == "response"))).scalars())
-        if emails & set(OPEN):
+            or_(FollowUp.kind.is_(None), FollowUp.kind == "response")).order_by(FollowUp.id.desc())).scalars().all()
+        if set(emails) & set(OPEN):
             true_now = opp.next_step if opp.next_step in ASKS_FOR_APPROVAL else REPLY_WAITING
-        else:
-            true_now = REPLY_SENT if "sent" in emails else NO_REPLY
+        else:  # the newest decides: an earlier reply that went out says nothing about the one rejected after it
+            true_now = REPLY_SENT if emails and emails[0] == "sent" else NO_REPLY
         if true_now != opp.next_step:
             session.execute(update(Opportunity).where(Opportunity.id == opp.id).values(next_step=true_now, updated_at=opp.updated_at))
 
