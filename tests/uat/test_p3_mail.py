@@ -75,6 +75,7 @@ class Server(threading.Thread):
         self.drop: set[int] = set()  # a fetch of these bodies takes the connection down
         self.fail_folder: set[str] = set()
         self.endless_structure: set[int] = set()
+        self.odd_file_name: set[int] = set()  # BODYSTRUCTURE of these brings a literal of its own, ahead of the email data
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(5)
@@ -167,6 +168,8 @@ class Server(threading.Thread):
         if structure and uid in self.endless_structure:
             structure = " BODYSTRUCTURE (" + '("TEXT" "PLAIN" NIL NIL NIL "7BIT" 1 1)' * 40000 + ' "MIXED")'
         size = f" RFC822.SIZE {len(raw)}" if "RFC822.SIZE" in items else ""
+        if structure and uid in self.odd_file_name:
+            structure = ' BODYSTRUCTURE ("TEXT" "PLAIN" ("NAME" {7}\r\nodd"nam) NIL NIL "7BIT" 1 1)'
         seq = sorted(self.current).index(uid) + 1
         literal = f"{item} {{{len(data)}}}\r\n".encode() + data
         if self.style == "gmail":  # the UID first and BODYSTRUCTURE after the data, as Gmail answers
@@ -343,6 +346,15 @@ def test_a_report_hidden_inside_a_multipart_has_its_body_fetched_and_is_kept(mak
     assert out.stored == 1 and latest_reply(ctx).category == "bounce"
 
 
+def test_a_file_name_sent_as_a_literal_is_not_taken_for_the_email(make_ctx, server):
+    ctx, _, _, v = scene(make_ctx)
+    srv = server({"INBOX": {1: news(1)}})
+    srv.odd_file_name.add(1)
+    assert read(ctx, srv).output.skipped_unrelated == 1 and not srv.body_fetches()
+    with ctx.db.session() as s:
+        assert s.execute(select(SkippedMail)).scalar_one().subject == "Offer 1"
+
+
 def test_a_server_that_gives_no_structure_has_the_multipart_bodies_fetched(make_ctx, server):
     ctx, _, _, v = scene(make_ctx)
 
@@ -476,16 +488,16 @@ def test_a_large_reply_whose_text_lies_past_what_was_read_is_kept_for_a_person(m
     assert r is not None and r.status == "needs_review" and "very large" in (r.action_note or "")
 
 
-def test_large_bodies_stop_at_what_one_run_may_hold_and_the_rest_wait(make_ctx, server, monkeypatch):
-    import aime.inbox as inbox
-
-    monkeypatch.setattr(inbox, "RUN_BYTES", 2_000_000)
-    monkeypatch.setattr(Mailbox.read_folder, "__defaults__", (None, None, HEADERS_PER_RUN, 2_000_000, ""))
+def test_large_bodies_stop_at_what_one_run_may_hold_and_the_rest_wait(make_ctx, server):
     ctx, _, _, v = scene(make_ctx)
     srv = server({"INBOX": {i: K.thr(v, "Thanks. " + "x" * 900_000, tag=f"b{i}") for i in range(1, 6)}})
-    out = read(ctx, srv).output
-    assert not out.read_to_end and position(ctx) == 3 and len(srv.body_fetches()) == 3
-    assert read(ctx, srv).output.read_to_end and position(ctx) == 5
+    box = Mailbox(ctx.settings, imap_factory=srv.factory)
+    with box.connected() as conn:
+        got, state = box.read_folder(conn, "INBOX", None, run_bytes=2_000_000)
+    assert len(got) == 3 and state["last_uid"] == 3 and state["complete"] is False
+    with box.connected() as conn:
+        got, state = box.read_folder(conn, "INBOX", state, run_bytes=2_000_000)
+    assert len(got) == 2 and state["last_uid"] == 5 and state["complete"] is True
 
 
 # ============================================================ 2. junk
@@ -581,7 +593,7 @@ def test_a_first_read_of_junk_uses_the_same_look_back_as_the_inbox(make_ctx, ser
     searches = [c for c in srv.commands if "SEARCH" in c.upper()]
     assert len(searches) == 2 and all("SINCE" in c for c in searches)
     read(ctx, srv)
-    assert "UID 2:*" in srv.commands[-2] or any("UID 2:*" in c for c in srv.commands)
+    assert any("UID 2:*" in c for c in srv.commands), "the second read goes on from its own position"
 
 
 @pytest.mark.parametrize("how", ["cannot open", "list refused", "connection lost", "stalls"])

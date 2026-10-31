@@ -39,7 +39,7 @@ class InboxInput(BaseModel):
 
 class InboxOutput(BaseModel):
     mailbox: str = "not configured"
-    fetched: int = 0
+    fetched: int = 0  # emails read: most of the unrelated ones only as far as their header lines
     stored: int = 0
     skipped_own: int = 0
     skipped_unrelated: int = 0  # INBOX_SCOPE=related: not sales mail, so not stored

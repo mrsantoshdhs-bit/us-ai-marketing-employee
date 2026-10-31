@@ -942,7 +942,7 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         if opted_out:  # still suppressed: only a person can take that back
             row.status = "needs_review"
             notes.append("they opted out earlier and stay suppressed: a person decides")
-    if getattr(row, "mail_kind", None) == "calendar" and row.category == "other" and not row.is_simulated:
+    if getattr(row, "mail_kind", None) == "calendar" and row.category == "other" and not row.is_simulated and not person:
         who = f"{row.from_email} ({row.lead.company.name})" if row.lead_id and row.lead else row.from_email
         session.add(Alert(level="info", source="inbox", message=f"A calendar invitation or answer from {who}: please answer it in your "
                           "calendar and record the meeting. Nothing is booked by itself. It is on Replies."[:500]))
