@@ -1350,18 +1350,19 @@ def test_ok_search_and_api_respect_who_may_see(org):
 
 
 def test_defect_report_date_filter_uses_utc_while_every_date_on_screen_is_local(org, monkeypatch):
-    """An owner in India wins a deal at 01:30 on 28 Oct local time. The deal's history says 28 Oct; the report for
-    28 Oct says nothing was won (it filters by the UTC date, 27 Oct)."""
-    for where in ("aime.timeutil.local_tz", "aime.web.app.local_tz"):
-        monkeypatch.setattr(where, lambda name=None: ZoneInfo("Asia/Kolkata"))
+    """An owner far east of UTC wins a deal in the small hours of 28 Oct local time. The deal's history says 28 Oct; the
+    report for 28 Oct says nothing was won (it filters by the UTC date, 27 Oct). Tokyo, not the owner's India: a machine
+    in India or on UTC cannot hide a place that still reads its own clock."""
+    for where in ("aime.timeutil.local_tz", 'aime.agents.analytics.local_tz', 'aime.agents.marketing_manager.local_tz', 'aime.scheduler.runner.local_tz', 'aime.web.app.local_tz', 'aime.web.team_pages.local_tz'):
+        monkeypatch.setattr(where, lambda name=None: ZoneInfo("Asia/Tokyo"))
     oid = make_deal(org, make_lead(org, owner="eva", email="a@a.example"), value=5000)
     post(client(org, "eva"), f"/opportunities/{oid}", stage="won")
     with org.db.session() as s:
         o = s.get(Opportunity, oid)
-        o.closed_at = datetime(2026, 10, 27, 20, 0)  # 01:30 on the 28th in India
+        o.closed_at = datetime(2026, 10, 27, 20, 0)  # 05:00 on the 28th in Tokyo
         s.execute(StageChange.__table__.update().where(StageChange.opportunity_id == oid).values(at=o.closed_at))
     boss = client(org, "boss")
-    assert "2026-10-28 01:30" in boss.get(f"/opportunities/{oid}").text
+    assert "2026-10-28 05:00" in boss.get(f"/opportunities/{oid}").text
     assert perf(boss.get("/performance?start=2026-10-28&end=2026-10-28").text, "eva")["won"] == "1"
 
 
