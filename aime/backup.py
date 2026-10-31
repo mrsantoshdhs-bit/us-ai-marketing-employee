@@ -44,7 +44,9 @@ def backup_sqlite_file(db_path: Path, backup_dir: Path, label: str = "auto") -> 
     """Consistent copy of a live database using SQLite's online backup API (safe while in use)."""
     backup_dir.mkdir(parents=True, exist_ok=True)
     target = backup_dir / f"aime-{label}-{datetime.now():%Y%m%d-%H%M%S}.db"
-    partial = target.with_name(f"partial-{target.name}")  # a failed copy (a full disk) must not look like a backup
+    # A failed copy (a full disk) must not look like a backup. Two processes can back up in one second (a tick and the
+    # dashboard, both starting on a new schema): each writes its own file.
+    partial = target.with_name(f"partial-{os.getpid()}-{target.name}")
     try:
         src = sqlite3.connect(str(db_path))
         dst = sqlite3.connect(str(partial))
@@ -53,7 +55,12 @@ def backup_sqlite_file(db_path: Path, backup_dir: Path, label: str = "auto") -> 
         finally:
             dst.close()
             src.close()
-        partial.replace(target)
+        try:
+            partial.replace(target)
+        except PermissionError:
+            if not target.exists():  # the other process's copy of this same second is in place, and open: that one stands
+                raise
+            partial.unlink()
     except BaseException:
         for leftover in (partial, partial.with_name(partial.name + "-journal")):
             try:
