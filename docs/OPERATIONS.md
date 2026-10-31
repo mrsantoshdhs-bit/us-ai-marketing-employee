@@ -133,6 +133,8 @@ trouble began; `backup-verify <file>` checks any other. Every restore loses what
 **A new PC** needs: the code (`git clone`) and its `.venv`, your `.env` from the password manager, an encrypted copy
 and `BACKUP_PASSPHRASE`, and the tasks (`scheduler install`, `install-watchdog`, `install-dashboard`). An encrypted copy
 holds the sent record of its own day only, so what went out after it is unknown: check the Sent folder before confirming.
+A backup more than 14 days old, with no check-in on this PC yet, also stops the first check-in for the clock:
+`python -m aime confirm-clock`, once you have seen the clock is right.
 
 **Damaged or missing database.** `maintenance`, `doctor`, `status`, `restore-drill`, `backup-verify` and `restore` work
 without the database, and `doctor` gives the next step. With a missing `aime.db` on production while backups exist,

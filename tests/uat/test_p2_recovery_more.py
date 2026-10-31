@@ -990,6 +990,17 @@ def test_a_maintenance_beat_on_a_wrong_clock_does_not_hide_it(make_ctx, monkeypa
     assert tick(ctx, trigger="scheduler")["status"] == "skipped" and calls == []
 
 
+def test_the_clock_alert_closes_after_a_maintenance_beat_came_between(make_ctx, monkeypatch):
+    ctx, calls = stopped_a_year_ahead(make_ctx, monkeypatch)
+    maintenance.start(ctx.settings.data_dir, 1, "deploy")
+    tick(ctx, trigger="scheduler")
+    maintenance.stop(ctx.settings.data_dir)
+    monkeypatch.setattr(aime.timeutil, "CLOCK_OFFSET", aime.timeutil.CLOCK_OFFSET - timedelta(days=365) + timedelta(minutes=30))
+    assert tick(ctx, trigger="scheduler")["status"] == "ok"
+    with ctx.db.session() as s:
+        assert s.execute(select(Alert).where(Alert.key == clock_check.ALERT_KEY)).scalars().one().resolved_at
+
+
 def test_ordinary_maintenance_beats_do_not_stop_the_next_tick(make_ctx, monkeypatch):
     ctx = make_ctx()
     stub_jobs(monkeypatch)

@@ -24,7 +24,7 @@ from sqlalchemy.exc import OperationalError
 from aime import automation, clock_check, maintenance, process_priority
 from aime.config import Settings
 from aime.context import AppContext
-from aime.models import AgentRun, JobRun, JobState
+from aime.models import AgentRun, Alert, JobRun, JobState
 from aime.monitoring import alert_once, read_heartbeat, resolve_alerts, write_heartbeat
 from aime.redact import redact
 from aime.runtime import current_job_run_id
@@ -495,8 +495,8 @@ def _clock_stops_work(ctx: AppContext, previous: dict | None, trigger: str, chec
         with ctx.db.session() as s:
             if wrong:
                 alert_once(s, "error", "scheduler", wrong, ctx.settings, key=clock_check.ALERT_KEY)
-            elif previous and previous.get("state") == clock_check.HOLD_STATE:
-                resolve_alerts(s, (clock_check.ALERT_KEY,), set())
+            elif s.execute(select(Alert.id).where(Alert.key == clock_check.ALERT_KEY, Alert.resolved_at.is_(None))).first():
+                resolve_alerts(s, (clock_check.ALERT_KEY,), set())  # whichever beat came between: the clock is believable now
         return wrong
     except OperationalError as exc:
         log.warning("Could not check the clock now: %s", exc)
