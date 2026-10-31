@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Literal
 
 from jinja2 import Environment, select_autoescape
@@ -12,6 +12,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent
+from aime.contact_validation import STATUS_OK
+from aime.crm_ops import is_suppressed
 from aime.integrations.status import integration_statuses
 from aime.knowledge.industries import industry_label
 from aime.knowledge.services import service_name
@@ -20,6 +22,7 @@ from aime.models import (Activity, AgentRun, Alert, Company, Contact, ContentIte
                          InboundInquiry, Meeting,
                          Lead, Opportunity, Report, Signal)
 from aime.monitoring import agent_stats
+from aime.outreach import OPEN, PUBLISHED_SOURCES
 from aime.timeutil import fmt_et, fmt_local, local_tz, utcnow
 
 PROBLEM_STATES = {"NOT CONFIGURED", "NOT CONNECTED", "BLOCKED", "DISABLED", "UNAVAILABLE", "NOT RUNNING", "STALE"}
@@ -43,6 +46,11 @@ def sales_kpis(count, since) -> dict:
     """Sales pipeline counts from records only. Simulated replies and meetings are kept apart."""
     researched = (Contact.source.in_(("website", "sec_filing")),)
     real = (InboundEmail.is_simulated.is_(False),)
+    from_lead = (*real, InboundEmail.lead_id.is_not(None))  # mail nobody could match to a lead is no prospect's reply
+    contacted = Lead.id.in_(select(FollowUp.lead_id).where(FollowUp.kind == "outreach", FollowUp.status == "sent"))
+    replied = Lead.id.in_(select(InboundEmail.lead_id).where(*from_lead, InboundEmail.category.in_(REAL_REPLY)))
+    interested = Lead.id.in_(select(InboundEmail.lead_id).where(*from_lead, InboundEmail.category == "interested"))
+    booked = Lead.id.in_(select(Meeting.lead_id).where(Meeting.is_simulated.is_(False), Meeting.status != "cancelled"))
     read = Company.research_status.in_(("done", "no_people"))  # a site that could not be read is not research
     out = {
         "companies_researched_period": count(Company, read, Company.researched_at >= since),
@@ -58,10 +66,16 @@ def sales_kpis(count, since) -> dict:
         "bounces_period": count(InboundEmail, *real, InboundEmail.category == "bounce", InboundEmail.received_at >= since),
         "bounces_total": count(InboundEmail, *real, InboundEmail.category == "bounce"),
         "unsubscribes_total": count(InboundEmail, *real, InboundEmail.category == "unsubscribe"),
-        "replies_period": count(InboundEmail, *real, InboundEmail.category.in_(REAL_REPLY), InboundEmail.received_at >= since),
-        "replies_total": count(InboundEmail, *real, InboundEmail.category.in_(REAL_REPLY)),
-        "interested_period": count(InboundEmail, *real, InboundEmail.category == "interested", InboundEmail.received_at >= since),
-        "interested_total": count(InboundEmail, *real, InboundEmail.category == "interested"),
+        "replies_period": count(InboundEmail, *from_lead, InboundEmail.category.in_(REAL_REPLY), InboundEmail.received_at >= since),
+        "replies_total": count(InboundEmail, *from_lead, InboundEmail.category.in_(REAL_REPLY)),
+        "interested_period": count(InboundEmail, *from_lead, InboundEmail.category == "interested", InboundEmail.received_at >= since),
+        "interested_total": count(InboundEmail, *from_lead, InboundEmail.category == "interested"),
+        # The rates count prospects, each once, so none can pass 100%: replies and meetings above are events.
+        "leads_contacted": count(Lead, contacted),
+        "leads_contacted_replied": count(Lead, contacted, replied),
+        "leads_replied": count(Lead, replied),
+        "leads_interested": count(Lead, interested),
+        "leads_interested_booked": count(Lead, interested, booked),
         "meetings_booked_period": count(Meeting, Meeting.is_simulated.is_(False), Meeting.status != "cancelled",
                                         Meeting.created_at >= since),
         "meetings_booked_total": count(Meeting, Meeting.is_simulated.is_(False), Meeting.status != "cancelled"),
@@ -84,9 +98,10 @@ def sales_rows(k: dict) -> list[tuple]:
         ("Replies from prospects", k["replies_period"], k["replies_total"]),
         ("Interested replies", k["interested_period"], k["interested_total"]),
         ("Meetings booked / held", k["meetings_booked_period"], f"{k['meetings_booked_total']} / {k['meetings_held_total']}"),
-        ("Reply rate (replies / outreach sent)", "—", _rate(k["replies_total"], k["outreach_sent_total"])),
-        ("Interest rate (interested / replies)", "—", _rate(k["interested_total"], k["replies_total"])),
-        ("Meeting rate (meetings / interested)", "—", _rate(k["meetings_booked_total"], k["interested_total"])),
+        ("Reply rate (leads who replied / leads contacted)", "—", _rate(k["leads_contacted_replied"], k["leads_contacted"])),
+        ("Interest rate (interested leads / leads who replied)", "—", _rate(k["leads_interested"], k["leads_replied"])),
+        ("Meeting rate (interested leads with a meeting / interested leads)", "—",
+         _rate(k["leads_interested_booked"], k["leads_interested"])),
     ]
     if k["simulated_replies_total"] or k["simulated_meetings_total"]:
         rows.append(("SIMULATED test activity (not counted above): replies / meetings", "—",
@@ -114,7 +129,9 @@ class ReportOutput(BaseModel):
 MD_TEMPLATE = """# {{ title }} — {{ d }}
 
 Generated {{ generated }} (local time). Window: {{ window_label|lower }}. All figures are counts of records in the local CRM.
-
+{% if window_note %}
+{{ window_note }}
+{% endif %}
 ## Summary
 
 | Metric | {{ window_label }} | Total |
@@ -124,6 +141,10 @@ Generated {{ generated }} (local time). Window: {{ window_label|lower }}. All fi
 ## Lead grades (open leads)
 
 {% for g in "ABCD" %}- **{{ g }}**: {{ grades.get(g, 0) }}
+{% endfor %}
+## Can the qualified leads be reached?
+
+{% for line in reach %}- {{ line }}
 {% endfor %}
 ## Pipeline (opportunities by stage)
 
@@ -187,9 +208,11 @@ td.n,th.n{text-align:right}.muted{color:#667085}.pill{display:inline-block;paddi
 </style></head><body>
 <h1>{{ title }} — {{ d }}</h1>
 <p class="muted">Generated {{ generated }} (local time). Window: {{ window_label|lower }}. Counts of records in the local CRM.</p>
+{% if window_note %}<p>{{ window_note }}</p>{% endif %}
 <h2>Summary</h2><table><tr><th>Metric</th><th class="n">{{ window_label }}</th><th class="n">Total</th></tr>
 {% for label, day, total in summary %}<tr><td>{{ label }}</td><td class="n">{{ day }}</td><td class="n">{{ total }}</td></tr>{% endfor %}</table>
 <h2>Lead grades (open leads)</h2><p>{% for g in "ABCD" %}<span class="pill">{{ g }}: {{ grades.get(g, 0) }}</span> {% endfor %}</p>
+<h2>Can the qualified leads be reached?</h2><ul>{% for line in reach %}<li>{{ line }}</li>{% endfor %}</ul>
 <h2>Pipeline</h2>{% if stages %}<p>{% for stage, n in stages %}<span class="pill">{{ stage }}: {{ n }}</span> {% endfor %}</p>{% else %}<p class="muted">No opportunities yet.</p>{% endif %}
 <h2>Top open leads</h2>{% if top_leads %}<table><tr><th>Company</th><th>State</th><th>Industry</th><th>Grade</th><th class="n">Score</th><th>Service</th><th>Evidence</th></tr>
 {% for l in top_leads %}<tr><td>{{ l.company }}</td><td>{{ l.state }}</td><td>{{ l.industry }}</td><td>{{ l.grade }}</td><td class="n">{{ l.score }}</td><td>{{ l.service }}</td><td>{% if l.evidence.startswith('http') %}<a href="{{ l.evidence }}">source</a>{% else %}{{ l.evidence }}{% endif %}</td></tr>{% endfor %}</table>{% else %}<p class="muted">No scored leads yet.</p>{% endif %}
@@ -219,10 +242,10 @@ class AnalyticsReportingAgent(BaseAgent[ReportInput, ReportOutput]):
     def execute(self, inp: ReportInput, session: Session) -> ReportOutput:
         s = self.settings
         tz = local_tz(s.schedule.get("timezone"))
-        d = inp.report_date or datetime.now(tz).date()
+        d = inp.report_date or self._report_date(session, datetime.now(tz), inp.kind)
         now = utcnow()
         period = timedelta(hours=24) if inp.kind == "daily" else timedelta(days=7)
-        since = now - period
+        since = self._window_start(session, inp.kind, d, now, period)
         prev_since = since - period
         imported = 0
         if inp.import_metrics:
@@ -332,8 +355,22 @@ class AnalyticsReportingAgent(BaseAgent[ReportInput, ReportOutput]):
                 "Website check": Counter(co.website_status or "unchecked" for _, co in open_rows).most_common(),
             }
         title = "Daily Marketing Report" if inp.kind == "daily" else "Weekly Marketing Report"
-        window_label = "Last 24h" if inp.kind == "daily" else "Last 7 days"
+        span = now - since
+        window_note = None
+        if abs(span - period) <= timedelta(hours=1 if inp.kind == "daily" else 12):
+            window_label = "Last 24h" if inp.kind == "daily" else "Last 7 days"
+        else:
+            window_label = f"Since {fmt_local(since, s.schedule.get('timezone'))}"
+            again = session.execute(select(Report.id).where(Report.report_date == d, Report.kind == inp.kind)).first()
+            if span > period and not again:
+                window_note = (f"The last report was {span.total_seconds() / 3600:.0f} hours ago (the PC may have been off or "
+                               "asleep at report time), so this one covers all of that time.")
+        reach = self._reach(session)
+        trend = self._qualified_trend(session, d, kpis["leads_qualified"]) if inp.kind == "daily" else None
+        if trend:
+            reach.append(trend)
         data = dict(d=d.isoformat(), generated=fmt_local(now, s.schedule.get("timezone")), summary=summary,
+                    reach=reach, window_note=window_note,
                     grades=grades, stages=stages, top_leads=top_leads, queue=queue, blockers=blockers,
                     agents=agent_stats(session, 7), alerts=alerts, engagement=engagement, title=title,
                     window_label=window_label, previous=previous, breakdowns=breakdowns)
@@ -351,8 +388,64 @@ class AnalyticsReportingAgent(BaseAgent[ReportInput, ReportOutput]):
         if report is None:
             report = Report(report_date=d, kind=inp.kind, path_md=str(md_path), path_html=str(html_path))
             session.add(report)
-        report.summary = {"kpis": kpis, "blockers": blockers}
+        report.summary = {"kpis": kpis, "blockers": blockers, "window": {"from": since.isoformat(), "to": now.isoformat()}}
         report.created_at = now
         session.flush()
         return ReportOutput(report_id=report.id, kind=inp.kind, report_date=d, path_md=str(md_path), path_html=str(html_path),
                             kpis=kpis, blockers=blockers, metrics_imported=imported)
+
+    def _report_date(self, session: Session, local_now: datetime, kind: str) -> date:
+        """The day a report is for. Written after midnight because the PC slept through report time, it is yesterday's:
+        under today's date, today's own report would overwrite it and yesterday would have none."""
+        today = local_now.date()
+        slot = self.settings.schedule.get("jobs", {}).get("daily_report", {}).get("daily_at")
+        if kind != "daily" or not slot or local_now.time() >= time.fromisoformat(slot):
+            return today
+        last = session.execute(select(func.max(Report.report_date)).where(Report.kind == "daily")).scalar_one()
+        return today - timedelta(days=1) if last is not None and last < today - timedelta(days=1) else today
+
+    @staticmethod
+    def _window_start(session: Session, kind: str, d: date, now: datetime, period: timedelta) -> datetime:
+        """Where this report's counts begin: where the last one ended, so that a late report leaves no gap and the next
+        one does not count the same hours twice. A report written again for its day keeps its start."""
+        row = session.execute(select(Report).where(Report.kind == kind, Report.report_date <= d).order_by(
+            Report.report_date.desc(), Report.id.desc())).scalars().first()
+        if row is None:
+            return now - period
+        window = (row.summary or {}).get("window") or {}
+        if row.report_date == d:
+            start = window.get("from")
+            start = datetime.fromisoformat(start) if start else (row.created_at or now) - period
+        else:
+            end = window.get("to")
+            start = datetime.fromisoformat(end) if end else (row.created_at or now - period)
+        return start if start < now else now - period  # a clock that was wrong
+
+    def _reach(self, session: Session) -> list[str]:
+        qualified = session.execute(select(Lead).where(Lead.status == "qualified")).scalars().all()
+        with_work = set(session.execute(select(FollowUp.lead_id).where(FollowUp.status.in_(OPEN))).scalars())
+        closed = set(session.execute(select(FollowUp.lead_id).where(FollowUp.channel == "task", FollowUp.status == "done",
+                                                                    FollowUp.blocked_reason.is_(None))).scalars())
+        unreachable = sum(1 for lead in qualified if not self._usable_address(session, lead))
+        by_hand = len(({lead.id for lead in qualified} & closed) - with_work)
+        lines = [f"{unreachable} of {len(qualified)} qualified leads have no usable address (no published business email "
+                 "that may be written to): nothing can be sent to them until a person finds another way."]
+        if by_hand:
+            lines.append(f"{by_hand} qualified lead(s) have nothing open: their review task was closed by hand.")
+        return lines
+
+    @staticmethod
+    def _usable_address(session: Session, lead: Lead) -> bool:
+        c = lead.contact
+        if c is None or not c.email or c.consent_status == "opted_out" or is_suppressed(session, c.email, lead.company.domain):
+            return False
+        return c.consent_status in ("inquiry", "opt_in") or (
+            c.source in PUBLISHED_SOURCES and bool(c.email_source_url) and c.email_status in STATUS_OK)
+
+    @staticmethod
+    def _qualified_trend(session: Session, d: date, today: int) -> str | None:
+        rows = session.execute(select(Report).where(Report.kind == "daily", Report.report_date < d).order_by(
+            Report.report_date.desc()).limit(6)).scalars().all()
+        past = [r.summary["kpis"]["leads_qualified"] for r in reversed(rows)
+                if "leads_qualified" in ((r.summary or {}).get("kpis") or {})]
+        return f"Qualified leads, report by report: {', '.join(str(n) for n in [*past, today])}." if past else None

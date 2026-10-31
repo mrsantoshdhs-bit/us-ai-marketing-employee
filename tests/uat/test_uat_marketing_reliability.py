@@ -557,13 +557,13 @@ def test_ok_image_upload_failure_is_clean_retry_not_uncertain(make_ctx):
     assert out.failed and post(ctx, cid).status == "approved" and fake.post_calls == 0
 
 
-def test_ok_overdue_post_moves_or_goes_back_to_a_person(make_ctx):
+def test_ok_overdue_post_moves_and_keeps_its_approval(make_ctx):
     fake = FakeLI()
     ctx = li_ctx(make_ctx, fake)
     late = add_post(ctx, slot_delta=timedelta(hours=-30))
     out = publish(ctx)
     assert out.rescheduled == [late] and fake.post_calls == 0 and post(ctx, late).scheduled_for > utcnow()
-    with ctx.db.session() as s:  # every slot in the horizon taken: back to a person, approval withdrawn
+    with ctx.db.session() as s:  # every slot in the horizon held by drafts: an approved post goes first, still approved
         from aime.calendar_slots import free_slots
         for sl in free_slots(s, ctx.settings):
             s.add(ContentItem(service=SERVICE, industry=INDUSTRY, title=f"f{sl}", body="b", hashtags=[], status="draft",
@@ -571,7 +571,7 @@ def test_ok_overdue_post_moves_or_goes_back_to_a_person(make_ctx):
     again = add_post(ctx, slot_delta=timedelta(hours=-30))
     publish(ctx)
     item = post(ctx, again)
-    assert item.status == "awaiting_approval" and item.approved_at is None and fake.post_calls == 0
+    assert item.status == "approved" and item.approved_at is not None and item.scheduled_for > utcnow() and fake.post_calls == 0
 
 
 def test_ok_paused_automation_holds_publishing(make_ctx):
@@ -1155,7 +1155,7 @@ def test_ok_empty_database_has_no_zero_division(ctx):
     res = _report(ctx)
     assert res.ok, res.error
     md = Path(res.output.path_md).read_text(encoding="utf-8")
-    assert "Reply rate (replies / outreach sent) | — | — |" in md
+    assert "Reply rate (leads who replied / leads contacted) | — | — |" in md
     with ctx.db.session() as s:
         assert build(s, utcnow() - timedelta(days=1), utcnow()).total.conversion is None
 
@@ -1249,8 +1249,8 @@ def test_ok_daily_report_figures_match_records_and_rerun_keeps_one_row(scenario)
     assert (k["meetings_booked_total"], k["meetings_held_total"], k["simulated_replies_total"], k["simulated_meetings_total"]) == (2, 1, 1, 1)
     assert (k["content_published_total"], k["content_awaiting_approval"]) == (2, 2)
     md = Path(res.output.path_md).read_text(encoding="utf-8")
-    assert "| Reply rate (replies / outreach sent) | — | 100% (3/3) |" in md
-    assert "| Interest rate (interested / replies) | — | 67% (2/3) |" in md
+    assert "| Reply rate (leads who replied / leads contacted) | — | 100% (2/2) |" in md
+    assert "| Interest rate (interested leads / leads who replied) | — | 100% (2/2) |" in md
     assert "SIMULATED test activity" in md
     assert _report(scenario, import_metrics=False).ok
     client = client_for(scenario)
