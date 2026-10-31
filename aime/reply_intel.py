@@ -287,11 +287,10 @@ def _classify(row: InboundEmail, text: str | None = None) -> tuple[str, str, lis
         return "bounce", "low", ["delivery delayed: the mail server is still trying"]
     if row.bounced_addresses:
         return "bounce", "high", ["delivery failure report"]
+    if kind == "receipt" and not dict(PATTERNS)["unsubscribe"].search(_flat(text)):  # nobody answered: it was shown or delivered
+        return "out_of_office", "high", ["read or delivery receipt"]
     if kind == "bounce" or BOUNCE_SENDERS.match(row.from_email or ""):
         return "bounce", "low", ["delivery report without a permanently failed address (for example a delay)"]
-    opt_out = dict(PATTERNS)["unsubscribe"]
-    if kind == "receipt" and not opt_out.search(_flat(text)):  # nobody answered: the email was shown or delivered
-        return "out_of_office", "high", ["read or delivery receipt"]
     if CALENDLY.search(row.from_email or "") or (CALENDLY.search(row.body_text or "")  # also a forwarded notice
                                                   and CALENDLY_NOTICE.match(subject)):
         return "calendly", "high", ["Calendly notification"]

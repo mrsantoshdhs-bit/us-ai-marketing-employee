@@ -173,11 +173,12 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         stand_in = f"<unreadable-{hashlib.sha256(raw).hexdigest()[:32]}@aime.invalid>"
         if session.execute(select(InboundEmail.id).where(InboundEmail.message_id == stand_in)).first():
             return
-        self.log.warning("Email %s could not be read (%s)", key, type(exc).__name__)
+        why = str(exc) if isinstance(exc, _StoppedTheJob) else type(exc).__name__
+        self.log.warning("Email %s could not be read (%s)", key, why)
         session.add(InboundEmail(mailbox_uid=key, message_id=stand_in, from_email=sender, status="new", new_text="",
                                  subject=f"(could not be read: open it in the mailbox, {key})"[:300], body_text=""))
         session.add(Alert(level="warning", source=self.name,
-                          message=f"An email from {sender} could not be read ({type(exc).__name__}): please open it in "
+                          message=f"An email from {sender} could not be read ({why}): please open it in "
                                   f"the mailbox ({key}). It is on Replies."[:500]))
         out.stored += 1
 
@@ -203,7 +204,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
             uid = int(key.rsplit(":", 1)[1])
             tries = int(reading.get(str(uid), 0))
             if tries >= READ_TRIES:
-                self._keep_unreadable(session, key, raw, own, _StoppedTheJob(), out)
+                self._keep_unreadable(session, key, raw, own, _StoppedTheJob(f"the job stopped on it {tries} times, so it was set aside"), out)
             else:
                 kv_set(session, state_key, {**state, "last_uid": position, "reading": {str(uid): tries + 1}})
                 session.commit()
