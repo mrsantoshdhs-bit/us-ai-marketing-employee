@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from aime.knowledge.geo import STATES, parse_location
 from aime.knowledge.industries import INDUSTRIES
 from aime.knowledge.services import service_name
-from aime.matching import classify_industry, match_services
+from aime.matching import classify_industry, industry_evidenced, match_services
 from aime.people import decision_maker_title
 from aime.timeutil import utcnow
 
@@ -136,7 +136,7 @@ def read_company(company, signals) -> dict:
         return facts
     posts = " ".join(s.text or "" for s in signals if s.signal_type == "hiring")
     given = company.verified or any(s.signal_type in FIRST_PARTY_SIGNALS for s in signals)
-    if company.industry == OLD_DEFAULT_INDUSTRY or (posts.strip() and not given):
+    if company.industry == OLD_DEFAULT_INDUSTRY or (posts.strip() and not given and not industry_evidenced(company.industry, posts)):
         facts["industry"] = classify_industry(posts)
     facts["running_business"] = bool(_RUNNING_BUSINESS_RE.search(posts))
     place = parse_location(company.location_text)

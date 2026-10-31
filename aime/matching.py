@@ -148,11 +148,22 @@ _NOT_AN_INDUSTRY_RE = re.compile(
     r"|\b(?:government|federal|state|public|regulatory|staffing|recruiting) agency\b")
 
 
+def _about_the_industry(text: str) -> str:
+    """What a text says of the company's industry: what it denies or merely mentions does not count ("we're not a SaaS company")."""
+    return _NOT_AN_INDUSTRY_RE.sub(" ", _NOT_A_NEED_RE.sub(" ", text.lower().replace("’", "'")))
+
+
+def industry_evidenced(industry: str | None, text: str | None) -> bool:
+    """The text bears out this stored label, whichever other industry it may also mention."""
+    ind = INDUSTRIES.get(industry or "")
+    lower = _about_the_industry(text or "")
+    return bool(ind) and any(_kw_re(kw).search(lower) for kw in ind.keywords)
+
+
 def classify_industry(text: str | None, default: str | None = None) -> str | None:
     if not text:
         return default
-    # what a text denies or merely mentions says nothing about the industry either: "we're not a SaaS company"
-    lower = _NOT_AN_INDUSTRY_RE.sub(" ", _NOT_A_NEED_RE.sub(" ", text.lower().replace("’", "'")))
+    lower = _about_the_industry(text)
     best, best_hits = default, 0
     for ind in INDUSTRIES.values():
         hits = sum(1 for kw in ind.keywords if _kw_re(kw).search(lower))
