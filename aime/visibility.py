@@ -106,6 +106,8 @@ def contact_condition(scope: Scope):
 
 # Pages that show the whole organisation's numbers and work: only for roles that see everything (view_all). Others
 # get "My work" (/my), built from what they may see.
+ORG_PAGE_WORDS = ("That page shows the whole organisation's figures, and your role sees your own and your team's records only, "
+                  "so you are on My work. Your figures are under Sales performance.")
 ORG_EXACT = ("/", "/manager", "/audit", "/system", "/automation", "/api/stats")
 ORG_PREFIXES = ("/command-center", "/reports", "/agents", "/jobs/", "/jobs")
 

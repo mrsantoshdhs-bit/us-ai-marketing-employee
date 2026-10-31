@@ -7,6 +7,7 @@
     Only records you may see are counted.</p>
 </div></div>
 {% if first_day %}<div class="card small"><b>Your first day.</b> This page is your day: the leads, deals, emails and meetings that are yours{% if has_team %}, or your team's under Team{% endif %}. Every email waits for a person's approval, and nothing goes out on its own. The menu on the left opens the full lists.</div>{% endif %}
+{% if msg == ORG_PAGE_WORDS %}<p class="small"><a href="/performance">Open Sales performance</a></p>{% endif %}
 <div class="card small"><b>Do this next:</b> {% if next_step[1] %}<a href="{{ next_step[1] }}">{{ next_step[0] }}</a>{% else %}{{ next_step[0] }}{% endif %}</div>
 {% if handed %}<div class="card small"><b>Handed over to you in the last 7 days</b>
   {% for h in handed %}<div class="row-item"><a href="/leads/{{ h.lead_id }}">{{ h.company }}</a> <span class="muted">from {{ h.from }}, by {{ h.by }}, {{ h.at|local(None, '%a %d %b %H:%M') }}{% if h.reason %}: {{ h.reason }}{% endif %}</span></div>{% endfor %}</div>{% endif %}

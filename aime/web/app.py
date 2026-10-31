@@ -71,7 +71,7 @@ from aime.stages import move as move_stage
 from aime.web.team_pages import assignment_history, next_email
 from aime.web.team_pages import register as register_team_pages
 from aime.web.deal_pages import register as register_deal_pages
-from aime.visibility import (EVERYTHING, can_see_lead, company_condition, contact_condition, lead_condition,
+from aime.visibility import (EVERYTHING, ORG_PAGE_WORDS, can_see_lead, company_condition, contact_condition, lead_condition,
                              opportunity_condition, org_page, record_condition)
 from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username, make_cookie,
                            safe_next, same_text, session_secret, user_count, wants_page)
@@ -308,7 +308,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     app.state.ctx = ctx
     limiter = InboundLimiter()
     app.add_middleware(AuthMiddleware, get_ctx=lambda: app.state.ctx or get_context(),
-                       error_page=lambda *args: error_page(*args))
+                       error_page=lambda *args: error_page(*args), org_refused=lambda: back("/my", ORG_PAGE_WORDS))
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(OriginCheckMiddleware)
     settings = (ctx or get_context()).settings
@@ -326,7 +326,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     env.filters.update(local=local_filter, et=fmt_et, service=service_name, industry=industry_label, safe_url=safe_url,
                        tier=lead_tier, tier_reason=tier_reason, run_summary=run_summary, plain=plain, activity_words=activity_words, waited=waiting_for,
                        intent_label=lambda i: INTENT_LABELS.get(i or "", ""))
-    env.globals.update(org_page=org_page, describe_rule=am.describe_rule, ADDRESS_RULES=am.ADDRESS_RULES, SERVICES=SERVICES, INDUSTRIES=INDUSTRIES, STATES=US_REGIONS, STAGES=STAGES,
+    env.globals.update(org_page=org_page, ORG_PAGE_WORDS=ORG_PAGE_WORDS, describe_rule=am.describe_rule, ADDRESS_RULES=am.ADDRESS_RULES, SERVICES=SERVICES, INDUSTRIES=INDUSTRIES, STATES=US_REGIONS, STAGES=STAGES,
                        LEAD_STATUSES=LEAD_STATUSES)
 
     def C() -> AppContext:
