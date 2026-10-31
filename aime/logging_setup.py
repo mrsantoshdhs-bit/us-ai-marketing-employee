@@ -23,9 +23,20 @@ ROTATE_RETRY_SECONDS = 60.0
 class KeepingRotatingHandler(RotatingFileHandler):
     """The standard handler moves the older logs along first and only then finds that another process holds the current one: on
     Windows the line is lost and the oldest log with it, again at every line. Here the current file moves aside first (see
-    `rotate`): while it is held nothing moves, the older logs stay, and lines keep going onto the end of it."""
+    `rotate`): while it is held nothing moves, the older logs stay, and lines keep going onto the end of it. And like AppendingLog
+    this one holds the file only for the moment of a line: a dashboard open all day and quiet all day no longer stops a tick
+    rotating it, so the log keeps its size limit."""
 
     _next_try = 0.0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        if self.stream:
+            try:
+                self.stream.close()
+            except OSError:  # a line that could not be flushed: logging must not stop the work
+                pass
+            self.stream = None
 
     def shouldRollover(self, record: logging.LogRecord) -> int:
         if time.monotonic() < self._next_try:  # it was held a moment ago: not at every line
