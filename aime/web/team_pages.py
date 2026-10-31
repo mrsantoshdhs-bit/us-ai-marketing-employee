@@ -41,11 +41,12 @@ def next_email(settings, lead: Lead, fups: list[FollowUp]) -> dict:
     waiting = [f for f in emails if f.status in words]
     if waiting:
         f = min(waiting, key=lambda x: x.step or 0)
-        return {"text": f"Next email: step {f.step} {words[f.status]}", "at": None}
+        return {"text": f"Next email: {'their answer' if f.kind == 'response' else f'step {f.step}'} {words[f.status]}", "at": None}
     if lead.status in ("disqualified", "merged"):
         return {"text": f"Next email: none, this lead is {lead.status}", "at": None}
     if lead.outreach_status in STOP_STATUSES:
-        return {"text": f"Next email: none, the sequence stopped ({lead.outreach_status.replace('_', ' ')})", "at": None}
+        return {"text": "Next email: none, the sequence was stopped" if lead.outreach_status == "stopped" else
+                f"Next email: none, the sequence stopped ({lead.outreach_status.replace('_', ' ')})", "at": None}
     sent = [f for f in emails if f.status == "sent" and f.sent_at and f.kind in ("outreach", None)]
     if not sent:
         tasks = sorted((f for f in fups if f.channel == "task" and f.status == "pending"), key=lambda f: f.due_at)

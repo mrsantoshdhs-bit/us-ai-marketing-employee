@@ -44,7 +44,7 @@
     <textarea name="body">{{ f.body }}</textarea>
     {% if can_approve and f.quality and f.quality.qc and f.quality.qc.status in ['held', 'failed'] %}
     <label class="small"><input type="checkbox" name="qc_override" value="yes"> I reviewed the quality findings</label>{% endif %}
-    <div class="row-actions" style="margin-top:8px"><button {{ 'disabled' if not can_approve }} {% if not can_approve %}title="A Sales Manager approves what goes out to customers"{% endif %}>Approve (send when enabled)</button>
+    <div class="row-actions" style="margin-top:8px"><button {{ 'disabled' if not can_approve }} {% if not can_approve %}title="A Sales Manager approves what goes out to customers"{% endif %}>Approve{% if not email_ready %} (send when enabled){% endif %}</button>
       {% if f.kind == 'outreach' %}<button class="secondary" formaction="/followups/{{ f.id }}/save">Save changes</button>{% endif %}
       {% if can_reject %}<button class="danger" formaction="/followups/{{ f.id }}/reject">Reject</button>{% endif %}</div>
   </form>
