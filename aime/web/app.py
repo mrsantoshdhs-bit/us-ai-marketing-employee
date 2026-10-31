@@ -290,7 +290,41 @@ def stage_reason(s, lead: Lead) -> str | None:
     said = s.execute(select(Activity.subject).where(Activity.lead_id == lead.id, Activity.type == "outreach",
                                                     Activity.subject.startswith(start, autoescape=True))
                      .order_by(Activity.id.desc()).limit(1)).scalar()
-    return said[len(start):].rstrip(")") if said else None
+    return said[len(start):].removesuffix(")") if said else None
+
+
+# "They replied" does not move these stages: an opt-out, a bounce, a no or a person's Stop stay closed; the others say more than "replied".
+CLOSED_ON_REPLY = ("unsubscribed", "bounced", "not_interested", "stopped")
+STAGE_STAYS_ON_REPLY = (*CLOSED_ON_REPLY, "interested", "meeting")
+ANSWERED_REPLIES = ("interested", "question", "objection", "referral", "other")
+
+
+def answers_to_keep(s, lead: Lead) -> set[int]:
+    """The drafted answers on this lead to an email a person really wrote. Never on a closed stage or to an address that opted
+    out or is suppressed: those are cancelled as before, and every send gate still applies to what stays."""
+    if lead.outreach_status in CLOSED_ON_REPLY:
+        return set()
+    kept = set()
+    for f in s.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email", FollowUp.kind == "response",
+                                              FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
+        real = s.execute(select(InboundEmail.id).where(InboundEmail.suggested_followup_id == f.id, InboundEmail.is_simulated.is_(False),
+                                                       InboundEmail.category.in_(ANSWERED_REPLIES))).first()
+        opted_out = (f.contact and f.contact.consent_status == "opted_out") or is_suppressed(s, f.to_email)
+        if real and not opted_out:
+            kept.add(f.id)
+    return kept
+
+
+# Reports are files written when they ran, read later on any screen: a wide table scrolls inside itself on a phone.
+REPORT_STYLE = ("@media (max-width:700px){body{margin:12px}table{display:block;overflow-x:auto;max-width:100%}"
+                "h1{font-size:20px}}a.report-back{display:inline-block;margin-bottom:8px}")
+REPORT_BACK = '<a class="report-back" href="/reports">&larr; Sales Analytics</a>'
+
+
+def report_page(html: str) -> str:
+    """A stored report as a page in the dashboard: a way back, the words a person reads, and it fits a phone. Old reports too."""
+    return (plain(html).replace("Marketing Report", "Sales Report")
+            .replace("</style>", f"{REPORT_STYLE}</style>", 1).replace("<body>", f"<body>{REPORT_BACK}", 1))
 
 
 def previous_sign_in(s, user_id: int) -> datetime | None:
@@ -763,19 +797,25 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/leads/{lead_id}/replied")
     def lead_replied(request: Request, lead_id: int):
+        """Stops the sequence. The drafted answer to an email they really wrote is not part of it and stays for a person to
+        decide (answers_to_keep). A stage that already says more than "replied", or that closes outreach, stays as it is."""
         with C().db.session() as s:
             lead = s.get(Lead, lead_id) or _404()
-            if lead.outreach_status:
-                stop_sequence(s, lead, "replied", "Contact replied (logged manually); sequence stopped", who(request))
+            kept = answers_to_keep(s, lead)
+            if lead.outreach_status and lead.outreach_status not in STAGE_STAYS_ON_REPLY:
+                set_outreach_status(s, lead, "replied", who(request), "Contact replied (logged manually); sequence stopped")
             for f in s.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
                                                       FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
-                f.status, f.blocked_reason = "cancelled", "Contact replied; sequence stopped"
+                if f.id not in kept:
+                    f.status, f.blocked_reason = "cancelled", "Contact replied; sequence stopped"
             for o in s.execute(select(Opportunity).where(Opportunity.lead_id == lead.id, Opportunity.stage == "new")).scalars():
                 move_stage(s, o, "discovery", who(request), "contact replied (logged manually)")
             lead.last_activity_at = utcnow()
-            log_activity(s, "Contact replied (logged manually); automated follow-ups stopped", who(request),
+            log_activity(s, "Contact replied (logged manually); automated follow-ups stopped"
+                         + ("; the drafted answer to their email stays" if kept else ""), who(request),
                          type_="reply", company_id=lead.company_id, lead_id=lead.id)
-        return back(f"/leads/{lead_id}", "Reply logged and sequence stopped")
+        return back(f"/leads/{lead_id}", "Reply logged and sequence stopped"
+                    + ("; the drafted answer to their email still waits on Follow-ups" if kept else ""))
 
     @app.get("/companies", response_class=HTMLResponse)
     def companies(request: Request, q: str = "", state: str = "", industry: str = "", page: int = 1):

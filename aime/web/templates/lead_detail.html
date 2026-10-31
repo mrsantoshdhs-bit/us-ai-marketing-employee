@@ -48,7 +48,7 @@
       <input name="note" placeholder="Reason (optional)"><button>Update status</button>
     </form>
     <form method="post" action="/leads/{{ lead.id }}/note" class="filters"><input name="note" placeholder="Add a note" style="flex:1" required><button class="secondary">Add note</button></form>
-    {% if lead.contact %}<form method="post" action="/leads/{{ lead.id }}/replied"><button class="secondary">They replied — stop follow-ups</button></form>{% endif %}
+    {% if lead.contact and thread|selectattr('dir', 'equalto', 'out')|first %}<form method="post" action="/leads/{{ lead.id }}/replied"><button class="secondary">They replied — stop follow-ups</button></form>{% endif %}
     {% if lead.outreach_status in ['drafted', 'approved', 'contacted'] %}<form method="post" action="/leads/{{ lead.id }}/stop_outreach" style="margin-top:6px"><button class="danger">Stop outreach</button></form>{% endif %}{% endif %}
     {% if can_approve and lead.outreach_status == 'stopped' %}{% if reopen_why %}<p class="small muted">Outreach cannot be reopened: {{ reopen_why }}.</p>
     {% else %}<form method="post" action="/leads/{{ lead.id }}/reopen_outreach" class="filters" style="margin-top:6px"><input name="reason" placeholder="Why reopen it? (required)" maxlength="200" style="flex:1" required><button class="secondary">Reopen outreach</button></form>
