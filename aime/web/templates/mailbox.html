@@ -32,7 +32,7 @@
     {% if r.reply_to %} · they ask for answers to go to {{ r.reply_to }} (nothing goes there unless a person decides){% endif %}</div>
   <div class="post small" style="margin-top:6px">{{ (r.new_text or r.body_text or '')[:1500] }}</div>
   {% if r.reasons %}<div class="small muted">Why: {{ r.reasons|join('; ') }}</div>{% endif %}
-  {% if r.action_note %}<div class="small">Done: {{ r.action_note }}{% if r.suggested_followup_id %} · <a href="/followups#f{{ r.suggested_followup_id }}">suggested reply</a>{% endif %}</div>{% endif %}
+  {% if r.action_note %}<div class="small">Done: {{ notes[r.id] }}{% if r.suggested_followup_id %} · <a href="/followups#f{{ r.suggested_followup_id }}">suggested reply</a>{% endif %}</div>{% endif %}
   {% if r.status == 'needs_review' and can_edit and not can_approve %}
   <form class="filters" method="post" action="/inbox/{{ r.id }}/reviewed" style="margin-top:8px"><button>Mark reviewed</button></form>
   {% elif r.status == 'needs_review' and can_approve %}

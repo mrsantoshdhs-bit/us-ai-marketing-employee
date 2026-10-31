@@ -330,19 +330,21 @@ def record_delivery(session: Session, f: FollowUp, sent_at, delivered_to: str | 
         set_status(session, lead, "contacted" if delivered_to_prospect(f) else TEST_SENT, actor)
 
 
-def stop_sequence(session: Session, lead: Lead, status: str, reason: str, actor: str) -> int:
-    """Cancel every open email of this lead's sequence and record why. Returns how many were cancelled. A later reply
-    never changes the "unsubscribed" stage: the opt-out still stands."""
-    cancelled = cancel_queued(session, lead, reason)
+def stop_sequence(session: Session, lead: Lead, status: str, reason: str, actor: str, keep: tuple[int, ...] = ()) -> int:
+    """Cancel every open email of this lead's sequence, but those in `keep`, and record why. Returns how many were cancelled. A
+    later reply never changes the "unsubscribed" stage: the opt-out still stands."""
+    cancelled = cancel_queued(session, lead, reason, keep)
     if lead.outreach_status != "unsubscribed":
         set_status(session, lead, status, actor, reason)
     return cancelled
 
 
-def cancel_queued(session: Session, lead: Lead, reason: str) -> int:
+def cancel_queued(session: Session, lead: Lead, reason: str, keep: tuple[int, ...] = ()) -> int:
     cancelled = 0
     for f in session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
                                                     FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
+        if f.id in keep:
+            continue
         f.status, f.blocked_reason = "cancelled", reason[:300]
         cancelled += 1
     return cancelled

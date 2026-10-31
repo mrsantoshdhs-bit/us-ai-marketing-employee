@@ -61,6 +61,7 @@ from aime.qc.checks import run_quality_checks
 from aime.qc.email_checks import run_email_checks
 from aime.reply_intel import INTENT_LABELS, QUESTION_PLACEHOLDER
 from aime.reply_intel import act as act_on_reply
+from aime.reply_intel import note_now as reply_note_now
 from aime.meetings import check_double_bookings, record_meeting, reopen_after_cancel
 from aime.scheduler.runner import ABANDON_AFTER, due_jobs, load_job_specs, next_run, run_job
 from aime.scoring import lead_tier, tier_reason
@@ -533,6 +534,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     s.execute(stmt.order_by(InboundEmail.received_at.desc()).limit(200)).scalars().all())
             for r in rows:
                 _ = r.lead.company if r.lead else None
+            drafts = dict(s.execute(select(FollowUp.id, FollowUp.status).where(
+                FollowUp.id.in_([r.suggested_followup_id for r in rows if r.suggested_followup_id] or [0]))).all())
+            notes = {r.id: reply_note_now(r.action_note, drafts.get(r.suggested_followup_id)) for r in rows}
             counts = dict(s.execute(select(InboundEmail.category, func.count(InboundEmail.id))
                                     .where(record_condition(scope(request), InboundEmail.lead_id))
                                     .group_by(InboundEmail.category)).all())
@@ -544,7 +548,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             user = getattr(request.state, "user", None)
             skipped = (reply_skipped_mail(s) if show == "skipped" and (user is None or "view_all" in user.get("perms", ()))
                        else [])
-        return render(request, "mailbox.html", rows=rows, show=show, counts=counts, state=state, skipped=skipped,
+        return render(request, "mailbox.html", rows=rows, notes=notes, show=show, counts=counts, state=state, skipped=skipped,
                       mailbox=where.removesuffix(", read-only") if reading else None)
 
     @app.post("/inbox/{eid}/{action}")

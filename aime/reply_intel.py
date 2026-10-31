@@ -427,7 +427,7 @@ def _classify(row: InboundEmail, text: str | None = None) -> tuple[str, str, lis
     if not human:
         if "?" in text:
             return "question", "medium", ["asks a question"]
-        return "other", "low", ["no clear signal"]
+        return "other", "low", [NO_CLEAR_SIGNAL]
     category = human[0]
     conflicting = len(set(human) & {"interested", "not_interested"}) == 2 or len(human) > 2
     reasons = [f'{k.replace("_", " ")}: "{hits[k]}"' for k in human if not (k == "interested" and meeting
@@ -854,6 +854,33 @@ def _tie_to_lead(row: InboundEmail, lead: Lead) -> None:
     row.lead_id, row.company_id = lead.id, lead.company_id
 
 
+SUGGESTED_WAITS = "suggested reply waiting for your approval"
+NO_CLEAR_SIGNAL = "no clear signal"
+# Stages a line that says nothing new does not lower: what they said before still stands.
+STAGES_THAT_STAND = ("interested", "meeting")
+# What can mean no, in words the rules do not read as a no ("You can stop now", "Never mind", "Kein Bedarf"). Any of it: the reply counts as
+# something new, whatever else it says, and is handled as every reply was before.
+MAY_MEAN_NO = re.compile(r"\b(no|nope|not|never|none|nothing|cannot|dont|cancel\w*|mind|off|stop\w*|wrong|busy|later|\w+n't|"
+                         r"kein\w*|nicht|nein|non|pas|nahi|nahin|mat|nada|sin)\b", re.I)
+
+
+def _nothing_new(row: InboundEmail, f: FollowUp | None, lead: Lead, person: bool) -> bool:
+    """One more line from someone in the conversation that the rules read as nothing at all ("my colleague will join us"). Every doubt
+    says no, and then this reply stops everything as any reply does: what may be a no, a footer's opt-out, mail only partly read, a
+    newsletter, an AI that reads it as a no, a sender who is not proven, an address that opted out or bounced."""
+    reasons = list(row.reasons or [])
+    if row.category != "other" or not reasons or reasons[0] != NO_CLEAR_SIGNAL or row.is_simulated:
+        return False
+    if not all(r.startswith("set to other by ") or (r.startswith("AI (") and not re.search(r"suggests: (not interested|unsubscribe|objection)", r)) for r in reasons[1:]):
+        return False
+    if getattr(row, "mail_kind", None) or getattr(row, "in_junk", None) or row.auto_submitted or LARGE_MARK in (getattr(row, "mail_note", None) or ""):
+        return False
+    if lead.outreach_status in ("unsubscribed", "bounced") or not (f is not None or row.sender_verified or person):
+        return False
+    said = _flat(f"{row.new_text or own_text(row.body_text or '')}\n{rest_of_reply(row.body_text or '')}")
+    return not (MAY_MEAN_NO.search(said) or REMOVAL_WORDS.search(said) or UPSET.search(said) or LEGAL_MENTION.search(said))
+
+
 def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
     """Apply the CRM consequences of a classified email and record what was done."""
     label = "SIMULATED reply" if row.is_simulated else "Reply"
@@ -957,9 +984,18 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         # Any human reply stops the automated sequence; the stage records what they said. A simulated one only stops it.
         opted_out = lead.outreach_status == "unsubscribed"
         stage = "replied" if automatic_simulation else OUTREACH_STAGE.get(row.category, "replied")
-        cancelled = stop_sequence(session, lead, stage, f"{label} received ({row.category.replace('_', ' ')})", actor)
+        answers = []
+        if _nothing_new(row, f, lead, person):  # the answer to what they asked still stands; the follow-ups stop, as for any reply
+            answers = session.execute(select(FollowUp.id).where(
+                FollowUp.lead_id == lead.id, FollowUp.channel == "email", FollowUp.kind == "response", FollowUp.status == "awaiting_approval",
+                func.lower(FollowUp.to_email) == (row.from_email or "").lower())).scalars().all()
+            if lead.outreach_status in STAGES_THAT_STAND:
+                stage = lead.outreach_status
+        cancelled = stop_sequence(session, lead, stage, f"{label} received ({row.category.replace('_', ' ')})", actor, keep=tuple(answers))
         if cancelled:
             notes.append(f"{cancelled} queued follow-up(s) cancelled")
+        if answers:
+            notes.append("the answer to their earlier email still waits for your approval: read this one with it")
         lead.last_activity_at = utcnow()
         if row.category == "interested" and automatic_simulation:
             msg = f"SIMULATED: Interested reply from {row.from_email} ({lead.company.name})"
@@ -996,7 +1032,7 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             row.suggested_followup_id = draft.id
             if "calendly.com/" in body.lower():
                 draft.purpose = "booking_link"
-            notes.append("suggested reply waiting for your approval")
+            notes.append(SUGGESTED_WAITS)
             if row.reply_to and NO_REPLY.match(row.from_email or ""):
                 notes.append(f"this draft goes to a no-reply address, where nobody may read it. They ask for answers to go to "
                              f"{row.reply_to}. Nothing goes there by itself: a person decides")
@@ -1025,6 +1061,13 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
     row.processed_at = utcnow()
     log_activity(session, f"{label} from {row.from_email}: {row.category.replace('_', ' ')} ({row.confidence})",
                  actor, type_="reply", body=(row.new_text or "")[:2000], company_id=row.company_id, lead_id=row.lead_id)
+
+
+def note_now(note: str | None, draft_status: str | None) -> str | None:
+    """A reply's note as it reads today: the note was written once, and its draft may have moved on since."""
+    if not note or SUGGESTED_WAITS not in note or draft_status in (None, "awaiting_approval"):
+        return note
+    return note.replace(SUGGESTED_WAITS, f"the suggested reply no longer waits: it is {draft_status.replace('_', ' ')}")
 
 
 def _hold_for_a_person(session: Session, row: InboundEmail, read: tuple | None, exc: Exception, actor: str) -> None:
