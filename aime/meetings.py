@@ -416,7 +416,7 @@ def handle_calendly_email(session: Session, settings, row: InboundEmail, actor: 
     if getattr(settings, "calendly_verified_only", True) and not row.is_simulated and not confirmed_by:
         from aime.mail_auth import calendly_verified
 
-        trusted, why = calendly_verified(session, settings, row.from_email, row.auth_results)
+        trusted, why = calendly_verified(session, settings, row.from_email, row.auth_results, to_email=row.to_email or "")
         if not trusted:
             row.status = "needs_review"
             return (f"Calendly notice not applied: {why}. Check it in Calendly, then press Apply on Replies "

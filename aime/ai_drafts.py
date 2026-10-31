@@ -15,7 +15,7 @@ SYSTEM = ("You write ONE friendly opening sentence for a reply to a business inq
           "Never mention prices, costs, numbers, dates, discounts, guarantees, timelines, links or email addresses. "
           "Do not promise anything. No greeting, no sign-off. Answer with the sentence only.")
 FORBIDDEN = re.compile(
-    r"\d|\$|€|£|%|https?://|www\.|@|\b(price|pricing|cost|costs|fee|fees|discount|free|guarantee[ds]?|promise[ds]?|"
+    r"\d|\$|€|£|%|https?://|www\.|@|\b[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}\b|\b(price|pricing|cost|costs|fee|fees|discount|free|guarantee[ds]?|promise[ds]?|"
     r"deadline|contract|quote|cheap|offer|deal|percent|refund|warranty|certified|award|best|#1|leading)\b", re.I)
 # What a word list of prices cannot catch. Amounts in words:
 AMOUNTS = (r"zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|sixty|seventy|"

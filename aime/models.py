@@ -344,6 +344,21 @@ class Meeting(Timestamped, Base):
     lead: Mapped["Lead | None"] = relationship()
 
 
+class SkippedMail(Base):
+    """Mail in a shared mailbox read as no part of the sales work and not stored: its sender, subject and date are kept for
+    30 days (aime.reply_intel.skipped_mail), so nothing vanishes without trace. No text is kept."""
+
+    __tablename__ = "skipped_mail"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mailbox_uid: Mapped[str | None] = mapped_column(String(60))
+    message_id: Mapped[str | None] = mapped_column(String(300), index=True)
+    from_email: Mapped[str] = mapped_column(String(200), index=True)
+    subject: Mapped[str] = mapped_column(String(300), default="")
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    skipped_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
 class InboundEmail(Base):
     """An email that arrived in the monitored sales mailbox (or a clearly labelled simulated one), with its
     classification, the lead it was matched to, and what was done about it."""
@@ -382,7 +397,11 @@ class InboundEmail(Base):
     action_note: Mapped[str | None] = mapped_column(Text)
     is_simulated: Mapped[bool] = mapped_column(Boolean, default=False)  # created by `aime simulate-reply`
     processed_at: Mapped[datetime | None] = mapped_column(DateTime)
-    auth_results: Mapped[str | None] = mapped_column(Text)  # the receiving server's Authentication-Results
+    auth_results: Mapped[str | None] = mapped_column(Text)  # the receiving server's Authentication-Results, or AIME's own check
+    sender_verified: Mapped[bool | None] = mapped_column(Boolean)  # the sender's domain signed it (None: not checked)
+    # What the mail is, when it is no person's answer: bounce | delay | receipt | sending_problem | calendar
+    mail_kind: Mapped[str | None] = mapped_column(String(20))
+    mail_note: Mapped[str | None] = mapped_column(String(400))  # no readable text (and what it holds), or why delivery failed
 
     lead: Mapped["Lead | None"] = relationship()
     contact: Mapped["Contact | None"] = relationship()

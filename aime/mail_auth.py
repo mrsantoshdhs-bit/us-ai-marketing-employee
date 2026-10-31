@@ -4,7 +4,8 @@ signature is verified: AIME checks the DKIM signatures itself when it reads the 
 server stamps no Authentication-Results), and records "aime.dkim; dkim=pass header.d=<domain>" for each that holds.
 A server's own Authentication-Results line counts only if that server is named in TRUSTED_AUTHSERV_IDS; a header
 the sender wrote is never believed. The notice must be signed by calendly.com, or forwarded by one of our trusted
-forwarders (our own mailbox, the owner's test address, CALENDLY_FORWARDERS) and signed by that forwarder's domain.
+forwarders (our own mailbox, the owner's test address, CALENDLY_FORWARDERS) and signed by that forwarder's domain. Calendly
+signs what it sends to anyone, so a notice it sent directly must also be addressed to one of those addresses.
 Anything else waits for a person to confirm it on Replies."""
 
 from __future__ import annotations
@@ -12,7 +13,9 @@ from __future__ import annotations
 import re
 
 _PASS = re.compile(r"\b(dkim|dmarc|spf)\s*=\s*pass\b([^;]*)", re.I)
-_DOMAIN = re.compile(r"\b(?:header\.d|header\.i|header\.from|smtp\.mailfrom)\s*=\s*@?([a-z0-9.-]+\.[a-z]{2,})", re.I)
+_COMMENT = re.compile(r"\([^()]*\)")
+_PROPERTIES = ("header.d", "header.i", "header.from", "smtp.mailfrom")
+_HOSTNAME = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}")
 
 
 OWN_AUTHSERV = "aime.dkim"  # the line AIME writes itself after verifying DKIM signatures (aime.dkim_verify)
@@ -32,13 +35,25 @@ def passing_domains(auth_results: str | None) -> set[str]:
     """Domains with a passing DKIM or DMARC result (SPF only counts with DMARC's alignment, so it is not used)."""
     out = set()
     for method, rest in _PASS.findall(auth_results or ""):
-        if method.lower() in ("dkim", "dmarc"):
-            out.update(d.lower().rstrip(".") for d in _DOMAIN.findall(rest))
+        if method.lower() not in ("dkim", "dmarc"):
+            continue
+        # Whole properties only, each value a whole hostname: "header.d=a,header.d=calendly.com,.evil.example" names nobody.
+        for token in re.sub(r"\s*=\s*", "=", _COMMENT.sub(" ", rest)).split():
+            key, _, value = token.partition("=")
+            value = value.strip('"').rsplit("@", 1)[-1].lower().rstrip(".")
+            if key.lower() in _PROPERTIES and len(value) <= 253 and _HOSTNAME.fullmatch(value):
+                out.add(value)
     return out
 
 
 def _within(domain: str, parent: str) -> bool:
     return domain == parent or domain.endswith("." + parent)
+
+
+def sender_signed(from_email: str | None, auth_results: str | None) -> bool:
+    """Did the sender's own domain sign this email? `auth_results` is what we stored: AIME's line or a trusted server's."""
+    domain = (from_email or "").rsplit("@", 1)[-1].lower()
+    return "@" in (from_email or "") and any(_within(d, domain) or _within(domain, d) for d in passing_domains(auth_results))
 
 
 def trusted_forwarders(session, settings) -> set[str]:
@@ -53,8 +68,9 @@ def trusted_forwarders(session, settings) -> set[str]:
     return own
 
 
-def calendly_verified(session, settings, from_email: str | None, auth_results: str | None) -> tuple[bool, str]:
-    """(trusted, why) for a Calendly notice."""
+def calendly_verified(session, settings, from_email: str | None, auth_results: str | None,
+                      to_email: str | None = None) -> tuple[bool, str]:
+    """(trusted, why) for a Calendly notice. `to_email`: who it was addressed to, for a notice Calendly sent directly."""
     sender = (from_email or "").lower()
     sender_domain = sender.rsplit("@", 1)[-1]
     if not auth_results:
@@ -64,6 +80,9 @@ def calendly_verified(session, settings, from_email: str | None, auth_results: s
     domains = passing_domains(auth_results)
     if _within(sender_domain, "calendly.com"):
         if any(_within(d, "calendly.com") for d in domains):
+            if to_email is not None and to_email.lower() not in trusted_forwarders(session, settings):
+                return False, (f"Calendly signed it, but it is addressed to {to_email or 'nobody'}, not to one of our addresses "
+                               "(if that address is ours, add it to the Calendly forwarders)")
             return True, "signed by calendly.com (DKIM/DMARC pass)"
         return False, "it claims to come from Calendly but has no passing calendly.com signature"
     if sender in trusted_forwarders(session, settings):
