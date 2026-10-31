@@ -1648,7 +1648,7 @@ def test_ok_clock_moved_forward_gives_one_catch_up(ctx, monkeypatch, clock):
     fast_jobs(monkeypatch)
     clock(datetime(2026, 10, 27, 14, 0))
     tick(ctx)
-    clock.forward(timedelta(days=30))
+    clock.forward(timedelta(days=13))  # longer than aime.clock_check.GAP_LIMIT, a person confirms first
     assert sorted(r["job"] for r in tick(ctx)["ran"]) == sorted(JOBS)  # a weekly slot passed as well
     assert tick(ctx)["ran"] == []
 
@@ -1661,6 +1661,13 @@ def test_defect_clock_set_back_stops_all_jobs_silently(ctx, monkeypatch, clock):
     clock(datetime(2026, 12, 1, 12, 0))
     tick(ctx)
     clock(datetime(2026, 10, 27, 14, 0))
+    # Phase 2 (R12): a clock earlier than the newest record stops the work until a person says the clock is right, and says
+    # so. It must not be silent, and it must not last until the clock catches up.
+    assert tick(ctx)["ran"] == []
+    assert [a for a in alerts(ctx, "%clock%") if not a.acknowledged], "stopped with no alert"
+    from aime.cli import cmd_confirm_clock
+
+    cmd_confirm_clock(None, ctx)
     ran = [r["job"] for r in tick(ctx)["ran"]]
     assert "monitor" in ran and "publish" in ran, f"five weeks without any job and no alert; this tick ran only {ran}"
 
