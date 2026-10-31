@@ -47,7 +47,7 @@ from aime.llm.base import LLMError
 from aime.models import Alert, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity, SkippedMail
 from aime.notify import notify_event
 from aime.integrations.email_smtp import sender_line
-from aime.outreach import TOPICS, stop_sequence
+from aime.outreach import CHECK_BACK_TASK, TOPICS, close_check_back_tasks, stop_sequence
 from aime.stages import move, opened
 from aime.timeutil import utcnow
 
@@ -117,7 +117,9 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
                             r"(cc|cc'?ing|copying|looping in)\b|forward(ed|ing)? (this|your)|contact our)", re.I)),
 ]
 # "I'm not the right person" points nowhere: nobody is referred, and a person reads it like "Wrong person, sorry".
-NOT_THE_RIGHT_PERSON = re.compile(r"(\bnot|n't|\bnever)( [\w']+){0,3} the right person\b", re.I)
+NOT_THE_RIGHT_PERSON = re.compile(r"(\bnot|n't|\bnever|\bno longer)( (?!but\b|however\b|though\b)[\w']+){0,6} the right person\b", re.I)
+# "I won't be forwarding this", "I never forwarded your email": nothing was passed on, and nobody is referred.
+NOT_PASSED_ON = re.compile(r"(\bnot|\bno\b|n't|\bnever|\bno longer)( (?!but\b|however\b|though\b)[\w']+){0,4} (forward|pass|shar)\w*\b( on)?( (this|your|it|the)\b)?", re.I)
 # Asking when we are free is a question, not interest, unless it is for a call they want ("your availability for a call").
 OUR_AVAILABILITY = re.compile(r"\b((what|how|when)\b[^.?!]{0,30}\byour( team'?s)? availability|(do|does) (you|your team) have (any )?availability)\b"
                               r"(?![^.?!]*\b(call|meeting|chat|demo)\b)[^.?!]*\?", re.I)
@@ -281,7 +283,7 @@ def recommended_for(row: InboundEmail) -> str | None:
     if getattr(row, "mail_kind", None) == "calendar" and row.category == "other":
         return RECOMMENDED["calendar"]
     if row.category == "referral":
-        if PASSED_ON.search(_flat(row.new_text or own_text(row.body_text or ""))):
+        if passed_on(row.new_text or own_text(row.body_text or "")):
             return "Wait to hear from the person they passed it to"
         if named_addresses(row):
             return "A person decides whether to write to the address they gave: nothing goes there by itself"
@@ -307,6 +309,18 @@ def intent_of(row: InboundEmail) -> str | None:
 PASSED_ON = re.compile(r"\b(forward(ed|ing)|pass(ed|ing)( on)?|shar(ed|ing)) (this|your|it|the)\b|\b(i'?ll|i will|we'?ll|we will) (forward|pass)\b|"
                        r"\b(looping|looped|copying|copied) in\b|\bcc'?(d|ed|ing)\b|\bcopying\b|\bon (cc|copy)\b", re.I)
 _ADDRESS = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# A word before it, in the same sentence, that takes it back: "You needn't check back", "I won't be forwarding", "It is pointless to follow up".
+_TAKEN_BACK = re.compile(r"\b(no|not|never|nor|neither|none|nobody|hardly|cannot|dont|needn'?t|\w+n't|without|pointless|useless|unnecessary|doubt|waste|avoid|instead|rather than|stop)\b", re.I)
+
+
+def _before_in_sentence(said: str, at: int) -> str:
+    return re.split(r"[.!?\n]", said[:at])[-1]
+
+
+def passed_on(text: str) -> bool:
+    """They say they passed it on or copied someone in, and do not say they did not."""
+    said = _flat(text)
+    return any(not _TAKEN_BACK.search(_before_in_sentence(said, m.start())) for m in PASSED_ON.finditer(said))
 
 
 def named_addresses(row: InboundEmail) -> list[str]:
@@ -320,17 +334,39 @@ _MONTHS = ("january", "february", "march", "april", "may", "june", "july", "augu
 # Asked to come back in a month they name. Only the writer's request: "we'll get back to you in March" asks nothing of us.
 CHECK_BACK = re.compile(r"\b((check|circle|come|get) back|touch base|reach (back )?out|follow[- ]?up|try (me |us )?again|reconnect|revisit|"
                         r"(ping|write to|contact|email|e-mail|call) (me|us))\b( \w+){0,4}? "
-                        rf"(in|around|after|until|till|by|from)( (early|mid|late|the start of|the end of))?[ -]({'|'.join(_MONTHS)})\b", re.I)
-_NOT_ASKED = re.compile(r"\b(do not|don'?t|no need to|never|not|(i|we)('ll| will| shall))( \w+){0,2} $", re.I)
+                        rf"(?P<prep>in|around|after|until|till|by|from)( (?P<part>early|mid|late|the start of|the end of))?[ -](?P<month>{'|'.join(_MONTHS)})\b( (?P<year>20\d\d)\b)?", re.I)
+# Someone else will write, or they will: "Our CFO will get back to you in March", "Sam can reach out in March". Not "you can", not "can we".
+_SOMEONE_WILL = re.compile(r"\b(?!you\b|we\b)[\w']+( \w+)?('ll| will| shall| would| might| may| is going to| are going to| can| could)( \w+){0,2} $|"
+                           r"\b(i|we)('ll| will| shall| am going to| are going to)( \w+){0,2} $", re.I)
+_PART_DAY = {"early": 1, "the start of": 1, "mid": 15, "late": 25, "the end of": 25}
+_PART_WORD = {"early": "early ", "the start of": "early ", "mid": "mid-", "late": "late ", "the end of": "late "}
+
+
+def check_back_when(row: InboundEmail) -> dict | None:
+    """What they ask: {month 1-12, year or None, part of the month, after: past that month, words: as we write it}. None when nobody asks
+    us to: a word that takes it back or someone else's promise makes no promise of ours, and no task."""
+    said = _flat(row.new_text or own_text(row.body_text or ""))
+    for asked in CHECK_BACK.finditer(said):
+        before = _before_in_sentence(said, asked.start())
+        if _TAKEN_BACK.search(before) or _SOMEONE_WILL.search(before):
+            continue
+        month, year = _MONTHS.index(asked.group("month").lower()) + 1, asked.group("year")
+        part, after = (asked.group("part") or "").lower(), asked.group("prep").lower() == "after"
+        name = asked.group("month").capitalize() + (f" {year}" if year else "")
+        return {"month": month, "year": int(year) if year else None, "part": part, "after": after,
+                "words": f"after {name}" if after else f"in {_PART_WORD.get(part, '')}{name}"}
+    return None
 
 
 def check_back_month(row: InboundEmail) -> int | None:
     """The month (1-12) they ask to hear from us again in, if they name one."""
-    said = _flat(row.new_text or own_text(row.body_text or ""))
-    asked = CHECK_BACK.search(said)
-    if not asked or _NOT_ASKED.search(said[:asked.start()][-30:]):
-        return None
-    return _MONTHS.index(asked.group(asked.lastindex).lower()) + 1
+    when = check_back_when(row)
+    return when["month"] if when else None
+
+
+def check_back_refused(row: InboundEmail) -> bool:
+    """They name a month and say not to, or that someone else will: asking whether to check back would be asking what they just answered."""
+    return bool(CHECK_BACK.search(_flat(row.new_text or own_text(row.body_text or "")))) and not check_back_when(row)
 
 
 UNSUBSCRIBE_SUBJECT = re.compile(r"^\s*((re|fwd?|aw)\s*:\s*)*(unsubscribe|opt[- ]?out|remove me|stop)\s*[.!]?\s*$", re.I)
@@ -414,7 +450,7 @@ def _classify(row: InboundEmail, text: str | None = None) -> tuple[str, str, lis
     text = _flat(text)
     said = _flat(f"{subject}\n{text}")
     complaint = COMPLAINT.search(SPAM_ASIDE.sub(" ", said))
-    heard = {"referral": NOT_THE_RIGHT_PERSON.sub(" ", said), "interested": OUR_AVAILABILITY.sub(" ", said)}  # never the opt-outs
+    heard = {"referral": NOT_PASSED_ON.sub(" ", NOT_THE_RIGHT_PERSON.sub(" ", said)), "interested": OUR_AVAILABILITY.sub(" ", said)}  # never the opt-outs
     hits = {name: m.group(0) for name, rx in PATTERNS if (m := rx.search(heard.get(name, said)))}
     if just_stop:
         hits.setdefault("unsubscribe", "stop")
@@ -846,16 +882,16 @@ def suggest(settings, category: str, row: InboundEmail, contact: Contact | None,
             body = (f"Hi {name},\n\nThank you for getting back to me. I would be glad to talk{topic}. Could you share "
                     f"two or three times {when}that suit you for a {minutes}-minute call?\n\n{sign}")
     elif category == "objection":
-        month = check_back_month(row)
-        if month:  # they said when: asking again whether to write would be asking twice
-            body = (f"Hi {name},\n\nThank you for letting me know. I will check back in {_MONTHS[month - 1].capitalize()}, as you suggest."
-                    f"\n\n{sign}")
+        when = check_back_when(row)
+        if when:  # they said when: asking again whether to write would be asking twice
+            body = f"Hi {name},\n\nThank you for letting me know. I will check back {when['words']}, as you suggest.\n\n{sign}"
+        elif check_back_refused(row):
+            body = f"Hi {name},\n\nThank you for letting me know.\n\n{sign}"
         else:
             body = (f"Hi {name},\n\nThank you for the honest answer. Would it be useful if I checked back in a few months, "
                     f"or would you rather I did not? Either is fine.\n\n{sign}")
     elif category == "referral":
-        said = _flat(row.new_text or own_text(row.body_text or ""))
-        if PASSED_ON.search(said):
+        if passed_on(row.new_text or own_text(row.body_text or "")):
             body = f"Hi {name},\n\nThank you for passing my note along. There is nothing more you need to do.\n\n{sign}"
         elif named_addresses(row):
             body = f"Hi {name},\n\nThank you for pointing me in the right direction. There is nothing more you need to do.\n\n{sign}"
@@ -876,29 +912,30 @@ def suggest(settings, category: str, row: InboundEmail, contact: Contact | None,
 
 
 BOOK_A_MEETING = "Book a meeting: approve the suggested reply with your booking link"
-CHECK_BACK_TASK = "Check back with "  # how a task of this kind starts: an opt-out afterwards closes it
+def _month_due(month: int, now: datetime, year: int | None = None, after: bool = False, part: str = "") -> datetime:
+    """When to write, never earlier than they asked: that month (the part of it they said) in the year they said, else its next coming, or
+    the first of the month after it for "after December". This month means now, unless they said a later part of it or "after"."""
+    if not year or year < now.year:
+        year = now.year if month >= now.month else now.year + 1
+    if after:
+        return datetime(year + 1, 1, 1, 14) if month == 12 else datetime(year, month + 1, 1, 14)
+    return max(datetime(year, month, _PART_DAY.get(part, 1), 14), now)
 
 
-def _month_due(month: int, now: datetime) -> datetime:
-    """The start of that month, next year's if it has passed; this month means now."""
-    if month == now.month:
-        return now
-    return datetime(now.year + (month < now.month), month, 1, 14)
-
-
-def _check_back_task(session: Session, row: InboundEmail, lead: Lead, contact: Contact | None, month: int, actor: str) -> str:
-    """A task for a person, due in the month they named. A task only: nothing is drafted or sent when it falls due."""
-    name = _MONTHS[month - 1].capitalize()
-    subject = f"{CHECK_BACK_TASK}{lead.company.name} in {name}"[:300]
+def _check_back_task(session: Session, row: InboundEmail, lead: Lead, contact: Contact | None, when: dict, actor: str) -> str:
+    """A task for a person, due when they said. A task only: nothing is drafted or sent when it falls due. Their words stay on the reply,
+    which a request to erase them reaches: a colleague's address and words are not copied here."""
+    words = when["words"]
+    subject = f"{CHECK_BACK_TASK}{lead.company.name} {words}"[:300]
     if session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task", FollowUp.subject == subject,
                                                  FollowUp.status == "pending").limit(1)).first():
-        return f"a task to check back in {name} is already open"
+        return f"a task to check back {words} is already open"
     session.add(FollowUp(lead_id=lead.id, contact_id=contact.id if contact else None, company_id=lead.company_id, channel="task", step=1,
-                         due_at=_month_due(month, utcnow()), status="pending", subject=subject,
-                         body=(f"{row.from_email} asked us to check back in {name}. They wrote: {(row.new_text or '')[:500]}\n\nFirst check that they "
-                               "have not opted out since. Nothing goes out by itself: writing to them is a person's decision.")))
-    log_activity(session, f"Task created: check back in {name}", actor, type_="task", company_id=lead.company_id, lead_id=lead.id)
-    return f"they asked us to check back in {name}: a task is due then, and nothing goes out by itself"
+                         due_at=_month_due(when["month"], utcnow(), when["year"], when["after"], when["part"]), status="pending", subject=subject,
+                         body=(f"Someone at this company asked us to check back {words}: their reply is on this lead's page. First check that they have not opted "
+                               "out since. Nothing goes out by itself: writing to them is a person's decision.")))
+    log_activity(session, f"Task created: check back {words}", actor, type_="task", company_id=lead.company_id, lead_id=lead.id)
+    return f"they asked us to check back {words}: a task is due then, and nothing goes out by itself"
 
 
 def ensure_opportunity(session: Session, lead: Lead, actor: str) -> Opportunity:
@@ -1091,10 +1128,8 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             contact.consent_status, contact.consent_at = "opted_out", utcnow()
         if lead and lead.outreach_status:
             stop_sequence(session, lead, "unsubscribed", "Asked not to be contacted", actor)
-        if lead:  # they said "check back in March", then this: nobody is reminded to write
-            for task in session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task", FollowUp.status == "pending",
-                                                               FollowUp.subject.startswith(CHECK_BACK_TASK, autoescape=True))).scalars():
-                task.status, task.blocked_reason = "cancelled", "They asked not to be contacted"
+        if lead:  # also a lead with no stage yet, which the line above leaves alone
+            close_check_back_tasks(session, lead, "They asked not to be contacted")
         # Anyone can write "From: david@...". In our thread, or with a verified signature, it is them; otherwise the address
         # is suppressed all the same (the safe side) but only a person closes a deal on it.
         proven = f is not None or bool(row.sender_verified) or person
@@ -1113,6 +1148,7 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         colleagues = company_leads(session, row.from_email) if unmatched else []
         for other in colleagues:
             stop_sequence(session, other, "stopped", f"{row.from_email} at this company asked not to be contacted", actor)
+            close_check_back_tasks(session, other, "Someone at this company asked not to be contacted")
         if colleagues:
             _tie_to_lead(row, colleagues[0])
             notes.append(f"{colleagues[0].company.name}: sequence stopped; a person decides whether it speaks for the company")
@@ -1206,8 +1242,8 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
                 lead.status = "nurture"
             notes.append("lead moved to nurture")
             notes += close_opportunities(session, lead, "Not interested", actor, sure=row.confidence == "high")
-        if not automatic_simulation and not opted_out and (month := check_back_month(row)):
-            notes.append(_check_back_task(session, row, lead, contact, month, actor))
+        if not automatic_simulation and not opted_out and (when := check_back_when(row)):
+            notes.append(_check_back_task(session, row, lead, contact, when, actor))
         booked = None
         if row.category == "interested":
             from aime.meetings import next_meeting

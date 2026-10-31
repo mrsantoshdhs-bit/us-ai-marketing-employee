@@ -330,10 +330,23 @@ def record_delivery(session: Session, f: FollowUp, sent_at, delivered_to: str | 
         set_status(session, lead, "contacted" if delivered_to_prospect(f) else TEST_SENT, actor)
 
 
+CHECK_BACK_TASK = "Check back with "  # how a task of this kind starts: a later no closes it
+ENDS_CHECK_BACK = ("unsubscribed", "bounced", "not_interested")
+
+
+def close_check_back_tasks(session: Session, lead: Lead, reason: str) -> None:
+    """They asked to hear from us again, and then said no, or their address failed: nobody is reminded to write."""
+    for task in session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task", FollowUp.status == "pending",
+                                                       FollowUp.subject.startswith(CHECK_BACK_TASK, autoescape=True))).scalars():
+        task.status, task.blocked_reason = "cancelled", reason[:300]
+
+
 def stop_sequence(session: Session, lead: Lead, status: str, reason: str, actor: str, keep: tuple[int, ...] = ()) -> int:
     """Cancel every open email of this lead's sequence, but those in `keep`, and record why. Returns how many were cancelled. A
     later reply never changes the "unsubscribed" stage: the opt-out still stands."""
     cancelled = cancel_queued(session, lead, reason, keep)
+    if status in ENDS_CHECK_BACK:
+        close_check_back_tasks(session, lead, reason)
     if lead.outreach_status != "unsubscribed":
         set_status(session, lead, status, actor, reason)
     return cancelled

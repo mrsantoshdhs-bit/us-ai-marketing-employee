@@ -17,7 +17,7 @@ from aime.outreach import draft_outreach, sent_earlier
 from aime.qc.checks import check_claims
 from aime.qc.email_checks import run_email_checks
 from aime.inbox import new_text
-from aime.reply_intel import (QUESTION_PLACEHOLDER, _month_due, _nothing_new, check_back_month, classify, first_name, intent_of, note_now, offered_day, recommended_for, reply_footer,
+from aime.reply_intel import (QUESTION_PLACEHOLDER, _month_due, _nothing_new, check_back_month, check_back_when, classify, first_name, intent_of, note_now, offered_day, recommended_for, reply_footer,
                               sentiment_and_recommendation, suggest)
 from aime.timeutil import utcnow
 from aime.web.app import create_app
@@ -329,6 +329,104 @@ def test_the_month_due_is_the_coming_one():
     assert _month_due(3, now) == datetime(2027, 3, 1, 14)
     assert _month_due(11, now) == datetime(2026, 11, 1, 14)
     assert _month_due(10, now) == now
+
+
+@pytest.mark.parametrize("text, due, words", [
+    ("Please check back in March 2028.", datetime(2028, 3, 1, 14), "in March 2028"), ("Please check back after December.", datetime(2027, 1, 1, 14), "after December"),
+    ("Check back after October please.", datetime(2026, 11, 1, 14), "after October"), ("Check back after December 2027.", datetime(2028, 1, 1, 14), "after December 2027"),
+    ("Try us again in mid-September.", datetime(2027, 9, 15, 14), "in mid-September"), ("Check back in late March.", datetime(2027, 3, 25, 14), "in late March"),
+    ("Check back in early May.", datetime(2027, 5, 1, 14), "in early May"), ("Check back after March.", datetime(2027, 4, 1, 14), "after March"),
+])
+def test_the_date_is_never_earlier_than_they_asked_and_says_what_they_said(st, text, due, words):
+    r = row(text)
+    when = check_back_when(r)
+    assert when["words"] == words
+    now = datetime(2026, 10, 31, 9)
+    assert _month_due(when["month"], now, when["year"], when["after"], when["part"]) == due
+    r.category, r.intent = classify(r)[0], None
+    if r.category == "objection":
+        assert f"I will check back {words}, as you suggest." in suggest(st, r.category, r, None, lead())[1]
+
+
+@pytest.mark.parametrize("text", ["You needn't check back in March.", "Do not, under any circumstances, check back in March.", "No need for you to check back in March.",
+                                  "It is pointless to follow up in March.", "Our CFO will get back to you in March.", "Sam will reach out in March if needed.", "You shouldn't check back in March.",
+                                  "There's no point trying again in March.", "I doubt it's worth checking back in March.", "Sam can reach out in March."])
+def test_a_refused_check_back_is_no_promise_and_no_task(st, make_ctx, text):
+    r = row(text)
+    assert check_back_month(r) is None
+    r.category, r.intent = classify(r)[0], None
+    suggested = suggest(st, r.category, r, None, lead())
+    assert suggested is None or ("will check back" not in suggested[1] and "checked back" not in suggested[1])
+    ctx, _sender, sent = contacted(make_ctx)
+    deliver(ctx, in_thread(sent, text))
+    with ctx.db.session() as s:
+        assert not s.execute(select(FollowUp).where(FollowUp.channel == "task", FollowUp.lead_id == sent.lead_id, FollowUp.subject.like("Check back%"))).first()
+
+
+@pytest.mark.parametrize("text", ["Actually, let's reconnect in March.", "Can we reconnect in June?", "You can check back in May.", "Don't call now. Please check back in March."])
+def test_a_real_request_still_counts(text):
+    assert check_back_month(row(text))
+
+
+@pytest.mark.parametrize("text", ["I won't be forwarding this to anyone.", "We are not sharing this with the team.", "I never forwarded your email.", "I am no longer the right person.",
+                                  "I'm not really sure that I would be the right person."])
+def test_no_referral_is_claimed_where_none_was_made(st, text):
+    r, suggested = answer(st, text)
+    assert r.category == "other" and suggested is None, r.category
+
+
+def test_a_refused_pass_on_then_a_real_direction_is_still_asked(st):
+    r, (_, body) = answer(st, "Sorry, I can't pass this on. Please reach out to our office.")
+    assert r.category == "referral" and "Thank you for passing" not in body and "best way to reach them" in body
+
+
+@pytest.mark.parametrize("text", ["Not me but Sam is the right person for this.", "I'm not the right person, you should talk to Sam Ray."])
+def test_a_real_direction_beside_those_words_stays_a_referral(text):
+    assert classify(row(text))[0] == "referral"
+
+
+def later_no(ctx, sent, raw):
+    FakeIMAP.messages[max(FakeIMAP.messages) + 1] = raw
+    run_inbox(ctx)
+    with ctx.db.session() as s:
+        return s.execute(select(FollowUp).where(FollowUp.channel == "task")).scalars().one().status
+
+
+def asked_march(make_ctx):
+    ctx, _sender, sent = contacted(make_ctx)
+    FakeIMAP.messages = {1: mail(f"David Chen <{TO}>", f"Re: {sent.subject}", "Please check back in March.", in_reply_to=sent.message_id, msg_id="<a@x.example>")}
+    run_inbox(ctx)
+    return ctx, sent
+
+
+def test_a_later_no_closes_the_task_whichever_way_it_comes(make_ctx):
+    ctx, sent = asked_march(make_ctx)
+    assert later_no(ctx, sent, mail(f"David Chen <{TO}>", f"Re: {sent.subject}", "Not interested, thanks.", in_reply_to=sent.message_id, msg_id="<b@x.example>")) == "cancelled"
+    ctx, sent = asked_march(make_ctx)
+    assert later_no(ctx, sent, mail(f"Jane <jane@{TO.split('@')[1]}>", "Remove us", "Please remove us from your mailing list.", msg_id="<c@x.example>")) == "cancelled"
+    ctx, sent = asked_march(make_ctx)
+    assert later_no(ctx, sent, bounce_for(TO, sent.message_id)) == "cancelled"
+    ctx, sent = asked_march(make_ctx)
+    assert later_no(ctx, sent, mail("Sam <sam@other.example>", f"Re: {sent.subject}", "Thanks.", msg_id="<d@x.example>")) == "pending"  # a stranger's word closes nothing
+
+
+def test_a_person_confirming_an_opt_out_closes_it_too(make_ctx):
+    ctx, sent = asked_march(make_ctx)
+    FakeIMAP.messages[2] = mail("Sam <sam@other.example>", f"Re: {sent.subject}", "Please take me off your list.", msg_id="<e@x.example>")
+    run_inbox(ctx)
+    r = latest_reply(ctx)
+    TestClient(create_app(ctx), headers=ORIGIN).post(f"/inbox/{r.id}/reclassify", data={"category": "unsubscribe"})
+    with ctx.db.session() as s:
+        assert s.execute(select(FollowUp).where(FollowUp.channel == "task")).scalars().one().status == "cancelled"
+
+
+def test_the_task_holds_no_address_and_no_words_of_theirs(make_ctx):
+    ctx, _sender, sent = contacted(make_ctx)
+    FakeIMAP.messages = {1: mail(f"Jane <jane@{TO.split('@')[1]}>", f"Re: {sent.subject}", "Secret plans aside, please check back in March.", in_reply_to=sent.message_id, msg_id="<a@x.example>")}
+    run_inbox(ctx)
+    with ctx.db.session() as s:
+        task = s.execute(select(FollowUp).where(FollowUp.channel == "task")).scalars().one()
+        assert "jane" not in f"{task.subject} {task.body}".lower() and "Secret" not in task.body and task.to_email is None
 
 
 def test_check_back_in_march_leaves_a_task_for_a_person_and_nothing_else(make_ctx):
@@ -815,7 +913,7 @@ def test_a_campaign_does_not_approve_an_answer_with_a_later_reply_unread(make_ct
     with ctx.db.session() as s:
         f = s.get(FollowUp, answer_of(ctx, lead_id)[0][0])
         f.body = f"{f.body} https://calendly.com/uat/30min"
-        a = NS(id=1, name="c", daily_limit=9, total_limit=9, recipients=[f.to_email.lower()], kinds=[am.email_kind(f)])
+        a = NS(id=1, name="c", daily_limit=9, total_limit=9, recipients=[f.to_email.lower()], kinds=[am.email_kind(f)], rule=None)
         monkeypatch.setattr(am, "active_authorizations", lambda *_a, **_k: [a])
         monkeypatch.setattr(am, "committed_counts", lambda *_a, **_k: (0, 0))
         assert am.campaign_for(s, f, "automatic", utcnow(), {})[0] is a  # without a later reply it would go
