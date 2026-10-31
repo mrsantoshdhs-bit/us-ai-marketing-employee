@@ -116,3 +116,13 @@ def test_ok_page_junk_is_not_named_as_the_person_found(make_ctx):
         lead = s.get(Lead, lid)
         snap = ResearchSnapshot(company_id=co, status="done", pages=[], people=[{"name": "HomeAbout UsCareers"}, {"name": "Dana Fox", "title": "CEO"}])
         assert SalesWorkflowAgent._person_found(s, lead, snap)[0] == "Dana Fox"
+
+
+def test_ok_a_campaign_never_approves_an_email_quoting_a_sensitive_word_from_a_website(make_ctx):
+    """The first email now quotes the company's own site. "invoice" in that quote still sends the email to a person."""
+    from types import SimpleNamespace
+
+    from aime.automation import SENSITIVE
+
+    quote = SimpleNamespace(body='Your website describes Acme this way: "Acme helps carriers plan routes and invoice customers."')
+    assert SENSITIVE.search(quote.body)
