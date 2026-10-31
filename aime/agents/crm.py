@@ -23,10 +23,19 @@ from aime.matching import classify_industry, competitor_evidence, competitor_in_
 from aime.models import Alert, Company, FollowUp, InboundInquiry, Lead, Opportunity, ResearchSnapshot, Signal
 from aime.sources.base import CompanyCandidate
 from aime.timeutil import utcnow
-from aime.website_check import check_website
+from aime.website_check import check_website, site_answers
 
 Operation = Literal["ingest_inbound", "verify_websites", "dedupe", "hygiene", "stale", "lifecycle", "competitors"]
 RECHECK_AFTER = timedelta(days=30)
+# No answer at all teaches nothing about a site: it keeps its status and is looked at again soon. Only this many such checks
+# in a row while the network worked, each at least RECHECK_NO_ANSWER after the last (about three days), call it unreachable.
+NO_ANSWERS_TO_UNREACHABLE = 4
+RECHECK_NO_ANSWER = timedelta(hours=20)
+RECHECK_IN_OUTAGE = timedelta(hours=1)
+OUTAGE_STOP_AFTER = 5  # this many with no answer and none with one: the rest of the run would only wait for timeouts
+OUTAGE_MIN_WITHOUT_WITNESS = 3  # no site that answered before to ask: this many silent ones are read as an outage
+OUTAGE_WITNESSES = 2
+OUTAGE_ALERT = "website_check:outage"
 US_NAMES = {"us", "usa", "u.s.", "u.s.a.", "united states", "united states of america", "america"}
 
 
@@ -185,15 +194,26 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         limit = limit or int(self.settings.section("research").get("website_checks_per_run", 25))
         stale = utcnow() - RECHECK_AFTER
         stmt = select(Company).where(Company.merged_into_id.is_(None), Company.domain.is_not(None),
-                                     or_(Company.website_checked_at.is_(None), Company.website_checked_at < stale))
+                                     or_(Company.website_checked_at.is_(None), Company.website_checked_at < stale),
+                                     or_(Company.website_retry_at.is_(None), Company.website_retry_at <= utcnow()))
         if company_ids:
             stmt = stmt.where(Company.id.in_(company_ids))
         todo = session.execute(stmt.order_by(Company.website_checked_at.is_not(None), Company.id).limit(limit)).scalars().all()
         session.commit()  # no write lock is held during network calls
+        silent: list[Company] = []
+        answered = 0
         for company in todo:
             result = check_website(self.ctx, company.domain, company.name)
             out.websites_checked += 1
-            out.website_results[result.status] = out.website_results.get(result.status, 0) + 1
+            said = "no answer" if result.no_answer else result.status
+            out.website_results[said] = out.website_results.get(said, 0) + 1
+            if result.no_answer:  # judged when the run is over: only then can it tell a dead site from a lost network
+                silent.append(company)
+                if not answered and len(silent) >= OUTAGE_STOP_AFTER:
+                    break
+                continue
+            answered += 1
+            company.website_no_answer, company.website_retry_at = None, None
             company.website_status = result.status
             company.website_checked_at = utcnow()
             company.website_title = result.title
@@ -217,6 +237,48 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             session.commit()
             if self.settings.polite_delay:
                 time.sleep(self.settings.polite_delay)
+        self._judge_silent_sites(session, silent, answered)
+
+    def _network_looks_down(self, session: Session, silent: list[Company], answered: int) -> bool | None:
+        """Most checks got no answer: a lost network, or a run of dead sites? Sites that answered before are asked, so dead
+        sites alone are never taken for an outage. None: this run cannot tell."""
+        if len(silent) <= answered:
+            return False
+        witnesses = session.execute(select(Company.domain).where(
+            Company.merged_into_id.is_(None), Company.domain.is_not(None), Company.website_status.in_(("verified", "redirected")),
+            Company.website_retry_at.is_(None), Company.id.not_in([c.id for c in silent]))
+            .order_by(Company.website_checked_at.desc()).limit(OUTAGE_WITNESSES)).scalars().all()
+        session.commit()  # no write lock is held during network calls
+        if witnesses:
+            return not any(site_answers(self.ctx, domain) for domain in witnesses)
+        return True if len(silent) >= OUTAGE_MIN_WITHOUT_WITNESS else None
+
+    def _judge_silent_sites(self, session: Session, silent: list[Company], answered: int) -> None:
+        from aime.monitoring import alert_once, resolve_alerts
+
+        down = self._network_looks_down(session, silent, answered) if silent else False
+        now = utcnow()
+        for company in silent:
+            if down:  # nothing was learned about these sites: no count, no change
+                company.website_retry_at = now + RECHECK_IN_OUTAGE
+                continue
+            company.website_no_answer = (company.website_no_answer or 0) + 1
+            company.website_retry_at = now + RECHECK_NO_ANSWER
+            if company.website_no_answer >= NO_ANSWERS_TO_UNREACHABLE:
+                checks = company.website_no_answer
+                company.website_status, company.website_checked_at = "unreachable", now
+                company.website_no_answer, company.website_retry_at = None, None
+                company.validation = {**(company.validation or {}), "website": f"No answer on {checks} checks over several days"}
+                log_activity(session, f"Website {company.domain} gave no answer on {checks} checks over several days, while "
+                             "other sites answered: now marked unreachable", self.name, type_="data_quality", company_id=company.id)
+        if down:
+            alert_once(session, "warning", self.name, f"The internet connection looks down: {len(silent)} of "
+                       f"{len(silent) + answered} company websites gave no answer, and neither did sites that answered before. "
+                       "Nothing changes for those companies or their leads; they are checked again once the connection is back.",
+                       self.settings, key=OUTAGE_ALERT)
+        elif down is False:
+            resolve_alerts(session, (OUTAGE_ALERT,), set())
+        session.commit()
 
     # ------------------------------------------------------------------ maintenance
     def _flag_competitors(self, session: Session) -> int:
