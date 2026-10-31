@@ -168,7 +168,8 @@ def _gives_pages(srv) -> None:
                 conn.settimeout(5)
                 try:
                     conn.recv(4096)
-                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    page = b"<title>Sign in - AI Sales Employee</title>"
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" % (len(page), page))
                 except OSError:
                     pass
     threading.Thread(target=serve, daemon=True).start()

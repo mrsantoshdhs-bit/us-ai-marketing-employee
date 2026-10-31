@@ -21,9 +21,30 @@ STALE_WHILE_RUNNING = timedelta(minutes=75)  # a tick writes its beat as each jo
 # starting this long to answer before reporting it as not running.
 DASHBOARD_GRACE_SECONDS = 180
 DASHBOARD_RECHECK_SECONDS = 10
+# After the PC wakes this task and the Tick task are both started at once (StartWhenAvailable), so this one can read the last
+# beat from before the sleep. Two missed ticks' time after a wake is the tick's to run in; this task's next run reports a real stop.
+WAKE_GRACE_SECONDS = 30 * 60
 
 
-def check(data_dir: Path, now: datetime | None = None) -> list[str]:
+def seconds_since_wake() -> float | None:
+    """Since this PC last woke from sleep; None where that cannot be told or it has not slept since it started."""
+    if os.name != "nt":
+        return None
+    import ctypes
+
+    try:
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.GetTickCount64.restype = ctypes.c_ulonglong
+        woke = ctypes.c_ulonglong(0)
+        last_wake_time = 14  # interrupt time at the last wake, in 100 ns: the same clock GetTickCount64 reads, in ms
+        if ctypes.WinDLL("powrprof").CallNtPowerInformation(last_wake_time, None, 0, ctypes.byref(woke), ctypes.sizeof(woke)) != 0:
+            return None
+    except (OSError, AttributeError):
+        return None
+    return (kernel32.GetTickCount64() - woke.value / 10_000) / 1000 if woke.value else None
+
+
+def check(data_dir: Path, now: datetime | None = None, since_wake=seconds_since_wake) -> list[str]:
     """Problems worth a notification; empty when ticks are fresh or a maintenance window is active."""
     from aime import maintenance
 
@@ -44,6 +65,9 @@ def check(data_dir: Path, now: datetime | None = None) -> list[str]:
         return ["No work is being done because the PC's clock looks wrong. Correct the clock, or run `python -m aime confirm-clock`."]
     age = now - at
     if age > (STALE_WHILE_RUNNING if beat.get("state") == "running" else STALE_AFTER):
+        woke = since_wake()
+        if woke is not None and 0 <= woke < WAKE_GRACE_SECONDS and age.total_seconds() > woke:  # the silence began before the wake
+            return []
         return [f"Scheduled ticks stopped: last tick {int(age.total_seconds() // 60)} min ago. "
                 "Check Task Scheduler (AIMarketingEmployee-Tick) and data/logs/scheduler_crash.log."]
     return []
@@ -53,12 +77,13 @@ def dashboard_problem(host: str = "127.0.0.1", port: int | None = None, wait_sec
                       sleep=time.sleep, clock=time.monotonic) -> str | None:
     """None when the dashboard gives a page. With `wait_seconds`, a dashboard that does not answer yet is checked again
     every few seconds until then (it may still be starting) before it is reported. A port that accepts the connection
-    and gives no page is a hung dashboard or another program: it is reported as that, not as all well."""
+    and gives no page is a hung dashboard or another program: it is reported as that, not as all well. So is a web program that
+    answers but is not the dashboard."""
     import socket
 
     from dotenv import dotenv_values
 
-    from aime.dashboard_probe import PAGE_TIMEOUT, page_answers
+    from aime.dashboard_probe import PAGE_TIMEOUT, page_owner
 
     port = port or int(os.environ.get("DASHBOARD_PORT") or dotenv_values(ROOT / ".env").get("DASHBOARD_PORT") or 8765)
     deadline = clock() + wait_seconds
@@ -69,12 +94,16 @@ def dashboard_problem(host: str = "127.0.0.1", port: int | None = None, wait_sec
                 pass
         except OSError:
             accepted = False
-        if accepted and page_answers(host, port):
+        owner = page_owner(host, port) if accepted else None
+        if owner == "dashboard":
             return None
         if clock() >= deadline:
             break
         sleep(DASHBOARD_RECHECK_SECONDS)
     waited = f" after waiting {int(wait_seconds)} s for it to start" if wait_seconds else ""
+    if owner == "other":
+        return (f"Another web program is using port {port}: it answers, but it is not the dashboard{waited}, so the dashboard cannot "
+                "start. Close that program, or give the dashboard another port.")
     if accepted:
         return (f"The dashboard is not answering: something holds port {port} but gave no page in {int(PAGE_TIMEOUT)} s{waited}. "
                 "A hung dashboard ends itself within minutes and the Dashboard task starts a new one; if this stays, another "
