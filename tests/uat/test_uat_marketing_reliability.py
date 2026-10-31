@@ -1027,7 +1027,7 @@ def test_ok_home_cards_match_records(scenario):
     assert re.findall(r'class="kpi-total">Last 7 days · ([\d,]+) in total<', html) == ["7", "3", "3", "2"]
     stages = {st["label"]: st["value"] for st in view["pipeline_stages"]}
     # the disqualified lead is not among the new leads (T04)
-    assert stages == {"New leads": 5, "Contacted": 2, "Interested": 1, "Meeting booked": 2, "Closed won": 1}
+    assert stages == {"Open leads": 5, "Contacted": 2, "Interested": 1, "Meeting booked": 2, "Closed won": 1}
 
 
 def test_ok_funnel_tiles_and_api_stats_match_records(scenario):

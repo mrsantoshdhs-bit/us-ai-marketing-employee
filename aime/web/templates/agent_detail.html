@@ -20,7 +20,7 @@
     <div class="status-row"><span class="k">Last successful run</span><span class="val">{{ a.last_success|local if a.last_success else 'never' }}</span></div>
     <div class="status-row"><span class="k">Last 7 days</span><span class="val">{{ a.ok_7d }} completed, {{ a.failed_7d }} failed</span></div>
     <div class="status-row"><span class="k">Retries pending</span><span class="val">{% if a.retries %}{{ a.retries }} failed attempt{{ 's' if a.retries != 1 }} in a row: the scheduler retries with a growing wait{% else %}none{% endif %}</span></div>
-    <div class="status-row"><span class="k">All time</span><span class="val">{% for st, n in totals|dictsort %}{{ n }} {{ st }}{% if not loop.last %} · {% endif %}{% else %}no runs{% endfor %}</span></div>
+    <div class="status-row"><span class="k">Last 90 days</span><span class="val">{% for st, n in totals|dictsort %}{{ n }} {{ st }}{% if not loop.last %} · {% endif %}{% else %}no runs{% endfor %}</span></div>
   </div>
   <div class="panel">
     <div class="panel-head"><h2>{{ icon('clock') }} Schedule</h2><a class="panel-link" href="/jobs">Jobs {{ icon('arrow-right') }}</a></div>

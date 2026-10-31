@@ -37,6 +37,7 @@ from aime.models import (Activity, Alert, Contact, FollowUp, InboundEmail, Inbou
 from aime.monitoring import alert_once, resolve_alerts
 from aime.outreach import (OPEN, RUNNING_STAGES, STOP_STATUSES, TOPICS, draft_outreach, draft_reengage, eligible, gather_evidence,
                            record_delivery, set_status, stop_sequence)
+from aime.people import looks_like_name
 from aime.pipeline import pipeline_checks
 from aime.outreach import policy as outreach_policy
 from aime.qc.email_checks import run_email_checks
@@ -418,10 +419,11 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         people = [lead.contact] if lead.contact else []
         people += session.execute(select(Contact).where(Contact.company_id == lead.company_id).order_by(
             Contact.relevance.desc(), Contact.id)).scalars().all()
+        company = lead.company.name if lead.company else None
         for c in people:
-            if c.last_name and c.source in ("website", "sec_filing"):
+            if c.last_name and c.source in ("website", "sec_filing") and looks_like_name(c.display_name, company):
                 return c.display_name, c.title, c.evidence_url
-        found = next((p for p in (snap.people if snap else []) or [] if p.get("name")), None)
+        found = next((p for p in (snap.people if snap else []) or [] if p.get("name") and looks_like_name(p["name"], company)), None)
         return (found["name"], found.get("title"), found.get("url")) if found else (None, None, None)
 
     def _in_send_window(self, now: datetime, cfg: dict) -> bool:

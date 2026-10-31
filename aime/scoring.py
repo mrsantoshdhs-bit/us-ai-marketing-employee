@@ -286,7 +286,7 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
     if f.country != "US":
         disqualify = "Outside US target market"
     elif f.is_competitor:
-        disqualify = "Company appears to sell similar services (competitor)"
+        disqualify = "Company appears to sell similar services or AI products itself (possible competitor)"
     elif f.suppressed or f.contact_consent == "opted_out":
         disqualify = "Contact or domain is on the suppression list"
     if disqualify:

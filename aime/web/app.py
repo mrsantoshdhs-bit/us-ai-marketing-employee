@@ -2933,7 +2933,7 @@ def dashboard_view(ctx: AppContext, s, days: int) -> dict:
     leads_with_meeting = s.execute(select(func.count(func.distinct(Meeting.lead_id))).where(
         Meeting.is_simulated.is_(False), Meeting.status != "cancelled", Meeting.lead_id.is_not(None))).scalar_one()
     # (label, the number shown, how many leads that is, ...): a rate divides leads by leads, not meetings by people
-    stages_raw = [("New leads", cnt(Lead, WORKING_LEADS), None, "users", "blue", "/leads?group=working"),
+    stages_raw = [("Open leads", cnt(Lead, WORKING_LEADS), None, "users", "blue", "/leads?group=working"),
                   ("Contacted", contacted, None, "mail", "purple", "/followups?show=sent&kind=outreach"),
                   ("Interested", cnt(Lead, *INTERESTED_LEADS), None, "star", "green", "/leads?outreach=interested"),
                   ("Meeting booked", cnt(Meeting, Meeting.is_simulated.is_(False), Meeting.status != "cancelled"),

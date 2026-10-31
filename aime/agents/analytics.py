@@ -432,6 +432,12 @@ class AnalyticsReportingAgent(BaseAgent[ReportInput, ReportOutput]):
                  "that may be written to): nothing can be sent to them until a person finds another way."]
         if by_hand:
             lines.append(f"{by_hand} qualified lead(s) have nothing open: their review task was closed by hand.")
+        since = utcnow() - timedelta(hours=24)
+        moves = session.execute(select(Activity.subject).where(Activity.type == "status_change", Activity.actor == "qualification",
+                                                               Activity.created_at >= since)).scalars().all()
+        for status in ("qualified", "nurture", "disqualified"):
+            if n := sum(f"→ {status} " in (m or "") for m in moves):
+                lines.append(f"In the last 24 hours scoring moved {n} lead(s) to {status}.")
         return lines
 
     @staticmethod

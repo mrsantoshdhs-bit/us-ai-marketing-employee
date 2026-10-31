@@ -13,7 +13,8 @@ from aime.agents.base import BaseAgent
 from aime.crm_ops import is_suppressed, log_activity
 from aime.matching import seeks_external_help
 from aime.models import Activity, Company, Contact, FollowUp, InboundInquiry, Lead, Signal
-from aime.outreach import set_status
+from aime.monitoring import alert_once
+from aime.outreach import RUNNING_STAGES, set_status
 from aime.pipeline import clear_stage
 from aime.scoring import LeadFacts, categorize, read_company, score_lead, signal_fact
 from aime.timeutil import utcnow
@@ -66,6 +67,7 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
             select(Signal.company_id, func.max(Signal.created_at)).group_by(Signal.company_id)).all())
         out = QualifyOutput()
         grades: Counter[str] = Counter()
+        moved: Counter[str] = Counter()
 
         for lead in leads:
             stale_cutoff = now - timedelta(hours=inp.stale_hours)
@@ -112,8 +114,9 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
             lead.fit_score, lead.need_score = result.fit, result.need
             lead.intent_score, lead.data_score = result.intent, result.data
             lead.score_breakdown = result.reasons
-            lead.matched_services = result.matched_services
-            lead.primary_service = result.matched_services[0] if result.matched_services else None
+            if lead.outreach_status not in RUNNING_STAGES:  # the next email follows up the one sent: same topic, whatever the score says now
+                lead.matched_services = result.matched_services
+                lead.primary_service = result.matched_services[0] if result.matched_services else None
             lead.last_scored_at = now
             out.scored += 1
             grades[result.grade] += 1
@@ -147,10 +150,21 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                 for task in session.execute(select(FollowUp).where(
                         FollowUp.lead_id == lead.id, FollowUp.channel == "task", FollowUp.status == "pending")).scalars():
                     task.status, task.blocked_reason = "cancelled", "Score fell below the qualification threshold"
+                # its first email can no longer go: it does not stay in the queue for a person to approve in vain
+                for f in session.execute(select(FollowUp).where(
+                        FollowUp.lead_id == lead.id, FollowUp.channel == "email", FollowUp.kind == "outreach",
+                        FollowUp.status.in_(("awaiting_approval", "approved")))).scalars():
+                    f.status, f.blocked_reason = "cancelled", "Score fell below the qualification threshold"
+                clear_stage(session, lead, self.name, "the score fell below the qualification threshold")
             lead.category = categorize(lead.source, result.grade, lead.primary_service, lead.status == "disqualified")
             if lead.status != prev_status:
                 log_activity(session, f"Lead {prev_status} → {lead.status} (score {result.total}, grade {result.grade})",
                              self.name, type_="status_change", company_id=company.id, lead_id=lead.id)
+                moved[lead.status] += 1
+        if moved:
+            words = ", ".join(f"{n} to {status}" for status, n in sorted(moved.items()))
+            alert_once(session, "info", self.name, f"Scoring moved {sum(moved.values())} lead(s): {words}. Each lead's page "
+                       "says why, and a wrong competitor flag can be cleared there.", self.settings, key="leads:moved")
         out.grade_counts = dict(grades)
         return out
 
@@ -185,5 +199,7 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                 FollowUp.lead_id == lead.id, FollowUp.channel == "email",
                 FollowUp.status.in_(("sent", "sending", "uncertain")))).first():
             return True
-        actors = session.execute(select(Activity.actor).where(Activity.lead_id == lead.id).distinct()).scalars()
+        # Ticking off a review task says nothing was done with the lead, so it does not count as working it.
+        actors = session.execute(select(Activity.actor).where(Activity.lead_id == lead.id, ~(
+            (Activity.type == "followup") & Activity.subject.like("% done"))).distinct()).scalars()
         return any((actor or "") not in NOT_A_PERSON for actor in actors)
