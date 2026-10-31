@@ -548,6 +548,12 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             return LEFT_THE_WINDOW
         return self.read_hold() if self.read_hold else None
 
+    def _stop_before_handing_over(self, last_look: datetime, now: datetime, cfg: dict, in_window: bool) -> None:
+        """The same judgement at the last moment: the PC can sleep between the claim and the mail server too."""
+        stop = self._why_stop_the_run(last_look, now, cfg, in_window)
+        if stop:
+            raise EmailNotReady(stop)
+
     def _send_locked(self, session: Session, approved: list[FollowUp], now: datetime, cfg: dict,
                      out: SalesOutput) -> None:
         ready, reason = self.sender.status()
@@ -698,7 +704,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             session.refresh(f)
             try:
                 msg_id = self._deliver(session, f, f.to_email or contact.email, f.subject, f.body or "", in_reply_to=f.in_reply_to,
-                                       message_id=f.message_id, references=self._references(session, f))
+                                       message_id=f.message_id, references=self._references(session, f),
+                                       last_look=lambda at=last_look: self._stop_before_handing_over(at, now, cfg, in_window))
             except smtplib.SMTPRecipientsRefused as exc:
                 self._recipient_refused(session, f, exc, out)
                 session.commit()
