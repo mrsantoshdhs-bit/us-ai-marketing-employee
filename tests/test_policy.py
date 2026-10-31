@@ -19,7 +19,7 @@ ORIGIN = {"origin": "http://testserver"}
 
 
 def make_post(ctx, s, n, *, slot_hours=24.0, renderer="browser", qc="pass", body=None, title=None):
-    title = title or f"Post {n}: fewer handoffs between sales and support"
+    title = title or f"Post {chr(97 + n)}: fewer handoffs between sales and support"  # no figure: the claims check is read today
     body = body or ("When a support ticket names a sales account, most teams copy it by hand.\n\n"
                     "A CRM that links both removes that step.\n\nWhere does your team copy data today?")
     tags = ["#CRM"]

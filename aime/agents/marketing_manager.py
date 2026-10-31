@@ -176,8 +176,12 @@ class MarketingManagerAgent(BaseAgent[PlanInput, PlanOutput]):
     def _ensure_campaign(self, session: Session, today: date, service: str, industry: str,
                          rationale: list[str]) -> Campaign | None:
         for old in session.execute(select(Campaign).where(Campaign.status == "active", Campaign.end_date < today)).scalars():
-            old.status = "completed"
-            rationale.append(f"Closed expired campaign '{old.name}'.")
+            target = (old.kpis or {}).get("target_posts")
+            published = session.execute(select(func.count(ContentItem.id)).where(
+                ContentItem.campaign_id == old.id, ContentItem.status == "published")).scalar_one()
+            old.status = "completed" if published >= (target or 1) else "ended"  # its dates ran out; that does not say it was carried out
+            of_target = f" of {target} planned" if target else ""
+            rationale.append(f"Campaign '{old.name}' reached its end date with {published}{of_target} posts published: marked {old.status}.")
         active = session.execute(select(Campaign).where(
             Campaign.status == "active", Campaign.start_date <= today, Campaign.end_date >= today)).scalars().first()
         if active:

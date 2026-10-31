@@ -301,10 +301,11 @@ def refusal(perms, method: str, path: str) -> str | None:
 class AuthMiddleware(BaseHTTPMiddleware):
     """Every page and API needs a signed-in user (when DASHBOARD_AUTH is on); operational changes need an admin."""
 
-    def __init__(self, app, get_ctx, error_page=None):
+    def __init__(self, app, get_ctx, error_page=None, org_refused=None):
         super().__init__(app)
         self.get_ctx = get_ctx
         self.error_page = error_page  # (request, status, reason) -> the page a person's browser gets
+        self.org_refused = org_refused  # () -> back to My work, saying why
 
     def deny(self, request: Request, status: int, reason: str):
         if self.error_page and wants_page(request):
@@ -340,7 +341,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if path.startswith("/api/"):
                 return JSONResponse({"detail": "Organisation-wide figures need a role that sees all records"},
                                     status_code=403)
-            return RedirectResponse("/my", status_code=303)
+            # the home address is simply their home; any other page they asked for and are told why not
+            return self.org_refused() if self.org_refused and path != "/" else RedirectResponse("/my", status_code=303)
         with ctx.db.session() as s:
             if (m := _RECORD.match(path)) and not record_visible(s, request.state.scope, m.group(1), int(m.group(2))):
                 # someone else's lead, deal, email, reply or meeting: as if it did not exist, for viewing and changing

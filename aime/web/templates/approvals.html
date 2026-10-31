@@ -17,7 +17,8 @@
   <tr><th>Email</th><th>To</th><th>Company</th><th>Checks</th><th>Due</th><th></th></tr>
   {% for f in emails %}
   <tr><td><b>{{ f.subject }}</b><div class="small muted">{{ (f.kind or 'reply')|replace('_', ' ') }} · {{ 'template draft, no AI model' if (f.generator or 'template') == 'template' else f.generator }}{% if f.status == 'uncertain' %} · <span class="pill bad">outcome unknown</span>{% endif %}
-      {% if f.contact and f.contact.email_status == 'user_provided' %} · <span class="pill warn">test contact</span>{% endif %}</div></td>
+      {% if f.contact and f.contact.email_status == 'user_provided' %} · <span class="pill warn">test contact</span>{% endif %}</div>
+      {% if later.get(f.id) %}<div class="small"><span class="pill warn">They wrote again after this draft: read it on Replies</span> <a href="/inbox">Replies</a><div class="post small">{{ later[f.id].text }}</div></div>{% endif %}</td>
     <td class="small">{{ f.to_email or (f.contact.email if f.contact else '—') }}</td>
     <td class="small"><a href="/leads/{{ f.lead_id }}">{{ f.lead.company.name if f.lead and f.lead.company else '—' }}</a></td>
     <td>{% if f.quality and f.quality.qc %}{{ qc_pill(f.quality.qc.status) }}{% else %}<span class="muted small">—</span>{% endif %}</td>

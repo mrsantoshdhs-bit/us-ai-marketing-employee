@@ -59,8 +59,7 @@ def upsert_company(session: Session, cand: CompanyCandidate) -> tuple[Company, b
             existing.description = cand.description
         if not existing.location_evidence:
             existing.location_evidence = us_location_evidence(existing.source, existing.state, existing.location_text)
-        if detect_competitor(cand.signal_text or cand.description) and not existing.competitor_cleared_by:
-            existing.is_competitor = True
+        # a company on file is judged by CRMManagementAgent._flag_competitors, which has the guards and logs what it read
         return existing, False
     company = Company(
         name=clean_company_name(cand.name)[:200],
@@ -187,6 +186,23 @@ def suppress(session: Session, value: str, reason: str) -> None:
 
 
 ERASED = "[erased on request]"
+
+
+WROTE_AGAIN = "They wrote again after this draft: read it on Replies"
+
+
+def later_reply_waiting(session: Session, f: FollowUp) -> InboundEmail | None:
+    """A reply from the person this answer goes to, written after the email it answers, that no person has read yet. The answer was written
+    without it: it is not approved or sent until someone has."""
+    if f.kind != "response" or not f.to_email or not f.lead_id:
+        return None
+    answered = session.execute(select(InboundEmail.id).where(or_(InboundEmail.suggested_followup_id == f.id, InboundEmail.message_id == f.in_reply_to))
+                               .order_by(InboundEmail.id)).scalars().first()
+    if answered is None:
+        return None
+    return session.execute(select(InboundEmail).where(
+        InboundEmail.lead_id == f.lead_id, InboundEmail.id > answered, InboundEmail.status == "needs_review",
+        func.lower(InboundEmail.from_email) == f.to_email.lower()).order_by(InboundEmail.id.desc())).scalars().first()
 
 
 def erase_person(session: Session, email: str, actor: str) -> dict[str, int]:

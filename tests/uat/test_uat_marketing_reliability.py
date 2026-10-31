@@ -272,7 +272,7 @@ def test_ok_plan_closes_expired_campaign_at_month_end(ctx):
     out = MarketingManagerAgent(ctx).run({"plan_date": date(2026, 11, 1)}).output
     with ctx.db.session() as s:
         camps = s.execute(select(Campaign).order_by(Campaign.id)).scalars().all()
-        assert [c.status for c in camps] == ["completed", "active"]
+        assert [c.status for c in camps] == ["ended", "active"]  # corrected: no post went out, so it is not "completed"
         assert camps[1].start_date == date(2026, 11, 1) and camps[1].end_date == date(2026, 11, 30)
         assert out.campaign_id == camps[1].id
 

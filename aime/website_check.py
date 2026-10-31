@@ -38,6 +38,7 @@ class WebsiteResult:
     final_domain: str | None
     title: str | None
     note: str
+    no_answer: bool = False  # nothing answered at all (no network, a timeout, a name not found): this says nothing about the site
 
 
 def name_matches(company: str, *haystacks: str | None) -> bool:
@@ -127,6 +128,12 @@ def site_name(body: str) -> str | None:
     return None
 
 
+def site_answers(ctx, domain: str) -> bool:
+    """Does this site give any HTTP answer at all? One small request, to tell a dead site from a lost network."""
+    with ctx.http(public_only=True, timeout=12) as client:
+        return _robots(client, domain)[0] != "unreachable"
+
+
 def check_website(ctx, domain: str, company_name: str) -> WebsiteResult:
     with ctx.http(public_only=True, timeout=12, headers={"Accept": "text/html,application/xhtml+xml"}) as client:
         robots, note = _robots(client, domain)
@@ -135,7 +142,7 @@ def check_website(ctx, domain: str, company_name: str) -> WebsiteResult:
         if robots == "unavailable":
             return WebsiteResult("blocked", domain, None, f"robots.txt could not be read ({note}): not checked")
         if robots == "unreachable":
-            return WebsiteResult("unreachable", None, None, "No answer (robots.txt request failed)")
+            return WebsiteResult("unreachable", None, None, "No answer (robots.txt request failed)", no_answer=True)
         resp = body = None
         last_error: Exception | None = None
         for scheme in ("https", "http"):
@@ -146,7 +153,7 @@ def check_website(ctx, domain: str, company_name: str) -> WebsiteResult:
             except httpx.HTTPError as exc:
                 last_error = exc
         if resp is None:
-            return WebsiteResult("unreachable", None, None, f"{type(last_error).__name__}")
+            return WebsiteResult("unreachable", None, None, f"{type(last_error).__name__}", no_answer=True)
 
     final_domain = registrable_domain(resp.url.host or domain)
     if resp.status_code in (401, 403, 429, 503):

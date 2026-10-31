@@ -266,7 +266,7 @@ def test_ok_full_journey_from_web_inquiry_to_handover_and_reports(make_ctx):
     assert perf(eva.get("/my").text, "eva")  # her last 30 days are on My work
     reports = ana.get("/reports")
     assert reports.status_code == 200 and tile(reports.text, "Deals won") == 1 and tile(reports.text, "Meetings booked") == 1
-    assert eva.get("/reports", follow_redirects=False).headers["location"] == "/my"  # org figures: not for her
+    assert eva.get("/reports", follow_redirects=False).headers["location"].startswith("/my?msg=")  # org figures: not for her
 
 
 # ================================================================== lead capture: wrong and missing input
@@ -754,7 +754,8 @@ def test_ok_meeting_wrong_input_is_refused_and_a_repeat_is_one_meeting(org):
         assert m.ends_at - m.starts_at == timedelta(minutes=5)
         mid = m.id
     assert post(eva, f"/meetings/{mid}/held").status_code == 303
-    for action in ("held", "no_show", "cancel", "nonsense"):  # already recorded: refused, not changed
+    assert "Already marked" in where(post(eva, f"/meetings/{mid}/held"))  # the same outcome again: a double click, nothing changes
+    for action in ("no_show", "cancel", "nonsense"):  # another outcome once recorded: refused, not changed
         assert post(eva, f"/meetings/{mid}/{action}").status_code == 400
     with org.db.session() as s:
         assert s.get(Meeting, mid).status == "completed"

@@ -31,6 +31,7 @@ TOPICS = {
     "saas_dev": "your product roadmap", "custom_software": "internal tools", "ai_consulting": "AI adoption",
 }
 MAX_SUBJECT_CHARS = 70
+_ALREADY_A_REPLY = re.compile(r"^\s*re\s*:\s*", re.I)
 TEST_SENT = "test_sent"  # the stage of a lead whose email went only to a test address (OUTBOUND_TEST_RECIPIENTS)
 RUNNING_STAGES = ("contacted", TEST_SENT)  # a sequence is under way
 OPEN = ("pending", "awaiting_approval", "approved", "sending", "uncertain")
@@ -195,13 +196,41 @@ def _subject(start: str, at_company: str) -> str:
     return start + at_company if len(start + at_company) <= MAX_SUBJECT_CHARS else start
 
 
-def draft_outreach(settings: Settings, step: int, lead: Lead, contact, evidence: list[Evidence]) -> tuple[str, str]:
+def sent_earlier(session: Session, lead_id: int, in_reply_to: str | None) -> list[FollowUp]:
+    """What really went out to this lead earlier in the thread an email answers, oldest first: its parent, and so on back, through
+    any reply of theirs in between. Only sent emails count, and only this lead's: anyone can write any id in a header."""
+    chain: list[FollowUp] = []
+    seen: set[str] = set()
+    current = in_reply_to
+    while current and current not in seen:
+        seen.add(current)
+        sent = session.execute(select(FollowUp).where(FollowUp.lead_id == lead_id, FollowUp.channel == "email", FollowUp.status == "sent",
+                                                      FollowUp.message_id == current).order_by(FollowUp.id)).scalars().first()
+        if sent is not None:
+            chain.insert(0, sent)
+            current = sent.in_reply_to
+            continue
+        theirs = session.execute(select(InboundEmail).where(InboundEmail.lead_id == lead_id, InboundEmail.message_id == current)).scalars().first()
+        answered = session.get(FollowUp, theirs.followup_id) if theirs is not None and theirs.followup_id else None
+        current = answered.message_id if answered is not None else None
+    return chain
+
+
+def reply_subject(subject: str) -> str:
+    """"Re: " and the exact subject of the first email: mail programs keep the thread by it."""
+    return f"Re: {_ALREADY_A_REPLY.sub('', subject)}"[:300]
+
+
+def draft_outreach(settings: Settings, step: int, lead: Lead, contact, evidence: list[Evidence],
+                   first_subject: str | None = None) -> tuple[str, str]:
+    """`first_subject`: what step 1 really went out under, for the later steps; a person may have edited it."""
     from aime.meetings import booking_minutes  # the length of the meeting the booking link offers
 
     named, greeting, at_company = _addressed(lead, contact)
     company = named or "your team"
     topic = TOPICS.get(lead.primary_service or "", "your operations")
     inbox = contact.role_category == "inbox" or not contact.first_name
+    first_touch = _subject(f"Question about {topic}", at_company)
     if step == 1:
         ev = evidence[0]
         brand = BRAND_LINES.get(lead.primary_service or "", "At {company}, we build software for teams like yours.")
@@ -210,17 +239,17 @@ def draft_outreach(settings: Settings, step: int, lead: Lead, contact, evidence:
                "whether it is worth pursuing." if inbox else
                f"Would a {booking_minutes(settings)}-minute call next week be useful to see whether this could help {company}? "
                "If someone else looks after this, I would be grateful for a pointer.")
-        subject = _subject(f"Question about {topic}", at_company)
+        subject = first_touch
         end = "" if line.endswith(('."', '!"', '?"')) else "."  # no doubled full stop after a quoted sentence
         body = f"{greeting}\n\n{line}{end}\n\n{brand.format(company=settings.company_name)}\n\n{ask}\n\n{_signature(settings)}"
     elif step == 2:
-        subject = _subject(f"Following up: {topic}", at_company)
+        subject = reply_subject(first_subject or first_touch)
         body = (f"{greeting}\n\nI wanted to follow up on my note about {topic}. If it is on your list this quarter, "
                 "I would be happy to walk through how we would approach it for your team. If not, no problem at all."
                 f"\n\n{_signature(settings)}")
     else:
-        subject = f"Closing the loop on {topic}"
-        body = (f"{greeting}\n\nThank you for taking the time to read my notes. I will not keep following up. Should "
+        subject = reply_subject(first_subject or first_touch)
+        body = (f"{greeting}\n\nThis is my last note about {topic}. I will not keep following up. Should "
                 f"{topic} become a priority, just reply to this email and we can pick it up from there."
                 f"\n\n{_signature(settings)}")
     return subject, body + outreach_footer(settings, contact)
@@ -301,19 +330,34 @@ def record_delivery(session: Session, f: FollowUp, sent_at, delivered_to: str | 
         set_status(session, lead, "contacted" if delivered_to_prospect(f) else TEST_SENT, actor)
 
 
-def stop_sequence(session: Session, lead: Lead, status: str, reason: str, actor: str) -> int:
-    """Cancel every open email of this lead's sequence and record why. Returns how many were cancelled. A later reply
-    never changes the "unsubscribed" stage: the opt-out still stands."""
-    cancelled = cancel_queued(session, lead, reason)
+CHECK_BACK_TASK = "Check back with "  # how a task of this kind starts: a later no closes it
+ENDS_CHECK_BACK = ("unsubscribed", "bounced", "not_interested")
+
+
+def close_check_back_tasks(session: Session, lead: Lead, reason: str) -> None:
+    """They asked to hear from us again, and then said no, or their address failed: nobody is reminded to write."""
+    for task in session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task", FollowUp.status == "pending",
+                                                       FollowUp.subject.startswith(CHECK_BACK_TASK, autoescape=True))).scalars():
+        task.status, task.blocked_reason = "cancelled", reason[:300]
+
+
+def stop_sequence(session: Session, lead: Lead, status: str, reason: str, actor: str, keep: tuple[int, ...] = ()) -> int:
+    """Cancel every open email of this lead's sequence, but those in `keep`, and record why. Returns how many were cancelled. A
+    later reply never changes the "unsubscribed" stage: the opt-out still stands."""
+    cancelled = cancel_queued(session, lead, reason, keep)
+    if status in ENDS_CHECK_BACK:
+        close_check_back_tasks(session, lead, reason)
     if lead.outreach_status != "unsubscribed":
         set_status(session, lead, status, actor, reason)
     return cancelled
 
 
-def cancel_queued(session: Session, lead: Lead, reason: str) -> int:
+def cancel_queued(session: Session, lead: Lead, reason: str, keep: tuple[int, ...] = ()) -> int:
     cancelled = 0
     for f in session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
                                                     FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
+        if f.id in keep:
+            continue
         f.status, f.blocked_reason = "cancelled", reason[:300]
         cancelled += 1
     return cancelled
@@ -374,13 +418,16 @@ def reopen_refusal(session: Session, lead: Lead) -> str | None:
         return "someone at this company asked not to be contacted"
     if any(m.category == "not_interested" for m in mail):
         return "someone at this company said they are not interested"
+    if session.execute(select(Activity.id).where(Activity.lead_id.in_(leads), Activity.type == "reply",
+                                                 Activity.subject.startswith("Contact replied (logged manually)")).limit(1)).first():
+        return "a person logged that this company replied"
     waiting = [m for m in mail if m.status in ("new", "needs_review")]
     if any(m.holds_sending for m in waiting):
-        return "an email about this company waits for review on Conversations, and it holds sending"
+        return "an email about this company waits for review on Replies, and it holds sending"
     if any(m.category == "bounce" for m in waiting):
-        return "a delivery failure report on this company waits for a person on Conversations"
+        return "a delivery failure report on this company waits for a person on Replies"
     if waiting:
-        return "an email about this company has not been read by a person yet: see Conversations"
+        return "an email about this company has not been read by a person yet: see Replies"
     return None
 
 

@@ -27,7 +27,7 @@ from aime import automation, send_journal
 from aime.agents.contracts import BlockedItem
 from aime.agents.qualification import LeadQualificationAgent
 from aime.calendar_slots import holiday_on
-from aime.crm_ops import is_suppressed, log_activity, suppress
+from aime.crm_ops import WROTE_AGAIN, is_suppressed, later_reply_waiting, log_activity, suppress
 from aime.email_templates import draft_reply
 from aime.integrations.email_smtp import EmailNotReady, EmailSender, compliance_problem, new_message_id
 from aime.knowledge.content_bank import BRAND_LINES
@@ -35,7 +35,7 @@ from aime.knowledge.services import service_name
 from aime.models import (Activity, Alert, Contact, FollowUp, InboundEmail, InboundInquiry, Lead, Opportunity, ResearchSnapshot,
                          Signal)
 from aime.monitoring import alert_once, resolve_alerts
-from aime.outreach import (OPEN, RUNNING_STAGES, STOP_STATUSES, TOPICS, draft_outreach, draft_reengage, eligible, gather_evidence,
+from aime.outreach import (OPEN, RUNNING_STAGES, STOP_STATUSES, TOPICS, draft_outreach, draft_reengage, eligible, gather_evidence, sent_earlier,
                            record_delivery, set_status, stop_sequence)
 from aime.people import looks_like_name
 from aime.pipeline import pipeline_checks
@@ -59,6 +59,11 @@ DEAD_ADDRESS = re.compile(r"\b5\.1\.(0|1|2|3|6|10)\b|no such|user unknown|unknow
 SIGN_IN_ALERT = "mail:sign_in"
 MAILBOX_ALERT = "mail:not_read"
 REVIEW_MARK = "Why no email was drafted:"  # in every review task written since this note was added
+# Between two looks in one send run a slow mail server takes seconds. More than this: the PC slept, or its clock was changed.
+SEND_RUN_JUMP = timedelta(minutes=5)
+TIME_JUMPED = ("Waiting: the PC slept or its clock changed during the send run, so the rest of that run stopped. It goes out on "
+               "the next run, after a new read of the mailbox")
+LEFT_THE_WINDOW = "Waiting for the business-hours send window"
 
 
 class SalesInput(BaseModel):
@@ -97,6 +102,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
     def __init__(self, ctx, sender: EmailSender | None = None):
         super().__init__(ctx)
         self.sender = sender or EmailSender(ctx.settings)
+        self.read_hold = None  # the followups job's: asked before each email, why it must wait for a new read of the mailbox
 
     def _use_primary_mailbox(self, session: Session) -> None:
         """A primary mailbox from the Super Admin panel sends instead of the .env mailbox. Every switch and
@@ -130,6 +136,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         self._use_primary_mailbox(session)
         self._connect_oauth(session)
         now = inp.now or utcnow()
+        self.run_began = utcnow()  # `now` may be a run's own time: what has passed since is read from the real clock
         cfg = self.settings.section("followup")
         out = SalesOutput()
         self._recover_stale_sends(session, now)
@@ -261,9 +268,10 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
     def _new_outreach(self, session: Session, lead: Lead, step: int, due: datetime, evidence_dicts: list[dict],
                       evidence, out: SalesOutput, in_reply_to: str | None = None) -> None:
         contact = lead.contact
-        subject, body = draft_outreach(self.settings, step, lead, contact, evidence)
+        earlier = sent_earlier(session, lead.id, in_reply_to)
+        subject, body = draft_outreach(self.settings, step, lead, contact, evidence, first_subject=earlier[0].subject if earlier else None)
         suppressed = is_suppressed(session, contact.email, lead.company.domain)
-        qc = run_email_checks(subject, body, evidence_dicts, contact, suppressed, step=step)
+        qc = run_email_checks(subject, body, evidence_dicts, contact, suppressed, step=step, sent_subjects=[e.subject for e in earlier])
         # Every draft waits for approval: a person's, or at send time an active campaign authorization (aime/automation.py).
         session.add(FollowUp(lead_id=lead.id, contact_id=contact.id, company_id=lead.company_id, channel="email",
                              kind="outreach", step=step, due_at=due, status="awaiting_approval", subject=subject,
@@ -524,17 +532,39 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             msg_id = self.sender.send(to, *args, **kwargs)
         except NOT_DELIVERED:
             send_journal.record_released(data, f.id, to)  # if this fails too: "delivery unknown", for a person
+            self._clear_interrupted(session, f)  # what this run knows is better: it did not leave
             raise
-        session.refresh(f)  # the PC may have slept inside the mail conversation: another run then called it interrupted
+        self._clear_interrupted(session, f)
+        return msg_id
+
+    @staticmethod
+    def _clear_interrupted(session: Session, f: FollowUp) -> None:
+        """The PC may have slept inside the mail conversation: another run then called it interrupted, with an alert to check."""
+        session.refresh(f)
         if f.status == "uncertain":
             session.execute(update(Alert).where(Alert.message.like(f"Follow-up #{f.id}:%"), Alert.acknowledged.is_(False)).values(
                 acknowledged=True, resolved_at=utcnow()))
-        return msg_id
+
+    def _why_stop_the_run(self, last_look: datetime, now: datetime, cfg: dict, in_window: bool) -> str | None:
+        """Judged again before each email, because the process can freeze for hours between two of them (a laptop lid). Only
+        ever stops a run: what was out of the window or held when the run began is dealt with as before."""
+        real = utcnow()
+        if abs(real - last_look) > SEND_RUN_JUMP:
+            return TIME_JUMPED
+        if in_window and not self._in_send_window(now + (real - self.run_began), cfg):
+            return LEFT_THE_WINDOW
+        return self.read_hold() if self.read_hold else None
+
+    def _stop_before_handing_over(self, last_look: datetime, now: datetime, cfg: dict, in_window: bool) -> None:
+        """The same judgement at the last moment: the PC can sleep between the claim and the mail server too."""
+        stop = self._why_stop_the_run(last_look, now, cfg, in_window)
+        if stop:
+            raise EmailNotReady(stop)
 
     def _send_locked(self, session: Session, approved: list[FollowUp], now: datetime, cfg: dict,
                      out: SalesOutput) -> None:
         ready, reason = self.sender.status()
-        in_window = self._in_send_window(now, cfg)
+        in_window = self._in_send_window(now + (utcnow() - self.run_began), cfg)
         limits = self._outreach_limits(session, now, cfg)
         replies_sent, replies_per_run = 0, int(cfg.get("replies_per_run", 10))
         sign_in_failed = False
@@ -546,7 +576,17 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
             return
         # someone is waiting on a meeting's time: those notes go first, and no limit on replies holds them
-        for f in sorted(approved, key=lambda f: f.purpose not in automation.MEETING_NOTES):
+        order = sorted(approved, key=lambda f: f.purpose not in automation.MEETING_NOTES)
+        last_look = utcnow()
+        for turn, f in enumerate(order):
+            stop = self._why_stop_the_run(last_look, now, cfg, in_window)
+            if stop:  # the rest stay approved, for the next proper run
+                self.log.warning("Send run stopped with %s email(s) left: %s", len(order) - turn, stop)
+                for rest in order[turn:]:
+                    rest.blocked_reason = stop[:300]
+                    out.blocked.append(BlockedItem(id=rest.id, reason=rest.blocked_reason))
+                break
+            last_look = utcnow()
             went_out = send_journal.claim_for(journal, f)
             if went_out:  # the record outside the database says it left already: never again without a person
                 send_journal.mark_for_a_person(session, f, went_out, self.name)
@@ -576,6 +616,10 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 if why:
                     f.status, f.blocked_reason = "cancelled", f"Not sent: {why}"[:300]
                     out.cancelled += 1
+                    continue
+                if later_reply_waiting(session, f):  # held, not cancelled: it goes out once a person has read what came after it
+                    f.blocked_reason = WROTE_AGAIN
+                    out.blocked.append(BlockedItem(id=f.id, reason=WROTE_AGAIN))
                     continue
             elif f.kind == "outreach":
                 if automation.is_given_test_contact(contact):  # an address the owner gave for testing, never published
@@ -612,7 +656,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 out.cancelled += 1
                 continue
             elif f.step > 1 and lead.outreach_status in STOP_STATUSES:  # step 1 answers a new inquiry: always fine
-                f.status, f.blocked_reason = "cancelled", f"Not sent: the sequence stopped ({lead.outreach_status})"
+                f.status, f.blocked_reason = ("cancelled", "Not sent: the sequence was stopped" if lead.outreach_status == "stopped"
+                                              else f"Not sent: the sequence stopped ({lead.outreach_status})")
                 out.cancelled += 1
                 continue
             answerable = (lead.status == "qualified" or reengaging
@@ -671,7 +716,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             session.refresh(f)
             try:
                 msg_id = self._deliver(session, f, f.to_email or contact.email, f.subject, f.body or "", in_reply_to=f.in_reply_to,
-                                       message_id=f.message_id, references=self._references(session, f))
+                                       message_id=f.message_id, references=self._references(session, f),
+                                       last_look=lambda at=last_look: self._stop_before_handing_over(at, now, cfg, in_window))
             except smtplib.SMTPRecipientsRefused as exc:
                 self._recipient_refused(session, f, exc, out)
                 session.commit()

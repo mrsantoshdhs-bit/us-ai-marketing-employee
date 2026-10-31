@@ -11,6 +11,10 @@
 <span class="pill {{ cls.get(s, '') }}">{{ s }}</span>
 {%- endmacro %}
 
+{% macro activity_text(a, show_body=True) -%}
+{{ a.subject|activity_words }}{% if show_body and a.body and a.type != 'email_sent' %}<div class="muted activity-body">{{ a.body }}</div>{% endif %}
+{%- endmacro %}
+
 {% macro qc_pill(s) -%}
 <span class="pill {{ {'passed': 'ok', 'held': 'warn', 'failed': 'bad'}.get(s, '') }}">{{ {'passed': 'checks passed', 'held': 'held for review', 'failed': 'checks failed'}.get(s, s) }}</span>
 {%- endmacro %}

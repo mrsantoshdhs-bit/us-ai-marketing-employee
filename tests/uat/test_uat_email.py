@@ -1169,7 +1169,7 @@ def test_ok_follow_up_steps_and_intervals_without_duplicates(make_ctx):
     assert [d.step for d in drafts(ctx)] == [1, 2]  # the gap from step 2 to 3 is six days
     run(ctx, sender, second + timedelta(days=6, minutes=1))
     step3 = drafts(ctx)[-1]
-    assert step3.step == 3 and step3.subject.startswith("Closing the loop")
+    assert step3.step == 3 and step3.subject == f"Re: {sent.subject}"
     approve(web(ctx), step3.id)
     third = second + timedelta(days=7)
     run(ctx, sender, third)
