@@ -18,7 +18,7 @@ from aime.monitoring import alert_once, resolve_alerts
 from aime.outreach import RUNNING_STAGES, set_status
 from aime.pipeline import clear_stage
 from aime.scoring import LeadFacts, categorize, lasting_grade, read_company, score_lead, signal_fact
-from aime.timeutil import as_aware_utc, local_tz, utcnow
+from aime.timeutil import utcnow
 
 # Who writes the activity log besides people. People are recorded by user name, whatever the name is, so a name that is
 # not here counts as a person: an agent left off this list keeps a lead qualified, it never drops one.
@@ -197,8 +197,7 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
             counts[status] += 1
             leads.setdefault(status, []).append(lead_id)
         moved.clear()
-        day = as_aware_utc(utcnow()).astimezone(local_tz(self.settings.schedule.get("timezone"))).date().isoformat()
-        kv_set(session, MOVED_TODAY, {"day": kept.get("day") or day, "moved": dict(counts), "leads": leads})
+        kv_set(session, MOVED_TODAY, {"moved": dict(counts), "leads": leads})
         words = ", ".join(f"{n} to {status}" for status, n in sorted(counts.items()))
         named, left = [], MOVED_NAMED
         for status, ids in sorted(leads.items()):

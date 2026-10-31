@@ -220,7 +220,7 @@ def decision_maker_title(title: str) -> bool:
     t = " ".join((title or "").split())
     if not t or FORMER_RE.search(t) or t.endswith(".") or len(t.split()) > 8:
         return False
-    return not re.search(r"\bowner\s+[a-z]", t, re.I)
+    return not re.search(r"\bowner\s+(?!and\b|of\b|at\b|operator\b)[a-z]", t, re.I)
 
 
 def seniority(title: str) -> int:

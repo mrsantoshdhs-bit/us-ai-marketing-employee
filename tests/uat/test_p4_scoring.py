@@ -252,6 +252,14 @@ def test_the_notice_is_a_warning_that_names_a_capped_list_of_leads(make_ctx):
         assert "and 70 more" in alert.message and alert.message.endswith("cleared there.")
 
 
+def test_the_notice_reaches_the_bell_and_the_home_page(make_ctx):
+    ctx = make_ctx()
+    with ctx.db.session() as s:
+        LeadQualificationAgent(ctx)._say_moved(s, [("nurture", 77)])
+    page = TestClient(create_app(ctx), base_url="http://127.0.0.1").get("/command-center").text
+    assert "Scoring moved 1 lead(s)" in page and '<span class="badge">1</span>' in page
+
+
 def test_the_disqualified_list_shows_the_reason(make_ctx):
     ctx = make_ctx()
     _flagged_lead(ctx)
@@ -347,7 +355,7 @@ def test_us_points_come_only_from_what_the_post_says(place, stated):
 
 @pytest.mark.parametrize("title, decides", [("Pet Owner Support", False), ("Clinics, Start HerePet Owner Support", False), ("Former CEO", False),
                                             ("We believe that each team member is an owner.", False), ("COO of a $6M family-owned HVAC business.", False),
-                                            ("Founder and CEO", True), ("Owner", True), ("Co-Founder, Owner", True), ("CTO", True)])
+                                            ("Founder and CEO", True), ("Owner", True), ("Owner and CEO", True), ("Co-Founder, Owner", True), ("CTO", True)])
 def test_a_decision_maker_is_someone_whose_title_says_so(title, decides):
     assert decision_maker_title(title) is decides
 
