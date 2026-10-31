@@ -257,14 +257,15 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
 
     def _review_competitor_flags(self, session: Session) -> int:
         """A flag AIME set is read again by today's rule, which stored flags otherwise never are. It goes only when AIME's own
-        log shows AIME set it and nothing the company or its posts say matches now; a flag with no such record, or one a person
-        had a hand in, stays. It changes the flag and the lead's status, each logged, and nothing else: a lead that returns is
+        log shows AIME set it and nothing the company or its posts say matches now; a flag with no such record, or on a company
+        a person wrote a note about, stays: only a person can read that note. It changes the flag and the lead's status, each logged, and nothing else: a lead that returns is
         scored by the next run like any other, so the most it can get is a draft waiting for a person's approval."""
         removed = 0
         for company in session.execute(select(Company).where(Company.is_competitor.is_(True), Company.merged_into_id.is_(None),
                                                              Company.competitor_cleared_by.is_(None))).scalars().all():
-            log = session.execute(select(Activity).where(Activity.company_id == company.id, Activity.subject.like("%competitor%"),
-                                                         Activity.type != "status_change")).scalars().all()
+            log = session.execute(select(Activity).where(Activity.company_id == company.id, or_(
+                Activity.type.in_(("note", "override")),
+                Activity.subject.like("%competitor%") & (Activity.type != "status_change")))).scalars().all()
             set_by_aime = any(a.subject.startswith("Marked as a possible competitor") and (a.actor or "") in NOT_A_PERSON for a in log)
             if not set_by_aime or any((a.actor or "") not in NOT_A_PERSON for a in log) or self._competitor_words_on_file(session, company):
                 continue

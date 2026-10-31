@@ -486,3 +486,12 @@ def test_we_build_ai_agents_for_someone_stays_unflagged():
     """Decided 31 Oct: alone it could be a product or a service, and a person approves every email."""
     assert competitor_evidence("We build AI agents for insurers.") is None
     assert competitor_in_post("We build AI agents for insurers.") is None
+
+
+def test_a_persons_note_keeps_the_flag(make_ctx):
+    ctx = make_ctx()
+    a, ca = _flagged_lead(ctx)
+    with ctx.db.session() as s:
+        s.add(Activity(subject="Note", actor="owner", type="note", body="Confirmed by phone, do not reopen", company_id=ca, lead_id=a))
+    _review(ctx)
+    assert _state(ctx, a, ca)[:2] == (True, "disqualified")
