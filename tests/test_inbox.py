@@ -49,7 +49,8 @@ class FakeIMAP:
         if command == "SEARCH":
             crit = " ".join(a for a in args if a)
             lo = int(crit.split()[1].split(":")[0]) if crit.startswith("UID ") else 0
-            return "OK", [" ".join(str(u) for u in sorted(self.messages) if u >= lo).encode()]
+            words = crit.split(" BODY ", 1)[1].strip('"').encode() if " BODY " in crit else b""  # as a server looks through the text
+            return "OK", [" ".join(str(u) for u in sorted(self.messages) if u >= lo and words.lower() in self.messages[u].lower()).encode()]
         uid = int(args[0])
         return "OK", [(f"{uid} (UID {uid} BODY[] {{1}}".encode(), self.messages[uid]), b")"]
 

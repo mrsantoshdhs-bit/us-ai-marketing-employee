@@ -41,7 +41,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from aime.crm_ops import log_activity, suppress
-from aime.inbox import AUTO_SUBJECT, BOUNCE_SENDERS, below_header_copy, is_address, own_text, rest_of_reply
+from aime.inbox import AUTO_SUBJECT, BOUNCE_SENDERS, LARGE_MARK, below_header_copy, is_address, own_text, rest_of_reply
 from aime.llm.base import LLMError
 from aime.models import Alert, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity, SkippedMail
 from aime.notify import notify_event
@@ -193,8 +193,13 @@ LEGAL_MENTION = re.compile(r"\b(spam|lawyers?|attorneys?|legal|illegal|unlawful|
 OOO = re.compile(r"\b(out of (the )?office|on (vacation|holiday|leave)|limited access to (my )?email|"
                  r"will be back|returning on|away until|automatic reply)\b", re.I)
 CALENDLY = re.compile(r"calendly\.com", re.I)
-# Calendly's own subject, also forwarded ("Fwd: New Event: ..."); a reply ("Re: ...") never starts like this
-CALENDLY_NOTICE = re.compile(r"\s*(?:(?:fwd?|fw)\s*:\s*)*(?:new event|cancel+ed|rescheduled|updated)\s*:", re.I)
+# Calendly's own subject, also forwarded, in any mail program's language ("Fwd:", "WG:", "RV:", "TR:", "SV:", "AW:"); a reply in
+# English ("Re: ...") never starts like this. Whether a notice is believed is decided elsewhere, and this changes nothing of that.
+CALENDLY_NOTICE = re.compile(r"\s*(?:(?:fwd?|fw|wg|rv|tr|sv|aw)\s*:\s*)*(?:new event|cancel+ed|rescheduled|updated)\s*:", re.I)
+NO_REPLY = re.compile(r"(no-?reply|do-?not-?reply)", re.I)
+# What mail programs put before a subject when answering or forwarding, in the languages our prospects write in.
+REPLY_WORDS = (r"re(?:\[\d{1,4}\]|\(\d{1,4}\))?|fwd?|fw|aw|wg|sv|vs|tr|rv|antw|ref|odp|r|rif|i|ynt|res|enc|ang|"
+               r"回复|回覆|答复|答覆|转发|轉寄|轉發")
 # Asking for a meeting, a call or a demo in everyday wording (and without the article: "schedule meeting").
 _TALK = r"(talk|chat|speak|meet|connect|discuss|catch up|hop on a call|jump on a call)"
 _THING = r"(time|meeting|call|demo|chat|session|appointment|slot|conversation|walkthrough|presentation)"
@@ -263,6 +268,8 @@ def recommended_for(row: InboundEmail) -> str | None:
     """What the lead should become, in words; a receipt is filed with the automatic replies but nobody is away."""
     if getattr(row, "mail_kind", None) == "receipt" and row.category == "out_of_office":
         return RECOMMENDED["receipt"]
+    if getattr(row, "mail_kind", None) == "calendar" and row.category == "other":
+        return RECOMMENDED["calendar"]
     return row.recommended_status
 
 
@@ -298,6 +305,7 @@ RECOMMENDED = {
     "out_of_office": "Wait until they are back",
     "receipt": "Nothing to do: the email arrived",
     "calendly": "Meeting booked: prepare for it",
+    "calendar": "Answer the invitation in your calendar and record the meeting: nothing is booked by itself",
     "other": "A person reviews it",
 }
 
@@ -534,14 +542,28 @@ def subdomain_leads(session: Session, address: str | None) -> list[Lead]:
         func.lower(Company.domain).in_(above), Company.merged_into_id.is_(None)).order_by(Lead.id)).scalars().all() if above else []
 
 
-_SUBJECT_PREFIX = re.compile(r"^\s*(?:(?:re|fwd?|fw|aw|wg|sv|vs|tr|rv|antw|ref|automatic reply|auto-?reply|out of office|undeliverable|undelivered|"
-                             r"message blocked|delivery delayed|delivered|read)\s*:\s*|"
+_SUBJECT_PREFIX = re.compile(rf"^\s*(?:(?:{REPLY_WORDS}|automatic reply|auto-?reply|out of office|undeliverable|undelivered|"
+                             r"message blocked|delivery delayed|delivered|read)\s*[:：]\s*|"
                              r"(?:ticket received|return receipt \(displayed\))\s*-\s*|\[[^\]]{0,60}\]\s*)+", re.I)
 _SUBJECT_TAG = re.compile(r"\s*\[[^\]]{0,60}\]\s*$")
 
 
 def _bare_subject(subject: str | None) -> str:
     return " ".join(_SUBJECT_TAG.sub("", _SUBJECT_PREFIX.sub("", subject or "")).split()).casefold()
+
+
+def _sent_subjects(session: Session) -> dict[str, list[tuple]]:
+    index: dict[str, list[tuple]] = {}
+    for lead_id, to, ours in session.execute(select(FollowUp.lead_id, FollowUp.to_email, FollowUp.subject).where(
+            FollowUp.status == "sent", FollowUp.channel == "email", FollowUp.kind == "outreach", FollowUp.subject.is_not(None))).all():
+        if lead_id:
+            index.setdefault(_bare_subject(ours), []).append((lead_id, to))
+    return index
+
+
+def remember_sent_subjects(session: Session) -> None:
+    """For one inbox run, which looks at up to 600 emails and sends none: the sent subjects are read once, in this session."""
+    session.info["sent_subjects"] = _sent_subjects(session)
 
 
 def sent_with_our_subject(session: Session, subject: str | None) -> list[tuple]:
@@ -551,9 +573,8 @@ def sent_with_our_subject(session: Session, subject: str | None) -> list[tuple]:
     seen = _bare_subject(subject)
     if not seen:
         return []
-    rows = session.execute(select(FollowUp.lead_id, FollowUp.to_email, FollowUp.subject).where(
-        FollowUp.status == "sent", FollowUp.channel == "email", FollowUp.kind == "outreach", FollowUp.subject.is_not(None))).all()
-    return [(lead_id, to) for lead_id, to, ours in rows if lead_id and _bare_subject(ours) == seen]
+    index = session.info["sent_subjects"] if "sent_subjects" in session.info else _sent_subjects(session)
+    return list(index.get(seen, []))
 
 
 def lead_from_our_subject(session: Session, row: InboundEmail) -> tuple[Lead | None, bool]:
@@ -576,6 +597,55 @@ def lead_on_hold(session: Session, lead_id: int | None) -> bool:
     on Replies moves the reply off review, and that releases them."""
     return bool(lead_id) and session.execute(select(InboundEmail.id).where(
         InboundEmail.lead_id == lead_id, InboundEmail.holds_sending.is_(True), InboundEmail.status == "needs_review").limit(1)).first() is not None
+
+
+def unproven_in_junk(row: InboundEmail, f: FollowUp | None) -> bool:
+    """Junk is where forged mail lands, and anyone can write someone's address on a From line. Only our own Message-ID in the thread
+    or the sender domain's verified signature proves such an email. A delivery report has only the quoted id: its "sender" means nothing."""
+    if not getattr(row, "in_junk", None):
+        return False
+    in_thread = f is not None and f.message_id in _thread_ids(row)
+    return not in_thread and (row.category == "bounce" or not row.sender_verified)
+
+
+JUNK_ALERT = "junk_unproven:"
+
+
+def _hold_unproven_in_junk(session: Session, settings, row: InboundEmail, contact: Contact | None, lead: Lead | None, actor: str) -> None:
+    """Nothing is suppressed, stopped, opened or drafted on it, and it counts as nobody's reply. The lead's emails wait, so a real opt-out
+    is not lost, until a person decides: Mark reviewed releases them, and reclassifying it applies what they choose. Someone a person
+    has already looked at does not hold a lead again by more junk mail."""
+    from aime.monitoring import alert_once
+
+    report = row.category == "bounce"
+    reading = "a delivery failure" if report else (row.category or "other").replace("_", " ")
+    # A company's own newsletter, saying nothing to us, is no reason to stop writing to it: in the inbox it changes nothing either.
+    newsletter = getattr(row, "mail_kind", None) == "list" and reading == "other"
+    tied = None if newsletter else lead or next(iter(company_leads(session, row.from_email)), None) or lead_from_our_subject(session, row)[0]
+    row.followup_id, row.contact_id = None, contact.id if contact else None
+    row.lead_id, row.company_id = (tied.id, tied.company_id) if tied else (None, contact.company_id if contact else None)
+    row.reasons = [*(row.reasons or []), f"found in the junk folder, unsigned and outside our thread: it reads as {reading}, but it may be forged"]
+    # A notice stays one, so a person can check it in Calendly and press Apply; anything else counts as nobody's answer.
+    row.category = "calendly" if row.category == "calendly" else "other"
+    row.confidence, row.intent, row.sentiment = "low", None, "neutral"
+    row.recommended_status = "Found in junk and may be forged: a person decides"
+    row.status, row.processed_at = "needs_review", utcnow()
+    seen_before = session.execute(select(InboundEmail.id).where(
+        InboundEmail.in_junk.is_(True), func.lower(InboundEmail.from_email) == (row.from_email or "").lower(), InboundEmail.status == "reviewed",
+        InboundEmail.id != row.id).limit(1)).first()
+    hold = bool(tied) and not report and not seen_before
+    row.holds_sending = True if hold else None
+    row.action_note = ("Found in the mailbox's junk folder, unsigned and outside our thread, so it may be forged. Nothing was changed. "
+                       + (f"{tied.company.name}'s emails wait until a person decides: Mark reviewed if it is junk, or reclassify it to apply it"
+                          if hold else "Mark reviewed if it is junk, or reclassify it to apply it"))
+    if not newsletter and not (row.subject or "").startswith("(could not be read"):  # that one has its own alert
+        where = f" about {tied.company.name}" if tied else ""
+        alert_once(session, "warning", "inbox", f"An email from {row.from_email}{where} was found in the junk folder and may be forged: it reads "
+                   f"as {reading}, but it is unsigned and outside our thread. Nothing was changed"
+                   f"{', and that lead' + chr(39) + 's emails wait' if hold else ''}. Please decide on Replies.", settings,
+                   key=f"{JUNK_ALERT}{tied.id if tied else 'none'}")
+    log_activity(session, f"Email from {row.from_email} found in junk, may be forged: held for a person", actor, type_="reply",
+                 company_id=row.company_id, lead_id=row.lead_id)
 
 
 def _hold_lead(row: InboundEmail, lead: Lead) -> str:
@@ -793,6 +863,9 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
     if person:
         row.holds_sending = None  # a person has decided
     f, contact, lead = match(session, row)
+    if not person and unproven_in_junk(row, f):
+        _hold_unproven_in_junk(session, settings, row, contact, lead, actor)
+        return
     row.followup_id = f.id if f else None
     row.contact_id, row.lead_id = (contact.id if contact else None), (lead.id if lead else None)
     row.company_id = lead.company_id if lead else (contact.company_id if contact else None)
@@ -924,6 +997,9 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             if "calendly.com/" in body.lower():
                 draft.purpose = "booking_link"
             notes.append("suggested reply waiting for your approval")
+            if row.reply_to and NO_REPLY.match(row.from_email or ""):
+                notes.append(f"this draft goes to a no-reply address, where nobody may read it. They ask for answers to go to "
+                             f"{row.reply_to}. Nothing goes there by itself: a person decides")
         row.status = "actioned" if row.confidence == "high" and row.category in ("interested", "not_interested") else "needs_review"
         if row.intent == "pricing_request":
             row.status = "needs_review"
@@ -934,6 +1010,15 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         if opted_out:  # still suppressed: only a person can take that back
             row.status = "needs_review"
             notes.append("they opted out earlier and stay suppressed: a person decides")
+    if getattr(row, "mail_kind", None) == "calendar" and row.category == "other" and not row.is_simulated and not person:
+        who = f"{row.from_email} ({row.lead.company.name})" if row.lead_id and row.lead else row.from_email
+        session.add(Alert(level="info", source="inbox", message=f"A calendar invitation or answer from {who}: please answer it in your "
+                          "calendar and record the meeting. Nothing is booked by itself. It is on Replies."[:500]))
+        notes.append("calendar invitation: a person answers it in their calendar and records the meeting; nothing is booked by itself")
+    if getattr(row, "in_junk", None):
+        notes.append("found in the mailbox's junk folder")
+    if LARGE_MARK in (getattr(row, "mail_note", None) or "") and row.status == "actioned":
+        row.status = "needs_review"  # what was done went by the part that was read
     if getattr(row, "mail_note", None) and row.mail_kind != "sending_problem":
         notes.append(row.mail_note)
     row.action_note = "; ".join(notes) or None
@@ -949,10 +1034,11 @@ def _hold_for_a_person(session: Session, row: InboundEmail, read: tuple | None, 
     category, reasons = (read[0], list(read[2])) if read else ("other", [])
     log.error("Reply %s could not be handled", row.id, exc_info=exc)
     try:
-        if category == "unsubscribe" and is_address(row.from_email):
+        found, _, lead = match(session, row)
+        unproven = unproven_in_junk(row, found)  # nothing is done on the word of an email that may be forged
+        if category == "unsubscribe" and is_address(row.from_email) and not unproven:
             suppress(session, row.from_email, "Unsubscribe request by email (a person checks it)")
-        if category not in ("bounce", "calendly", "out_of_office"):
-            _, _, lead = match(session, row)
+        if category not in ("bounce", "calendly", "out_of_office") and not unproven:
             if lead:
                 stop_sequence(session, lead, "unsubscribed" if category == "unsubscribe" else "replied",
                               "Reply could not be handled automatically", actor)

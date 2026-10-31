@@ -20,6 +20,7 @@
       {% if f.contact and f.contact.email_status == 'user_provided' %}<span class="pill warn" title="An address given to us, not published by the company">test contact: goes out only with your approval and an active campaign authorization naming this exact address</span>{% endif %}
       <div class="small muted">Lead: <a href="/leads/{{ f.lead_id }}">{{ f.lead.company.name }}</a>{% if f.contact %} · to {{ f.contact.display_name }} &lt;{{ f.to_email or f.contact.email }}&gt;{% if f.kind == 'outreach' %} ({{ (f.contact.email_status or '')|replace('_', ' ') }}{% if f.contact.email_confidence %}, {{ f.contact.email_confidence }}{% endif %}, {{ ext(f.contact.email_source_url, 'where published') }}){% endif %}{% endif %} · due {{ f.due_at|local }}</div>
       {% if reply_to.get(f.id) %}<div class="small muted">They asked for answers to go to {{ reply_to[f.id] }}; this draft goes to the address above.</div>{% endif %}
+      {% set bare = (f.to_email or '')|lower|replace('-', '') %}{% if reply_to.get(f.id) and (bare.startswith('noreply') or bare.startswith('donotreply')) %}<div class="small"><span class="pill warn">The address above is a no-reply address, where nobody may read this. Nothing goes to the other address by itself: a person decides.</span></div>{% endif %}
       {% if f.blocked_reason %}<div class="small"><span class="pill warn">{{ f.blocked_reason|plain }}</span></div>{% endif %}
     </div>
   </div>

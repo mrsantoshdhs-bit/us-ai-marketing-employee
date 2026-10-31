@@ -8,6 +8,9 @@
   <div class="card">
     <h2 style="margin-top:0">Company</h2>
     <table>
+      <tr><th>Name</th><td>{{ c.name }}{% if c.name_set_by %} <span class="small muted">corrected by {{ c.name_set_by }}</span>{% endif %}
+        {% if can_edit %}<form method="post" action="/companies/{{ c.id }}/name" class="filters small" style="margin-top:4px"><input name="name" value="{{ c.name }}" maxlength="200" style="flex:1" required><button class="secondary">Correct the name</button></form>
+        <div class="small muted">Emails already waiting keep their words: edit those on Follow-ups.</div>{% endif %}</td></tr>
       <tr><th>Website</th><td>{{ ext(c.website, c.website) if c.website else '—' }}{% if c.website_status %} <span class="pill {{ 'ok' if c.website_status in ['verified', 'redirected'] else 'warn' }}">{{ c.website_status }}</span><div class="small muted">{{ (c.validation or {}).get('website', '') }}{% if c.website_title %} · title: {{ c.website_title }}{% endif %}</div>{% endif %}</td></tr>
       <tr><th>Location</th><td>{{ c.city or '' }}{{ ', ' if c.city and c.state }}{{ c.state or '' }} {{ c.country }}{% if c.location_text %}<div class="small muted">{{ c.location_text }}</div>{% endif %}{% if c.location_evidence %}<div class="small muted">US evidence: {{ c.location_evidence }}</div>{% endif %}</td></tr>
       <tr><th>Industry</th><td>{{ c.industry|industry }}</td></tr>
@@ -36,7 +39,7 @@
     <p class="small">Fit {{ lead.fit_score }}/35 · Need {{ lead.need_score }}/35 · Intent {{ lead.intent_score }}/20 · Data {{ lead.data_score }}/10</p>
     <ul class="reasons small">{% for r in lead.score_breakdown or [] %}<li>{{ r }}</li>{% endfor %}</ul>
     <p class="small">Matched services: {% for s in lead.matched_services or [] %}<span class="pill">{{ s|service }}</span> {% else %}none{% endfor %}</p>
-    {% if lead.outreach_status or lead.owner %}<p class="small">Outreach: {{ status_pill(lead.outreach_status or 'none') }}{% if lead.outreach_updated_at %} <span class="muted">since {{ lead.outreach_updated_at|local }}</span>{% endif %}{% if lead.owner %} · owner {{ lead.owner }}{% endif %}</p>{% endif %}
+    {% if lead.outreach_status or lead.owner %}<p class="small">Outreach: {{ status_pill(lead.outreach_status or 'none') }}{% if lead.outreach_updated_at %} <span class="muted">since {{ lead.outreach_updated_at|local }}</span>{% endif %}{% if lead.owner %} · owner {{ lead.owner }}{% endif %}{% if stage_why %}<br><span class="muted">Why: {{ stage_why }}</span>{% endif %}</p>{% endif %}
     <p class="small">{{ coming.text }}{% if coming.at %} {{ coming.at|local(None, '%a %d %b') }}{% endif %}.</p>
     {% if lead.disqualify_reason %}<p class="small"><span class="pill bad">{{ lead.disqualify_reason }}</span></p>{% endif %}
     {% if can_edit %}<h2>Actions</h2>
@@ -47,6 +50,9 @@
     <form method="post" action="/leads/{{ lead.id }}/note" class="filters"><input name="note" placeholder="Add a note" style="flex:1" required><button class="secondary">Add note</button></form>
     {% if lead.contact %}<form method="post" action="/leads/{{ lead.id }}/replied"><button class="secondary">They replied — stop follow-ups</button></form>{% endif %}
     {% if lead.outreach_status in ['drafted', 'approved', 'contacted'] %}<form method="post" action="/leads/{{ lead.id }}/stop_outreach" style="margin-top:6px"><button class="danger">Stop outreach</button></form>{% endif %}{% endif %}
+    {% if can_approve and lead.outreach_status == 'stopped' %}{% if reopen_why %}<p class="small muted">Outreach cannot be reopened: {{ reopen_why }}.</p>
+    {% else %}<form method="post" action="/leads/{{ lead.id }}/reopen_outreach" class="filters" style="margin-top:6px"><input name="reason" placeholder="Why reopen it? (required)" maxlength="200" style="flex:1" required><button class="secondary">Reopen outreach</button></form>
+    <p class="small muted">This sends and approves nothing. Whether another email follows depends on the usual rules, and any that does waits for a person's approval.</p>{% endif %}{% endif %}
     <h2>Owner</h2>
     <p class="small">{{ lead.owner or 'Unassigned' }}{% for o in opps if o.owner and o.owner != lead.owner %} · deal {{ o.name }}: {{ o.owner }}{% endfor %}</p>
     {% if can_assign %}<form method="post" action="/leads/{{ lead.id }}/assign" class="filters">

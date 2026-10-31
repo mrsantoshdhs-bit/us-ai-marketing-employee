@@ -5,12 +5,12 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from aime.dedupe import clean_company_name, domain_from_email, find_duplicate, normalize_name
 from aime.matching import detect_competitor, match_services
-from aime.models import Activity, Company, Contact, FollowUp, Lead, Opportunity, Signal, Suppression
+from aime.models import Activity, Company, Contact, FollowUp, InboundEmail, Lead, Opportunity, Signal, Suppression
 from aime.sources.base import CompanyCandidate
 from aime.timeutil import utcnow
 
@@ -156,6 +156,16 @@ def is_suppressed(session: Session, email: str | None = None, domain: str | None
     return session.execute(select(Suppression.id).where(Suppression.value.in_(values))).first() is not None
 
 
+_ON_THE_LIST = select(Suppression.value).correlate(None)
+# is_suppressed for a query over contacts: the address, its domain, or its company's domain is on the do-not-contact list.
+# suppress() marks the contacts on file at that moment; one found later, or at another domain than its company's, is caught here.
+CONTACT_NOT_SUPPRESSED = and_(
+    func.lower(Contact.email).not_in(_ON_THE_LIST),
+    func.lower(func.substr(Contact.email, func.instr(Contact.email, "@") + 1)).not_in(_ON_THE_LIST),
+    or_(Contact.company_id.is_(None),
+        Contact.company_id.not_in(select(Company.id).where(func.lower(Company.domain).in_(_ON_THE_LIST)).correlate(None))))
+
+
 def suppress(session: Session, value: str, reason: str) -> None:
     value = value.strip().lower()
     if not value:
@@ -184,7 +194,7 @@ def erase_person(session: Session, email: str, actor: str) -> dict[str, int]:
     details, the inquiries and emails they sent us, our emails to them and the activity lines naming them are erased.
     The address stays only on the suppression list, so nothing is ever sent to it again. Company records stay."""
     from aime.automation import audit
-    from aime.models import InboundEmail, InboundInquiry, SkippedMail
+    from aime.models import InboundInquiry, SkippedMail
 
     email = (email or "").strip().lower()
     if "@" not in email:
@@ -208,8 +218,10 @@ def erase_person(session: Session, email: str, actor: str) -> dict[str, int]:
             inq.payload = {"erased": True}
             counts["inquiries"] += 1
     for e in session.execute(select(InboundEmail).where(InboundEmail.from_email == email)).scalars():
-        e.from_email, e.subject, e.body_text, e.new_text = ERASED, ERASED, ERASED, ERASED
+        e.from_email, e.subject, e.body_text, e.new_text, e.reply_to = ERASED, ERASED, ERASED, ERASED, None
         counts["emails_received"] += 1
+    for e in session.execute(select(InboundEmail).where(InboundEmail.reply_to == email)).scalars():
+        e.reply_to = None
     for skipped in session.execute(select(SkippedMail).where(SkippedMail.from_email == email)).scalars().all():
         session.delete(skipped)  # the short record of mail read as unrelated: sender, subject and date, nothing else
         counts["emails_received"] += 1
@@ -267,9 +279,13 @@ def merge_companies(session: Session, keeper: Company, dup: Company, actor: str)
         lead.company_id = keeper.id
     for opp in session.execute(select(Opportunity).where(Opportunity.company_id == dup.id)).scalars():
         opp.company_id = keeper.id
+    for mail in session.execute(select(InboundEmail).where(InboundEmail.company_id == dup.id)).scalars():
+        mail.company_id = keeper.id  # what they wrote, an opt-out above all, stays with the company
     for attr in ("website", "domain", "state", "city", "industry", "employee_range", "description", "phone"):
         if not getattr(keeper, attr) and getattr(dup, attr):
             setattr(keeper, attr, getattr(dup, attr))
+    if dup.name_set_by and not keeper.name_set_by:  # a person's correction outlives the merge
+        keeper.name, keeper.name_set_by = dup.name, dup.name_set_by
     keeper.verified = keeper.verified or dup.verified
     if not keeper.source_record_id and dup.source_record_id:
         keeper.source_record_id = dup.source_record_id  # e.g. the SEC CIK, so officers are still looked up

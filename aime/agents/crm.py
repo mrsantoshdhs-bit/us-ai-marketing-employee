@@ -198,7 +198,7 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             company.website_checked_at = utcnow()
             company.website_title = result.title
             better = name_from_title(result.title, company.domain)
-            if better and " " not in company.name.strip() and "." in company.name:  # still named after its domain
+            if better and not company.name_set_by and " " not in company.name.strip() and "." in company.name:  # still named after its domain
                 company.validation = {**(company.validation or {}), "name": f"from the homepage title: {result.title[:120]}"}
                 company.name, company.normalized_name = better, normalize_name(better)
             company.validation = {**(company.validation or {}), "website": result.note}
@@ -280,7 +280,7 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         filled = renamed = 0
         for c in active:
             name = clean_company_name(c.name)
-            if name != c.name:
+            if name != c.name and not c.name_set_by:
                 c.validation = {**(c.validation or {}), "name": f"web address removed from the name: {c.name[:120]}"}
                 c.name, c.normalized_name = name, normalize_name(name)
                 renamed += 1

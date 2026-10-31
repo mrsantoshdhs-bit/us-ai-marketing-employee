@@ -46,6 +46,7 @@ class Company(Timestamped, Base):
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
     is_competitor: Mapped[bool] = mapped_column(Boolean, default=False)
     competitor_cleared_by: Mapped[str | None] = mapped_column(String(80))  # a person said "not a competitor"
+    name_set_by: Mapped[str | None] = mapped_column(String(80))  # a person corrected the name: nothing automatic changes it
     is_sample: Mapped[bool] = mapped_column(Boolean, default=False)
     lifecycle_stage: Mapped[str] = mapped_column(String(30), default="prospect")
     merged_into_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"))
@@ -404,6 +405,8 @@ class InboundEmail(Base):
     mail_note: Mapped[str | None] = mapped_column(String(400))  # no readable text (and what it holds), or why delivery failed
     # Written from an address we do not know, about this lead: its emails wait while this reply waits for a person.
     holds_sending: Mapped[bool | None] = mapped_column(Boolean)
+    reply_to: Mapped[str | None] = mapped_column(String(200))  # where they ask answers to go, if not the sender: shown, never used by itself
+    in_junk: Mapped[bool | None] = mapped_column(Boolean)  # found in the mailbox's junk folder
 
     lead: Mapped["Lead | None"] = relationship()
     contact: Mapped["Contact | None"] = relationship()

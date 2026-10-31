@@ -127,13 +127,13 @@ def test_a_refused_sign_in_stays_failed_after_the_alert_is_acknowledged(org):  #
     assert row["status"] == "FAILED" and "refused the sign-in" in row["detail"]
 
 
-def test_a_stored_reply_to_is_shown_beside_its_draft_when_one_exists(org, monkeypatch):  # noqa: F811
+def test_a_stored_reply_to_is_shown_beside_its_draft_when_one_exists(org):  # noqa: F811
     lead = add_lead(org)
     fid = add_email(org, lead, status="awaiting_approval", kind="response")
     with org.db.session() as s:
         s.add(InboundEmail(message_id="<q@x.example>", from_email="noreply@x.example", subject="Re", received_at=utcnow(),
-                           status="actioned", lead_id=lead, suggested_followup_id=fid, category="question"))
-    monkeypatch.setattr(InboundEmail, "reply_to", "person@x.example", raising=False)
+                           status="actioned", lead_id=lead, suggested_followup_id=fid, category="question",
+                           reply_to="person@x.example"))
     assert "person@x.example" in words(client(org, "owner").get("/followups").text)
 
 

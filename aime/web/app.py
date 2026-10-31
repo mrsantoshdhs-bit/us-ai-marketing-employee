@@ -33,7 +33,7 @@ from aime import clock_check, maintenance, send_journal
 from aime.agents import AGENTS
 from aime.agents.sales_workflow import SIGN_IN_ALERT
 from aime.context import AppContext, get_context
-from aime.crm_ops import is_suppressed, log_activity, suppress
+from aime.crm_ops import CONTACT_NOT_SUPPRESSED, is_suppressed, log_activity, suppress
 from aime.db import kv_get, kv_set, take_write_lock
 from aime.inbound import InboundPayload, record_inquiry
 from aime.integrations.email_smtp import POSTAL_PLACEHOLDER, EmailSender, compliance_problem
@@ -54,7 +54,7 @@ from aime.monitoring import agent_stats, alert_key, read_heartbeat
 from aime.policy import agreement, environment_blockers, evaluate_shadow, policy_config
 from aime.qc import summary as qc_summary
 from aime.reply_intel import skipped_mail as reply_skipped_mail
-from aime.outreach import REACHED_PROSPECT, record_delivery
+from aime.outreach import REACHED_PROSPECT, STOPPABLE_STAGES, after_reopen, cancel_queued, record_delivery, reopen_refusal, reopen_stopped
 from aime.outreach import set_status as set_outreach_status
 from aime.outreach import stop_sequence
 from aime.qc.checks import run_quality_checks
@@ -163,7 +163,7 @@ ERROR_WORDS = {"Bad Request": "That cannot be done with this record as it is now
                "Method Not Allowed": "This address only works from a button on a page. Go back and use the button."}
 # A contact the Sales Manager can actually email: researched, a checked published address, not opted out.
 USABLE_EMAIL = (Contact.source.in_(("website", "sec_filing")), Contact.email_status.in_(("published", "role_address")),
-                Contact.consent_status != "opted_out")
+                Contact.consent_status != "opted_out", CONTACT_NOT_SUPPRESSED)
 # A lead being worked: every count and list of "leads" outside the merged and the disqualified.
 WORKING_LEADS = Lead.status.not_in(("merged", "disqualified"))
 OPEN_LEAD_STATUSES = ("new", "qualified", "nurture")
@@ -261,9 +261,20 @@ def open_alert_rows(s, limit_notices: int = 10) -> tuple[list[dict], int]:
 
 def mailbox_refused(s) -> Alert | None:
     """The open episode of the mailbox refusing the sign-in, also after someone acknowledged the alert: it ends only
-    when an email goes out again. EmailSender.status() cannot know this: it reads the settings, not what happened."""
+    when an email goes out again, or Test connection passes on the sending mailbox. EmailSender.status() cannot know this: it reads the settings, not what happened."""
     return s.execute(select(Alert).where(Alert.key == SIGN_IN_ALERT, Alert.resolved_at.is_(None))
                      .order_by(Alert.id.desc()).limit(1)).scalars().first()
+
+
+def stage_reason(s, lead: Lead) -> str | None:
+    """Why the lead's outreach stage is what it is: the words kept in Activity when the stage was set (outreach.set_status)."""
+    if not lead.outreach_status:
+        return None
+    start = f"Outreach: {lead.outreach_status.replace('_', ' ')} ("
+    said = s.execute(select(Activity.subject).where(Activity.lead_id == lead.id, Activity.type == "outreach",
+                                                    Activity.subject.startswith(start, autoescape=True))
+                     .order_by(Activity.id.desc()).limit(1)).scalar()
+    return said[len(start):].rstrip(")") if said else None
 
 
 def previous_sign_in(s, user_id: int) -> datetime | None:
@@ -680,11 +691,14 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                                 "text": r.new_text or r.body_text, "status": (r.category or "new").replace("_", " "),
                                 "sentiment": r.sentiment} for r in replies], key=lambda m: m["at"])
             coming = next_email(C().settings, lead, fups)
+            stage_why = stage_reason(s, lead)
+            reopen_why = reopen_refusal(s, lead) if lead.outreach_status == "stopped" else None
         user = getattr(request.state, "user", None)
         can_assign = not C().settings.dashboard_auth or bool(user and "assign_leads" in user.get("perms", ()))
         return render(request, "lead_detail.html", lead=lead, signals=signals, acts=acts, fups=fups, opps=opps,
                       people=people, research=research, meetings=meetings, withdrawn=withdrawn, thread=thread,
-                      assignments=assignments, assignees=assignees, can_assign=can_assign, coming=coming)
+                      assignments=assignments, assignees=assignees, can_assign=can_assign, coming=coming, stage_why=stage_why,
+                      reopen_why=reopen_why)
 
     @app.get("/contacts", response_class=HTMLResponse)
     def contacts_page(request: Request, confidence: str = "", role: str = "", reachable: str = ""):
@@ -991,10 +1005,59 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/leads/{lead_id}/stop_outreach")
     def stop_outreach(request: Request, lead_id: int):
+        """From a running stage only: a page left open while a reply came in must not turn "not interested" or "bounced" into a
+        "stopped" that can be reopened. A person's Stop still always cancels what is queued; the stage then stays as it is."""
         with C().db.session() as s:
+            take_write_lock(s)
             lead = s.get(Lead, lead_id) or _404()
-            n = stop_sequence(s, lead, "stopped", f"Stopped by {who(request)}", who(request))
-        return back(f"/leads/{lead_id}", f"Outreach stopped; {n} queued email(s) cancelled")
+            if lead.outreach_status in STOPPABLE_STAGES:
+                n = stop_sequence(s, lead, "stopped", f"Stopped by {who(request)}", who(request))
+                return back(f"/leads/{lead_id}", f"Outreach stopped; {n} queued email(s) cancelled")
+            stage = (lead.outreach_status or "none").replace("_", " ")
+            n = cancel_queued(s, lead, f"Stopped by {who(request)}")
+            if not n:
+                return back(f"/leads/{lead_id}", f"Nothing changed: the outreach stage is {stage} and no email is queued. Your page may "
+                                                 "have been out of date")
+            log_activity(s, f"{n} queued email(s) cancelled by {who(request)}; the outreach stage stays {stage}", who(request),
+                         type_="outreach", company_id=lead.company_id, lead_id=lead.id)
+        return back(f"/leads/{lead_id}", f"{n} queued email(s) cancelled; the outreach stage stays {stage}")
+
+    @app.post("/leads/{lead_id}/reopen_outreach")
+    def reopen_outreach(request: Request, lead_id: int, reason: str = Form("")):
+        """Needs approve_outbound (auth._APPROVALS). It changes the stage and nothing else: see aime.outreach.reopen_stopped."""
+        reason = " ".join(reason.split())[:200]
+        with C().db.session() as s:
+            take_write_lock(s)  # beside a reply being processed: this reads what that one saved
+            lead = s.get(Lead, lead_id) or _404()
+            if not reason:
+                return back(f"/leads/{lead_id}", "Not reopened: give the reason")
+            refused = reopen_stopped(s, lead, who(request), reason)
+            if refused:
+                return back(f"/leads/{lead_id}", f"Not reopened: {refused}")
+            follows = after_reopen(s, C().settings, lead)
+        return back(f"/leads/{lead_id}", f"Outreach reopened. Nothing was drafted or sent. {follows}")
+
+    @app.post("/companies/{company_id}/name")
+    def correct_company_name(request: Request, company_id: int, name: str = Form("")):
+        """A person's name stands: research and clean-ups leave it alone (Company.name_set_by). normalized_name stays what the
+        sources call the company, so a later listing under the old name still finds this record. Emails already drafted keep
+        their words: a person edits those."""
+        new = " ".join(name.split())[:200]
+        with C().db.session() as s:
+            take_write_lock(s)
+            company = s.get(Company, company_id) or _404()
+            from aime.crm_ops import primary_lead
+
+            lead = primary_lead(s, company.id)
+            page = f"/leads/{lead.id}" if lead else "/companies"
+            if len(new) < 2:
+                return back(page, "Name not changed: give the company's name")
+            old = company.name
+            if new != old:
+                company.name, company.name_set_by = new, who(request)
+                log_activity(s, f"Company name corrected by {who(request)}: {old} → {new}", who(request), type_="override",
+                             company_id=company.id, lead_id=lead.id if lead else None)
+        return back(page, "Company name saved. Emails already waiting keep their words: edit those on Follow-ups")
 
     @app.post("/opportunities/{opp_id}")
     def update_opp(request: Request, opp_id: int, stage: str = Form(...), next_step: str = Form(""),

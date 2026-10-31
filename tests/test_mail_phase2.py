@@ -250,7 +250,7 @@ def test_a_lookalike_domain_is_not_the_senders_signature():
 # ------------------------------------------------------------------ a run that dies
 def test_an_email_set_aside_after_killed_runs_is_named_and_kept(make_ctx, monkeypatch):
     ctx, _, sent = contacted(make_ctx)
-    killer = mail("Stranger <stranger@evil.example>", "x", "y", msg_id="<kill@evil.example>")
+    killer = mail("Stranger <stranger@evil.example>", "Re: x", "y", msg_id="<kill@evil.example>")  # its body is read
     FakeIMAP.messages = {1: killer, 2: in_thread(sent, "Please remove me from your list.")}
     import aime.agents.inbox_agent as ia
 
@@ -392,7 +392,8 @@ def test_a_backlog_over_one_batch_is_no_read_and_the_email_waits(make_ctx, monke
     from tests.test_time_and_alerts import status_of
 
     ctx, fid = _world(make_ctx, monkeypatch, clock)
-    FakeIMAP.messages = {i: mail(f"News <news{i}@unrelated.example>", f"Offer {i}", "Buy.", msg_id=f"<o{i}@u.example>") for i in range(1, 56)}
+    # "Re:" from a stranger: only the body can say whether it quotes our email, so each counts against the batch
+    FakeIMAP.messages = {i: mail(f"News <news{i}@unrelated.example>", f"Re: Offer {i}", "Buy.", msg_id=f"<o{i}@u.example>") for i in range(1, 56)}
     assert not workflows.job_inbox(ctx).failed
     workflows.job_followups(ctx)
     state, why = status_of(ctx, fid)
@@ -689,7 +690,7 @@ def test_a_kill_on_the_first_email_does_not_restart_from_uid_one(make_ctx, monke
     from aime.db import kv_get
 
     ctx, _, _ = contacted(make_ctx)
-    FakeIMAP.messages = {480: mail("Stranger <x@evil.example>", "Old mail", "y", msg_id="<kill2@evil.example>")}
+    FakeIMAP.messages = {480: mail("Stranger <x@evil.example>", "Re: Old mail", "y", msg_id="<kill2@evil.example>")}
     import aime.agents.inbox_agent as ia
 
     real = ia.parse_message

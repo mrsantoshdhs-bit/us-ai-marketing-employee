@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent
 from aime.contact_validation import STATUS_OK
-from aime.crm_ops import is_suppressed
+from aime.crm_ops import CONTACT_NOT_SUPPRESSED, is_suppressed
 from aime.integrations.status import integration_statuses
 from aime.knowledge.industries import industry_label
 from aime.knowledge.services import service_name
@@ -58,7 +58,7 @@ def sales_kpis(count, since) -> dict:
         "decision_makers_period": count(Contact, *researched, Contact.last_name.is_not(None), Contact.created_at >= since),
         "decision_makers_total": count(Contact, *researched, Contact.last_name.is_not(None)),
         "usable_emails_total": count(Contact, *researched, Contact.email_status.in_(("published", "role_address")),
-                                     Contact.consent_status != "opted_out"),
+                                     Contact.consent_status != "opted_out", CONTACT_NOT_SUPPRESSED),
         "outreach_drafted_period": count(FollowUp, FollowUp.kind == "outreach", FollowUp.created_at >= since),
         "outreach_drafted_total": count(FollowUp, FollowUp.kind == "outreach"),
         "outreach_sent_period": count(FollowUp, FollowUp.kind == "outreach", FollowUp.status == "sent", FollowUp.sent_at >= since),

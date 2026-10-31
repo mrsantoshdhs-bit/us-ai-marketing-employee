@@ -610,10 +610,28 @@ def cmd_confirm_clock(args, ctx) -> int:
 
     now = clock_check.confirm(ctx, read_heartbeat(ctx.settings))
     with ctx.db.session() as s:
-        resolve_alerts(s, (clock_check.ALERT_KEY,), set())
+        resolve_alerts(s, (clock_check.ALERT_KEY, clock_check.SERVERS_ALERT_KEY), set())
     print(f"Clock accepted: {fmt_local(now)} here. The next check-in does the work that is due. If this time is wrong, correct "
           "the clock now: work done on a wrong date cannot be taken back.")
     return 0
+
+
+def cmd_scrub_logs(args, ctx) -> int:
+    """Query strings out of the dashboard log's old access lines. Prints counts, never a line."""
+    from aime.logging_setup import scrub_access_log
+
+    named = [Path(p) for p in args.file or []]
+    log = ctx.settings.logs_dir / "dashboard.log"
+    files = named or [log, *sorted(log.parent.glob("dashboard.log.[0-9]*"))]
+    worst = 0
+    for path in files:
+        done = scrub_access_log(path)
+        print(f"{path.name}: {done['state']}: {done['lines']} line(s) read, {done['changed']} cleaned")
+        if done["state"] == "in use":
+            print("  Another program holds this file open, so it was left as it was. Stop the dashboard (or run this in a "
+                  "maintenance window) and run this again.")
+        worst = max(worst, 0 if done["state"] in ("clean", "cleaned", "no file") else 1)
+    return worst
 
 
 def cmd_maintenance(args, ctx) -> int:
@@ -751,6 +769,8 @@ def build_parser() -> argparse.ArgumentParser:
     cs = sub.add_parser("confirm-sending", help="After a restore or a damaged database: a person has looked, emails may go")
     cs.add_argument("--who", default="owner (command line)")
     sub.add_parser("confirm-clock", help="The PC's clock is right: end the stop for an implausible clock")
+    sl = sub.add_parser("scrub-logs", help="Take query strings out of old access lines in the dashboard log (prints counts only)")
+    sl.add_argument("--file", action="append", help="this log file instead (repeat); default: dashboard.log and its older copies")
     mt = sub.add_parser("maintenance", help="Pause scheduled ticks for upgrades (always expires)")
     mt.add_argument("action", choices=["on", "off", "status"])
     mt.add_argument("--hours", type=float, default=2.0)
@@ -799,10 +819,11 @@ COMMANDS = {
     "refresh-graphics": cmd_refresh_graphics, "backup-verify": cmd_backup_verify, "restore-drill": cmd_restore_drill,
     "user": cmd_user, "policy": cmd_policy, "simulate-reply": cmd_simulate_reply, "research-recheck": cmd_research_recheck,
     "acceptance-report": cmd_acceptance_report, "confirm-sending": cmd_confirm_sending, "confirm-clock": cmd_confirm_clock,
+    "scrub-logs": cmd_scrub_logs,
 }
 PRODUCTION_DATA_DIR = BASE_DIR / "data"
 # These still work when the database is damaged or missing: they are how a person gets out of that.
-NEEDS_NO_DATABASE = ("maintenance", "restore-drill", "backup-verify")
+NEEDS_NO_DATABASE = ("maintenance", "restore-drill", "backup-verify", "scrub-logs")
 
 
 def _status_without_database(settings, problem: Exception) -> int:

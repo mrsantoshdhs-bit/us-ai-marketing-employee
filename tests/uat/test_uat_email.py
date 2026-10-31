@@ -978,7 +978,7 @@ def test_ok_an_email_that_cannot_be_parsed_is_kept_for_a_person_and_the_next_one
             raise RuntimeError("cannot parse")
         return real(raw, own)
     monkeypatch.setattr(ia, "parse_message", fussy)
-    FakeIMAP.messages = {1: b"From: Strange <strange@nowhere.example>\r\nSubject: poison\r\n\r\nhello\r\n",
+    FakeIMAP.messages = {1: b"From: Strange <strange@nowhere.example>\r\nSubject: Re: poison\r\n\r\nhello\r\n",
                          2: in_thread(sent, "Please remove me from your list.")}
     assert run_inbox(ctx).stored == 2
     with ctx.db.session() as s:

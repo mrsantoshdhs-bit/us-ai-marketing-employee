@@ -30,7 +30,7 @@ VOCABULARY = {
     "workflow", "workflows", "multi", "rekeyed", "keyed", "realtor", "realtors", "startups", "kpi", "kpis", "llm",
     "llms", "api", "apis", "b2b", "linkedin", "followup", "followups", "hashtag", "hashtags", "inbox", "inboxes",
     "dataset", "datasets", "toolset", "toolsets", "reskill", "upskill", "timeline", "timelines", "prioritize",
-    "digitize", "agentic", "ups", "admin", "rekey", "rekeying", "offboarding",
+    "digitize", "agentic", "ups", "admin", "rekey", "rekeying", "offboarding", "tech",
 }
 THIRD_PARTIES = ["Google", "Microsoft", "OpenAI", "Anthropic", "Salesforce", "HubSpot", "Amazon", "AWS", "Meta",
                  "Apple", "IBM", "Oracle", "SAP", "Gartner", "McKinsey", "Forrester", "Deloitte", "Accenture",
