@@ -1,7 +1,7 @@
 """Does the dashboard answer with a page? (stdlib only: the watchdog and the dashboard task use it without the app.)
 
 A port that accepts a connection proves little: the operating system accepts for a hung dashboard, and for another
-program holding the port. Only a page counts.
+program holding the port. Only a page counts, and from outside only one that is really the dashboard's.
 
 A hung dashboard cannot be replaced from outside: the Dashboard task's run IS the dashboard, and Task Scheduler starts no
 second copy while that run lives (IgnoreNew). So the dashboard watches itself from a thread of its own, and a dashboard
@@ -20,6 +20,8 @@ from pathlib import Path
 PAGE = "/login"
 SELF_CHECK_QUERY = "self_check=1"  # left out of the access log (one line a minute)
 PAGE_TIMEOUT = 10.0
+PAGE_MARK = b"AI Sales Employee"  # in the sign-in page's title, in this version and earlier ones
+PAGE_READ_BYTES = 65_536
 CHECK_EVERY = 60.0
 FAILURES_TO_END = 5  # five minutes without a page: a slow moment or a waking PC does not end it
 
@@ -35,6 +37,21 @@ def page_answers(host: str, port: int, timeout: float = PAGE_TIMEOUT, path: str 
         return False
     finally:
         conn.close()
+
+
+def page_owner(host: str, port: int, timeout: float = PAGE_TIMEOUT, path: str = PAGE) -> str | None:
+    """Who answers on this port? "dashboard", "other" (a web program that is not the dashboard), or None (no answer). A server
+    error says nothing of who it is, and the dashboard gives one when its database is in trouble: it counts as the dashboard."""
+    conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    try:
+        conn.request("GET", path)
+        response = conn.getresponse()
+        body = response.read(PAGE_READ_BYTES)
+    except (OSError, http.client.HTTPException):
+        return None
+    finally:
+        conn.close()
+    return "dashboard" if response.status >= 500 or PAGE_MARK in body else "other"
 
 
 def self_check(host: str, port: int, data_dir: Path, probe=page_answers, sleep=time.sleep, end=os._exit,

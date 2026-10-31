@@ -8,10 +8,12 @@ rebuilds a backup in a temporary folder and checks it; it never touches the live
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -26,10 +28,15 @@ from sqlalchemy import text
 from sqlalchemy.exc import DatabaseError
 
 from aime.db import Database
+from aime.redact import redact
 
 MAGIC = b"AIMEBAK1"
 OFFSITE_PREFIX = "aime-offsite-"
 OFFSITE_KEEP = 30
+OFFSITE_PROBLEM = "backup.offsite_problem"  # why the last off-machine copy failed, in words; empty once one is written
+OFFSITE_KEY_CHANGED = "backup.offsite_key_changed"  # the last copy that does not open with today's passphrase
+MIN_BLOB = len(MAGIC) + 28  # the header, the salt, the nonce and the tag: what any encrypted copy has at least
+LEFTOVER_AGE_SECONDS = 3600  # a half-written file this old has no writer left: a copy takes seconds
 MIN_PASSPHRASE = 12
 MIN_FREE_BYTES = 2 * 2**30
 DAMAGE_WORDS = ("malformed", "not a database")  # what SQLite says of a damaged file; anything else may pass by itself
@@ -41,9 +48,26 @@ class BackupError(Exception):
     pass
 
 
+def _clear_leftovers(folder: Path, *patterns: str) -> list[str]:
+    """Half-written files of this tool that a power cut left behind. By name only (nothing else in the folder is ever touched)
+    and only old ones, by the time in the name, or the file's own time if it has none: a copy being written now is young."""
+    removed = []
+    for pattern in patterns:
+        for left in folder.glob(pattern):
+            stamp = re.search(r"\d{8}-\d{6}", left.name)
+            try:
+                born = datetime.strptime(stamp.group(), "%Y%m%d-%H%M%S").timestamp() if stamp else left.stat().st_mtime
+            except (OSError, ValueError):
+                continue
+            if abs(time.time() - born) > LEFTOVER_AGE_SECONDS and _removed(left):
+                removed.append(left.name)
+    return removed
+
+
 def backup_sqlite_file(db_path: Path, backup_dir: Path, label: str = "auto") -> Path:
     """Consistent copy of a live database using SQLite's online backup API (safe while in use)."""
     backup_dir.mkdir(parents=True, exist_ok=True)
+    _clear_leftovers(backup_dir, "partial-[0-9]*-aime-*.db", "partial-[0-9]*-aime-*.db-journal")
     target = backup_dir / f"aime-{label}-{datetime.now():%Y%m%d-%H%M%S}.db"
     # A failed copy (a full disk) must not look like a backup. Two processes can back up in one second (a tick and the
     # dashboard, both starting on a new schema): each writes its own file.
@@ -129,8 +153,7 @@ def prune_backups(backup_dir: Path, label: str = "auto", keep: int = 14) -> int:
         last_good = next((p for p in reversed(expired) if verify_backup(p)["ok"]), None)
     removed = 0
     for old in expired:
-        if old != last_good:
-            old.unlink()
+        if old != last_good and _removed(old):
             removed += 1
     return removed
 
@@ -261,14 +284,41 @@ def decrypt_bytes(blob: bytes, passphrase: str) -> bytes:
         raise BackupError("cannot decrypt: wrong passphrase or damaged file") from exc
 
 
-def prune_offsite(folder: Path, keep: int = OFFSITE_KEEP) -> int:
-    """Remove only this tool's own older encrypted copies; any other file in the folder is left alone."""
+def _cloud_only(path: Path) -> bool:
+    """A file a sync client keeps online only: opening it would download it. Nothing here does that."""
+    attributes = getattr(os.stat(path), "st_file_attributes", 0)  # Windows: offline, recall on open, recall on data access
+    return bool(attributes & (0x1000 | 0x40000 | 0x400000))
+
+
+def copy_opens(path: Path, passphrase: str | None = None) -> bool | None:
+    """Can this encrypted copy still be read? True or False; None when that cannot be told without a download, or just now.
+    With no passphrase only its beginning and size are read; with one, it is decrypted."""
+    try:
+        if _cloud_only(path):
+            return None
+        if not passphrase:
+            with path.open("rb") as fh:
+                return fh.read(len(MAGIC)) == MAGIC and path.stat().st_size >= MIN_BLOB
+        decrypt_bytes(path.read_bytes(), passphrase)
+        return True
+    except BackupError:
+        return False
+    except OSError:  # gone, or held by another program for a moment
+        return None
+
+
+def prune_offsite(folder: Path, keep: int = OFFSITE_KEEP, passphrase: str | None = None, known_good: Path | None = None) -> int:
+    """Remove only this tool's own older encrypted copies; any other file in the folder is left alone. The newest copy that
+    really opens is never removed, however old: 30 newer files a sync client cut short are no way back. A copy another program
+    holds stays until the next run. Cloud-only copies are not downloaded to judge them: one that might open stays."""
     files = sorted(folder.glob(f"{OFFSITE_PREFIX}*.aimebak"))
-    removed = 0
-    for old in files[:-keep] if keep > 0 else []:
-        old.unlink()
-        removed += 1
-    return removed
+    expired, kept = (files[:-keep], files[-keep:]) if keep > 0 else ([], files)
+    if not expired:
+        return 0
+    last_good = None
+    if known_good not in kept and not any(copy_opens(p, passphrase) for p in reversed(kept)):  # newest first: the first answers
+        last_good = next((p for p in reversed(expired) if copy_opens(p, passphrase) is not False), None)
+    return sum(1 for old in expired if old != last_good and _removed(old))
 
 
 def offsite_status(settings) -> tuple[bool, str]:
@@ -315,42 +365,121 @@ def onedrive_folders() -> list[Path]:
 def offsite_sync(folder: str | Path, synced: list[Path] | None = None) -> tuple[bool | None, str]:
     """Whether copies written to `folder` actually leave this PC.
 
-    True: inside a folder a signed-in OneDrive account syncs. False: a OneDrive path that no signed-in account
-    syncs, so the copies stay on this PC. None: another kind of folder (USB drive, network share) that this
+    True: inside a folder a signed-in OneDrive account syncs. False: its drive is not connected, or a OneDrive path that no
+    signed-in account syncs, so the copies stay on this PC. None: another kind of folder (USB drive, network share) that this
     check cannot judge.
     """
     path = Path(folder).expanduser().resolve()
-    for synced_root in onedrive_folders() if synced is None else synced:
-        synced_root = synced_root.expanduser().resolve()
+    roots = [root.expanduser().resolve() for root in (onedrive_folders() if synced is None else synced)]
+    for synced_root in roots:
         if path == synced_root or synced_root in path.parents:
             return True, f"synced by OneDrive ({synced_root})"
+    if path.anchor and not Path(path.anchor).exists():
+        return False, (f"The drive {path.anchor} is not connected, so no copy can be written to this folder: connect the drive, "
+                       "or choose a folder that is there")
     if any("onedrive" in part.lower() for part in path.parts):
+        if roots:  # signed in, but this folder only sits beside what it syncs
+            return False, (f"OneDrive is signed in but syncs only {', '.join(str(r) for r in roots)}. This folder is outside "
+                           "that, so copies would stay on this PC: choose a folder inside it")
         return False, ("OneDrive is not signed in for this folder, so copies would stay on this PC: sign in to "
                        "OneDrive (cloud icon in the taskbar) and check the folder shows as synced")
     return None, "not a OneDrive folder: check yourself that it is on another device (USB drive, network share)"
 
 
+def offsite_trouble(exc: BaseException, folder: str | Path) -> str:
+    """Why an off-machine copy could not be written, in words."""
+    if isinstance(exc, (FileNotFoundError, NotADirectoryError, FileExistsError)):
+        anchor = Path(folder).expanduser().anchor
+        if anchor and not Path(anchor).exists():
+            return f"the off-machine folder {folder} cannot be reached: the drive {anchor} is not connected"
+        return f"the off-machine folder {folder} cannot be reached: it, or a folder above it, is not there"
+    if isinstance(exc, PermissionError):
+        return (f"the off-machine folder {folder} refused the file: this PC may not write there, or another program "
+                "(a sync client) was holding it")
+    if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+        return f"the off-machine folder {folder} has no room left"
+    if isinstance(exc, OSError):
+        return f"the off-machine folder {folder} could not be written ({type(exc).__name__})"
+    return f"the copy for the off-machine folder {folder} could not be made: {redact(str(exc))}"
+
+
+def try_write_offsite(settings, db_path: Path) -> dict:
+    """write_offsite for a job or a person: a failure comes back as a result, with the reason in words."""
+    try:
+        return write_offsite(settings, db_path)
+    except Exception as exc:  # the local backup stands whatever happens to this copy
+        return {"status": "error", "reason": offsite_trouble(exc, settings.backup_offsite_dir)}
+
+
+def offsite_problem_words(problem: dict, failures: int = 0) -> str:
+    """The whole story for a person, from what db_maintenance recorded."""
+    times = f" {failures} times in a row" if failures > 1 else ""
+    local = "The local backup is fine" if problem.get("local_ok") else "The local backup needs a look too"
+    return f"{local}, but the off-machine copy failed{times}: {problem.get('why')}."
+
+
+def offsite_copy_problem(settings, record: dict | None) -> str | None:
+    """What is wrong with the newest copy in the off-machine folder, or None: not only the record of it. It is decrypted, which
+    takes a fraction of a second for a local file; a cloud-only file is not downloaded for this."""
+    folder = Path(settings.backup_offsite_dir).expanduser()
+    if not folder.is_dir():
+        return f"the off-machine folder {folder} cannot be reached just now"
+    files = sorted(folder.glob(f"{OFFSITE_PREFIX}*.aimebak"))
+    if not files:
+        return f"no copy is left in the off-machine folder {folder}: the last one was written as {(record or {}).get('file')}"
+    newest = files[-1]
+    if record and record.get("file", "") > newest.name:
+        return f"the newest copy, {record['file']}, is no longer in the off-machine folder {folder}"
+    try:
+        size = newest.stat().st_size
+    except OSError:
+        return None  # another program has it for a moment
+    if size < MIN_BLOB or (record and record.get("file") == newest.name and record.get("bytes") not in (None, size)):
+        return f"the newest copy, {newest.name}, is cut short: a sync client or a full disk may have damaged it"
+    if copy_opens(newest) is False:
+        return f"the newest copy, {newest.name}, is not a whole encrypted backup: a sync client may have damaged it"
+    if copy_opens(newest, settings.backup_passphrase) is False:
+        return (f"the newest copy, {newest.name}, does not open with the backup passphrase in use now: the passphrase has changed "
+                "since it was written, or the file is damaged")
+    return None
+
+
+def _first_copy_the_passphrase_cannot_open(files: list[Path], passphrase: str) -> str | None:
+    """The newest of the earlier copies does not open with today's passphrase: it was changed, or that copy is damaged."""
+    return files[-1].name if files and copy_opens(files[-1], passphrase) is False else None
+
+
 def write_offsite(settings, db_path: Path) -> dict:
-    """Encrypted bundle into BACKUP_OFFSITE_DIR, then decrypt it again to prove it can be restored."""
+    """Encrypted bundle into BACKUP_OFFSITE_DIR, then decrypt it again to prove it can be restored. Once the copy is in place
+    nothing here can fail it: tidying up comes after, and a file another program holds simply waits."""
     ready, reason = offsite_status(settings)
     if not ready:
         return {"status": "not_configured", "reason": reason}
     folder = Path(settings.backup_offsite_dir).expanduser()
     folder.mkdir(parents=True, exist_ok=True)
+    _clear_leftovers(folder, f"{OFFSITE_PREFIX}*.partial")
+    earlier = sorted(folder.glob(f"{OFFSITE_PREFIX}*.aimebak"))
     with tempfile.TemporaryDirectory(prefix="aime-offsite-") as tmp:
         bundle = create_bundle(settings, db_path, Path(tmp))
         data = bundle.read_bytes()
         target = folder / f"{OFFSITE_PREFIX}{datetime.now():%Y%m%d-%H%M%S}.aimebak"
         partial = target.with_suffix(".partial")
         try:
-            partial.write_bytes(encrypt_bytes(data, settings.backup_passphrase))
+            encrypted = encrypt_bytes(data, settings.backup_passphrase)
+            partial.write_bytes(encrypted)
             if _sha256(decrypt_bytes(partial.read_bytes(), settings.backup_passphrase)) != _sha256(data):
                 raise BackupError("encrypted copy did not decrypt to the same bundle")
             partial.replace(target)
         except BaseException:
-            partial.unlink(missing_ok=True)
+            _removed(partial)
             raise
-    return {"status": "ok", "file": target.name, "bytes": target.stat().st_size, "pruned": prune_offsite(folder)}
+    result = {"status": "ok", "file": target.name, "bytes": len(encrypted), "pruned": 0,
+              "key_changed_after": _first_copy_the_passphrase_cannot_open(earlier, settings.backup_passphrase)}
+    try:
+        result["pruned"] = prune_offsite(folder, passphrase=settings.backup_passphrase, known_good=target)
+    except OSError:  # today's copy stands: the old ones go next time
+        pass
+    return result
 
 
 # ---------------------------------------------------------------------- restore drill
@@ -408,6 +537,37 @@ def weekly_restore_drill(ctx) -> dict | None:
             kv_set(s, "backup.last_drill", utcnow().isoformat())
     else:
         step["error"] = f"The weekly restore drill failed on {result.get('source')}: {result['detail']}"
+    return step
+
+
+def weekly_offsite_drill(ctx) -> dict | None:
+    """A job step, once a week: the newest off-machine copy is restored in a temporary folder too. None when it is not time yet,
+    the copies are not set up, or the newest is kept online only, which is not downloaded for this."""
+    from aime.db import kv_get, kv_set
+    from aime.timeutil import utcnow
+
+    if not offsite_status(ctx.settings)[0]:
+        return None
+    with ctx.db.session() as s:
+        last = kv_get(s, "backup.last_offsite_drill")
+    try:
+        if last and (utcnow() - datetime.fromisoformat(last)).days < DRILL_EVERY_DAYS:
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        files = sorted(Path(ctx.settings.backup_offsite_dir).expanduser().glob(f"{OFFSITE_PREFIX}*.aimebak"))
+        if not files or _cloud_only(files[-1]):
+            return None
+        result = restore_drill(ctx.settings, source=files[-1])
+    except (BackupError, OSError) as exc:
+        result = {"ok": False, "source": files[-1].name if files else None, "detail": str(exc)}
+    step = {"agent": "offsite_drill", "status": "success" if result["ok"] else "failed", "output": result}
+    if result["ok"]:
+        with ctx.db.session() as s:
+            kv_set(s, "backup.last_offsite_drill", utcnow().isoformat())
+    else:
+        step["error"] = f"the newest copy, {result.get('source')}, failed the weekly restore check: {result['detail']}"
     return step
 
 

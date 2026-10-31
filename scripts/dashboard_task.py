@@ -81,9 +81,14 @@ def run() -> int:
     if maintenance.active(settings.data_dir):
         return 0
     if still_running(settings.dashboard_host, settings.dashboard_port):
-        from aime.dashboard_probe import page_answers
+        from aime.dashboard_probe import page_owner
 
-        if not page_answers(settings.dashboard_host, settings.dashboard_port):  # a second copy could not take the port
+        owner = page_owner(settings.dashboard_host, settings.dashboard_port)
+        if owner == "other":  # a second copy could not take the port
+            note_problem(settings.data_dir / "logs" / "dashboard.log",
+                         f"Another web program is using port {settings.dashboard_port}: it answers, but it is not the dashboard. "
+                         "Nothing was started: close that program, or give the dashboard another port.")
+        elif owner is None:
             note_problem(settings.data_dir / "logs" / "dashboard.log",
                          f"Port {settings.dashboard_port} accepts connections but gives no page: another program holds it, or "
                          "a dashboard that was not started by this task has hung. Nothing was started.")

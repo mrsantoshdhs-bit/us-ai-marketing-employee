@@ -13,8 +13,8 @@ from aime.agents import (AnalyticsReportingAgent, AuthorizedPublishingAgent, Com
                          LeadQualificationAgent, LinkedInContentAgent, MarketingManagerAgent, SalesWorkflowAgent,
                          USBusinessResearchAgent)
 from aime.agents.base import AgentResult, agent_enabled
-from aime.backup import (PREDEPLOY_KEPT, backup_sqlite_file, checkpoint, integrity_check, prune_backups, verify_backup,
-                         weekly_restore_drill, write_offsite)
+from aime.backup import (OFFSITE_KEY_CHANGED, OFFSITE_PROBLEM, PREDEPLOY_KEPT, backup_sqlite_file, checkpoint, integrity_check,
+                         prune_backups, try_write_offsite, verify_backup, weekly_offsite_drill, weekly_restore_drill)
 from aime.context import AppContext
 from aime.db import kv_get, kv_set
 from aime.doctor import run_checks
@@ -31,6 +31,7 @@ MAILBOX_READ_SHORT = "mailbox.read_short"  # that the last read was fine but mor
 # slack is for a followups run started by hand between two check-ins.
 MAILBOX_READ_FRESH = timedelta(minutes=20)
 RUN_HISTORY_DAYS = 90
+RETRY_KEEPS_COPY = timedelta(hours=12)  # a retry of a backup job that left a good copy this recently writes no second one
 
 
 class JobOutcome:
@@ -158,9 +159,12 @@ def mailbox_hold(ctx: AppContext) -> str | None:
 
 
 def job_followups(ctx: AppContext, job: str = "followups") -> JobOutcome:
-    """The one job that sends approved emails: it runs after the inbox job, and holds them if that read failed."""
+    """The one job that sends approved emails: it runs after the inbox job, and holds them if that read failed. The read is
+    judged again before each email: the PC may sleep in the middle of a run."""
     out = JobOutcome()
-    out.add(SalesWorkflowAgent(ctx).run({"hold_sends": mailbox_hold(ctx)}, job=job))
+    agent = SalesWorkflowAgent(ctx)
+    agent.read_hold = lambda: mailbox_hold(ctx)
+    out.add(agent.run({"hold_sends": mailbox_hold(ctx)}, job=job))
     return out
 
 
@@ -226,16 +230,34 @@ def prune_run_history(ctx: AppContext, days: int = RUN_HISTORY_DAYS) -> int:
     return removed
 
 
+def _copy_of_the_failed_try(ctx: AppContext, job: str) -> Path | None:
+    """Today's local copy, when the last try of this job left it and failed for another reason, and it is still good. A retry
+    then writes no second copy: 14 kept must reach back 14 days however long the off-machine folder stays broken."""
+    with ctx.db.session() as session:
+        state = session.get(JobState, job)
+        last = kv_get(session, "backup.last_verified")
+    if state is None or state.last_status in (None, "success") or not last:
+        return None
+    try:
+        age = utcnow() - datetime.fromisoformat(last["at"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    file = ctx.settings.backups_dir / str(last.get("file"))
+    fresh = timedelta(0) <= age <= RETRY_KEEPS_COPY and file.name.startswith(f"aime-auto-{datetime.now():%Y%m%d}-")
+    return file if fresh and verify_backup(file)["ok"] else None
+
+
 def job_db_maintenance(ctx: AppContext, job: str = "db_maintenance") -> JobOutcome:
     """Daily online backup (14 kept) verified after writing, encrypted off-machine copy when configured,
     integrity check, run history older than 90 days removed, and WAL checkpoint."""
     out = JobOutcome()
     s = ctx.settings
     db_path = ctx.db.engine.url.database
-    backup = backup_sqlite_file(Path(db_path), s.backups_dir, label="auto") if db_path else None
+    kept = _copy_of_the_failed_try(ctx, job) if db_path else None
+    backup = kept or (backup_sqlite_file(Path(db_path), s.backups_dir, label="auto") if db_path else None)
     verified = verify_backup(backup) if backup else None
     pruned = 0
-    if verified and verified["ok"]:  # a copy that failed verification must not push out the last good one
+    if verified and verified["ok"] and not kept:  # a copy that failed verification must not push out the last good one
         from aime.backup import prune_manual_backups
 
         pruned = prune_backups(s.backups_dir, label="auto", keep=14)
@@ -250,13 +272,13 @@ def job_db_maintenance(ctx: AppContext, job: str = "db_maintenance") -> JobOutco
         problems.append(f"Integrity check failed: {check}")
     if verified is not None and not verified["ok"]:
         problems.append(f"Backup {backup.name} failed verification: {verified['integrity']}")
-    elif verified is not None:
+    elif verified is not None and not kept:
         with ctx.db.session() as session:
             kv_set(session, "backup.last_verified", {"file": backup.name, "at": utcnow().isoformat(),
                                                      "tables": verified["tables"], "rows": verified["rows"]})
     step = {"agent": "db_maintenance", "status": "failed" if problems else "success",
             "output": {"backup": backup.name if backup else None, "pruned": pruned, "history_pruned": history_pruned, **check,
-                       "backup_verified": bool(verified and verified["ok"]),
+                       "backup_verified": bool(verified and verified["ok"]), "copy_of_the_earlier_try": bool(kept),
                        "backup_rows": verified["rows"] if verified else None}}
     if problems:
         step["error"] = "; ".join(problems)
@@ -264,23 +286,32 @@ def job_db_maintenance(ctx: AppContext, job: str = "db_maintenance") -> JobOutco
     out.steps.append(step)
 
     if db_path:  # encrypted off-machine copy (optional; a failure is reported but the local backup stands)
-        try:
-            offsite = write_offsite(s, Path(db_path))
-        except Exception as exc:  # keep the job alive; the monitor raises an alert on repeated failures
-            offsite = {"status": "error", "reason": redact(str(exc))}
+        offsite = try_write_offsite(s, Path(db_path))  # keep the job alive; the monitor raises an alert on repeated failures
         if offsite["status"] == "ok":
             with ctx.db.session() as session:
-                kv_set(session, "backup.last_offsite", {"file": offsite["file"], "at": utcnow().isoformat()})
+                kv_set(session, "backup.last_offsite", {"file": offsite["file"], "at": utcnow().isoformat(), "bytes": offsite["bytes"]})
+                if offsite.get("key_changed_after"):
+                    kv_set(session, OFFSITE_KEY_CHANGED, {"file": offsite["key_changed_after"], "at": utcnow().isoformat()})
         off_step = {"agent": "offsite_backup", "status": "failed" if offsite["status"] == "error" else "success",
                     "output": offsite}
         if offsite["status"] == "error":
             off_step["error"] = offsite["reason"]
             out.failed = True
         out.steps.append(off_step)
+        problem = offsite["reason"] if offsite["status"] == "error" else None
+    else:
+        problem = None
     drill = weekly_restore_drill(ctx) if db_path else None
     if drill:
         out.failed = out.failed or drill["status"] != "success"
         out.steps.append(drill)
+    drill = weekly_offsite_drill(ctx) if db_path else None
+    if drill:
+        out.failed = out.failed or drill["status"] != "success"
+        out.steps.append(drill)
+        problem = problem or drill.get("error")
+    with ctx.db.session() as session:  # what doctor, the home page and the alert say, in words
+        kv_set(session, OFFSITE_PROBLEM, {"why": problem, "at": utcnow().isoformat(), "local_ok": not problems} if problem else None)
     return out
 
 

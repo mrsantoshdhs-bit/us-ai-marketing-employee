@@ -59,6 +59,11 @@ DEAD_ADDRESS = re.compile(r"\b5\.1\.(0|1|2|3|6|10)\b|no such|user unknown|unknow
 SIGN_IN_ALERT = "mail:sign_in"
 MAILBOX_ALERT = "mail:not_read"
 REVIEW_MARK = "Why no email was drafted:"  # in every review task written since this note was added
+# Between two looks in one send run a slow mail server takes seconds. More than this: the PC slept, or its clock was changed.
+SEND_RUN_JUMP = timedelta(minutes=5)
+TIME_JUMPED = ("Waiting: the PC slept or its clock changed during the send run, so the rest of that run stopped. It goes out on "
+               "the next run, after a new read of the mailbox")
+LEFT_THE_WINDOW = "Waiting for the business-hours send window"
 
 
 class SalesInput(BaseModel):
@@ -97,6 +102,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
     def __init__(self, ctx, sender: EmailSender | None = None):
         super().__init__(ctx)
         self.sender = sender or EmailSender(ctx.settings)
+        self.read_hold = None  # the followups job's: asked before each email, why it must wait for a new read of the mailbox
 
     def _use_primary_mailbox(self, session: Session) -> None:
         """A primary mailbox from the Super Admin panel sends instead of the .env mailbox. Every switch and
@@ -130,6 +136,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         self._use_primary_mailbox(session)
         self._connect_oauth(session)
         now = inp.now or utcnow()
+        self.run_began = utcnow()  # `now` may be a run's own time: what has passed since is read from the real clock
         cfg = self.settings.section("followup")
         out = SalesOutput()
         self._recover_stale_sends(session, now)
@@ -532,10 +539,20 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 acknowledged=True, resolved_at=utcnow()))
         return msg_id
 
+    def _why_stop_the_run(self, last_look: datetime, now: datetime, cfg: dict, in_window: bool) -> str | None:
+        """Judged again before each email, because the process can freeze for hours between two of them (a laptop lid). Only
+        ever stops a run: what was out of the window or held when the run began is dealt with as before."""
+        real = utcnow()
+        if abs(real - last_look) > SEND_RUN_JUMP:
+            return TIME_JUMPED
+        if in_window and not self._in_send_window(now + (real - self.run_began), cfg):
+            return LEFT_THE_WINDOW
+        return self.read_hold() if self.read_hold else None
+
     def _send_locked(self, session: Session, approved: list[FollowUp], now: datetime, cfg: dict,
                      out: SalesOutput) -> None:
         ready, reason = self.sender.status()
-        in_window = self._in_send_window(now, cfg)
+        in_window = self._in_send_window(now + (utcnow() - self.run_began), cfg)
         limits = self._outreach_limits(session, now, cfg)
         replies_sent, replies_per_run = 0, int(cfg.get("replies_per_run", 10))
         sign_in_failed = False
@@ -547,7 +564,17 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
             return
         # someone is waiting on a meeting's time: those notes go first, and no limit on replies holds them
-        for f in sorted(approved, key=lambda f: f.purpose not in automation.MEETING_NOTES):
+        order = sorted(approved, key=lambda f: f.purpose not in automation.MEETING_NOTES)
+        last_look = utcnow()
+        for turn, f in enumerate(order):
+            stop = self._why_stop_the_run(last_look, now, cfg, in_window)
+            if stop:  # the rest stay approved, for the next proper run
+                self.log.warning("Send run stopped with %s email(s) left: %s", len(order) - turn, stop)
+                for rest in order[turn:]:
+                    rest.blocked_reason = stop[:300]
+                    out.blocked.append(BlockedItem(id=rest.id, reason=rest.blocked_reason))
+                break
+            last_look = utcnow()
             went_out = send_journal.claim_for(journal, f)
             if went_out:  # the record outside the database says it left already: never again without a person
                 send_journal.mark_for_a_person(session, f, went_out, self.name)
