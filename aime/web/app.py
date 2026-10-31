@@ -54,7 +54,7 @@ from aime.monitoring import agent_stats, alert_key, read_heartbeat
 from aime.policy import agreement, environment_blockers, evaluate_shadow, policy_config
 from aime.qc import summary as qc_summary
 from aime.reply_intel import skipped_mail as reply_skipped_mail
-from aime.outreach import REACHED_PROSPECT, STOPPABLE_STAGES, after_reopen, cancel_queued, record_delivery, reopen_refusal, reopen_stopped
+from aime.outreach import REACHED_PROSPECT, STOPPABLE_STAGES, after_reopen, cancel_queued, record_delivery, reopen_refusal, reopen_stopped, sent_earlier
 from aime.outreach import set_status as set_outreach_status
 from aime.outreach import stop_sequence
 from aime.qc.checks import run_quality_checks
@@ -1139,9 +1139,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 InboundEmail.suggested_followup_id.in_([f.id for f in first] or [0]))).scalars()}
             simulated = {fid for fid, r in answers.items() if r.is_simulated}
             reply_to = {fid: r.reply_to for fid, r in answers.items() if getattr(r, "reply_to", None)}
+            earlier = {f.id: [{"subject": e.subject, "body": e.body, "sent_at": e.sent_at, "to": e.to_email}
+                              for e in sent_earlier(s, f.lead_id, f.in_reply_to)]
+                       for f in first if f.status == "awaiting_approval" and f.in_reply_to}
         return render(request, "followups.html", rows=rows, show=show, email_ready=ready, email_reason=reason, sent_total=total,
                       hidden=total - len(rest), page_size=FOLLOWUPS_PAGE, reconfirm=reconfirm, simulated=simulated,
-                      reply_to=reply_to)
+                      reply_to=reply_to, earlier=earlier)
 
     @app.post("/followups/{fid}/{action}")
     def followup_action(request: Request, fid: int, action: str, subject: str = Form(""), body: str = Form(""),
@@ -1173,7 +1176,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 if f.kind == "outreach":
                     if edited or action == "save":  # an edited email is checked again before anyone approves it
                         f.quality = {**(f.quality or {}), "qc": run_email_checks(
-                            f.subject, f.body or "", list(f.evidence or []), f.contact, suppressed, step=f.step)}
+                            f.subject, f.body or "", list(f.evidence or []), f.contact, suppressed, step=f.step,
+                            sent_subjects=[e.subject for e in sent_earlier(s, f.lead_id, f.in_reply_to)])}
                     qc_status = ((f.quality or {}).get("qc") or {}).get("status")
                 if action == "save":
                     msg = "Saved" + (f"; quality checks: {qc_status}" if qc_status else "")
@@ -1438,7 +1442,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/campaigns/{camp_id}/status")
     def campaign_status(camp_id: int, status: str = Form(...)):
-        if status not in ("planned", "active", "paused", "completed"):
+        if status not in ("planned", "active", "paused", "completed", "ended"):
             raise HTTPException(400)
         with C().db.session() as s:
             c = s.get(Campaign, camp_id) or _404()

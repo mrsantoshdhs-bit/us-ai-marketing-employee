@@ -32,6 +32,12 @@
     {% endfor %}{% endif %}
   </div>
   {% endif %}
+  {% if earlier.get(f.id) %}
+  <details class="small" open style="margin-top:8px"><summary>Already sent in this thread ({{ earlier[f.id]|length }})</summary>
+    {% for e in earlier[f.id] %}<div class="row-item"><b>{{ e.subject }}</b> <span class="muted">sent {{ e.sent_at|local }}{% if e.to %} to {{ e.to }}{% endif %}</span>
+      <div class="post small">{{ e.body }}</div></div>{% endfor %}
+  </details>
+  {% endif %}
   {% if f.channel == 'email' and f.status == 'awaiting_approval' and (can_approve or (can_edit and f.kind == 'outreach')) %}
   <form method="post" action="/followups/{{ f.id }}/{{ 'approve' if can_approve else 'save' }}">
     <input name="subject" value="{{ f.subject }}" style="width:100%;margin:8px 0">

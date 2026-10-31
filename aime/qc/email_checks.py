@@ -47,16 +47,22 @@ def _normalize(text: str) -> str:
     return " ".join(text.replace("“", '"').replace("”", '"').split()).lower()
 
 
-def run_email_checks(subject: str, body: str, evidence: list[dict], contact, suppressed: bool, step: int = 1) -> dict:
+def run_email_checks(subject: str, body: str, evidence: list[dict], contact, suppressed: bool, step: int = 1,
+                     sent_subjects: list[str] | None = None) -> dict:
+    """`sent_subjects`: the subjects of the emails really sent earlier in this one's thread (aime.outreach.sent_earlier)."""
     main, footer = split_footer(body)
     words = len(re.findall(r"\b\w+\b", main))
     results = [CheckResult("length", "pass" if MIN_WORDS <= words <= MAX_WORDS else "fail",
                            f"{words} words (keep it between {MIN_WORDS} and {MAX_WORDS})")]
 
     subj_problems = []
-    if len(subject) > 70:
+    # "Re:" is true only of an answer to an email we really sent in this thread, under that email's own subject.
+    prefix = re.match(r"\s*(re|fwd?)\s*:\s*", subject, re.I)
+    answers = bool(prefix) and prefix.group(1).lower() == "re" and _normalize(subject[prefix.end():]) in {
+        _normalize(s) for s in sent_subjects or []}
+    if len(subject[prefix.end():] if answers else subject) > 70:
         subj_problems.append("longer than 70 characters")
-    if re.match(r"\s*(re|fwd?)\s*:", subject, re.I):
+    if prefix and not answers:
         subj_problems.append("pretends to be a reply or forward")
     # A name in capitals is how that company writes itself, not shouting; anything else in capitals still is.
     own_name = getattr(getattr(contact, "company", None), "name", None)
@@ -75,10 +81,10 @@ def run_email_checks(subject: str, body: str, evidence: list[dict], contact, sup
     results.append(CheckResult("numbers", "uncertain" if numbers else "pass",
                                f"check the source for: {', '.join(numbers[:5])}" if numbers else "none outside quotes"))
 
-    # Every draft names the lead's own company, except the closing one ("Closing the loop on ...", aime/outreach.py).
+    # Every draft names the lead's own company, except the closing one: step 3, or an older one still waiting under its own subject.
     record = getattr(contact, "company", None)
     company = getattr(record, "name", None)
-    if company and not subject.lower().startswith("closing the loop"):
+    if company and step != 3 and not subject.lower().startswith("closing the loop"):
         written = company_to_address(company, getattr(record, "website_title", None), getattr(record, "domain", None))
         named = bool(written) and _normalize(written) in _normalize(f"{subject}\n{main}")
         results.append(CheckResult("company name", "pass" if named else "uncertain",

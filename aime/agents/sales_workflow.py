@@ -35,7 +35,7 @@ from aime.knowledge.services import service_name
 from aime.models import (Activity, Alert, Contact, FollowUp, InboundEmail, InboundInquiry, Lead, Opportunity, ResearchSnapshot,
                          Signal)
 from aime.monitoring import alert_once, resolve_alerts
-from aime.outreach import (OPEN, RUNNING_STAGES, STOP_STATUSES, TOPICS, draft_outreach, draft_reengage, eligible, gather_evidence,
+from aime.outreach import (OPEN, RUNNING_STAGES, STOP_STATUSES, TOPICS, draft_outreach, draft_reengage, eligible, gather_evidence, sent_earlier,
                            record_delivery, set_status, stop_sequence)
 from aime.people import looks_like_name
 from aime.pipeline import pipeline_checks
@@ -261,9 +261,10 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
     def _new_outreach(self, session: Session, lead: Lead, step: int, due: datetime, evidence_dicts: list[dict],
                       evidence, out: SalesOutput, in_reply_to: str | None = None) -> None:
         contact = lead.contact
-        subject, body = draft_outreach(self.settings, step, lead, contact, evidence)
+        earlier = sent_earlier(session, lead.id, in_reply_to)
+        subject, body = draft_outreach(self.settings, step, lead, contact, evidence, first_subject=earlier[0].subject if earlier else None)
         suppressed = is_suppressed(session, contact.email, lead.company.domain)
-        qc = run_email_checks(subject, body, evidence_dicts, contact, suppressed, step=step)
+        qc = run_email_checks(subject, body, evidence_dicts, contact, suppressed, step=step, sent_subjects=[e.subject for e in earlier])
         # Every draft waits for approval: a person's, or at send time an active campaign authorization (aime/automation.py).
         session.add(FollowUp(lead_id=lead.id, contact_id=contact.id, company_id=lead.company_id, channel="email",
                              kind="outreach", step=step, due_at=due, status="awaiting_approval", subject=subject,
