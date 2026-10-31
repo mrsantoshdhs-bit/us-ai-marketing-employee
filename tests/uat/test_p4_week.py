@@ -554,3 +554,23 @@ def test_cancelled_on_an_ended_calendar_meeting_changes_the_crm_only(make_ctx, m
     ahead = calendar_meeting(ctx, lead_id, utcnow() + timedelta(days=2), "ev-ahead")
     assert client.post(f"/meetings/{ahead}/cancel", headers=ORIGIN, data={"notes": ""}, follow_redirects=False).status_code == 303
     assert FakeCalendar.cancelled == ["ev-ahead"]  # one still to come is cancelled in the calendar, as before
+
+
+@pytest.mark.parametrize("oldest_first, expected", [(("sent", "rejected"), NO_REPLY), (("rejected", "sent"), REPLY_SENT),
+                                                    (("sent", "cancelled"), NO_REPLY)])
+def test_a_deals_next_step_goes_by_the_newest_reply(make_ctx, oldest_first, expected):
+    ctx = contacted(make_ctx)[0]
+    lead_id = lead_of(ctx).id
+    with ctx.db.session() as s:
+        lead = s.get(Lead, lead_id)
+        opp = Opportunity(company_id=lead.company_id, lead_id=lead_id, name="Deal", stage="discovery", probability=20, next_step=REPLY_SENT)
+        s.add(opp)
+        s.flush()
+        oid = opp.id
+        for status in oldest_first:
+            s.add(FollowUp(lead_id=lead_id, company_id=lead.company_id, channel="email", kind="response", step=1, status=status,
+                           subject="Answer", body="Words", to_email=DAVID))
+            s.flush()
+    with ctx.db.session() as s:
+        settle_next_steps(s, lead_id)
+    assert opp_row(ctx, oid).next_step == expected
