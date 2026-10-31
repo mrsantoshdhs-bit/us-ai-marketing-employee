@@ -205,6 +205,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         # what the buttons on a page may offer: the same permissions the server enforces on every request (aime.web.auth)
         data.setdefault("can_edit", may("edit_records"))
         data.setdefault("can_approve", may("approve_outbound"))
+        data.setdefault("can_reject", may("approve_outbound") or may("reject_outbound"))
         data.setdefault("can_assign", may("assign_leads"))
         data.setdefault("can_run", may("admin_ops"))
         if "user_role" not in data:
@@ -914,6 +915,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             # two requests of a double click, then run one after the other, and the second sees what the first decided.
             take_write_lock(s)
             f = s.get(FollowUp, fid) or _404()
+            user = getattr(request.state, "user", None)
+            if (action == "reject" and f.channel == "email" and user is not None
+                    and not {"approve_outbound", "reject_outbound"} & set(user.get("perms", ()))):
+                raise HTTPException(403, "A Sales Manager decides what happens to an email: ask one to reject this")
             if action in ("approve", "save") and f.channel == "email" and f.status == "awaiting_approval":
                 edited = False
                 if subject.strip() and subject.strip() != f.subject:
@@ -952,7 +957,6 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     am.observe_sending(s, C().settings.outbound_email_enabled, now)
                     f.status, f.approved_by, f.approved_at = "approved", who(request), now
                     lead = f.lead
-                    user = getattr(request.state, "user", None)
                     # whoever approves the first email to a lead (outreach or a reply to someone who contacted us)
                     # works it from then on, if their role receives leads (an administrator approving does not)
                     if not lead.owner and (user is None or "receive_leads" in user.get("perms", ())):

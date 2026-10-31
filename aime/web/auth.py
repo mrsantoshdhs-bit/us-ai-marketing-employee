@@ -199,6 +199,8 @@ def admin_only(method: str, path: str) -> bool:
 # - configure_system: mailboxes, sales settings, LinkedIn Lead Sync;  admin_ops: jobs, automation, integrations;
 # - manage_users: accounts, teams and roles;  assign_leads: moving a lead or deal to someone else;
 # - approve_outbound: approving, confirming or resending what goes out to customers, and campaigns;
+# - approve_outbound or reject_outbound: rejecting or cancelling an email (decided in the route: the same URL also
+#   cancels a task, which edit_records is enough for);
 # - edit_records: every other change. Without it (a Read-Only Analyst) a user can only look and sign out.
 # - view_all: acknowledging an alert: alerts are about the whole organisation and only such a role sees them.
 # Which records a user sees and works is limited separately (aime.visibility).

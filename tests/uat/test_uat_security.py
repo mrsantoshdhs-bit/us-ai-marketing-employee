@@ -1686,6 +1686,94 @@ def test_ok_a_sales_executive_is_not_offered_approve_or_reject_and_the_server_st
     assert {f"/followups/{ids['fu_a']}/approve", f"/followups/{ids['fu_a']}/reject"} <= {a for a, _ in offered(mgr)}
 
 
+def email_state(ctx, fid):
+    with ctx.db.session() as s:
+        f = s.get(FollowUp, fid)
+        return f.status, f.lead.outreach_status
+
+
+@pytest.mark.parametrize("status", ["awaiting_approval", "approved", "pending"])
+@pytest.mark.parametrize("role", ["sales_executive", "bde", "lead_gen_executive"])
+def test_ok_an_unauthorized_role_cannot_reject_an_email_in_any_state(world, role, status):
+    ctx, app, ids = world
+    with ctx.db.session() as s:
+        s.add(User(username="worker", password_hash=pw_hash(), role=role))
+        f = s.get(FollowUp, ids["fu_a"])
+        f.status, f.kind, f.step = status, "outreach", 1
+        f.lead.owner, f.lead.outreach_status = "worker", "drafted"
+    worker = as_user(ctx, app, "worker")
+    before = email_state(ctx, ids["fu_a"])
+    r = worker.post(f"/followups/{ids['fu_a']}/reject", headers={**ORIGIN, "accept": "text/html"})
+    assert r.status_code == 403 and "Sales Manager" in r.text and "<html" in r.text.lower()  # a page, in plain words
+    assert email_state(ctx, ids["fu_a"]) == before
+    with ctx.db.session() as s:
+        assert not s.execute(select(AuditEvent).where(AuditEvent.action == "email_reject")).first()
+    assert f"/followups/{ids['fu_a']}/reject" not in {a for a, _ in offered(worker.get("/followups").text)}
+
+
+def test_ok_a_loose_id_or_another_spelling_does_not_get_round_the_reject_rule(world):
+    ctx, app, ids = world
+    eva = as_user(ctx, app, "exec_a")
+    for path in (f"/followups/+{ids['fu_a']}/reject", f"/followups/{ids['fu_a']}/reject/", f"/followups/{ids['fu_a']}/REJECT",
+                 f"/followups/{ids['fu_a']:04d}/reject"):
+        assert eva.post(path).status_code in (307, 400, 403, 404), path
+    assert email_state(ctx, ids["fu_a"])[0] == "awaiting_approval"
+
+
+def test_ok_an_executive_still_cancels_their_own_task(world):
+    ctx, app, ids = world
+    with ctx.db.session() as s:
+        f = s.get(FollowUp, ids["fu_a"])
+        f.channel, f.status = "task", "pending"
+    eva = as_user(ctx, app, "exec_a")
+    assert f"/followups/{ids['fu_a']}/reject" in {a for a, _ in offered(eva.get("/followups").text)}
+    assert eva.post(f"/followups/{ids['fu_a']}/reject").status_code == 303
+    assert email_state(ctx, ids["fu_a"])[0] == "rejected"
+
+
+@pytest.mark.parametrize("perms", [["view_all", "edit_records", "reject_outbound"], ["view_all", "edit_records", "approve_outbound"]])
+def test_ok_a_role_explicitly_authorized_to_reject_can_reject(world, perms):
+    """reject_outbound is the narrow grant: Reject without Approve. A custom role made earlier with approve_outbound keeps
+    rejecting too."""
+    ctx, app, ids = world
+    with ctx.db.session() as s:
+        s.add(CustomRole(name="closer", label="Closer", permissions=perms))
+        s.add(User(username="clo", password_hash=pw_hash(), role="closer"))
+    clo = as_user(ctx, app, "clo")
+    assert f"/followups/{ids['fu_a']}/reject" in {a for a, _ in offered(clo.get("/followups").text)}
+    if "approve_outbound" not in perms:
+        assert clo.post(f"/followups/{ids['fu_a']}/approve").status_code == 403
+        with ctx.db.session() as s:
+            s.get(FollowUp, ids["fu_a"]).kind = "outreach"
+        page = clo.get("/followups").text
+        assert f"/followups/{ids['fu_a']}/reject" in {a for a, _ in offered(page)}
+        assert clo.post(f"/followups/{ids['fu_a']}/approve").status_code == 403
+    assert clo.post(f"/followups/{ids['fu_a']}/reject").status_code == 303
+    assert email_state(ctx, ids["fu_a"])[0] == "rejected"
+    with ctx.db.session() as s:
+        assert s.execute(select(AuditEvent).where(AuditEvent.action == "email_reject")).first()
+
+
+def test_ok_every_built_in_approver_can_reject_and_a_manager_can_grant_it(world):
+    ctx, app, ids = world
+    holders = {r for r, v in BUILTIN_ROLES.items() if "approve_outbound" in v["permissions"]}
+    assert holders == {r for r, v in BUILTIN_ROLES.items() if "reject_outbound" in v["permissions"]}
+    assert "sales_executive" not in holders and "bde" not in holders and "lead_gen_executive" not in holders
+    assert as_user(ctx, app, "mgr_a").post(f"/followups/{ids['fu_a']}/reject").status_code == 303
+    assert email_state(ctx, ids["fu_a"])[0] == "rejected"
+
+
+def test_ok_stopping_outreach_to_their_own_lead_stays_open_to_an_executive(world):
+    """Deliberate: when a prospect says stop, whoever works the lead must be able to stop the emails at once. That is
+    Stop outreach on the lead, cancels the whole sequence and names who did it; it is not a decision on one draft."""
+    ctx, app, ids = world
+    eva = as_user(ctx, app, "exec_a")
+    assert eva.post(f"/leads/{ids['lead_a']}/stop_outreach").status_code == 303
+    assert email_state(ctx, ids["fu_a"])[0] == "cancelled"
+    with ctx.db.session() as s:
+        assert "exec_a" in s.get(FollowUp, ids["fu_a"]).blocked_reason
+
+
 def test_ok_pausing_and_stopping_stay_open_to_anyone_who_edits_records(world):
     """aime/web/auth.py: "pausing and stopping: anyone signed in" (with edit_records): deliberately kept."""
     ctx, app, _ = world

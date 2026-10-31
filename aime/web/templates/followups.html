@@ -38,7 +38,7 @@
     <label class="small"><input type="checkbox" name="qc_override" value="yes"> I reviewed the quality findings</label>{% endif %}
     <div class="row-actions" style="margin-top:8px"><button {{ 'disabled' if not can_approve }} {% if not can_approve %}title="A Sales Manager approves what goes out to customers"{% endif %}>Approve (send when enabled)</button>
       {% if f.kind == 'outreach' %}<button class="secondary" formaction="/followups/{{ f.id }}/save">Save changes</button>{% endif %}
-      {% if can_approve %}<button class="danger" formaction="/followups/{{ f.id }}/reject">Reject</button>{% endif %}</div>
+      {% if can_reject %}<button class="danger" formaction="/followups/{{ f.id }}/reject">Reject</button>{% endif %}</div>
   </form>
   {% else %}
   <div class="post small">{{ f.body }}</div>
@@ -48,7 +48,7 @@
     {% if can_approve and f.status == 'uncertain' %}<form class="inline" method="post" action="/followups/{{ f.id }}/mark_sent"><button>It was delivered: mark sent</button></form>
       <form class="inline" method="post" action="/followups/{{ f.id }}/requeue"><button class="secondary">Not delivered: requeue</button></form>{% endif %}
     {% if can_approve and f.id in reconfirm %}<form class="inline" method="post" action="/followups/{{ f.id }}/reconfirm"><button>Confirm again</button></form>{% endif %}
-    {% if can_edit and f.status in ['pending', 'approved'] %}<form class="inline" method="post" action="/followups/{{ f.id }}/reject"><button class="danger">Cancel</button></form>{% endif %}
+    {% if (can_reject if f.channel == 'email' else can_edit) and f.status in ['pending', 'approved', 'awaiting_approval'] %}<form class="inline" method="post" action="/followups/{{ f.id }}/reject"><button class="danger">{{ 'Reject' if f.status == 'awaiting_approval' else 'Cancel' }}</button></form>{% endif %}
   </div>
   {% endif %}
 </div>
