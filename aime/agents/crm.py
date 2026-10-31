@@ -31,6 +31,14 @@ RECHECK_AFTER = timedelta(days=30)
 US_NAMES = {"us", "usa", "u.s.", "u.s.a.", "united states", "united states of america", "america"}
 
 
+def _own_words(snap: ResearchSnapshot | None, company: Company) -> str:
+    """All a company says of itself on file, as research reads it: its description, services, and homepage titles."""
+    parts = [company.website_title or ""]
+    if snap:
+        parts += [snap.description or "", *(snap.services_offered or []), *(p.get("title") or "" for p in snap.pages or [] if p.get("kind") == "home")]
+    return " ".join(parts)
+
+
 class CRMInput(BaseModel):
     operations: list[Operation] = Field(
         default_factory=lambda: ["verify_websites", "dedupe", "hygiene", "stale", "lifecycle", "competitors"])
@@ -236,7 +244,7 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
                                    .order_by(ResearchSnapshot.id.desc())).scalars().first()
             description = snap.description if snap else None
             if description:
-                phrase = competitor_evidence(f"{description} {' '.join(snap.services_offered or [])} {company.website_title or ''}")
+                phrase = competitor_evidence(_own_words(snap, company))
             else:
                 posts = session.execute(select(Signal.text).where(Signal.company_id == company.id, Signal.signal_type == "hiring"))
                 phrase = next((p for p in map(competitor_in_post, posts.scalars()) if p), None) or competitor_evidence(company.website_title)
@@ -272,9 +280,8 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
     def _competitor_words_on_file(self, session: Session, company: Company) -> bool:
         snap = session.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == company.id)
                                .order_by(ResearchSnapshot.id.desc())).scalars().first()
-        own = f"{snap.description or ''} {' '.join(snap.services_offered or [])}" if snap else ""
         posts = session.execute(select(Signal.text).where(Signal.company_id == company.id, Signal.signal_type == "hiring")).scalars()
-        return bool(competitor_evidence(f"{own} {company.website_title or ''}") or any(map(competitor_in_post, posts))
+        return bool(competitor_evidence(_own_words(snap, company)) or any(map(competitor_in_post, posts))
                     or competitor_in_post(company.description))
 
     def _return_lead(self, session: Session, lead: Lead, company: Company) -> None:

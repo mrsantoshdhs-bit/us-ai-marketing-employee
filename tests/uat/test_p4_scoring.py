@@ -456,3 +456,13 @@ def test_a_post_saying_it_is_such_a_firm_still_counts(post):
 
 def test_engineering_services_of_another_trade_are_no_competitor():
     assert competitor_evidence("An environmental services and consulting company.") is None
+
+
+def test_a_flag_shown_only_by_the_homepage_title_stays(make_ctx):
+    ctx = make_ctx()
+    a, ca = _flagged_lead(ctx, own_words="We help teams.")
+    with ctx.db.session() as s:
+        snap = s.query(ResearchSnapshot).filter(ResearchSnapshot.company_id == ca).one()
+        snap.pages = [{"url": "https://flagged.example/", "kind": "home", "status": 200, "title": "Flagged | Custom AI development"}]
+    _review(ctx)
+    assert _state(ctx, a, ca)[:2] == (True, "disqualified")
