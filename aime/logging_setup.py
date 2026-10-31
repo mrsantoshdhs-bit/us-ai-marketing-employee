@@ -17,6 +17,29 @@ from typing import Any
 from aime.redact import RedactingFilter
 
 _CONFIGURED: set[str] = set()
+ROTATE_RETRY_SECONDS = 60.0
+
+
+class KeepingRotatingHandler(RotatingFileHandler):
+    """The standard handler moves the older logs along first and only then finds that another process holds the current one: on
+    Windows the line is lost and the oldest log with it, again at every line. Here the current file moves aside first (see
+    `rotate`): while it is held nothing moves, the older logs stay, and lines keep going onto the end of it."""
+
+    _next_try = 0.0
+
+    def shouldRollover(self, record: logging.LogRecord) -> int:
+        if time.monotonic() < self._next_try:  # it was held a moment ago: not at every line
+            return 0
+        return super().shouldRollover(record)
+
+    def doRollover(self) -> None:
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+        if not rotate(Path(self.baseFilename), 0, self.backupCount):  # it is due: the handler has judged the size
+            self._next_try = time.monotonic() + ROTATE_RETRY_SECONDS
+        if not self.delay:
+            self.stream = self._open()
 
 
 def setup_logging(logs_dir: Path, level: int = logging.INFO) -> None:
@@ -27,7 +50,7 @@ def setup_logging(logs_dir: Path, level: int = logging.INFO) -> None:
     logger = logging.getLogger("aime")
     logger.setLevel(level)
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    file_handler = RotatingFileHandler(logs_dir / "aime.log", maxBytes=2_000_000, backupCount=5, encoding="utf-8")
+    file_handler = KeepingRotatingHandler(logs_dir / "aime.log", maxBytes=2_000_000, backupCount=5, encoding="utf-8")
     file_handler.setFormatter(fmt)
     file_handler.addFilter(RedactingFilter())
     logger.addHandler(file_handler)
@@ -72,11 +95,23 @@ def _shift_older_copies(path: Path, moving: Path, keep: int) -> None:
     moving.replace(path.with_name(f"{path.name}.1"))
 
 
+_UNWRITABLE: set[str] = set()
+
+
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rotate(path)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, default=str) + "\n")
+    """A log that cannot be written (held by Excel, a full disk) must not stop the work it records: said once, in words."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rotate(path)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, default=str) + "\n")
+        _UNWRITABLE.discard(str(path))
+    except OSError as exc:
+        if str(path) not in _UNWRITABLE:
+            _UNWRITABLE.add(str(path))
+            logging.getLogger("aime.logging").warning(
+                "The log file %s cannot be written (%s): the work goes on, but its lines there are missing until another program "
+                "lets go of the file or the disk has room again", path, type(exc).__name__)
 
 
 DASHBOARD_LOG_MAX_BYTES = 5_000_000
