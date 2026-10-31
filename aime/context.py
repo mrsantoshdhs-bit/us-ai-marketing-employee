@@ -7,6 +7,7 @@ import logging
 import socket
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpcore
@@ -138,6 +139,11 @@ class DataRoleMismatch(RuntimeError):
     pass
 
 
+class DatabaseMissing(RuntimeError):
+    """Production's database is gone while its backups are there. An empty one in its place would look healthy, with the
+    do-not-contact list gone and the first-account page open to anyone."""
+
+
 def _has_data(db: Database) -> bool:
     """Any record in any table: posts, tokens or history are worth a backup even with no company on file."""
     from sqlalchemy import inspect, text
@@ -147,7 +153,21 @@ def _has_data(db: Database) -> bool:
         return any(conn.execute(text(f'SELECT 1 FROM "{t}" LIMIT 1')).first() for t in tables)  # noqa: S608
 
 
+def _refuse_a_lost_database(db: Database, settings: Settings) -> None:
+    """A brand-new install (no backups) starts empty, as ever."""
+    path = Path(db.engine.url.database or "")
+    if not settings.is_production or not db.engine.url.database or (path.exists() and path.stat().st_size > 0):
+        return
+    backups = [p for p in settings.backups_dir.glob("aime-*.db") if p.stat().st_size > 0]
+    if backups:
+        db.dispose()
+        raise DatabaseMissing(f"The database {path} is missing, and {len(backups)} backup(s) exist in {settings.backups_dir}. "
+                              "Nothing was started and no empty database was created. See what can be restored with "
+                              "`python -m aime doctor`, then run `python -m aime restore --from <backup file>`.")
+
+
 def create_context(settings: Settings | None = None, http_transport: httpx.BaseTransport | None = None) -> AppContext:
+    from aime import send_journal
     from aime.db import kv_get, kv_set
     from aime.migrations import migrate
 
@@ -155,6 +175,7 @@ def create_context(settings: Settings | None = None, http_transport: httpx.BaseT
     settings.ensure_dirs()
     setup_logging(settings.logs_dir)
     db = Database(settings.database_url)
+    _refuse_a_lost_database(db, settings)
     migrate(db.engine, settings.backups_dir, has_data=_has_data(db))
     with db.session() as s:
         role = kv_get(s, "db_role")
@@ -165,6 +186,7 @@ def create_context(settings: Settings | None = None, http_transport: httpx.BaseT
             raise DataRoleMismatch(
                 f"Database at {settings.database_url} is a '{role}' database but settings say "
                 f"'{settings.data_role}'. Refusing to mix real and sample data.")
+    send_journal.start(db, settings)
     with db.session() as s:  # the Super Admin's sales settings, laid over config/business.toml
         from aime import admin_settings
         admin_settings.load(s, settings)

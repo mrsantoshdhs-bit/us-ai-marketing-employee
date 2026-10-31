@@ -57,11 +57,18 @@ def protect(value: str) -> str:
     return "plain:" + value
 
 
+class SecretUnreadable(OSError, RuntimeError):
+    """Encrypted on another PC or under another Windows password, or damaged: only entering it again helps."""
+
+
 def unprotect(stored: str) -> str:
     if stored.startswith("dpapi:"):
         if os.name != "nt":
-            raise RuntimeError("Secret was encrypted with Windows DPAPI on another machine; reconnect the integration")
-        return _dpapi(base64.b64decode(stored[6:]), False).decode("utf-8")
+            raise SecretUnreadable("Secret was encrypted with Windows DPAPI on another machine; reconnect the integration")
+        try:
+            return _dpapi(base64.b64decode(stored[6:]), False).decode("utf-8")
+        except (OSError, ValueError) as exc:
+            raise SecretUnreadable("Secret cannot be read on this PC or under this Windows account; enter it again") from exc
     if stored.startswith("plain:"):
         return stored[6:]
     return stored  # legacy plaintext

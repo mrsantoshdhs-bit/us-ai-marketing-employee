@@ -62,7 +62,8 @@ def integration_statuses(ctx: AppContext, session: Session, include_scheduler: b
 
     ready, reason = mail_accounts.sending_status(session, s)  # the Mailboxes panel's primary mailbox, else .env
     rows.append({"name": "Outbound email (approved replies and outreach)", "state": "READY" if ready else
-                 ("DISABLED" if "DISABLED" in reason else "NOT CONFIGURED"), "detail": reason, "action": ""})
+                 ("ON HOLD" if reason.startswith("ON HOLD") else "DISABLED" if "DISABLED" in reason else "NOT CONFIGURED"),
+                 "detail": reason, "action": ""})
     reading, where = mail_accounts.reading_status(session, s)
     rows.append({"name": "Sales mailbox (replies, bounces)", "state": "CONFIGURED" if reading else "NOT CONFIGURED",
                  "detail": where, "action": ""})

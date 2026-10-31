@@ -81,10 +81,13 @@ alert). If no slot is free it is never published late: it returns to "awaiting a
 ## Backups and restore
 
 - `db_maintenance` (daily 06:15) writes an online backup to `data/backups/`, **verifies it** (integrity
-  and table counts) and keeps 14. Pre-deploy and manual backups are never pruned.
+  and table counts) and keeps 14. Once a week it also restores the newest copy into a temporary folder and checks it.
+- Manual, pre-deploy and pre-migration copies are kept for at least 30 days. After that the newest 20
+  (`BACKUP_KEEP_MANUAL`; 0 keeps every one) and the newest 5 pre-deploy copies stay, and the last copy that still
+  verifies is never removed.
 - **Off-machine copy (optional):** set `BACKUP_OFFSITE_DIR` (e.g. `C:\Users\<you>\OneDrive\AIME-Backups`)
-  and `BACKUP_PASSPHRASE` (12+ characters) in `.env`. Each day an encrypted bundle (database, publish
-  journal, post images, config, SHA-256 manifest; never `.env`) is written there and test-decrypted;
+  and `BACKUP_PASSPHRASE` (12+ characters) in `.env`. Each day an encrypted bundle (database, publish and sent
+  journals, post images, config, SHA-256 manifest; never `.env`) is written there and test-decrypted;
   the last 30 copies are kept. **Store the passphrase in your password manager: without it the copies
   cannot be read.**
 - Manual: `backup --label before-change` (add `--offsite` for an encrypted copy too);
@@ -92,13 +95,53 @@ alert). If no slot is free it is never published late: it returns to "awaiting a
 - An encrypted copy only counts as off-machine when the folder really leaves the PC. `doctor` checks that a
   signed-in OneDrive account syncs `BACKUP_OFFSITE_DIR` ("Off-machine folder leaves this PC"); on 27 Oct
   OneDrive was installed but not signed in, so the folder was local only.
-- `doctor` warns while the off-machine copy is not configured (folder or passphrase missing).
+- `doctor` warns while the off-machine copy is not configured (folder or passphrase missing), and when under 2 GB
+  of disk is free. `doctor` also opens the newest verified backup each time, and names the next good copy if it has gone bad.
 - **Restore drill:** `restore-drill` (latest local backup) or `restore-drill --source <file.aimebak>`
   restores into a temporary folder and checks it. It never writes to `data/`.
-- Restore: `maintenance on`, copy the chosen backup over `data/aime.db` (delete `aime.db-wal` and
-  `aime.db-shm` first), run `doctor`, then `maintenance off`. For an encrypted copy, first run
-  `restore-drill --source <file.aimebak> --extract-to C:\restore-check` (a new folder outside `data/`),
-  then restore the checked `aime.db`, `publish_journal.jsonl` and `assets/` from that folder.
+
+### Restoring a backup
+
+**Choose the backup.** `doctor` names the newest copy that passes its check today. Take the newest one from before the
+trouble began; `backup-verify <file>` checks any other. Every restore loses what happened after that copy was made.
+
+**Run:**
+
+1. Stop the dashboard: end the `AIMarketingEmployee-Dashboard` task in Task Scheduler, or close its window. With the
+   dashboard running, its `-wal` file cannot be deleted on Windows and would damage the restored database.
+2. `python -m aime restore --from <file> --confirm`. It refuses while the dashboard or a run is using the file. It
+   starts a maintenance window, keeps a copy of the present database in the backups folder (`aime-pre-restore-*`, or
+   `damaged-*` if it is damaged), removes the `-wal` and `-shm` files, puts the backup in place, checks it, applies newer
+   schema, and holds sending. It takes a `.db`, a `.zip` bundle or an encrypted `.aimebak`.
+3. Read what it prints, then your **Sent folder**, then Follow-ups.
+4. `python -m aime confirm-sending`, once you have looked.
+5. `python -m aime maintenance off`. The tasks start the work and the dashboard again.
+
+**What comes back to life, and how each is handled:**
+
+- **Approved emails.** An email sent after the backup is "approved" again in the restored database, and would go out
+  twice. Each email is recorded in `data/sent_journal.jsonl` before it goes to the mail server; that file is outside
+  `aime.db` and a restore leaves it alone. An email it names is not sent again: it goes to Follow-ups, where a person
+  checks the Sent folder, then marks it sent or requeues it. Sending is held for everything until `confirm-sending`, also
+  when a database was copied back by hand: the record knowing more than the database is how it is found.
+- **Do-not-contact entries and edits** made after the backup are gone. Replies, opt-outs and bounces are read again from the
+  mailbox, because the reading position went back too; anything entered by hand must be entered again.
+- **Mailbox passwords.** They are encrypted for this Windows account on this PC (DPAPI). After a Windows password reset or on
+  another PC they cannot be read: pages say so, one alert says so, nothing signs in, and the rest of the work goes on.
+  Re-enter the password on Administration > Mailboxes. LinkedIn and other connections are connected again the same way.
+
+**A new PC** needs: the code (`git clone`) and its `.venv`, your `.env` from the password manager, an encrypted copy
+and `BACKUP_PASSPHRASE`, and the tasks (`scheduler install`, `install-watchdog`, `install-dashboard`). An encrypted copy
+holds the sent record of its own day only, so what went out after it is unknown: check the Sent folder before confirming.
+
+**Damaged or missing database.** `maintenance`, `doctor`, `status`, `restore-drill`, `backup-verify` and `restore` work
+without the database, and `doctor` gives the next step. With a missing `aime.db` on production while backups exist,
+nothing starts and no empty database is created (to start empty on purpose, move the backups folder away). A database that
+fails its integrity check holds sending the same way as a restore; after `confirm-sending` only a different result holds it again.
+
+**A wrong clock.** A check-in stops before any work, with one alert naming the clock, when the clock is more than 14 days past the
+last check-in or earlier than the newest record: on a wrong date, work changes records for good. Correct the clock and it
+resumes by itself. If the clock is right (a holiday longer than two weeks), run `python -m aime confirm-clock`.
 
 ## Scheduler recovery
 

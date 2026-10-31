@@ -28,6 +28,9 @@ NOT_A_PERSON = {"marketing_manager", "research", "company_research", "linkedin_c
 CLOSED_STAGES = ("not_interested", "no_response", "reengage")
 
 
+WRITE_BATCH = 50  # leads saved at a time: at about 5 ms a lead, a click waits a quarter of a second at most
+
+
 class QualifyInput(BaseModel):
     lead_ids: list[int] | None = None
     rescore_all: bool = False
@@ -161,6 +164,8 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                 log_activity(session, f"Lead {prev_status} → {lead.status} (score {result.total}, grade {result.grade})",
                              self.name, type_="status_change", company_id=company.id, lead_id=lead.id)
                 moved[lead.status] += 1
+            if out.scored % WRITE_BATCH == 0:  # the write lock is not held for the whole run: clicks wait for no one
+                session.commit()
         if moved:
             words = ", ".join(f"{n} to {status}" for status, n in sorted(moved.items()))
             alert_once(session, "info", self.name, f"Scoring moved {sum(moved.values())} lead(s): {words}. Each lead's page "

@@ -249,7 +249,7 @@ class Settings:
     # wait for a person. CALENDLY_FORWARDERS: extra addresses allowed to forward notices (comma-separated).
     calendly_verified_only: bool = True
     llm_cost_per_1k_tokens: float = 0.0
-    backup_keep_manual: int = 0  # manual and pre-deploy copies to keep (older than 30 days); 0 keeps every one  # the local model is free; for a provider that charges per token
+    backup_keep_manual: int = 20  # manual and pre-deploy copies to keep once older than 30 days; 0 keeps every one
     # Let the local model write the personal opening line of a reply draft, checked for prices, promises and claims;
     # anything doubtful falls back to the template. Off by default.
     ai_email_drafts: bool = False

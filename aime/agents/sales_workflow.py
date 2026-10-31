@@ -23,7 +23,7 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent, RetryPolicy
-from aime import automation
+from aime import automation, send_journal
 from aime.agents.contracts import BlockedItem
 from aime.agents.qualification import LeadQualificationAgent
 from aime.calendar_slots import holiday_on
@@ -49,6 +49,9 @@ CONSENTED = ("inquiry", "opt_in")
 OPEN_FOLLOWUP = ("pending", "awaiting_approval", "approved", "sending", "uncertain")
 COUNTS_AS_SENT = ("sent", "sending", "uncertain")  # for the daily limits: an uncertain email may have gone out
 SEND_BUSY = "Another run is sending emails right now; this one goes out on the next run"
+# What certainly delivered nothing: the server refused it, it never connected, or the message could not be built.
+NOT_DELIVERED = (smtplib.SMTPRecipientsRefused, EmailNotReady, smtplib.SMTPSenderRefused, smtplib.SMTPConnectError,
+                 smtplib.SMTPAuthenticationError, ConnectionRefusedError, socket.gaierror, ValueError)
 # A refusal that says the address itself does not exist (RFC 3463 5.1.x, not those about our own sender address).
 DEAD_ADDRESS = re.compile(r"\b5\.1\.(0|1|2|3|6|10)\b|no such|user unknown|unknown user|does not exist|address not found|"
                           r"no mailbox|mailbox not found|recipient not found|invalid recipient", re.I)
@@ -445,6 +448,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
         due = select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "approved",
                                      FollowUp.approved_at.is_not(None), FollowUp.due_at <= now)
+        if self._sending_held(session, due, now, out):
+            return
         ready, _ = self.sender.status()
         automation.observe_sending(session, self.settings.outbound_email_enabled, now)  # the switch, not readiness
         if not send:
@@ -490,6 +495,38 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         finally:
             lock.release()
 
+    def _sending_held(self, session: Session, due, now: datetime, out: SalesOutput) -> bool:
+        """A restored or damaged database: nothing goes out, and no campaign approves anything, until a person has looked."""
+        something_to_send = session.execute(due.limit(1)).first() or not self.settings.require_human_approval
+        why = send_journal.why_held(self.ctx, session, check_integrity=bool(something_to_send), source=self.name)
+        if not why:
+            return False
+        automation.observe_sending(session, self.settings.outbound_email_enabled, now)
+        for f in session.execute(due).scalars():
+            f.blocked_reason = send_journal.row_message()
+            out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+        return True
+
+    def _deliver(self, session: Session, f: FollowUp, to: str, *args, **kwargs) -> str:
+        """Hand one email to the mail server, with the record outside the database written first. A send that certainly
+        delivered nothing takes the record back, so the retry is no repeat; anything else leaves it for a restore to find.
+        A record that cannot be written stops this send and leaves the email approved."""
+        data = self.settings.data_dir
+        try:
+            send_journal.record_claim(data, f.id, to, f.message_id)
+        except OSError as exc:
+            raise EmailNotReady(f"the record of sent emails cannot be written ({type(exc).__name__}), so nothing left") from exc
+        try:
+            msg_id = self.sender.send(to, *args, **kwargs)
+        except NOT_DELIVERED:
+            send_journal.record_released(data, f.id, to)  # if this fails too: "delivery unknown", for a person
+            raise
+        session.refresh(f)  # the PC may have slept inside the mail conversation: another run then called it interrupted
+        if f.status == "uncertain":
+            session.execute(update(Alert).where(Alert.message.like(f"Follow-up #{f.id}:%"), Alert.acknowledged.is_(False)).values(
+                acknowledged=True, resolved_at=utcnow()))
+        return msg_id
+
     def _send_locked(self, session: Session, approved: list[FollowUp], now: datetime, cfg: dict,
                      out: SalesOutput) -> None:
         ready, reason = self.sender.status()
@@ -497,6 +534,12 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         limits = self._outreach_limits(session, now, cfg)
         sign_in_failed = False
         for f in approved:
+            went_out = send_journal.claim_for(send_journal.read(self.settings.data_dir), f)
+            if went_out:  # the record outside the database says it left already: never again without a person
+                send_journal.mark_for_a_person(session, f, went_out, self.name)
+                out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+                session.commit()
+                continue
             contact = f.contact
             lead = f.lead
             test_auth = None  # the authorization a given test contact's email goes out under
@@ -604,8 +647,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 continue
             session.refresh(f)
             try:
-                msg_id = self.sender.send(f.to_email or contact.email, f.subject, f.body or "", in_reply_to=f.in_reply_to,
-                                          message_id=f.message_id, references=self._references(session, f))
+                msg_id = self._deliver(session, f, f.to_email or contact.email, f.subject, f.body or "", in_reply_to=f.in_reply_to,
+                                       message_id=f.message_id, references=self._references(session, f))
             except smtplib.SMTPRecipientsRefused as exc:
                 self._recipient_refused(session, f, exc, out)
                 session.commit()

@@ -10,6 +10,8 @@ import os
 import socket
 import sys
 import time
+import traceback
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,7 +50,25 @@ def ensure_output(log_path: Path) -> None:
     sys.stderr = sys.stderr or log
 
 
+def note_problem(log_path: Path, text: str) -> None:
+    """Under pythonw nothing else can show this. A log that cannot be written leaves nothing more to try."""
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n[{datetime.now().isoformat(timespec='seconds')}] {text}\n")
+    except OSError:
+        pass
+
+
 def main() -> int:
+    try:
+        return run()
+    except Exception:  # before the settings are read nothing has given this process a place to write
+        note_problem(Path(os.environ.get("AIME_DATA_DIR") or ROOT / "data") / "logs" / "dashboard.log", traceback.format_exc())
+        raise
+
+
+def run() -> int:
     from aime.process_priority import use_normal_priority
 
     use_normal_priority()  # Task Scheduler starts tasks at low priority; the dashboard answers people
@@ -59,6 +79,12 @@ def main() -> int:
     if maintenance.active(settings.data_dir):
         return 0
     if still_running(settings.dashboard_host, settings.dashboard_port):
+        from aime.dashboard_probe import page_answers
+
+        if not page_answers(settings.dashboard_host, settings.dashboard_port):  # a second copy could not take the port
+            note_problem(settings.data_dir / "logs" / "dashboard.log",
+                         f"Port {settings.dashboard_port} accepts connections but gives no page: another program holds it, or "
+                         "a dashboard that was not started by this task has hung. Nothing was started.")
         return 0
     ensure_output(settings.data_dir / "logs" / "dashboard.log")
     from aime.cli import main as cli_main

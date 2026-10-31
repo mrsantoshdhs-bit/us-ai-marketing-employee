@@ -30,6 +30,7 @@ from aime.integrations.linkedin import (LinkedInAPIError, LinkedInAuthStatus, Li
                                         format_commentary, get_auth_status, get_token, normalize_commentary,
                                         post_url)
 from aime.models import ContentItem, PublishAttempt
+from aime import send_journal
 from aime.publish_journal import confirmed, record_success
 from aime.redact import redact
 from aime.timeutil import utcnow
@@ -87,6 +88,9 @@ class AuthorizedPublishingAgent(BaseAgent[PublishInput, PublishOutput]):
         out = PublishOutput(can_publish=auth.can_publish, authorization=auth.reason)
 
         self._reconcile(session, now, auth, out)
+        if send_journal.hold(self.settings.data_dir):  # a restored or damaged database: a person looks first
+            out.can_publish, out.authorization = False, send_journal.row_message()
+            return out
 
         # "approved" without an approval record (e.g. set directly in the database) is not an approval.
         for item in session.execute(select(ContentItem).where(

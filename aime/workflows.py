@@ -13,8 +13,8 @@ from aime.agents import (AnalyticsReportingAgent, AuthorizedPublishingAgent, Com
                          LeadQualificationAgent, LinkedInContentAgent, MarketingManagerAgent, SalesWorkflowAgent,
                          USBusinessResearchAgent)
 from aime.agents.base import AgentResult
-from aime.backup import (backup_sqlite_file, checkpoint, integrity_check, prune_backups, verify_backup,
-                         write_offsite)
+from aime.backup import (PREDEPLOY_KEPT, backup_sqlite_file, checkpoint, integrity_check, prune_backups, verify_backup,
+                         weekly_restore_drill, write_offsite)
 from aime.context import AppContext
 from aime.db import kv_get, kv_set
 from aime.doctor import run_checks
@@ -220,7 +220,8 @@ def job_db_maintenance(ctx: AppContext, job: str = "db_maintenance") -> JobOutco
         from aime.backup import prune_manual_backups
 
         pruned = prune_backups(s.backups_dir, label="auto", keep=14)
-        pruned += len(prune_manual_backups(s.backups_dir, int(getattr(s, "backup_keep_manual", 0) or 0)))  # opt-in
+        pruned += len(prune_manual_backups(s.backups_dir, int(getattr(s, "backup_keep_manual", 0) or 0),
+                                           keep_predeploy=PREDEPLOY_KEPT))
     check = integrity_check(ctx.db)
     # Only with a good backup of what is about to go, and a sound database.
     history_pruned = prune_run_history(ctx) if check["ok"] and (verified is None or verified["ok"]) else 0
@@ -257,6 +258,10 @@ def job_db_maintenance(ctx: AppContext, job: str = "db_maintenance") -> JobOutco
             off_step["error"] = offsite["reason"]
             out.failed = True
         out.steps.append(off_step)
+    drill = weekly_restore_drill(ctx) if db_path else None
+    if drill:
+        out.failed = out.failed or drill["status"] != "success"
+        out.steps.append(drill)
     return out
 
 
@@ -264,7 +269,7 @@ def job_monitor(ctx: AppContext, job: str = "monitor") -> JobOutcome:
     out = JobOutcome()
     with ctx.db.session() as s:
         summary = check_health(s, ctx.settings)
-    failing = [c for c in run_checks(ctx) if not c["ok"]]
+    failing = [c for c in run_checks(ctx) if not c["ok"] and not c.get("own_alert")]  # one problem, one alert
     with ctx.db.session() as s:
         for c in failing:
             created = alert_once(s, "error" if c["severity"] == "error" else "warning", "doctor",

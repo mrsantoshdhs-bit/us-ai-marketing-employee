@@ -87,7 +87,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                     with self.ctx.http() as http:
                         return oauth.access_token(session, self.settings, http, "microsoft", "mail", account=account)
             out.append((f"{a.email} / {a.imap_folder}", Mailbox(mail_accounts.settings_for(self.settings, a),
-                                                                  imap_factory=self.imap_factory),
+                                                                  imap_factory=mail_accounts.imap_factory_for(a, self.imap_factory)),
                         f"inbox.state.mailbox{a.id}", token))
         return out
 

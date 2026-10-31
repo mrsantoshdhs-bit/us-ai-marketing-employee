@@ -80,9 +80,13 @@ def session_secret(data_dir) -> bytes:
     key = str(data_dir)
     if key not in _SECRETS:
         path = data_dir / "session.key"
+        raw = None
         if path.exists():
-            raw = base64.b64decode(unprotect(path.read_text(encoding="utf-8").strip()))
-        else:
+            try:
+                raw = base64.b64decode(unprotect(path.read_text(encoding="utf-8").strip()))
+            except (OSError, ValueError, RuntimeError):  # another PC, a Windows password reset: everyone signs in again
+                raw = None
+        if raw is None:
             raw = os.urandom(32)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(protect(base64.b64encode(raw).decode()), encoding="utf-8")
