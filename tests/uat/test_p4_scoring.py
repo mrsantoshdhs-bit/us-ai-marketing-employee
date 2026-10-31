@@ -86,8 +86,9 @@ def _status(ctx, lead_id):
 
 @pytest.fixture
 def clock():
-    yield tu
-    tu.CLOCK_OFFSET = timedelta(0)
+    before = tu.CLOCK_OFFSET  # the session's test day: later tests run on it
+    yield before
+    tu.CLOCK_OFFSET = before
 
 
 def test_a_lead_is_not_qualified_for_one_day_only(make_ctx, clock):
@@ -95,7 +96,7 @@ def test_a_lead_is_not_qualified_for_one_day_only(make_ctx, clock):
     lead_id, _ = _hn_lead(ctx, days_old=60)
     LeadQualificationAgent(ctx).run({"rescore_all": True})
     first = _status(ctx, lead_id)
-    tu.CLOCK_OFFSET = timedelta(days=1)
+    tu.CLOCK_OFFSET = clock + timedelta(days=1)
     LeadQualificationAgent(ctx).run({"rescore_all": True})
     second = _status(ctx, lead_id)
     assert first[0] == second[0], f"qualified and dropped again in 24 hours: {first} then {second}"
@@ -130,7 +131,7 @@ def test_yesterdays_unread_moves_are_not_overwritten_by_todays(make_ctx, clock):
     ctx = make_ctx()
     a, _ = _hn_lead(ctx, days_old=5, status="new")
     LeadQualificationAgent(ctx).run({"rescore_all": True})
-    tu.CLOCK_OFFSET = timedelta(days=1)
+    tu.CLOCK_OFFSET = clock + timedelta(days=1)
     with ctx.db.session() as s:
         c = Company(name="Other Co", normalized_name="other co", state="TX", country="ZZ", source="hn_hiring")
         s.add(c)
