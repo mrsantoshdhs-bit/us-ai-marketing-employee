@@ -57,7 +57,7 @@ def protect(value: str) -> str:
     return "plain:" + value
 
 
-class SecretUnreadable(RuntimeError):
+class SecretUnreadable(OSError, RuntimeError):
     """Encrypted on another PC or under another Windows password, or damaged: only entering it again helps."""
 
 

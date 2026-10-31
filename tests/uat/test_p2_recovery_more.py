@@ -677,6 +677,16 @@ def test_the_mailboxes_page_says_it_plainly(make_ctx, monkeypatch):
     assert "dpapi" not in json.dumps(shown, default=str)
 
 
+def test_a_sign_in_key_from_another_pc_only_signs_everyone_out(tmp_path, monkeypatch):
+    from aime.web import auth
+
+    (tmp_path / "session.key").write_text("dpapi:AAAA", encoding="utf-8")
+    monkeypatch.setattr(auth, "unprotect", cannot_read)
+    monkeypatch.setattr(auth, "protect", lambda v: "plain:" + v)
+    assert len(auth.session_secret(tmp_path)) == 32
+    assert (tmp_path / "session.key").read_text(encoding="utf-8").startswith("plain:")
+
+
 # ---------------------------------------------------------------------------------------- the dashboard looking after itself
 def test_a_hung_dashboard_ends_itself_only_after_it_has_answered_once(tmp_path):
     from aime import dashboard_probe as dp

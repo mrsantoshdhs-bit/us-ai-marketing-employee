@@ -203,8 +203,12 @@ def pid_started(pid: int) -> float | None:
         finally:
             kernel32.CloseHandle(wintypes.HANDLE(handle))
     try:
-        return os.stat(f"/proc/{pid}").st_mtime
-    except OSError:
+        with open(f"/proc/{pid}/stat", encoding="ascii", errors="replace") as fh:
+            ticks = int(fh.read().rsplit(")", 1)[1].split()[19])  # field 22, after the name that may hold spaces
+        with open("/proc/stat", encoding="ascii", errors="replace") as fh:
+            booted = next(int(line.split()[1]) for line in fh if line.startswith("btime "))
+        return booted + ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError, StopIteration, AttributeError):  # no /proc here: it cannot be told
         return None
 
 

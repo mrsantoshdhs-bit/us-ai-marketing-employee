@@ -57,7 +57,7 @@ def _stored_password(a: MailAccount) -> str | None:
     """The app password, or None when it cannot be read here (restored on another PC, Windows password reset)."""
     try:
         return unprotect(a.secret)
-    except (OSError, ValueError, SecretUnreadable):
+    except (OSError, ValueError, RuntimeError):  # on another PC, or damaged
         return None
 
 

@@ -548,6 +548,10 @@ def cmd_restore(args, settings) -> int:
     except RestoreRefused as exc:
         print(f"Restore refused: {exc}")
         return 1
+    except (SQLAlchemyError, sqlite3.Error, RuntimeError) as exc:
+        print(f"The backup is in place and sending is on hold, but the database could not be started: {redact_error(exc)}. "
+              "Run `python -m aime doctor`.")
+        return 1
     print(f"Restored from {done['source']}.")
     if done["kept"]:
         print(f"The database it replaced is kept as {done['kept']} in the backups folder.")

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DatabaseError
 
 from aime import clock_check, maintenance, send_journal
@@ -87,7 +88,7 @@ def restore_advice(settings) -> str:
 
 def checks_without_database(settings, problem: Exception) -> list[dict]:
     """What doctor can say when the database cannot even be opened: that, why, and what to do next."""
-    missing = not Path(settings.database_url.removeprefix("sqlite:///")).exists()
+    missing = not Path(make_url(settings.database_url).database or "").exists()
     busy = "locked" in str(problem).lower()
     what = ("is missing" if missing else "is busy: another process has held it for too long; try again" if busy
             else "is damaged and cannot be opened (not a database, or its integrity check cannot run)")

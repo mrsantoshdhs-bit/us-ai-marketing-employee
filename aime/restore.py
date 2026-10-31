@@ -15,6 +15,9 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+from sqlalchemy import func, select
+from sqlalchemy.engine import make_url
+
 from aime import maintenance, send_journal
 from aime.backup import BackupError, backup_sqlite_file, integrity_of_file, newest_good_backup, restore_drill, verify_backup
 
@@ -26,10 +29,10 @@ class RestoreRefused(Exception):
 
 
 def _db_path(settings) -> Path:
-    url = settings.database_url
-    if not url.startswith("sqlite:///"):
+    url = make_url(settings.database_url)
+    if url.get_backend_name() != "sqlite" or not url.database:
         raise RestoreRefused("Only a SQLite database can be restored with this command")
-    return Path(url.removeprefix("sqlite:///"))
+    return Path(url.database)
 
 
 def _port_open(host: str, port: int) -> bool:
@@ -182,6 +185,7 @@ def restore_database(settings, source: Path) -> dict:
                 maintenance.stop(settings.data_dir)
             raise
         # From here on the database changes: sending is held first, so a crash half way sends nothing either.
+        hold_was_on = send_journal.hold(settings.data_dir) is not None
         send_journal.set_hold(settings.data_dir, "restored", f"the database was restored from {source.name} and has forgotten "
                               "what it sent after that backup: check the Sent folder")
         incoming = db.with_name(db.name + ".restoring")
@@ -189,6 +193,10 @@ def restore_database(settings, source: Path) -> dict:
         check = integrity_of_file(incoming)
         if check != "ok":
             incoming.unlink(missing_ok=True)
+            if not window_was_on:
+                maintenance.stop(settings.data_dir)
+            if not hold_was_on:
+                send_journal.clear_hold(settings.data_dir)
             raise RestoreRefused(f"The copy of {source.name} failed its check ({check}). The present database was not replaced.")
         for side in SIDE_FILES:
             db.with_name(db.name + side).unlink(missing_ok=True)
@@ -202,8 +210,6 @@ def restore_database(settings, source: Path) -> dict:
         with ctx.db.session() as s:
             view = send_journal.read(settings.data_dir)
             already = send_journal.review_rows(s, view, "restore")
-            from sqlalchemy import func, select
-
             waiting = s.execute(select(func.count(FollowUp.id)).where(FollowUp.channel == "email", FollowUp.status == "approved")).scalar_one()
             log_activity(s, f"Database restored from {source.name}; sending held until a person confirms", "command line", type_="security")
         checks = [c for c in run_checks(ctx) if not c["ok"] and c["severity"] == "error"]
