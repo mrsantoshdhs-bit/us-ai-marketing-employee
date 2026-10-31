@@ -5,6 +5,7 @@ a decision is needed. Run by the Sales Workflow Agent (followups job).
 - No response: the outreach sequence ended (all sent, the next step rejected, or the lead parked) and nobody replied
   for `no_response_days` after the last email -> outreach stage "no_response", lead to nurture (no further email).
 - Meeting held: a scheduled meeting ended more than two hours ago -> a task to record the outcome.
+- A deal's next step about a waiting reply follows that reply: sent, gone, or a new one waiting.
 - A stage nothing is behind any more ("drafted" or "approved" with no email left) closes, and says so in Activity.
 - Emails waiting for a person: one reminder that stays open while any has waited `draft_reminder_days`; one waiting
   `draft_fresh_days` says it should be read again. It is never cancelled or sent by this: approving it is the fresh look.
@@ -15,7 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from aime.crm_ops import log_activity
@@ -75,12 +76,38 @@ def _remind_about_drafts(session: Session, settings, actor: str) -> None:
         resolve_alerts(session, (DRAFTS_ALERT,), set())
 
 
+# The next steps written by the system about a reply to a person who wrote to us (aime.reply_intel, the Sales Workflow
+# Agent), and what is true once that reply went out or is gone. A next step a person typed is none of these and stays.
+ASKS_FOR_APPROVAL = ("Book a meeting: approve the suggested reply with your booking link", "Review the drafted reply and send once approved")
+REPLY_WAITING = "Read the reply waiting on Follow-ups, then approve or reject it"
+REPLY_SENT = "Reply sent: wait for their answer, or log the meeting when one is booked"
+NO_REPLY = "No reply went out and none is waiting: decide the next step"
+
+
+def settle_next_steps(session: Session, lead_id: int | None = None) -> None:
+    """A deal's next step says what is true now. Its last change stays as it was: this is no activity on the deal, and the
+    stalled check below must not read it as such."""
+    stmt = select(Opportunity).where(Opportunity.stage.not_in(("won", "lost")), Opportunity.lead_id.is_not(None),
+                                     Opportunity.next_step.in_((*ASKS_FOR_APPROVAL, REPLY_WAITING, REPLY_SENT, NO_REPLY)))
+    for opp in session.execute(stmt.where(Opportunity.lead_id == lead_id) if lead_id else stmt).scalars().all():
+        emails = set(session.execute(select(FollowUp.status).where(
+            FollowUp.lead_id == opp.lead_id, FollowUp.channel == "email",
+            or_(FollowUp.kind.is_(None), FollowUp.kind == "response"))).scalars())
+        if emails & set(OPEN):
+            true_now = opp.next_step if opp.next_step in ASKS_FOR_APPROVAL else REPLY_WAITING
+        else:
+            true_now = REPLY_SENT if "sent" in emails else NO_REPLY
+        if true_now != opp.next_step:
+            session.execute(update(Opportunity).where(Opportunity.id == opp.id).values(next_step=true_now, updated_at=opp.updated_at))
+
+
 def pipeline_checks(session: Session, settings, now: datetime, actor: str) -> dict:
     cfg = settings.section("pipeline")
     stalled_days = int(cfg.get("stalled_days", 10))
     wait_days = int(cfg.get("no_response_days", 7))
     stats = {"stalled_tasks": 0, "no_response": 0, "meeting_tasks": 0}
 
+    settle_next_steps(session)
     for opp in session.execute(select(Opportunity).where(Opportunity.stage.not_in(("won", "lost")))).scalars().all():
         # two indexed lookups: an OR of the two columns makes SQLite scan every activity for each deal
         by_opp = session.execute(select(func.max(Activity.created_at)).where(Activity.opportunity_id == opp.id)).scalar_one()

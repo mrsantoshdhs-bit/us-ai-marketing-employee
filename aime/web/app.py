@@ -56,7 +56,8 @@ from aime.qc import summary as qc_summary
 from aime.reply_intel import skipped_mail as reply_skipped_mail
 from aime.outreach import REACHED_PROSPECT, STOPPABLE_STAGES, after_reopen, cancel_queued, record_delivery, reopen_refusal, reopen_stopped
 from aime.outreach import set_status as set_outreach_status
-from aime.outreach import stop_sequence
+from aime.outreach import outreach_footer, stop_sequence
+from aime.pipeline import settle_next_steps
 from aime.qc.checks import run_quality_checks
 from aime.qc.email_checks import run_email_checks
 from aime.reply_intel import INTENT_LABELS, QUESTION_PLACEHOLDER
@@ -1311,6 +1312,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 raise HTTPException(400, "Action not allowed in the current state")
             log_activity(s, f"Follow-up #{f.id} {action}", who(request), type_="followup", company_id=f.company_id,
                          lead_id=f.lead_id)
+            if f.lead_id and action in ("reject", "mark_sent"):
+                settle_next_steps(s, f.lead_id)
             if f.channel == "email" and action in ("approve", "reject", "mark_sent", "requeue"):
                 am.audit(s, who(request), f"email_{action}", f"follow-up #{f.id}",
                          f"{f.kind or 'email'} to {am.recipient(f) or 'no address'}: {(f.subject or '')[:120]}")
