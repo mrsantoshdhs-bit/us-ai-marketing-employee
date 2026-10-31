@@ -557,13 +557,13 @@ def test_ok_image_upload_failure_is_clean_retry_not_uncertain(make_ctx):
     assert out.failed and post(ctx, cid).status == "approved" and fake.post_calls == 0
 
 
-def test_ok_overdue_post_moves_or_goes_back_to_a_person(make_ctx):
+def test_ok_overdue_post_moves_and_keeps_its_approval(make_ctx):
     fake = FakeLI()
     ctx = li_ctx(make_ctx, fake)
     late = add_post(ctx, slot_delta=timedelta(hours=-30))
     out = publish(ctx)
     assert out.rescheduled == [late] and fake.post_calls == 0 and post(ctx, late).scheduled_for > utcnow()
-    with ctx.db.session() as s:  # every slot in the horizon taken: back to a person, approval withdrawn
+    with ctx.db.session() as s:  # every slot in the horizon held by drafts: an approved post goes first, still approved
         from aime.calendar_slots import free_slots
         for sl in free_slots(s, ctx.settings):
             s.add(ContentItem(service=SERVICE, industry=INDUSTRY, title=f"f{sl}", body="b", hashtags=[], status="draft",
@@ -571,7 +571,7 @@ def test_ok_overdue_post_moves_or_goes_back_to_a_person(make_ctx):
     again = add_post(ctx, slot_delta=timedelta(hours=-30))
     publish(ctx)
     item = post(ctx, again)
-    assert item.status == "awaiting_approval" and item.approved_at is None and fake.post_calls == 0
+    assert item.status == "approved" and item.approved_at is not None and item.scheduled_for > utcnow() and fake.post_calls == 0
 
 
 def test_ok_paused_automation_holds_publishing(make_ctx):
