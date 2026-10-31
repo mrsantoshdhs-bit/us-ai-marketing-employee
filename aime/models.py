@@ -499,8 +499,11 @@ class ContentItem(Timestamped, Base):
 
     @property
     def qc(self) -> dict:
-        """Latest automated quality-check report (see aime.qc), stored in `quality`."""
-        return (self.quality or {}).get("qc") or {}
+        """Latest automated quality-check report (see aime.qc), stored in `quality`, with today's factual-claims check. Nothing is
+        written back: the stored report stays as it was."""
+        from aime.qc.checks import with_todays_claims
+
+        return with_todays_claims((self.quality or {}).get("qc") or {}, self.title or "", self.body or "")
 
     @property
     def qc_status(self) -> str:

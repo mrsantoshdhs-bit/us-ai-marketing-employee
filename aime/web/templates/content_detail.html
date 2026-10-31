@@ -30,7 +30,7 @@
       {% for ch in item.qc.checks %}<tr><td>{{ qc_pill({'pass': 'passed', 'fail': 'failed', 'uncertain': 'held'}[ch.status]) }}</td>
         <td><b>{{ ch.name }}</b></td><td class="muted">{{ ch.detail }}</td></tr>{% endfor %}
     </table>
-    <p class="small muted">Checked {{ item.qc.checked_at }} UTC · {{ item.quality.get('words') }} words
+    <p class="small muted">Checked {{ item.qc.checked_at }} UTC, factual claims again just now · {{ item.quality.get('words') }} words
       {% if item.quality.get('image') %} · image: {{ item.quality.image.renderer }} {{ item.quality.image.style }}{% endif %}</p>
     {% else %}<p class="small muted">Not checked yet (posts created before automated checks). Saving the post runs them.</p>{% endif %}
     <h3>Auto-publish policy <span class="pill warn">shadow</span></h3>
