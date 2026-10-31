@@ -8,7 +8,8 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
-from datetime import timedelta
+from collections import defaultdict
+from datetime import date, datetime, timedelta
 from typing import Annotated
 
 from fastapi import Form, HTTPException, Request
@@ -18,15 +19,59 @@ from sqlalchemy import func, select
 from aime.automation import audit
 from aime.db import take_write_lock
 from aime.knowledge.services import SERVICES
-from aime.models import Assignment, CustomRole, Lead, Opportunity, Team, User
+from aime.models import Activity, Assignment, CustomRole, FollowUp, Lead, Opportunity, Team, User
+from aime.outreach import STOP_STATUSES
 from aime.permissions import BUILTIN_ROLES, PERMISSIONS, all_roles, can_grant, permissions_of
-from aime.timeutil import as_aware_utc, to_naive_utc, utcnow
+from aime.timeutil import as_aware_utc, local_tz, to_naive_utc, utcnow
+from aime.visibility import Scope
 from aime.web.auth import form_id
 
 SETUP_HOURS = 48
 UNUSABLE_HASH = "setup-pending"  # matches no password: the account works once its owner sets one
 USERNAME_RE = re.compile(r"[a-z][a-z0-9._-]{1,59}")
 ROLE_NAME_RE = re.compile(r"[a-z][a-z0-9_]{2,29}")
+
+
+def next_email(settings, lead: Lead, fups: list[FollowUp]) -> dict:
+    """What happens next in this lead's email sequence, by the rules the sales workflow applies: {"text", "at"}; `at`, when
+    there is one, is the date the text ends on. Only a promise that nothing goes out without a person is ever made."""
+    emails = [f for f in fups if f.channel == "email"]
+    words = {"awaiting_approval": "is drafted and waits for a person's approval", "approved": "is approved and goes out in the next send window",
+             "sending": "is going out now", "uncertain": "may have gone out: check the Sent folder", "pending": "is planned"}
+    waiting = [f for f in emails if f.status in words]
+    if waiting:
+        f = min(waiting, key=lambda x: x.step or 0)
+        return {"text": f"Next email: step {f.step} {words[f.status]}", "at": None}
+    if lead.status in ("disqualified", "merged"):
+        return {"text": f"Next email: none, this lead is {lead.status}", "at": None}
+    if lead.outreach_status in STOP_STATUSES:
+        return {"text": f"Next email: none, the sequence stopped ({lead.outreach_status.replace('_', ' ')})", "at": None}
+    sent = [f for f in emails if f.status == "sent" and f.sent_at and f.kind in ("outreach", None)]
+    if not sent:
+        tasks = sorted((f for f in fups if f.channel == "task" and f.status == "pending"), key=lambda f: f.due_at)
+        if tasks:
+            return {"text": f"Next step: {tasks[0].subject}, due", "at": tasks[0].due_at}
+        return {"text": "Next email: none planned yet", "at": None}
+    last = max(sent, key=lambda f: f.step or 0)
+    intervals = list(settings.section("outreach").get("intervals_days", [0, 4, 10]) if last.kind == "outreach"
+                     else settings.section("followup").get("intervals_days", [0, 3, 7]))
+    if (last.step or 1) >= len(intervals):
+        return {"text": f"Next email: none, all {len(intervals)} emails of the sequence were sent", "at": None}
+    if any(f.status == "rejected" and (f.step or 0) > last.step for f in emails):
+        return {"text": "Next email: none, a person rejected the next step", "at": None}
+    gap = timedelta(days=intervals[last.step] - intervals[last.step - 1])
+    return {"text": f"Next email: step {last.step + 1} is drafted for approval around", "at": last.sent_at + gap}
+
+
+def last_30_days(settings) -> tuple[date, date]:
+    """The same "last 30 days" on My work and on Sales performance: whole days on the owner's clock, today included."""
+    today = as_aware_utc(utcnow()).astimezone(local_tz(settings.schedule.get("timezone"))).date()
+    return today - timedelta(days=30), today
+
+
+def day_start(day: date, tz) -> datetime:
+    # the picker's far ends (0001-01-01, 9999-12-31) would overflow the conversion to UTC
+    return to_naive_utc(datetime.combine(max(min(day, date(9000, 1, 1)), date(1900, 1, 1)), datetime.min.time(), tzinfo=tz))
 
 
 def token_hash(token: str) -> str:
@@ -311,69 +356,107 @@ def register(app, C, render, back, who) -> None:
 
     # ------------------------------------------------------------------ my work
     @app.get("/my", response_class=HTMLResponse)
-    def my_work(request: Request):
+    def my_work(request: Request, view: str = ""):
 
-        from aime.models import FollowUp, InboundEmail, Meeting
+        from aime.models import InboundEmail, Meeting
         from aime.performance import build
         from aime.visibility import EVERYTHING, lead_condition, opportunity_condition, record_condition
 
         sc = getattr(request.state, "scope", None) or EVERYTHING
         user = getattr(request.state, "user", None)
         name = user["username"] if user else None
+        settings = C().settings
+        tz = local_tz(settings.schedule.get("timezone"))
         now = utcnow()
+        # Mine: what this person owns. Team: all they may see. Someone who sees everything starts on their own work, as
+        # others' leads are not "on you"; a team member starts on the team, whose leads they share.
+        has_team = bool(name) and (sc.all or len(sc.usernames) > 1)
+        view = view if view in ("mine", "team") and has_team else ("mine" if name and (sc.all or not has_team) else "team")
+        shown = Scope(all=False, usernames=frozenset({name}), unassigned=False) if view == "mine" and name else sc
         with C().db.session() as s:
-            mine = Lead.owner.in_(sc.usernames) if not sc.all else Lead.owner.is_not(None)
-            leads = s.execute(select(Lead).where(lead_condition(sc), mine, Lead.status.not_in(("merged", "disqualified")))
+            mine = Lead.owner.is_not(None) if shown.all else Lead.owner.in_(shown.usernames)
+            working = Lead.status.not_in(("merged", "disqualified"))
+            leads = s.execute(select(Lead).where(lead_condition(shown), mine, working)
                               .order_by(Lead.score.desc()).limit(12)).scalars().all()
-            for lead in leads:
-                _ = lead.company
-            lead_total = s.execute(select(func.count(Lead.id)).where(lead_condition(sc), mine, Lead.status.not_in(
-                ("merged", "disqualified")))).scalar_one()
+            lead_total = s.execute(select(func.count(Lead.id)).where(lead_condition(shown), mine, working)).scalar_one()
             unassigned = s.execute(select(func.count(Lead.id)).where(lead_condition(sc), Lead.owner.is_(None),
                                                                      Lead.status == "qualified")).scalar_one() if sc.unassigned else 0
-            deals = s.execute(select(Opportunity).where(opportunity_condition(sc), Opportunity.stage.not_in(("won", "lost")))
+            emails = defaultdict(list)
+            for f in s.execute(select(FollowUp).where(FollowUp.lead_id.in_([lead.id for lead in leads] or [0]))).scalars():
+                emails[f.lead_id].append(f)
+            lead_rows = [{"lead": lead, "company": lead.company.name, "stage": (lead.outreach_status or "not contacted").replace("_", " "),
+                          "last": max((f.sent_at for f in emails[lead.id] if f.sent_at), default=None),
+                          "coming": next_email(settings, lead, emails[lead.id])} for lead in leads]
+            deals = s.execute(select(Opportunity).where(opportunity_condition(shown), Opportunity.stage.not_in(("won", "lost")))
                               .order_by(Opportunity.expected_close.is_(None), Opportunity.expected_close, Opportunity.id)).scalars().all()
             for d in deals:
                 _ = d.company
             approvals = s.execute(select(func.count(FollowUp.id)).where(
-                record_condition(sc, FollowUp.lead_id), FollowUp.status == "awaiting_approval")).scalar_one()
-            tasks = s.execute(select(FollowUp).where(record_condition(sc, FollowUp.lead_id), FollowUp.channel == "task",
-                                                     FollowUp.status == "pending").order_by(FollowUp.due_at).limit(10)).scalars().all()
+                record_condition(shown, FollowUp.lead_id), FollowUp.status == "awaiting_approval")).scalar_one()
+            open_tasks = (record_condition(shown, FollowUp.lead_id), FollowUp.channel == "task", FollowUp.status == "pending")
+            tasks = s.execute(select(FollowUp).where(*open_tasks).order_by(FollowUp.due_at).limit(10)).scalars().all()
+            task_total = s.execute(select(func.count(FollowUp.id)).where(*open_tasks)).scalar_one()
             for t in tasks:
                 _ = t.lead.company
             replies = s.execute(select(func.count(InboundEmail.id)).where(
-                record_condition(sc, InboundEmail.lead_id), InboundEmail.status == "needs_review")).scalar_one()
-            meetings = s.execute(select(Meeting).where(record_condition(sc, Meeting.lead_id, allow_unlinked=False),
-                                                       Meeting.status == "scheduled", Meeting.ends_at >= now)
-                                 .order_by(Meeting.starts_at).limit(8)).scalars().all()
-            people = sorted(sc.usernames) if not sc.all else ([name] if name else [])
-            report = build(s, now - timedelta(days=30), now, people, scope=sc, include_unassigned=False) if people else None
-        return render(request, "my.html", leads=leads, lead_total=lead_total, unassigned=unassigned, deals=deals,
-                      approvals=approvals, tasks=tasks, replies=replies, meetings=meetings, report=report,
-                      who_label=("you and your team" if sc.usernames and len(sc.usernames) > 1 else "you"),
-                      pipeline_value=sum(d.est_value or 0 for d in deals), today=now.date())
+                record_condition(shown, InboundEmail.lead_id), InboundEmail.status == "needs_review")).scalar_one()
+            coming = (record_condition(shown, Meeting.lead_id, allow_unlinked=False), Meeting.status == "scheduled",
+                      Meeting.ends_at >= now, Meeting.is_simulated.is_(False))
+            meetings = s.execute(select(Meeting).where(*coming).order_by(Meeting.starts_at).limit(8)).scalars().all()
+            meeting_total = s.execute(select(func.count(Meeting.id)).where(*coming)).scalar_one()
+            if view == "mine" or not sc.all:
+                people = sorted(shown.usernames)
+            else:
+                people = list(s.execute(select(User.username).where(User.active.is_(True)).order_by(User.username)).scalars())
+            first, last = last_30_days(settings)
+            report = (build(s, day_start(first, tz), day_start(last + timedelta(days=1), tz), people, scope=shown,
+                            include_unassigned=False) if people else None)
+            # told once a week's worth: leads someone else handed to this person
+            handed = s.execute(select(Assignment).where(Assignment.to_owner == name, Assignment.actor != name,
+                                                        Assignment.lead_id.is_not(None), Assignment.created_at >= now - timedelta(days=7))
+                               .order_by(Assignment.id.desc()).limit(6)).scalars().all() if name else []
+            handed_rows = [{"at": a.created_at, "from": a.from_owner or "nobody", "by": a.actor, "lead_id": a.lead_id,
+                            "company": s.get(Lead, a.lead_id).company.name, "reason": a.reason} for a in handed]
+            first_day = bool(name) and s.execute(select(Activity.id).where(Activity.actor == name).limit(1)).first() is None
+            today = as_aware_utc(now).astimezone(tz).date()
+            overdue = next((d for d in deals if d.expected_close and d.expected_close < today), None)
+            may_approve = not user or "approve_outbound" in user.get("perms", ())
+            if replies:
+                next_step = (f"Read the {replies} repl{'ies' if replies != 1 else 'y'} waiting for a person.", "/inbox")
+            elif approvals and may_approve:
+                next_step = (f"Read and approve or reject the {approvals} email{'s' if approvals != 1 else ''} waiting.", "/approvals")
+            elif overdue:
+                next_step = (f"Update {overdue.name}: its close date has passed.", f"/leads/{overdue.lead_id}" if overdue.lead_id else "/pipeline")
+            elif tasks:
+                next_step = (f"Do the task: {tasks[0].subject}.", f"/leads/{tasks[0].lead_id}")
+            elif leads:
+                next_step = (f"Open your strongest lead, {leads[0].company.name}, and read its evidence.", f"/leads/{leads[0].id}")
+            elif unassigned:
+                next_step = ("No lead is yours yet: ask your manager to assign some of the unassigned ones.", "/leads?status=qualified&owner=none")
+            else:
+                next_step = ("Nothing waits for you. Leads appear here when they are assigned to you.", None)
+        team_label = "everyone" if sc.all else "you and your team"
+        return render(request, "my.html", leads=lead_rows, lead_total=lead_total, unassigned=unassigned, deals=deals,
+                      approvals=approvals, tasks=tasks, task_total=task_total, replies=replies, meetings=meetings,
+                      meeting_total=meeting_total, report=report, view=view, has_team=has_team, handed=handed_rows,
+                      first_day=first_day, next_step=next_step,
+                      who_label="you" if view == "mine" or not has_team else team_label,
+                      pipeline_value=sum(d.est_value or 0 for d in deals), today=today)
 
     # ------------------------------------------------------------------ sales performance
     @app.get("/performance", response_class=HTMLResponse)
     def performance_page(request: Request, start: str = "", end: str = "", team: str = "", owner: str = "",
                          source: str = ""):
-        from datetime import date, datetime
-
         from aime.performance import build, team_members
-        from aime.timeutil import local_tz
         from aime.visibility import EVERYTHING
 
-        tz = local_tz()  # the days a person reads: every date on screen is in this zone (fmt_local)
-        today = as_aware_utc(utcnow()).astimezone(tz).date()
+        tz = local_tz(C().settings.schedule.get("timezone"))  # the days a person reads: every date on screen is in this zone
+        default_first, default_last = last_30_days(C().settings)
         try:
-            first = date.fromisoformat(start) if start else today - timedelta(days=30)
-            last = date.fromisoformat(end) if end else today
+            first = date.fromisoformat(start) if start else default_first
+            last = date.fromisoformat(end) if end else default_last
         except ValueError:
             return back("/performance", "Dates are YYYY-MM-DD")
-
-        def midnight(day: date) -> datetime:
-            # the picker's far ends (0001-01-01, 9999-12-31) would overflow the conversion to UTC
-            return to_naive_utc(datetime.combine(max(min(day, date(9000, 1, 1)), date(1900, 1, 1)), datetime.min.time(), tzinfo=tz))
 
         sc = getattr(request.state, "scope", None)
         everyone = sc is None or sc.all
@@ -391,7 +474,7 @@ def register(app, C, render, back, who) -> None:
             if owner:
                 people = [p for p in people if p == owner]
             narrowed = not everyone or team_id is not None or bool(owner)
-            report = build(s, midnight(first), midnight(min(last, date(9000, 1, 1)) + timedelta(days=1)),
+            report = build(s, day_start(first, tz), day_start(min(last, date(9000, 1, 1)) + timedelta(days=1), tz),
                            people if narrowed else None, source or None, scope=sc or EVERYTHING, include_unassigned=not narrowed)
             report.rows = [r for r in report.rows if r.username in active or r.has_numbers()]
             if narrowed:

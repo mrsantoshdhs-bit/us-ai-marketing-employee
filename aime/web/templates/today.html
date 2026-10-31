@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% extends "base.html" %}{% from "_icons.html" import icon %}{% from "_macros.html" import alert_row %}
 {% block title %}Dashboard · AI Sales Employee{% endblock %}
 {% block content %}
 {% set duty_label, duty_tone, duty_note, duty_head = employee.duty %}
@@ -20,11 +20,16 @@
   </div>
 </div>
 
+{% if open_alerts %}<section class="panel" id="alerts" aria-label="Open alerts" style="margin-bottom:22px">
+  <div class="panel-head"><h2>{{ icon('alert') }} Open alerts</h2><a class="panel-link" href="/system#alerts">{{ 'All ' ~ open_alert_count if open_alert_count > open_alerts|length else 'System health' }} {{ icon('arrow-right') }}</a></div>
+  {% for a in open_alerts %}{{ alert_row(a, can_edit) }}{% endfor %}
+</section>{% endif %}
+
 <section class="kpi-cards" aria-label="Key figures">
   {% for c in cards %}
   <a class="kpi-card" href="{{ c.href }}">
     <span class="kpi-icon {{ c.tone }}">{{ icon(c.icon) }}</span>
-    <span class="kpi-body"><span class="kpi-label">{{ c.label }}</span><b class="kpi-value">{{ '{:,}'.format(c.value) }}</b></span>
+    <span class="kpi-body"><span class="kpi-label">{{ c.label }}</span><b class="kpi-value">{{ '{:,}'.format(c.period) }}</b><small class="muted">in {{ period_days }} days · {{ '{:,}'.format(c.value) }} in total</small></span>
     <span class="delta {{ c.trend }}" title="{{ c.period }} in the last {{ period_days }} days, against the {{ period_days }} days before">{% if c.trend == 'up' %}↑{% elif c.trend == 'down' %}↓{% endif %} {{ c.change }}</span>
     {{ c.spark }}
   </a>

@@ -15,7 +15,7 @@ def test_dashboard_has_every_reference_section_and_real_numbers(make_ctx):
     ctx = researched(make_ctx, **SENDING)
     page = TestClient(create_app(ctx)).get("/").text
     for text in ("AI Activity", "Sales Performance", "Sales Pipeline", "Upcoming Meetings", "AI Insights", "/static/robot.svg",
-                 "Companies discovered", "Verified contacts", "Emails sent", "Meetings booked", "Your AI team at work",
+                 "Companies discovered", "Usable contacts", "Emails sent", "Meetings booked", "Your AI team at work",
                  'href="/command-center"', 'action="/search"', 'href="/approvals"', 'href="/settings"', "Automation Control"):
         assert text in page, text
     assert "No upcoming meetings" in page  # an honest empty state, not sample data
@@ -30,7 +30,7 @@ def test_each_figure_has_one_home(make_ctx):
     dash, center, analytics = client.get("/").text, client.get("/command-center").text, client.get("/reports").text
     for text in ("Needs you", "Sales funnel", "Lead generation", "Funnel detail", "Companies with a usable email"):
         assert text not in dash, text
-    for text in ("Companies discovered", "Verified contacts", "Sales Pipeline", "Sales funnel"):
+    for text in ("Companies discovered", "Usable contacts", "Sales Pipeline", "Sales funnel"):
         assert text not in center, text
     for text in ("Lead generation", "Sales funnel", "Funnel detail", "Companies with a usable email"):
         assert text in analytics, text
@@ -44,7 +44,7 @@ def test_agents_show_one_clear_status_each(make_ctx):
     for stage in ("Find", "Qualify", "Engage", "Market", "Report"):
         assert f"<b>{stage}</b>" in page
     # publishing is switched off in tests and the mailbox is not set: blocked, with the reason, never "running"
-    assert "st-blocked" in page and "publishing is off (PUBLISHING_ENABLED is false)" in page
+    assert "st-blocked" in page and "publishing is switched off" in page
     assert "mailbox reading is off (mailbox not set up)" in page
     assert "st-completed" in page  # research ran in the fixture
 
@@ -78,7 +78,7 @@ def test_search_approvals_and_settings(make_ctx):
     [draft] = [f for f in drafts(ctx) if f.status == "awaiting_approval"]
     assert f"/followups#f{draft.id}" in queue and draft.subject in queue
     settings = client.get("/settings").text
-    assert "OUTBOUND_EMAIL_ENABLED" in settings and "never-shown-secret-123" not in settings
+    assert "Sending email" in settings and "never-shown-secret-123" not in settings
     for page in ("/", "/command-center", "/reports"):
         assert "never-shown-secret-123" not in client.get(page).text
 

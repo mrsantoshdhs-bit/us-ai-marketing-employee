@@ -1016,10 +1016,10 @@ def _cards(ctx, days=7):
 
 def test_ok_home_cards_match_records(scenario):
     cards, view = _cards(scenario)
-    assert {k: c["value"] for k, c in cards.items()} == {"Companies discovered": 7, "Verified contacts": 3, "Emails sent": 3,
+    assert {k: c["value"] for k, c in cards.items()} == {"Companies discovered": 7, "Usable contacts": 3, "Emails sent": 3,
                                                          "Meetings booked": 2}
     assert cards["Companies discovered"]["period"] == 4 and cards["Companies discovered"]["change"] == "+2"
-    assert cards["Verified contacts"]["period"] == 3 and cards["Emails sent"]["period"] == 3
+    assert cards["Usable contacts"]["period"] == 3 and cards["Emails sent"]["period"] == 3
     assert view["leads_badge"]["count"] == 6
     html = client_for(scenario).get("/").text
     assert re.findall(r'class="kpi-value">([\d,]+)<', html) == ["7", "3", "3", "2"]
@@ -1045,7 +1045,7 @@ def test_ok_funnel_tiles_and_api_stats_match_records(scenario):
 def test_ok_system_page_kpis_match_records(scenario):
     text = text_of(client_for(scenario).get("/system").text)
     for label, n in (("Companies", 7), ("Open leads", 4), ("Qualified", 2), ("Grade A", 2), ("Open opportunities", 2),
-                     ("Replies to approve", 2), ("Posts to approve", 2), ("Posts published", 2)):
+                     ("Emails to approve", 2), ("Posts to approve", 2), ("Posts published", 2)):
         assert f"{n} {label}" in text or f"{label} {n}" in text, label
 
 

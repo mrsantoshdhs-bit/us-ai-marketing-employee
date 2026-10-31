@@ -3,7 +3,8 @@
 Who a record counts for: a reply, a meeting or a sent email counts for the owner of its lead's deal, else the lead's
 owner. A won deal counts once: for the person who moved it to won (else its owner), and by origin as AI-sourced
 (opened by the agents) or human-sourced, so AI and human contributions are never added twice. Nothing is
-estimated: a deal without a value adds nothing to revenue, and a rate with nothing to divide is shown as none.
+estimated: a deal without a value adds nothing to revenue, and is named beside the report; a rate with nothing to divide
+is shown as none.
 The Total adds what the report shows: a report narrowed to some people leaves out everyone else and the unassigned
 records. The report on everyone adds what nobody in it can be credited with to the unassigned row, so that revenue
 stays in the Total when a salesperson leaves."""
@@ -17,7 +18,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from aime.models import Assignment, FollowUp, InboundEmail, Lead, Meeting, Opportunity, User
+from aime.models import Assignment, FollowUp, InboundEmail, Lead, Meeting, Opportunity, Quote, User
 from aime.visibility import EVERYTHING, Scope, lead_condition, record_condition
 
 POSITIVE = ("interested",)
@@ -54,6 +55,8 @@ class Report:
     total: Row
     ai: dict = field(default_factory=dict)
     unassigned: Row | None = None
+    # won deals that add nothing to Won value: {"id", "name", "quote": "EUR 9,000" or None}
+    won_without_value: list[dict] = field(default_factory=list)
 
 
 def owners_by_lead(session: Session) -> dict[int, str | None]:
@@ -109,10 +112,11 @@ def build(session: Session, start: datetime, end: datetime, people: list[str] | 
             r.negative_replies += category in NEGATIVE
     for lead_id, in session.execute(select(Meeting.lead_id).where(
             Meeting.created_at >= start, Meeting.created_at < end, Meeting.lead_id.is_not(None),
-            Meeting.is_simulated.is_(False))).all():
+            Meeting.is_simulated.is_(False), Meeting.status != "cancelled")).all():
         if (r := row_for(lead_id)) is not None:
             r.meetings += 1
     ai_opened = ai_won = 0
+    no_value: list[dict] = []
     for o in session.execute(select(Opportunity).where(Opportunity.created_at >= start, Opportunity.created_at < end)).scalars():
         if (r := row_for(o.lead_id, o.owner)) is not None:
             r.deals_opened += 1
@@ -126,6 +130,10 @@ def build(session: Session, start: datetime, end: datetime, people: list[str] | 
         if o.stage == "won":
             r.won += 1
             r.won_value += o.est_value or 0.0
+            if not o.est_value:
+                quote = session.execute(select(Quote).where(Quote.opportunity_id == o.id, Quote.status == "accepted")
+                                        .order_by(Quote.id.desc()).limit(1)).scalars().first()
+                no_value.append({"id": o.id, "name": o.name, "quote": f"{quote.currency} {quote.amount:,.0f}" if quote else None})
             if o.origin == "ai":
                 r.won_value_ai_sourced += o.est_value or 0.0
                 ai_won += 1
@@ -147,7 +155,7 @@ def build(session: Session, start: datetime, end: datetime, people: list[str] | 
           "deals_opened": ai_opened, "deals_won_ai_sourced": ai_won,
           "won_value_ai_sourced": total.won_value_ai_sourced,
           "won_value_human_sourced": total.won_value - total.won_value_ai_sourced}
-    return Report(rows=shown, total=total, ai=ai, unassigned=other)
+    return Report(rows=shown, total=total, ai=ai, unassigned=other, won_without_value=no_value)
 
 
 def team_members(session: Session) -> dict[int, list[str]]:
@@ -182,7 +190,8 @@ def campaign_stats(session: Session, scope: Scope = EVERYTHING) -> dict[int, dic
     for (lead_id,) in session.execute(select(InboundEmail.lead_id).where(InboundEmail.category.in_(POSITIVE),
                                                                          InboundEmail.is_simulated.is_(False))).all():
         add(lead_id, "positive_replies")
-    for (lead_id,) in session.execute(select(Meeting.lead_id).where(Meeting.is_simulated.is_(False))).all():
+    for (lead_id,) in session.execute(select(Meeting.lead_id).where(Meeting.is_simulated.is_(False),
+                                                                    Meeting.status != "cancelled")).all():
         add(lead_id, "meetings")
     for o in session.execute(select(Opportunity).where(Opportunity.lead_id.is_not(None))).scalars():
         add(o.lead_id, "deals")

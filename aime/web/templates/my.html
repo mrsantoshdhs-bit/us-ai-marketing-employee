@@ -6,13 +6,18 @@
   <p class="subtitle">What is on {{ who_label }} today: your leads, deals, emails to approve, replies and meetings.
     Only records you may see are counted.</p>
 </div></div>
+{% if first_day %}<div class="card small"><b>Your first day.</b> This page is your day: the leads, deals, emails and meetings that are yours{% if has_team %}, or your team's under Team{% endif %}. Every email waits for a person's approval, and nothing goes out on its own. The menu on the left opens the full lists.</div>{% endif %}
+<div class="card small"><b>Do this next:</b> {% if next_step[1] %}<a href="{{ next_step[1] }}">{{ next_step[0] }}</a>{% else %}{{ next_step[0] }}{% endif %}</div>
+{% if handed %}<div class="card small"><b>Handed over to you in the last 7 days</b>
+  {% for h in handed %}<div class="row-item"><a href="/leads/{{ h.lead_id }}">{{ h.company }}</a> <span class="muted">from {{ h.from }}, by {{ h.by }}, {{ h.at|local(None, '%a %d %b %H:%M') }}{% if h.reason %}: {{ h.reason }}{% endif %}</span></div>{% endfor %}</div>{% endif %}
 <div class="card small">
-  <span class="pill">Leads: {{ lead_total }}</span>
-  {% if unassigned %}<a class="pill" href="/leads?status=qualified">Unassigned qualified leads: {{ unassigned }}</a>{% endif %}
+  {% if has_team %}<a class="pill {{ 'ok' if view == 'mine' }}" href="/my?view=mine">Mine</a> <a class="pill {{ 'ok' if view == 'team' }}" href="/my?view=team">Team</a> · {% endif %}
+  <a class="pill" href="/leads?owner={{ 'me' if view == 'mine' else 'team' }}&group=working">Leads: {{ lead_total }}</a>
+  {% if unassigned %}<a class="pill" href="/leads?status=qualified&owner=none">Unassigned qualified leads: {{ unassigned }}</a>{% endif %}
   <a class="pill" href="/pipeline">Open deals: {{ deals|length }}{% if pipeline_value %} · ${{ '{:,.0f}'.format(pipeline_value) }}{% endif %}</a>
   <a class="pill {{ 'warn' if approvals }}" href="/approvals">Emails to approve: {{ approvals }}</a>
   <a class="pill {{ 'warn' if replies }}" href="/inbox">Replies to review: {{ replies }}</a>
-  <a class="pill" href="/meetings">Upcoming meetings: {{ meetings|length }}</a>
+  <a class="pill" href="/meetings">Upcoming meetings: {{ meeting_total }}</a>
 </div>
 <h2>Open deals</h2>
 <div class="card table-wrap"><table>
@@ -23,11 +28,13 @@
   {% else %}<tr><td colspan="6" class="muted">No open deals.</td></tr>{% endfor %}
 </table></div>
 <div class="grid">
-  <div><h2>Tasks</h2><div class="card">{% for t in tasks %}<div class="row-item"><a href="/leads/{{ t.lead_id }}">{{ t.subject }}</a> <span class="small muted">{{ t.lead.company.name }} · due {{ t.due_at|local }}</span></div>{% else %}<span class="muted">No open tasks.</span>{% endfor %}</div></div>
+  <div><h2>Tasks <span class="muted small">{{ task_total }}</span></h2><div class="card">{% for t in tasks %}<div class="row-item"><a href="/leads/{{ t.lead_id }}">{{ t.subject }}</a> <span class="small muted">{{ t.lead.company.name }} · due {{ t.due_at|local }}</span></div>{% else %}<span class="muted">No open tasks.</span>{% endfor %}
+    {% if task_total > tasks|length %}<div class="small muted">The {{ tasks|length }} due soonest are shown. All of them are on <a href="/followups">Follow-ups</a>.</div>{% endif %}</div></div>
   <div><h2>Meetings</h2><div class="card">{% for m in meetings %}<div class="row-item"><a href="/leads/{{ m.lead_id }}">{{ m.title }}</a> <span class="small muted">{{ m.starts_at|local }}</span></div>{% else %}<span class="muted">No upcoming meetings.</span>{% endfor %}</div></div>
 </div>
 <h2>Leads</h2>
-<div class="card">{% for l in leads %}<div class="row-item"><a href="/leads/{{ l.id }}">{{ l.company.name }}</a> <span class="small muted">{{ l.grade or '' }} · {{ l.score }} · {{ l.owner }}</span></div>{% else %}<span class="muted">No leads assigned yet.</span>{% endfor %}</div>
+<div class="card">{% for r in leads %}<div class="row-item"><a href="/leads/{{ r.lead.id }}">{{ r.company }}</a> <span class="small muted">{{ r.lead.grade or '' }} · {{ r.lead.score }} · {{ r.lead.owner }} · {{ r.stage }}{% if r.last %} · last email {{ r.last|local(None, '%d %b') }}{% endif %} · {{ r.coming.text }}{% if r.coming.at %} {{ r.coming.at|local(None, '%d %b') }}{% endif %}</span></div>{% else %}<span class="muted">No leads assigned yet.</span>{% endfor %}
+  {% if lead_total > leads|length %}<div class="small muted">The {{ leads|length }} with the highest score are shown. <a href="/leads?owner={{ 'me' if view == 'mine' else 'team' }}&group=working">All {{ lead_total }}</a>.</div>{% endif %}</div>
 {% if report %}<h2>Last 30 days</h2>
 <div class="card table-wrap"><table>
   <tr><th>Person</th><th>Emails sent</th><th>Positive replies</th><th>Meetings</th><th>Deals opened</th><th>Won</th><th>Lost</th><th>Won value</th></tr>

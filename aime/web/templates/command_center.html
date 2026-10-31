@@ -56,7 +56,7 @@
     </div>
     <div class="send-check {{ 'warn' if automation.blockers else 'ok' }}">
       <b>{% if automation.blockers %}{{ icon('lock') }} No email can go out without a person{% else %}{{ icon('check-circle') }} Emails within authorizations can go out{% endif %}</b>
-      {% for b in automation.blockers %}<span>{{ b }}</span>{% endfor %}
+      {% for b in automation.blockers %}<span>{{ b|plain }}</span>{% endfor %}
     </div>
   </div>
 </section>
@@ -153,8 +153,8 @@
 
   <div class="panel">
     <div class="panel-head"><h2>{{ icon('mail') }} Email &amp; Calendly</h2><a href="/integrations" class="panel-link">Integrations {{ icon('arrow-right') }}</a></div>
-    <div class="status-row"><span class="k">Sending (OUTBOUND_EMAIL_ENABLED)</span><span class="val">{% if gmail.sending %}<span class="pill ok">on</span>{% else %}<span class="pill warn">off</span>{% endif %}</span></div>
-    <div class="status-row"><span class="k">Mail server</span><span class="val">{% if gmail.ready %}<span class="pill ok">ready</span>{% else %}<span class="small muted">{{ gmail.reason }}</span>{% endif %}</span></div>
+    <div class="status-row"><span class="k">Sending</span><span class="val">{% if gmail.sending %}<span class="pill ok">on</span>{% else %}<span class="pill warn">off</span>{% endif %}</span></div>
+    <div class="status-row"><span class="k">Mail server</span><span class="val">{% if gmail.ready %}<span class="pill ok">ready</span>{% else %}<span class="small muted">{{ gmail.reason|plain }}</span>{% endif %}</span></div>
     <div class="status-row"><span class="k">Sender</span><span class="val">{{ gmail.sender or '—' }}</span></div>
     <div class="status-row"><span class="k">Reply monitoring</span><span class="val">{{ 'reading the mailbox' if gmail.reading else 'off (IMAP not set)' }}</span></div>
     <div class="status-row"><span class="k">Booking link</span><span class="val">{% if calendly.url %}<a href="{{ calendly.url|safe_url }}" target="_blank" rel="noopener noreferrer">{{ calendly.url|replace('https://', '') }}</a>{% else %}<span class="pill warn">not set</span>{% endif %}</span></div>

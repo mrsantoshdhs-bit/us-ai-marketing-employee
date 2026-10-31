@@ -236,11 +236,11 @@ def test_the_board_says_what_is_waiting_for_authorization_or_not_configured(make
     ctx = make_ctx(outbound_email_enabled=False, publishing_enabled=False)
     b = board(ctx)
     assert b["Scheduled jobs"][0] == "NOT CONFIGURED"
-    assert b["Running while signed out"][0] == "WAITING FOR AUTHORIZATION" and "(A1)" in b["Running while signed out"][1]
-    assert b["Email sending"] == ("WAITING FOR AUTHORIZATION", "OUTBOUND_EMAIL_ENABLED=false: emails are drafted, never "
-                                  "sent; sending needs your approval (A3)")
-    assert b["Mailbox reading"][0] == "NOT CONFIGURED" and "(A2)" in b["Mailbox reading"][1]
-    assert b["Meeting booking"][0] == "NOT CONFIGURED" and "(A4)" in b["Meeting booking"][1]
+    assert b["Running while signed out"][0] == "WAITING FOR AUTHORIZATION" and "needs your approval" in b["Running while signed out"][1]
+    assert b["Email sending"] == ("WAITING FOR AUTHORIZATION", "sending is switched off: emails are drafted, never "
+                                  "sent; sending needs your approval")
+    assert b["Mailbox reading"][0] == "NOT CONFIGURED" and "needs your approval" in b["Mailbox reading"][1]
+    assert b["Meeting booking"][0] == "NOT CONFIGURED" and "nothing is booked automatically" in b["Meeting booking"][1]
     assert b["LinkedIn publishing"][0] == "WAITING FOR AUTHORIZATION" and b["Backups"][0] == "NOT CONFIGURED"
     page = TestClient(create_app(ctx)).get("/manager").text
     for text in ("WAITING FOR AUTHORIZATION", "NOT CONFIGURED", "Next scheduled check-in", "companies discovered today",
@@ -278,7 +278,7 @@ def test_sending_switched_on_without_a_password_is_blocked_not_active(make_ctx):
 
     ctx = make_ctx(**{**SENDING, "smtp_username": "sales@us.example", "smtp_password": ""})
     status, detail = board(ctx)["Email sending"]
-    assert status == "BLOCKED" and "SMTP_PASSWORD missing" in detail
+    assert status == "BLOCKED" and "mailbox password is missing" in detail
     assert board(make_ctx(**{**SENDING, "smtp_username": "sales@us.example", "smtp_password": "x" * 8}))["Email sending"][0] == "ACTIVE"
 
 

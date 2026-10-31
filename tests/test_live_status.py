@@ -93,7 +93,7 @@ def test_sales_performance_has_ten_real_series_and_honest_empty_views(make_ctx):
         view = dashboard_view(ctx, s, 7)
         drafts_made = s.execute(select(func.count(FollowUp.id)).where(FollowUp.kind == "outreach")).scalar_one()
     names = [name for v in view["performance"] for name, _, _ in v["series"]]
-    assert names == ["Companies discovered", "Leads generated", "Verified contacts", "Outreach drafts created",
+    assert names == ["Companies discovered", "Leads generated", "Usable contacts", "Outreach drafts created",
                      "Emails sent", "Follow-ups completed", "Replies received", "Positive replies", "Meetings booked",
                      "Qualified opportunities"]
     totals = {name: total for v in view["performance"] for name, total, _ in v["series"]}

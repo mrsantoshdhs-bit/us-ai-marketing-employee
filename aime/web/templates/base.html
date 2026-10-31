@@ -61,7 +61,7 @@
       <img src="/static/robot.svg" alt="" width="46" height="49">
       <div class="side-card-text"><b>{{ nav_s.duty[3] }}</b><span>{{ nav_s.duty[2] }}</span>
         <span class="live {{ nav_s.duty[1] }}"><i></i>{{ nav_s.duty[0] }}</span></div>
-      <a class="side-card-btn" href="/command-center">View activity {{ icon('arrow-right') }}</a>
+      {% if can_view_all %}<a class="side-card-btn" href="/command-center">View activity {{ icon('arrow-right') }}</a>{% endif %}
     </div>
     {% endif %}
     <label for="nav-toggle" class="collapse-btn" title="Collapse or expand the menu">{{ icon('chevron-left') }}<span class="nav-label">Collapse menu</span></label>
@@ -75,7 +75,7 @@
                placeholder="Search companies, contacts, emails, meetings…  (Alt+K)"></form>
       <span class="spacer"></span>
       {% if data_role != 'production' %}<span class="chip env-other hide-sm" title="Not the production database">{{ (data_role or 'unknown')|upper }}</span>{% endif %}
-      <span class="chip {{ 'ok' if sending_on else 'warn' }} hide-sm" title="OUTBOUND_EMAIL_ENABLED"><span class="dot"></span>Sending {{ 'on' if sending_on else 'off' }}</span>
+      <span class="chip {{ 'ok' if sending_on else 'warn' }} hide-sm" title="Whether approved emails can go out"><span class="dot"></span>Sending {{ 'on' if sending_on else 'off' }}</span>
       {% if nav_s.mode %}
       <details class="menu-wrap mode-menu">
         <summary class="mode-pill {{ 'ok' if nav_s.state == 'running' else 'bad' }}" title="Operating mode"><i></i>{{ nav_s.mode|title }} Mode{{ icon('chevron-down') }}</summary>
@@ -86,7 +86,7 @@
           <button class="menu-item mode-option{{ ' on' if key == nav_s.mode }}" name="mode" value="{{ key }}" {{ 'disabled' if not nav_s.admin or key == nav_s.mode }}>
             <span class="mode-dot"></span><span><b>{{ key|title }}</b><small>{{ text }}</small></span></button>
           {% endfor %}
-          <a class="menu-item" href="/automation">{{ icon('sliders') }}Authorizations and limits</a>
+          {% if can_view_all %}<a class="menu-item" href="/automation">{{ icon('sliders') }}Authorizations and limits</a>{% endif %}
         </form>
       </details>
       {% endif %}
@@ -98,17 +98,18 @@
           {% for action, label, ico in [('start', 'Start automation', 'play'), ('resume', 'Resume', 'play'), ('pause', 'Pause sending', 'pause'), ('stop', 'Stop jobs', 'stop'), ('emergency_stop', 'Emergency stop', 'alert')] %}
           {% if nav_s.state in nav_s.transitions[action][0] and (nav_s.admin if action in nav_s.admin_actions else can_edit) %}<form method="post" action="/automation/state/{{ action }}"><input type="hidden" name="next" value="{{ nav_s.here }}"><button class="menu-item{{ ' danger' if action == 'emergency_stop' }}">{{ icon(ico) }}{{ label }}</button></form>{% endif %}
           {% endfor %}
-          <a class="menu-item" href="/automation">{{ icon('sliders') }}Automation Control</a>
+          {% if can_view_all %}<a class="menu-item" href="/automation">{{ icon('sliders') }}Automation Control</a>{% endif %}
         </div>
       </details>
       {% endif %}
-      <a class="bell" href="/system#alerts" title="Open alerts">{{ icon('bell') }}{% if nav_c.alerts %}<span class="badge">{{ nav_c.alerts }}</span>{% endif %}</a>
+      {% if can_view_all %}<a class="bell" href="/system#alerts" title="Open alerts">{{ icon('bell') }}{% if nav_c.alerts %}<span class="badge">{{ nav_c.alerts }}</span>{% endif %}</a>
+      {% else %}<a class="bell" title="Alerts are about the whole organisation: a manager who sees all records reads them">{{ icon('bell') }}</a>{% endif %}
       <details class="menu-wrap user-menu">
         <summary><span class="avatar-sm">{{ (user_name or 'AI')[:2]|upper }}</span><span class="who hide-sm"><b>{{ user_name or 'Local preview' }}</b><small>{{ user_role }}</small></span>{{ icon('chevron-down') }}</summary>
         <div class="menu">
           {% if current_user %}<div class="menu-head">Signed in as {{ current_user.username }}</div>{% endif %}
           <a class="menu-item" href="/settings">{{ icon('gear') }}Settings</a>
-          <a class="menu-item" href="/audit">{{ icon('list') }}Audit log</a>
+          {% if can_view_all %}<a class="menu-item" href="/audit">{{ icon('list') }}Audit log</a>{% endif %}
           {% if current_user %}<form method="post" action="/logout"><button class="menu-item">{{ icon('arrow-right') }}Sign out</button></form>{% endif %}
         </div>
       </details>

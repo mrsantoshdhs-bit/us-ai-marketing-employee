@@ -334,7 +334,7 @@ def cmd_user(args, ctx, prompt_fn=None) -> int:
                 print(f"{u.username:<20} {u.role:<15} {'active' if u.active else 'disabled':<9} "
                       f"last sign-in: {u.last_login_at or '-'}")
             return 0
-        username = (args.username or "").strip().lower()
+        username = (args.username or getattr(args, "name", None) or "").strip().lower()
         if not username:
             print("--username is required")
             return 1
@@ -682,6 +682,7 @@ def build_parser() -> argparse.ArgumentParser:
     rr.add_argument("--company", type=int, action="append", help="company id (repeat); default: every researched one")
     us = sub.add_parser("user", help="Dashboard sign-in accounts (you type the password at the prompt)")
     us.add_argument("action", choices=["create", "list", "set-password", "set-role", "disable", "enable"])
+    us.add_argument("name", nargs="?", help="the account's username (the same as --username)")
     us.add_argument("--username")
     us.add_argument("--role", help="default for create: sales_manager. Built in: super_admin, admin, sales_director, "
                                    "sales_manager, team_leader, sales_executive, bde, lead_gen_executive, analyst; "
