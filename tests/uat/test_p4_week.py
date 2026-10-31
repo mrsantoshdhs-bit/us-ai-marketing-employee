@@ -272,6 +272,8 @@ def test_a_corrected_name_logs_the_deal_and_leaves_what_a_person_named_or_closed
     exact = make_deal(org, lid, stage="discovery", name="Acme")
     named = make_deal(org, lid, stage="discovery", name="Big renewal for Acme")
     longer = make_deal(org, lid, stage="discovery", name="Acme2 pilot")
+    already = make_deal(org, lid, stage="discovery", name="Acme Inc — CRM")
+    other = make_deal(org, lid, stage="discovery", name="Acme Robotics pilot")
     closed = make_deal(org, lid, stage="won", name="Acme — old project")
     with org.db.session() as s:
         company_id = s.get(Lead, lid).company_id
@@ -279,6 +281,7 @@ def test_a_corrected_name_logs_the_deal_and_leaves_what_a_person_named_or_closed
     assert opp_row(org, follows).name == "Acme Inc — CRM" and opp_row(org, exact).name == "Acme Inc"
     assert opp_row(org, named).name == "Big renewal for Acme" and opp_row(org, longer).name == "Acme2 pilot"
     assert opp_row(org, closed).name == "Acme — old project"
+    assert opp_row(org, already).name == "Acme Inc — CRM" and opp_row(org, other).name == "Acme Robotics pilot"
     with org.db.session() as s:
         logged = s.execute(select(Activity.subject).where(Activity.opportunity_id == follows)).scalars().all()
     assert "Deal renamed with its company: Acme — CRM → Acme Inc — CRM" in logged

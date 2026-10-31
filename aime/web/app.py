@@ -1130,7 +1130,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                              company_id=company.id, lead_id=lead.id if lead else None)
                 # an open deal still named after the old name follows; one a person named differently, or a closed one, stays
                 for o in s.execute(select(Opportunity).where(Opportunity.company_id == company.id, Opportunity.stage.not_in(("won", "lost")))).scalars():
-                    if o.name == old or o.name.startswith(f"{old} "):
+                    if o.name == old or o.name.startswith(f"{old} — "):
                         was, o.name = o.name, f"{new}{o.name[len(old):]}"[:Opportunity.name.type.length]
                         log_activity(s, f"Deal renamed with its company: {was} → {o.name}", who(request), type_="opportunity",
                                      company_id=company.id, lead_id=o.lead_id, opportunity_id=o.id)
