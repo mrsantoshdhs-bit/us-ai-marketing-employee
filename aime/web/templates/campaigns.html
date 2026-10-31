@@ -20,7 +20,7 @@
           <input name="min_score" type="number" min="0" max="100" placeholder="min score" value="{{ (c.audience or {}).get('min_score') or '' }}" style="width:90px">
           <button class="secondary">Save</button> <button class="secondary" name="attach" value="yes">Save and attribute matching leads</button>
         </form>{% endif %}</details>{% endif %}
-        {% if can_approve %}<form method="post" action="/campaigns/{{ c.id }}/status" class="filters"><select name="status">{% for st in ['planned', 'active', 'paused', 'completed'] %}<option {{ 'selected' if c.status == st }}>{{ st }}</option>{% endfor %}</select><button class="secondary">Set</button></form>{% endif %}</td></tr>
+        {% if can_approve %}<form method="post" action="/campaigns/{{ c.id }}/status" class="filters"><select name="status">{% for st in ['planned', 'active', 'paused', 'completed', 'ended'] %}<option {{ 'selected' if c.status == st }}>{{ st }}</option>{% endfor %}</select><button class="secondary">Set</button></form>{% endif %}</td></tr>
   {% else %}<tr><td colspan="8" class="muted">No campaigns yet; the Marketing Manager creates a monthly campaign automatically.</td></tr>{% endfor %}
 </table></div>
 

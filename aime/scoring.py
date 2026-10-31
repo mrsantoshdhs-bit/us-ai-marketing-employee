@@ -8,11 +8,14 @@ Intent is never inferred: it is scored only from recorded evidence
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 from aime.knowledge.geo import STATES, parse_location
-from aime.matching import classify_industry, match_services
+from aime.knowledge.industries import INDUSTRIES
+from aime.knowledge.services import service_name
+from aime.matching import classify_industry, industry_evidenced, match_services
+from aime.people import decision_maker_title
 from aime.timeutil import utcnow
 
 FIRST_PARTY_SIGNALS = {"inbound", "manual"}
@@ -47,11 +50,13 @@ class LeadFacts:
     stated_budget: bool = False
     running_business: bool = False  # its own words show customers, a product or funding
     us_office_only: bool = False  # places abroad come first in its own list: a US office, most likely not its home
+    us_stated: bool = True  # its own words place it in the US; "US" may also be only the default on its record
     website_status: str | None = None  # see aime.website_check; None = not checked yet
     seeks_external_help: bool = False  # their own post asks for contractors / partners
     contact_source: str | None = None  # inbound | manual | import | website | sec_filing
     contact_role: str | None = None  # role category; "inbox" for a published company inbox
     contact_email_status: str | None = None  # see aime.contact_validation
+    contact_title: str | None = None
     now: datetime | None = None
 
 
@@ -119,26 +124,36 @@ def signal_fact(signal) -> SignalFact:
 OLD_DEFAULT_INDUSTRY = "tech_startups"
 
 
+# Hiring from anywhere says nothing about where a company is: "Remote (Global / US/EU time zones)". A company's name or "anywhere
+# in the US" does not count.
+_WORLDWIDE_RE = re.compile(r"\bremote\b[^|]{0,12}\b(?:global|globally|worldwide|anywhere)\b(?!\s+in\s+the\s+(?:us|usa|u\.s\.|united states))"
+                           r"|\b(?:global|worldwide|anywhere)[ /-]+remote\b(?!\s*\(?(?:us|usa)\b)", re.I)
+
+
 def read_company(company, signals) -> dict:
     """The company's facts as scoring sees them. A company found in a hiring post is checked against the post's own words:
-    older records carry a default industry and locations read by older rules, and only evidence earns points. A company
+    older records carry a default industry, labels and locations read by older rules, and only evidence earns points. A company
     whose industry a person or a registry gave is taken as it is, and no stored record is changed."""
     facts = {"industry": company.industry, "state": company.state, "country": company.country}
     if company.source != "hn_hiring":
         return facts
     posts = " ".join(s.text or "" for s in signals if s.signal_type == "hiring")
-    if company.industry == OLD_DEFAULT_INDUSTRY:
+    given = company.verified or any(s.signal_type in FIRST_PARTY_SIGNALS for s in signals)
+    if company.industry == OLD_DEFAULT_INDUSTRY or (posts.strip() and not given and not industry_evidenced(company.industry, posts)):
         facts["industry"] = classify_industry(posts)
     facts["running_business"] = bool(_RUNNING_BUSINESS_RE.search(posts))
     place = parse_location(company.location_text)
     if place.is_us is False:
         facts["country"] = "outside"
     facts["us_office_only"] = place.foreign_first
+    # the record's country is "US" by default: a post that places it nowhere, or anywhere, says nothing about the US
+    facts["us_stated"] = place.is_us is True and not _WORLDWIDE_RE.search(company.location_text or "")
     return facts
 
 
 # Hiring evidence counts in full for 60 days, half until 120 days, then not at all.
 FRESH_DAYS, STALE_DAYS = 60, 120
+HOLD_DAYS = 30  # how long a lead must keep its grade on today's evidence to enter qualified
 # Weights measured on the real leads (Phase 2): the default industry's +15 and the programming-language matches are gone, and
 # these evidence-based points keep companies that really do run a business and build software within reach of grade B.
 BUILDERS_POINTS = 7
@@ -146,6 +161,10 @@ BUILDERS_INTENT = 6
 RUNNING_BUSINESS_POINTS = 12
 US_STATED_POINTS = 5
 PRESENCE_ONLY_POINTS = 2
+
+
+def _how_strong(strength: float) -> str:
+    return "strong" if strength >= 0.75 else "moderate" if strength >= 0.5 else "slight"
 
 
 def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
@@ -158,7 +177,7 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
     if f.industry and f.industry in f.target_industries:
         pts = 8 if f.industry == "smb" else 15
         fit += pts
-        reasons.append(f"+{pts} fit: target industry ({f.industry})")
+        reasons.append(f"+{pts} fit: target industry ({INDUSTRIES[f.industry].label if f.industry in INDUSTRIES else f.industry})")
     elif f.running_business:
         fit += RUNNING_BUSINESS_POINTS
         reasons.append(f"+{RUNNING_BUSINESS_POINTS} fit: its own words show a running business (customers, a product or funding), "
@@ -174,9 +193,11 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
     elif f.country == "US" and f.state == "DC":
         fit += 10
         reasons.append("+10 fit: US location verified (DC)")
-    elif f.country == "US":
+    elif f.country == "US" and f.us_stated:
         fit += US_STATED_POINTS
         reasons.append(f"+{US_STATED_POINTS} fit: US presence stated, state unknown")
+    elif f.country == "US":
+        reasons.append("+0 fit: nothing it says places it in the US")
     if f.has_website:
         if f.website_status in ("verified", "redirected"):
             fit += 5
@@ -210,10 +231,10 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
     for svc, strength in ranked[:3]:
         if svc in first_party:
             pts = round(5 + 5 * strength)
-            reasons.append(f"+{pts} need: they asked about {svc} (strength {strength:.2f})")
+            reasons.append(f"+{pts} need: they asked about {service_name(svc)} ({_how_strong(strength)} evidence)")
         else:
             pts = round(3 + 4 * strength)
-            reasons.append(f"+{pts} need: public evidence for {svc} (strength {strength:.2f})")
+            reasons.append(f"+{pts} need: public evidence for {service_name(svc)} ({_how_strong(strength)})")
         need += pts
     # Hiring people to build software is work an outside team could share, but it names no need: it takes a place among the
     # needs and never decides what we would offer.
@@ -266,7 +287,9 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
     if f.verified:
         data += 2
         reasons.append("+2 data: company record verified from an official registry")
-    researched = f.contact_source in ("website", "sec_filing")
+    # A testimonial or a menu item read as a job title, or someone who has left, names no decision-maker.
+    researched = f.contact_source in ("website", "sec_filing") and (
+        f.contact_role == "inbox" or f.contact_title is None or decision_maker_title(f.contact_title))
     if f.contact_consent in {"inquiry", "opt_in"}:
         data += 3
         reasons.append("+3 data: contact provided by the person with consent")
@@ -286,7 +309,7 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
     if f.country != "US":
         disqualify = "Outside US target market"
     elif f.is_competitor:
-        disqualify = "Company appears to sell similar services or AI products itself (possible competitor)"
+        disqualify = "Company appears to sell software or AI work to clients (possible competitor)"
     elif f.suppressed or f.contact_consent == "opted_out":
         disqualify = "Contact or domain is on the suppression list"
     if disqualify:
@@ -302,6 +325,15 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
         reasons=reasons,
         disqualify_reason=disqualify,
     )
+
+
+def lasting_grade(f: LeadFacts, thresholds: dict | None = None) -> str:
+    """The grade this evidence still earns a month from now. A lead enters qualified only if it holds its grade that long: for a
+    post over 30 days old that means past the 60-day step down, so nothing goes in today to come out tomorrow with a draft made
+    and cancelled on the way, and a fresh post still has a month for its emails. Someone who asked us is not held back by this."""
+    if f.source in FIRST_PARTY_SIGNALS or any(s.signal_type in FIRST_PARTY_SIGNALS for s in f.signals):
+        return score_lead(f, thresholds).grade
+    return score_lead(replace(f, now=(f.now or utcnow()) + timedelta(days=HOLD_DAYS)), thresholds).grade
 
 
 TIERS = ("HOT", "WARM", "COLD", "UNQUALIFIED")

@@ -16,8 +16,10 @@ from sqlalchemy import or_, select
 
 from aime.crm_ops import log_activity
 from aime.db import take_write_lock
-from aime.models import Activity, Assignment, Attachment, Opportunity, Quote, StageChange, User
+from aime.assignment import owner_choices
+from aime.models import Activity, Assignment, Attachment, Opportunity, Quote, StageChange
 from aime.timeutil import utcnow
+from aime.visibility import can_see_lead
 
 MAX_BYTES = 10 * 1024 * 1024
 # documents a sales team shares; never anything a browser or Windows would run
@@ -67,10 +69,11 @@ def register(app, C, render, back, who) -> None:
                                                         (Activity.lead_id == opp.lead_id) & (Activity.lead_id.is_not(None))))
                              .order_by(Activity.id.desc()).limit(40)).scalars().all()
             sc = getattr(request.state, "scope", None)
-            assignees = [u for u in s.execute(select(User.username).where(User.active.is_(True)).order_by(User.username)).scalars()
-                         if sc is None or sc.all or u in sc.usernames]
+            assignees = owner_choices(s, sc, opp.owner)
+            # a note's words go with its lead: the owner of a deal on someone else's lead reads the lines, not the notes
+            show_notes = sc is None or not opp.lead_id or can_see_lead(s, sc, opp.lead_id)
             return render(request, "deal.html", opp=opp, history=history, quotes=quotes, files=files, owners=owners,
-                          acts=acts, stages=stage_names(C().settings), assignees=assignees, allowed=", ".join(ALLOWED),
+                          acts=acts, show_notes=show_notes, stages=stage_names(C().settings), assignees=assignees, allowed=", ".join(ALLOWED),
                           max_mb=MAX_BYTES // (1024 * 1024))
 
     @app.post("/opportunities/{opp_id}/quotes")

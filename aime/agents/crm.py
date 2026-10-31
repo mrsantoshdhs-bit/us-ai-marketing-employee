@@ -13,6 +13,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent
+from aime.agents.qualification import NOT_A_PERSON
 from aime.crm_ops import (add_signal, ensure_lead, is_suppressed, log_activity, merge_companies, upsert_company,
                           upsert_contact, us_location_evidence)
 from aime.dedupe import clean_company_name, domain_from_email, domain_from_url, name_from_title, normalize_name
@@ -20,14 +21,32 @@ from aime.inbound import InboundPayload, load_inbox_files, validate_inquiry
 from aime.knowledge.geo import normalize_state
 from aime.knowledge.industries import INDUSTRIES
 from aime.matching import classify_industry, competitor_evidence, competitor_in_post
-from aime.models import Alert, Company, FollowUp, InboundInquiry, Lead, Opportunity, ResearchSnapshot, Signal
+from aime.models import Activity, Alert, Company, FollowUp, InboundInquiry, Lead, Opportunity, ResearchSnapshot, Signal
+from aime.monitoring import alert_once
 from aime.sources.base import CompanyCandidate
 from aime.timeutil import utcnow
-from aime.website_check import check_website
+from aime.website_check import check_website, site_answers
 
 Operation = Literal["ingest_inbound", "verify_websites", "dedupe", "hygiene", "stale", "lifecycle", "competitors"]
 RECHECK_AFTER = timedelta(days=30)
+# No answer at all teaches nothing about a site: it keeps its status and is looked at again soon. Only this many such checks
+# in a row while the network worked, each at least RECHECK_NO_ANSWER after the last (about three days), call it unreachable.
+NO_ANSWERS_TO_UNREACHABLE = 4
+RECHECK_NO_ANSWER = timedelta(hours=20)
+RECHECK_IN_OUTAGE = timedelta(hours=1)
+OUTAGE_STOP_AFTER = 5  # this many with no answer and none with one: the rest of the run would only wait for timeouts
+OUTAGE_MIN_WITHOUT_WITNESS = 3  # no site that answered before to ask: this many silent ones are read as an outage
+OUTAGE_WITNESSES = 2
+OUTAGE_ALERT = "website_check:outage"
 US_NAMES = {"us", "usa", "u.s.", "u.s.a.", "united states", "united states of america", "america"}
+
+
+def _own_words(snap: ResearchSnapshot | None, company: Company) -> str:
+    """All a company says of itself on file, as research reads it: its description, services, and homepage titles."""
+    parts = [company.website_title or ""]
+    if snap:
+        parts += [snap.description or "", *(snap.services_offered or []), *(p.get("title") or "" for p in snap.pages or [] if p.get("kind") == "home")]
+    return " ".join(parts)
 
 
 class CRMInput(BaseModel):
@@ -39,6 +58,7 @@ class CRMInput(BaseModel):
 
 class CRMOutput(BaseModel):
     competitors_flagged: int = 0
+    competitor_flags_removed: int = 0
     linkedin_leads_fetched: int = 0
     linkedin_leads_recorded: int = 0
     inbound_files_loaded: int = 0
@@ -91,6 +111,7 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         if "lifecycle" in ops:
             out.lifecycle_updates = self._lifecycle(session)
         if "competitors" in ops:
+            out.competitor_flags_removed = self._review_competitor_flags(session)
             out.competitors_flagged = self._flag_competitors(session)
         return out
 
@@ -98,7 +119,7 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
     def _sync_linkedin_leads(self, session: Session, out: CRMOutput) -> None:
         """New LinkedIn lead form responses become inbound inquiries (aime/integrations/linkedin_leads.py)."""
         from aime.integrations import linkedin_leads
-        from aime.monitoring import alert_once, resolve_alerts
+        from aime.monitoring import resolve_alerts
 
         try:
             with self.ctx.http() as http:
@@ -185,15 +206,26 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         limit = limit or int(self.settings.section("research").get("website_checks_per_run", 25))
         stale = utcnow() - RECHECK_AFTER
         stmt = select(Company).where(Company.merged_into_id.is_(None), Company.domain.is_not(None),
-                                     or_(Company.website_checked_at.is_(None), Company.website_checked_at < stale))
+                                     or_(Company.website_checked_at.is_(None), Company.website_checked_at < stale),
+                                     or_(Company.website_retry_at.is_(None), Company.website_retry_at <= utcnow()))
         if company_ids:
             stmt = stmt.where(Company.id.in_(company_ids))
         todo = session.execute(stmt.order_by(Company.website_checked_at.is_not(None), Company.id).limit(limit)).scalars().all()
         session.commit()  # no write lock is held during network calls
+        silent: list[Company] = []
+        answered = 0
         for company in todo:
             result = check_website(self.ctx, company.domain, company.name)
             out.websites_checked += 1
-            out.website_results[result.status] = out.website_results.get(result.status, 0) + 1
+            said = "no answer" if result.no_answer else result.status
+            out.website_results[said] = out.website_results.get(said, 0) + 1
+            if result.no_answer:  # judged when the run is over: only then can it tell a dead site from a lost network
+                silent.append(company)
+                if not answered and len(silent) >= OUTAGE_STOP_AFTER:
+                    break
+                continue
+            answered += 1
+            company.website_no_answer, company.website_retry_at = None, None
             company.website_status = result.status
             company.website_checked_at = utcnow()
             company.website_title = result.title
@@ -217,6 +249,49 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             session.commit()
             if self.settings.polite_delay:
                 time.sleep(self.settings.polite_delay)
+        self._judge_silent_sites(session, silent, answered)
+
+    def _network_looks_down(self, session: Session, silent: list[Company], answered: int) -> bool | None:
+        """Most checks got no answer: a lost network, or a run of dead sites? Sites that answered before are asked, so dead
+        sites alone are never taken for an outage. None: this run cannot tell."""
+        if len(silent) <= answered:
+            return False
+        witnesses = session.execute(select(Company.domain).where(
+            Company.merged_into_id.is_(None), Company.domain.is_not(None), Company.website_status.in_(("verified", "redirected")),
+            Company.website_retry_at.is_(None), Company.id.not_in([c.id for c in silent]))
+            .order_by(Company.website_checked_at.desc()).limit(OUTAGE_WITNESSES)).scalars().all()
+        session.commit()  # no write lock is held during network calls
+        if witnesses:
+            return not any(site_answers(self.ctx, domain) for domain in witnesses)
+        return True if len(silent) >= OUTAGE_MIN_WITHOUT_WITNESS else None
+
+    def _judge_silent_sites(self, session: Session, silent: list[Company], answered: int) -> None:
+        from aime.monitoring import alert_once, resolve_alerts
+
+        # nothing asked, nothing learned: an outage's alert stays open until something has answered
+        down = self._network_looks_down(session, silent, answered) if silent else (False if answered else None)
+        now = utcnow()
+        for company in silent:
+            if down:  # nothing was learned about these sites: no count, no change
+                company.website_retry_at = now + RECHECK_IN_OUTAGE
+                continue
+            company.website_no_answer = (company.website_no_answer or 0) + 1
+            company.website_retry_at = now + RECHECK_NO_ANSWER
+            if company.website_no_answer >= NO_ANSWERS_TO_UNREACHABLE:
+                checks = company.website_no_answer
+                company.website_status, company.website_checked_at = "unreachable", now
+                company.website_no_answer, company.website_retry_at = None, None
+                company.validation = {**(company.validation or {}), "website": f"No answer on {checks} checks over several days"}
+                log_activity(session, f"Website {company.domain} gave no answer on {checks} checks over several days, while "
+                             "other sites answered: now marked unreachable", self.name, type_="data_quality", company_id=company.id)
+        if down:
+            alert_once(session, "warning", self.name, f"The internet connection looks down: {len(silent)} of "
+                       f"{len(silent) + answered} company websites gave no answer, and neither did sites that answered before. "
+                       "Nothing changes for those companies or their leads; they are checked again once the connection is back.",
+                       self.settings, key=OUTAGE_ALERT)
+        elif down is False:
+            resolve_alerts(session, (OUTAGE_ALERT,), set())
+        session.commit()
 
     # ------------------------------------------------------------------ maintenance
     def _flag_competitors(self, session: Session) -> int:
@@ -233,7 +308,7 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
                                    .order_by(ResearchSnapshot.id.desc())).scalars().first()
             description = snap.description if snap else None
             if description:
-                phrase = competitor_evidence(f"{description} {' '.join(snap.services_offered or [])} {company.website_title or ''}")
+                phrase = competitor_evidence(_own_words(snap, company))
             else:
                 posts = session.execute(select(Signal.text).where(Signal.company_id == company.id, Signal.signal_type == "hiring"))
                 phrase = next((p for p in map(competitor_in_post, posts.scalars()) if p), None) or competitor_evidence(company.website_title)
@@ -243,6 +318,69 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
                 log_activity(session, f'Marked as a possible competitor: it says "{phrase}"', self.name, type_="data_quality",
                              company_id=company.id, lead_id=lead.id)
         return flagged
+
+    def _review_competitor_flags(self, session: Session) -> int:
+        """A flag AIME set is read again by today's rule, which stored flags otherwise never are. It goes only when AIME's own
+        log shows AIME set it and nothing the company or its posts say matches now; a flag with no such record, or on a company
+        a person wrote a note about, stays: only a person can read that note. It changes the flag and the lead's status, each logged, and nothing else: a lead that returns is
+        scored by the next run like any other, so the most it can get is a draft waiting for a person's approval."""
+        removed = 0
+        for company in session.execute(select(Company).where(Company.is_competitor.is_(True), Company.merged_into_id.is_(None),
+                                                             Company.competitor_cleared_by.is_(None))).scalars().all():
+            log = session.execute(select(Activity).where(Activity.company_id == company.id, or_(
+                Activity.type.in_(("note", "override")),
+                Activity.subject.like("%competitor%") & (Activity.type != "status_change")))).scalars().all()
+            set_by_aime = any(a.subject.startswith("Marked as a possible competitor") and (a.actor or "") in NOT_A_PERSON for a in log)
+            if not set_by_aime or any((a.actor or "") not in NOT_A_PERSON for a in log) or self._competitor_words_on_file(session, company):
+                continue
+            company.is_competitor = False
+            removed += 1
+            log_activity(session, "Competitor flag removed: AIME set it on older wording, and nothing on record now shows it sells "
+                         "software or AI work to clients", self.name, type_="data_quality", company_id=company.id)
+            for lead in session.execute(select(Lead).where(Lead.company_id == company.id, Lead.status == "disqualified",
+                                                           Lead.disqualify_reason.contains("competitor"))).scalars().all():
+                self._return_lead(session, lead, company)
+        return removed
+
+    def _competitor_words_on_file(self, session: Session, company: Company) -> bool:
+        snap = session.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == company.id)
+                               .order_by(ResearchSnapshot.id.desc())).scalars().first()
+        posts = session.execute(select(Signal.text).where(Signal.company_id == company.id, Signal.signal_type == "hiring")).scalars()
+        return bool(competitor_evidence(_own_words(snap, company)) or any(map(competitor_in_post, posts))
+                    or competitor_in_post(company.description))
+
+    def _return_lead(self, session: Session, lead: Lead, company: Company) -> None:
+        """The lead the old flag closed. A person's last word on its status holds; an opt-out or an outreach already under way
+        keeps it closed, for a person to decide."""
+        changes = session.execute(select(Activity).where(Activity.lead_id == lead.id, Activity.type == "status_change")
+                                  .order_by(Activity.created_at.desc(), Activity.id.desc())).scalars().all()
+        contact = lead.contact
+        if changes and (changes[0].actor or "") not in NOT_A_PERSON:
+            self._tell_it_stays_closed(session, lead, company, "a person set its status last")
+            return
+        if is_suppressed(session, contact.email if contact else None, company.domain) or (contact and contact.consent_status == "opted_out"):
+            lead.disqualify_reason = "Contact or domain is on the suppression list"
+            why = "the contact or domain is on the suppression list"
+        elif lead.outreach_status not in (None, "drafted", "approved"):
+            lead.disqualify_reason = "Competitor flag removed; its outreach had begun, so a person decides whether to reopen it"
+            why = "its outreach had begun, so a person decides whether to reopen it"
+        else:
+            # one a person or the stale-lead rule had parked goes back to being parked: the score alone does not take it further
+            before = next((a for a in changes if "→ disqualified" not in (a.subject or "")), None)
+            parked = before is not None and before.actor != "qualification" and "nurture" in (before.subject or "")
+            status = "nurture" if parked else "new"
+            log_activity(session, f"Lead disqualified → {status}: the competitor flag was removed, so the next scoring run decides",
+                         self.name, type_="status_change", company_id=company.id, lead_id=lead.id)
+            lead.status, lead.disqualify_reason = status, None
+            lead.last_activity_at = utcnow()  # or the stale-lead rule could park it again the next morning
+            return
+        self._tell_it_stays_closed(session, lead, company, why)
+
+    def _tell_it_stays_closed(self, session: Session, lead: Lead, company: Company, why: str) -> None:
+        log_activity(session, f"Competitor flag removed, but the lead stays closed: {why}", self.name, type_="data_quality",
+                     company_id=company.id, lead_id=lead.id)
+        alert_once(session, "warning", self.name, f"Lead #{lead.id}: its competitor flag was removed, but it stays closed: {why}. "
+                   "Nothing was reopened; a person decides on the lead's page.", self.settings, key=f"lead_closed:{lead.id}")
 
     def _dedupe(self, session: Session) -> int:
         companies = session.execute(select(Company).where(Company.merged_into_id.is_(None))

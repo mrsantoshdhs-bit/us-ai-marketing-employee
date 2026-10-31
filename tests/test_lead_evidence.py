@@ -23,7 +23,7 @@ SOFTWARE_POST = ("Acme | Senior Engineer | Austin, TX | Full-time | $150k\n\nAcm
 
 
 def company(**kw):
-    base = dict(source="hn_hiring", industry="tech_startups", state="TX", country="US", location_text="Acme | Austin, TX")
+    base = dict(source="hn_hiring", industry="tech_startups", state="TX", country="US", location_text="Acme | Austin, TX", verified=False)
     return SimpleNamespace(**{**base, **kw})
 
 
@@ -137,11 +137,18 @@ def test_a_company_outside_the_us_is_disqualified_on_its_own_words():
 
 
 # ------------------------------------------------------------------ competitors
+@pytest.mark.parametrize("words", ["Fractional CTO and custom AI development.", "Source a custom AI agent for your business.",
+                                   "Custom CRM development agency.", "Hire vetted remote developers.",
+                                   "Repetitive tasks, done for you, by AI workers"])
+def test_firms_selling_software_work_are_recognised_in_their_own_words(words):
+    assert competitor_evidence(words)
+
+
 @pytest.mark.parametrize("words", ["Agentic pricing management for B2B. Experts and AI agents do the work.", "Give AI agents instant sandboxes.",
                                    "Infrastructure for your code and agents.", "Give every team agents they can trust.",
                                    "Finds accounts and automates personalized outreach."])
-def test_same_offer_vendors_are_recognised_in_their_own_words(words):
-    assert competitor_evidence(words)
+def test_product_companies_stay_prospects_even_when_the_product_uses_agents(words):
+    assert not competitor_evidence(words)
 
 
 @pytest.mark.parametrize("words", ["We sell accounting software.", "Affordable primary care designed around you.", "Wholesale specialty insurance brokerage.",
@@ -183,8 +190,8 @@ def test_a_company_on_file_gets_the_own_words_check_and_it_is_logged(make_ctx):
 
 def test_an_unread_company_is_checked_on_its_post_but_its_own_words_decide_when_on_record(make_ctx):
     ctx = make_ctx()
-    _, unread = lead_with(ctx, "Unread", post_text="We are expanding into a full agentic compliance platform.")
-    _, clinic = lead_with(ctx, "Clinic", description="Affordable primary care.", post_text="We are building an agentic platform for our clinic.")
+    _, unread = lead_with(ctx, "Unread", post_text="We are a small IT consulting firm in regulated environments.")
+    _, clinic = lead_with(ctx, "Clinic", description="Affordable primary care.", post_text="Our last vendor was a dev shop, so we build it ourselves.")
     assert flagged(ctx, unread) and not flagged(ctx, clinic)
 
 

@@ -746,3 +746,4 @@ a.agent-card:hover { color: var(--text); text-decoration: none; transform: trans
 .mbx-form fieldset { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px 12px; margin: 0; }
 .mbx-form fieldset legend { padding: 0 6px; font-weight: 650; color: var(--text-2); }
 .mbx-form .checks label { flex-direction: row; align-items: center; gap: 6px; }
+.activity-body { white-space: pre-wrap; overflow-wrap: anywhere; }

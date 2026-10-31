@@ -32,12 +32,12 @@
     {% if r.reply_to %} · they ask for answers to go to {{ r.reply_to }} (nothing goes there unless a person decides){% endif %}</div>
   <div class="post small" style="margin-top:6px">{{ (r.new_text or r.body_text or '')[:1500] }}</div>
   {% if r.reasons %}<div class="small muted">Why: {{ r.reasons|join('; ') }}</div>{% endif %}
-  {% if r.action_note %}<div class="small">Done: {{ r.action_note }}{% if r.suggested_followup_id %} · <a href="/followups#f{{ r.suggested_followup_id }}">suggested reply</a>{% endif %}</div>{% endif %}
+  {% if r.action_note %}<div class="small">Done: {{ notes[r.id] }}{% if r.suggested_followup_id %} · <a href="/followups#f{{ r.suggested_followup_id }}">suggested reply</a>{% endif %}</div>{% endif %}
   {% if r.status == 'needs_review' and can_edit and not can_approve %}
   <form class="filters" method="post" action="/inbox/{{ r.id }}/reviewed" style="margin-top:8px"><button>Mark reviewed</button></form>
   {% elif r.status == 'needs_review' and can_approve %}
   <form class="filters" method="post" action="/inbox/{{ r.id }}/reclassify" style="margin-top:8px">
-    <select name="category">{% for c in ['interested', 'not_interested', 'objection', 'referral', 'question', 'unsubscribe', 'out_of_office', 'bounce', 'other'] %}<option {{ 'selected' if r.category == c }}>{{ c }}</option>{% endfor %}</select>
+    <select name="category">{% for c in ['interested', 'not_interested', 'objection', 'referral', 'question', 'unsubscribe', 'out_of_office', 'bounce', 'other'] %}<option value="{{ c }}" {{ 'selected' if r.category == c }}>{{ c|replace('_', ' ') }}</option>{% endfor %}</select>
     <button class="secondary">Reclassify and apply</button>
     <button formaction="/inbox/{{ r.id }}/reviewed">Mark reviewed</button>
     {% if r.category == 'calendly' and r.status == 'needs_review' %}<button formaction="/inbox/{{ r.id }}/apply_calendly" title="You checked it in Calendly: apply the booking, change or cancellation">Apply (checked in Calendly)</button>{% endif %}

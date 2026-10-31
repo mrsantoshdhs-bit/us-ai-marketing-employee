@@ -9,6 +9,9 @@ from functools import lru_cache
 from aime.knowledge.industries import INDUSTRIES
 from aime.knowledge.services import SERVICES
 
+# Only firms that sell software or AI work to clients count as competitors (the owner's rule, 31 Oct 2026). A company selling
+# its own product stays a prospect, even when that product uses AI agents.
+_SAYS_IT_IS = r"(?:\bwe are|\bwe['\u2019]re|(?<!customer )(?<!client )(?<!partner )(?<!vendor )\bis) an? (?:[\w&]+[ ,-]+){0,3}?"
 COMPETITOR_PATTERNS = [
     r"software (?:development|engineering) (?:agency|firm|company|services)",
     r"dev(?:elopment)? shop",
@@ -20,39 +23,31 @@ COMPETITOR_PATTERNS = [
     r"\b(?:applied[- ]ai|ai|ai transformation|digital transformation|automation) (?:advisory|consulting|consultancy|"
     r"implementation|transformation) (?:firm|company|agency|studio|partner)\b",
     r"\bai transformation firm\b",
+    # These say who the company is, so they need it saying so: a post also names firms it sold to, replaced or wants experience of.
+    _SAYS_IT_IS + r"(?:boutique )?(?:(?:it|tech|technology|software) consulting|outsourcing|outstaffing) (?:firm|company)\b",
+    _SAYS_IT_IS + r"boutique (?:tech(?:nology)?|software|it|ai|digital|engineering|dev(?:elopment)?) "
+    r"(?:agency|firm|company|consultancy|studio|shop)\b",
+    r"\b(?:specializ\w+ in|we (?:do|offer|provide)) (?:ai/ml|ai|ml|machine learning) (?:and|&) software development for (?!our\b|your\b)",
 ]
 _COMPETITOR_RE = re.compile("|".join(COMPETITOR_PATTERNS), re.IGNORECASE)
-# What a company says it sells on its own website: AI agents or workers, an agent platform, or developers for
-# hire. A hiring post can describe the job instead, so these apply only to the company's own description.
+# What a company says it sells on its own website: software work, or developers for hire. A hiring post can describe the job
+# instead, so these apply only to the company's own description.
 OWN_SITE_COMPETITOR_PATTERNS = [
-    r"\bai (?:agents?|workers?|employees?|teammates?) (?:that|which|for|to)\b",
-    r"\b(?:build|create|source|deploy|launch|design) (?:your own |a |an |custom |autonomous )*ai (?:agents?|workers?|"
-    r"employees?)\b",
-    r"\bagentic ai\b",
-    r"\bai agent (?:platform|builder|infrastructure|framework|marketplace)\b",
     r"\b(?:custom )?(?:crm|software|app) development (?:agency|company|firm|services)\b",
     r"\b(?:hire|access|connect with|join) (?:thousands of )?(?:elite |top(?:-tier)? |vetted |remote )*"
     r"(?:developers|engineers|software talent)\b",
     r"\bfractional (?:cto|cio|caio|chief)\b",
-    r"\bcustom ai (?:development|solutions|systems|agents)\b",
-    r"\bagentic (?:\w+ ){0,2}(?:management|platform|enterprise|workflows?|operations|compliance|systems?)\b",
-    r"\bai agents? (?:do|run|handle|work)\b",
-    r"\b(?:give|for) (?:your |developers and )*ai agents\b",
-    r"\bfor your code and agents\b|\bagents they can trust\b|\bagent identit(?:y|ies)\b|\bmcp (?:gateway|registry)\b",
-    r"\bautomates? (?:personali[sz]ed |your )?(?:outreach|sales|follow-?ups?)\b",
+    r"\bcustom ai (?:development|solutions|systems|agents?)\b",
+    r"\bdone[- ]for[- ]you,? by ai\b",
+    r"\b(?:technology|tech|it) services (?:&|and) (?:it )?consulting\b",
+    r"\boutstaffing (?:partner|company|firm|provider)\b",
+    r"\bai automation agency\b|\bai consultancy\b|\bsoftware consultancy\b",
+    r"\bai(?: agents?)? development (?:company|firm|agency|services)\b",
+    r"\bcustom software development (?:for (?!our\b|your\b)|services\b|company\b)",
+    r"\b(?:it|ai) consulting services\b",
     *COMPETITOR_PATTERNS,
 ]
 _OWN_SITE_COMPETITOR_RE = re.compile("|".join(OWN_SITE_COMPETITOR_PATTERNS), re.IGNORECASE)
-# The same, in a hiring post of a company whose own site has not been read: only what names the product it sells. A post
-# can describe a job ("build AI agents for our clinic"), so these never decide when the company's own words are on record.
-UNREAD_COMPANY_PATTERNS = [
-    r"\bagentic (?:\w+ ){0,2}(?:platform|management|compliance)\b",
-    r"\bbuilds? agentic\b",
-    r"\b(?:roll out|deploy|govern) ai agents\b",
-    r"\bplatform for developers and ai agents\b",
-    r"\bai agents that (?:take|do|run|handle)\b",
-]
-_UNREAD_COMPANY_RE = re.compile("|".join(UNREAD_COMPANY_PATTERNS), re.IGNORECASE)
 
 
 @lru_cache(maxsize=512)
@@ -88,15 +83,23 @@ class ServiceMatch:
         return f"{SERVICES[self.service_id].name} ({self.confidence}): mentions {', '.join(self.keywords[:4])}"
 
 
+_NOT_OF_AGENTS = r"(?!\s+(?:of|for|across)\s+(?:\w+\s+){0,2}(?:agents?|llms?)\b)"
 # Words our keywords would catch that are no evidence of a need: a thing denied ("not LLMs"), what engineers use to write
 # code ("agentic coding", "Claude Code"), and engineering terms that share a word with a service ("test automation").
 _NOT_A_NEED_RE = re.compile(
     r"\b(?:not|no|non|without|beyond|rather than)[- ]+(?:an? )?(?:llms?|ai|gpt|genai|saas|crm|automation)\b"
     r"|\bbehind llms\b|\bwere not a saas\b|\bnot a saas\b"
+    r"|\bnot an? (?:ml|ai|machine learning)\b[^.\n]{0,40}\b(?:position|role|job)\b"
     r"|\bagentic (?:coding|engineering|development|tooling|practices|skills)\b"
     r"|\b(?:claude code|github copilot|coding (?:agents?|assistants?)|llm[- ]based tooling|ai[- ]assisted (?:coding|development)|"
-    r"ai tools daily|ai coding tools?)\b"
-    r"|\b(?:container|kubernetes|k8s|workload|infrastructure|service) orchestration\b"
+    r"ai tools daily|ai coding tools?|ai ides?|claude or similar tools)\b"
+    r"|\b(?:(?:claude|copilot|chatgpt|codex|windsurf|gemini)\s*(?:,|/|&|and|or)\s*)+(?:and |or )?cursor\b"
+    r"|\bcursor\s*(?:,|/|&|and|or)\s*(?:and |or )?(?:claude|copilot|chatgpt|codex|windsurf|gemini)\b"
+    r"|\bapply via mcp\b"
+    r"|\b(?:container|kubernetes|k8s|workload|infrastructure|service|terraform) orchestration\b"
+    r"|(?<!ai )(?<!agent )(?<!llm )(?<!agentic )\b(?:workflow|data|pipeline|etl|batch|job)[- ]orchestration\b" + _NOT_OF_AGENTS +
+    r"|\b(?:pipelines?|data services?),? (?:and )?orchestration\b" + _NOT_OF_AGENTS + r"|\borchestration in resource[- ]constrained\b"
+    r"|\b(?:apache )?airflow\b|\bdagster\b|\bprefect\b|\btemporal\b"
     r"|\b(?:test|testing|qa|cloud|infrastructure|infra|build|deployment|deploy|ci/?cd|security|network|browser|e2e|home|"
     r"factory|lab|industrial|warehouse|robotics) automation\b|\bautomation engineers?\b"
     r"|\bintegration test(?:s|ing)?\b|\bunit and integration\b",
@@ -104,11 +107,28 @@ _NOT_A_NEED_RE = re.compile(
 )
 
 
+_VENDOR_RE = re.compile(r"\b(?:anthropic|openai|gpt|claude)\b", re.I)
+# Inside the same clause only: "backed by Benchmark, Anthropic and others" names an investor; "backed by Benchmark, we build on
+# Anthropic" does not. Only the vendor's name goes, so whatever else the words say still counts.
+_CLAUSE = r"(?:(?!\b(?:to|we|with|using|built|build|for|that|our)\b)[^.\n;:]){0,100}?"
+_NAMED_ONLY_RE = re.compile(
+    r"\b(?:backed by|funded by|investors? (?:include|including|like)|investment from|raised (?:\S+ )?from)\b" + _CLAUSE
+    + r"\b(?:anthropic|openai|gpt|claude)\b(?:\s*(?:,|and|&)+\s*(?:anthropic|openai|gpt|claude)\b)*"
+    r"|\b(?:ex|former|formerly(?: at)?|alumni of|alums? of|previously at)[- ]+(?:anthropic|openai)\b"
+    r"(?:(?:(?!\b(?:to|we|with|using|built|build|for|that|our)\b)[^.)\n;]){0,40}?\b(?:anthropic|openai)\b)?",
+    re.IGNORECASE,
+)
+
+
+def _strip_no_evidence(lower: str) -> str:
+    return _NOT_A_NEED_RE.sub(" ", _NAMED_ONLY_RE.sub(lambda m: _VENDOR_RE.sub(" ", m.group(0)), lower))
+
+
 def match_services(text: str | None) -> list[ServiceMatch]:
     """Return services evidenced by the text, strongest first."""
     if not text:
         return []
-    lower = _NOT_A_NEED_RE.sub(" ", text.lower().replace("\u2019", "'"))
+    lower = _strip_no_evidence(text.lower().replace("\u2019", "'"))
     found: dict[str, list[tuple[str, int, list[tuple[int, int]]]]] = {}
     for svc in SERVICES.values():
         for kw, weight in [(k, 2) for k in svc.strong] + [(k, 1) for k in svc.weak]:
@@ -139,10 +159,28 @@ def match_services(text: str | None) -> list[ServiceMatch]:
     return matches
 
 
+# "Agency" in a job post is usually a trait or a customer, not the company's industry.
+_NOT_AN_INDUSTRY_RE = re.compile(
+    r"\b(?:high|lots of|a lot of|more|personal|real|full|great|strong|much|sense of)[- ]agency\b"
+    r"|\b(?:government|federal|state|public|regulatory|staffing|recruiting) agency\b")
+
+
+def _about_the_industry(text: str) -> str:
+    """What a text says of the company's industry: what it denies or merely mentions does not count ("we're not a SaaS company")."""
+    return _NOT_AN_INDUSTRY_RE.sub(" ", _strip_no_evidence(text.lower().replace("\u2019", "'")))
+
+
+def industry_evidenced(industry: str | None, text: str | None) -> bool:
+    """The text bears out this stored label, whichever other industry it may also mention."""
+    ind = INDUSTRIES.get(industry or "")
+    lower = _about_the_industry(text or "")
+    return bool(ind) and any(_kw_re(kw).search(lower) for kw in ind.keywords)
+
+
 def classify_industry(text: str | None, default: str | None = None) -> str | None:
     if not text:
         return default
-    lower = text.lower()
+    lower = _about_the_industry(text)
     best, best_hits = default, 0
     for ind in INDUSTRIES.values():
         hits = sum(1 for kw in ind.keywords if _kw_re(kw).search(lower))
@@ -165,7 +203,7 @@ def competitor_evidence(own_words: str | None) -> str | None:
 # defense contractor", "(employees + contractors)".
 def competitor_in_post(post: str | None) -> str | None:
     """The phrase in a hiring post that shows the company sells what we sell, for a company whose own site is unread."""
-    m = _UNREAD_COMPANY_RE.search(post or "") or _COMPETITOR_RE.search(post or "")
+    m = _COMPETITOR_RE.search(post or "")
     return m.group(0) if m else None
 
 

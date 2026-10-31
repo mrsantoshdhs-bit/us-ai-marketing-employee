@@ -41,11 +41,12 @@ def next_email(settings, lead: Lead, fups: list[FollowUp]) -> dict:
     waiting = [f for f in emails if f.status in words]
     if waiting:
         f = min(waiting, key=lambda x: x.step or 0)
-        return {"text": f"Next email: step {f.step} {words[f.status]}", "at": None}
+        return {"text": f"Next email: {'their answer' if f.kind == 'response' else f'step {f.step}'} {words[f.status]}", "at": None}
     if lead.status in ("disqualified", "merged"):
         return {"text": f"Next email: none, this lead is {lead.status}", "at": None}
     if lead.outreach_status in STOP_STATUSES:
-        return {"text": f"Next email: none, the sequence stopped ({lead.outreach_status.replace('_', ' ')})", "at": None}
+        return {"text": "Next email: none, the sequence was stopped" if lead.outreach_status == "stopped" else
+                f"Next email: none, the sequence stopped ({lead.outreach_status.replace('_', ' ')})", "at": None}
     sent = [f for f in emails if f.status == "sent" and f.sent_at and f.kind in ("outreach", None)]
     if not sent:
         tasks = sorted((f for f in fups if f.channel == "task" and f.status == "pending"), key=lambda f: f.due_at)
@@ -183,7 +184,14 @@ def register(app, C, render, back, who) -> None:
                 user.session_version = (user.session_version or 1) + 1  # new permissions from the next sign-in
             audit(s, who(request), "user_changed", f"user {user.username}",
                   f"{before} -> {(user.role, user.team_id, user.manager, user.skills, user.available, user.capacity)}"[:2000])
-        return back("/admin/users", f"Saved {user.username}")
+            away = ""
+            if before[4] is not False and not user.available:
+                from aime.assignment import open_work
+
+                away = (f". {user.username} gets no new leads now and still holds {open_work(s, user.username)}: that stays with them "
+                        "until a manager reassigns it on each lead's page, except that a new deal on one of their leads takes that "
+                        "lead to whoever receives the deal")
+        return back("/admin/users", f"Saved {user.username}{away}")
 
     @app.post("/admin/users/{uid}/{action}", response_class=HTMLResponse)
     def user_action(request: Request, uid: int, action: str):
@@ -422,7 +430,7 @@ def register(app, C, render, back, who) -> None:
             # one line, for this person: what waits on the team first, then their own work, never a colleague's task
             own = Scope(all=False, usernames=frozenset({name}), unassigned=False) if name else shown
             overdue = next((d for d in deals if d.expected_close and d.expected_close < today and (not name or d.owner == name)), None)
-            own_task = s.execute(select(FollowUp).where(record_condition(own, FollowUp.lead_id), FollowUp.channel == "task",
+            own_task = s.execute(select(FollowUp).where(record_condition(own, FollowUp.lead_id), FollowUp.channel == "task", FollowUp.due_at <= now,
                                                         FollowUp.status == "pending").order_by(FollowUp.due_at).limit(1)).scalars().first()
             own_lead = s.execute(select(Lead).where(lead_condition(own), Lead.owner == name if name else mine, working)
                                  .order_by(Lead.score.desc()).limit(1)).scalars().first()
@@ -438,7 +446,9 @@ def register(app, C, render, back, who) -> None:
             elif own_lead:
                 next_step = (f"Open your strongest lead, {own_lead.company.name}, and read its evidence.", f"/leads/{own_lead.id}")
             elif unassigned:
-                next_step = ("No lead is yours yet: ask your manager to assign some of the unassigned ones.", "/leads?status=qualified&owner=none")
+                may_assign = not user or "assign_leads" in user.get("perms", ())
+                next_step = (f"No lead is yours yet: {'assign' if may_assign else 'ask your manager to assign'} some of the unassigned ones.",
+                             "/leads?status=qualified&owner=none")
             else:
                 next_step = ("Nothing waits for you. Leads appear here when they are assigned to you.", None)
         team_label = "everyone" if sc.all else "you and your team"

@@ -64,7 +64,7 @@ def test_a_lead_moved_to_nurture_is_not_requalified_without_new_evidence(make_ct
     from aime.crm_ops import add_signal, ensure_lead, log_activity
     from aime.models import Company, Lead
     ctx = make_ctx()
-    post = ("We are hiring a senior engineer to rebuild our CRM integration, automate sales follow-up emails and "
+    post = ("Our SaaS company is hiring a senior engineer to rebuild our CRM integration, automate sales follow-up emails and "
             "lead scoring, and build AI agents for our pipeline. Contractors welcome.")
     with ctx.db.session() as s:
         co = Company(name="Acme", normalized_name="acme", domain="acme.example", website="https://acme.example",

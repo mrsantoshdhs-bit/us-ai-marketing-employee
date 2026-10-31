@@ -244,6 +244,7 @@ class FileLock:
         self.path = path
         self.stale_seconds = stale_seconds
         self.held = False
+        self.written: bytes | None = None
 
     def _owner_dead(self) -> bool:
         return lock_owner_gone(self.path)
@@ -274,7 +275,8 @@ class FileLock:
             try:
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 try:
-                    os.write(fd, f"{os.getpid()} {datetime.now().isoformat()} {pid_started(os.getpid()) or ''}".encode())
+                    self.written = f"{os.getpid()} {datetime.now().isoformat()} {pid_started(os.getpid()) or ''}".encode()
+                    os.write(fd, self.written)
                 finally:
                     os.close(fd)
                 self.held = True
@@ -296,9 +298,12 @@ class FileLock:
         return False
 
     def release(self) -> None:
+        """Only what this holder wrote is removed: a run that slept past `stale_seconds` lost the lock to another run, and on
+        waking must not open it to a third while that one works."""
         if self.held:
             try:
-                self.path.unlink()
+                if self.path.read_bytes() == self.written:
+                    self.path.unlink()
             except FileNotFoundError:
                 pass
             self.held = False

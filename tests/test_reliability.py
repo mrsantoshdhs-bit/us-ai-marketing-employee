@@ -177,7 +177,8 @@ def _heartbeat(data_dir, minutes_ago):
     (data_dir / "heartbeat.json").write_text(json.dumps({"at": at.isoformat() + "Z", "state": "idle"}), encoding="utf-8")
 
 
-def test_watchdog_flags_stale_ticks_but_not_fresh_or_maintenance(tmp_path):
+def test_watchdog_flags_stale_ticks_but_not_fresh_or_maintenance(tmp_path, monkeypatch):
+    monkeypatch.setattr(watchdog, "seconds_since_wake", lambda: None)  # however lately this PC really woke
     _heartbeat(tmp_path, 5)
     assert watchdog.check(tmp_path) == []
     _heartbeat(tmp_path, 90)

@@ -54,6 +54,9 @@ class Company(Timestamped, Base):
     website_status: Mapped[str | None] = mapped_column(String(30))
     website_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
     website_title: Mapped[str | None] = mapped_column(String(300))
+    # Checks in a row that got no answer at all while the network worked, and when to look again (aime.agents.crm)
+    website_no_answer: Mapped[int | None] = mapped_column(Integer)
+    website_retry_at: Mapped[datetime | None] = mapped_column(DateTime)
     validation: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict)
     # Reading the company's own pages (aime.company_research): done | no_people | no_website | blocked | failed |
     # redirected (the site now sends visitors to another domain, which is not read)
@@ -499,8 +502,11 @@ class ContentItem(Timestamped, Base):
 
     @property
     def qc(self) -> dict:
-        """Latest automated quality-check report (see aime.qc), stored in `quality`."""
-        return (self.quality or {}).get("qc") or {}
+        """Latest automated quality-check report (see aime.qc), stored in `quality`, with today's factual-claims check. Nothing is
+        written back: the stored report stays as it was."""
+        from aime.qc.checks import with_todays_claims
+
+        return with_todays_claims((self.quality or {}).get("qc") or {}, self.title or "", self.body or "")
 
     @property
     def qc_status(self) -> str:

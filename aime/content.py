@@ -49,6 +49,9 @@ _BANNED = [
     (re.compile(r"\b(?:industry[- ]leading|world[- ]class|best[- ]in[- ]class|number one|award[- ]winning|"
                 r"leading provider|#1)\b", re.I), "uses unverifiable superlatives"),
 ]
+# Words that say nothing about what a post is about ("The hidden cost of ...", "Give ... back").
+_TITLE_FILLER = frozenset("a about an and are at back by do does for from give how in into is it its just need needs not of on one or "
+                          "our real start stops than that the their them these this those to we what when where why with without work you your".split())
 _EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF☀-➿️]")
 _PREAMBLE_RE = re.compile(r"^(here(?:'s| is)|sure|certainly|below is)[^\n]*:\s*\n", re.I)
 
@@ -145,6 +148,14 @@ def quality_check(body: str, min_words: int = 70, max_words: int = 260) -> dict:
     return {"passed": not problems, "problems": problems, "words": words}
 
 
+def title_belongs(title: str, body: str) -> bool:
+    """Most of what the title speaks of is in the text. A model handed one topic can write about another, and the title stays."""
+    words = [w for w in re.findall(r"[a-z]+", title.lower()) if w not in _TITLE_FILLER]
+    low = body.lower()
+    found = sum(bool(re.search(rf"\b{w[:len(w) - 2]}" if len(w) > 5 else rf"\b{w}\b", low)) for w in words)
+    return not words or found * 2 > len(words)
+
+
 def write_post(llm: LLMProvider | None, company: str, service_id: str, industry_id: str,
                angle_idx: int, pain_idx: int, cta_idx: int, min_words: int = 70, max_words: int = 260) -> Draft:
     template = compose_template(service_id, industry_id, angle_idx, pain_idx, cta_idx)
@@ -166,8 +177,12 @@ def write_post(llm: LLMProvider | None, company: str, service_id: str, industry_
         except LLMError as exc:
             attempts.append(f"error: {exc}")
             break
-        body = add_brand_line(sanitize(raw), company, service_id)
+        text = sanitize(raw)
+        body = add_brand_line(text, company, service_id)
         q = quality_check(body, min_words, max_words)
+        if not title_belongs(template.title, text):  # before the brand line, which speaks of the service whatever the post says
+            q["passed"] = False
+            q["problems"].append(f"the text is not about its title ({template.title})")
         if q["passed"]:
             q["llm_attempts"] = attempts
             return Draft(title=template.title, body=body, generator=llm.label, quality=q)

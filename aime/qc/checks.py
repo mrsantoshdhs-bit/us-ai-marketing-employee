@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
 
@@ -86,6 +87,17 @@ def check_claims(title: str, body: str) -> CheckResult:
     if not found:
         return CheckResult("factual claims", "pass", "no figures or named third parties")
     return CheckResult("factual claims", "uncertain", "; ".join(found) + " (needs a person to verify the source)")
+
+
+def with_todays_claims(report: dict, title: str, body: str) -> dict:
+    """A stored report with today's factual-claims check. Texts are not rechecked when the rule grows, so a post checked long ago
+    can read "passed" for what the rule now holds. It only ever adds a finding: what was stored stands until a person saves the post."""
+    today = check_claims(title, body)
+    if today.status == "pass":
+        return report
+    failed = report.get("status") == "failed"
+    return {**report, "status": "failed" if failed else "held", "decision": "fail" if failed else "hold",
+            "checks": [*(c for c in report.get("checks", []) if c.get("name") != today.name), asdict(today)]}  # no date: only a stored report has one
 
 
 _SPELLER: list = []

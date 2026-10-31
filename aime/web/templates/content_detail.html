@@ -30,8 +30,9 @@
       {% for ch in item.qc.checks %}<tr><td>{{ qc_pill({'pass': 'passed', 'fail': 'failed', 'uncertain': 'held'}[ch.status]) }}</td>
         <td><b>{{ ch.name }}</b></td><td class="muted">{{ ch.detail }}</td></tr>{% endfor %}
     </table>
-    <p class="small muted">Checked {{ item.qc.checked_at }} UTC · {{ item.quality.get('words') }} words
+    {% if item.qc.checked_at %}<p class="small muted">Checked {{ item.qc.checked_at }} UTC, factual claims again just now · {{ item.quality.get('words') }} words
       {% if item.quality.get('image') %} · image: {{ item.quality.image.renderer }} {{ item.quality.image.style }}{% endif %}</p>
+    {% else %}<p class="small muted">Not checked yet: only the factual claims above were read, just now. Saving the post runs every check.</p>{% endif %}
     {% else %}<p class="small muted">Not checked yet (posts created before automated checks). Saving the post runs them.</p>{% endif %}
     <h3>Auto-publish policy <span class="pill warn">shadow</span></h3>
     {% if decision %}<p class="small"><span class="pill {{ 'ok' if decision.decision == 'would_publish' else 'warn' }}">{{ decision.decision|replace('_', ' ') }}</span>
