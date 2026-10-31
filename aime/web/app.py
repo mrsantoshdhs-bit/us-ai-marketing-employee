@@ -988,7 +988,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     opp.next_step = "No-show: follow up to rebook"
             if action == "cancel":  # as for a cancellation Calendly reports: the lead reopens unless another is booked
                 reopen_after_cancel(s, m, who(request))
-                if m.event_id:  # booked through the calendar: cancel the event too (a person clicked Cancel)
+                # booked through the calendar and still ahead: cancel the event too (a person clicked Cancel). One that has ended
+                # changes here only: no call to the calendar, and no apology to the attendee
+                if m.event_id and m.ends_at >= utcnow():
                     from aime import booking
                     from aime.integrations.calendar import CalendarError, calendar_for
                     with C().http() as http:

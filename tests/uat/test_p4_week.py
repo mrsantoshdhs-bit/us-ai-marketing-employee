@@ -12,6 +12,7 @@ from aime.agents.analytics import AnalyticsReportingAgent
 from aime.agents.sales_workflow import SalesWorkflowAgent
 from aime.assignment import assign_new
 from aime.crm_ops import log_activity, suppress
+from aime.integrations import calendar as calendar_module
 from aime.models import Activity, Assignment, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity, User
 from aime.pipeline import NO_REPLY, REPLY_SENT, REPLY_WAITING, settle_next_steps
 from aime.permissions import permissions_of
@@ -516,3 +517,37 @@ def test_a_stopped_lead_with_a_logged_reply_cannot_be_reopened(make_ctx):
     assert "/reopen_outreach" not in page and "a person logged that this company replied" in page
     r = client.post(f"/leads/{lead_id}/reopen_outreach", data={"reason": "try again"}, headers=ORIGIN, follow_redirects=False)
     assert "Not reopened" in unquote(r.headers["location"]) and lead_of(ctx).outreach_status == "stopped"
+
+
+class FakeCalendar:
+    name = "google"
+    cancelled: list[str] = []
+
+    def cancel_event(self, event_id):
+        FakeCalendar.cancelled.append(event_id)
+
+
+def calendar_meeting(ctx, lead_id, start, event_id):
+    with ctx.db.session() as s:
+        lead = s.get(Lead, lead_id)
+        m = Meeting(lead_id=lead_id, company_id=lead.company_id, invitee_email=DAVID, starts_at=start, ends_at=start + timedelta(minutes=30),
+                    status="scheduled", source="calendar", title="Intro call", event_id=event_id, provider="google")
+        s.add(m)
+        s.flush()
+        return m.id
+
+
+def test_cancelled_on_an_ended_calendar_meeting_changes_the_crm_only(make_ctx, monkeypatch):
+    ctx, _sent, lead_id = interested(make_ctx)
+    monkeypatch.setattr(calendar_module, "calendar_for", lambda *a, **k: FakeCalendar())
+    FakeCalendar.cancelled = []
+    ended = calendar_meeting(ctx, lead_id, utcnow() - timedelta(days=1), "ev-ended")
+    client = web(ctx)
+    assert client.post(f"/meetings/{ended}/cancel", headers=ORIGIN, data={"notes": ""}, follow_redirects=False).status_code == 303
+    with ctx.db.session() as s:
+        assert s.get(Meeting, ended).status == "cancelled"
+        assert not s.execute(select(FollowUp.id).where(FollowUp.lead_id == lead_id, FollowUp.purpose == "meeting_cancel")).first()
+    assert FakeCalendar.cancelled == []
+    ahead = calendar_meeting(ctx, lead_id, utcnow() + timedelta(days=2), "ev-ahead")
+    assert client.post(f"/meetings/{ahead}/cancel", headers=ORIGIN, data={"notes": ""}, follow_redirects=False).status_code == 303
+    assert FakeCalendar.cancelled == ["ev-ahead"]  # one still to come is cancelled in the calendar, as before
