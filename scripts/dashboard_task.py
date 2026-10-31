@@ -45,7 +45,9 @@ def ensure_output(log_path: Path) -> None:
     if sys.stdout is not None and sys.stderr is not None:
         return
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log = open(log_path, "a", encoding="utf-8", buffering=1)  # noqa: SIM115 - lives as long as the process
+    from aime.logging_setup import AppendingLog
+
+    log = AppendingLog(log_path)
     sys.stdout = sys.stdout or log
     sys.stderr = sys.stderr or log
 
