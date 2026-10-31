@@ -564,7 +564,8 @@ def test_defect_a_tick_keeps_its_log_lines_and_the_old_logs_while_the_dashboard_
         for i in range(6):
             logging.getLogger("aime.scheduler").warning("TICK-%d", i)
         for h in logger.handlers:
-            h.flush()
+            if h not in before:  # an earlier test may leave its own closed handler here
+                h.flush()
     finally:
         logging.raiseExceptions = raise_exc
         dashboard.close()
