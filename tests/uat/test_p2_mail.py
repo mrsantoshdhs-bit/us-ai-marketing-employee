@@ -309,13 +309,13 @@ def test_ok_a_hard_bounce_in_each_real_format_stops_the_lead(make_ctx, build):
     assert next_steps(ctx, sender) == []
 
 
-def test_ok_a_mail_systems_bounce_quoting_no_id_stops_the_lead_and_a_person_looks(make_ctx):
+def test_ok_a_mail_systems_bounce_quoting_no_id_stops_the_lead_and_a_person_decides(make_ctx):
     """Anyone can send a report, and this one quotes nothing of ours (test_p2_hostile forbids blind suppression). A mail system
-    naming an address we wrote to is still honoured, but it is not filed as done."""
+    naming an address we wrote to stops the sequence; nothing is suppressed for good until a person confirms it."""
     ctx, sender, sent, _ = scene(make_ctx, K.BOUNCES["postfix_dsn_no_id"])
     r = latest_reply(ctx)
     assert (r.category, r.status, r.followup_id) == ("bounce", "needs_review", sent.id)
-    assert DAVID in suppressed_values(ctx) and contact_status(ctx) == "bounced" and lead_of(ctx).outreach_status == "bounced"
+    assert DAVID not in suppressed_values(ctx) and contact_status(ctx) != "bounced" and lead_of(ctx).outreach_status == "stopped"
     assert next_steps(ctx, sender) == []
 
 

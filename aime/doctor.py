@@ -223,3 +223,7 @@ def _setup_checks(ctx: AppContext, add) -> None:
             "outreach can be sent but replies, unsubscribes and bounces are not read: on the Mailboxes page enable a "
             "mailbox and turn on Read replies (or set IMAP_HOST in .env)",
             "warning")
+        every = int(st.schedule.get("jobs", {}).get("inbox", {}).get("every_minutes") or 0)
+        add("Mailbox read before sending", every <= 15, f"the inbox job runs every {every} minutes" if every <= 15 else
+            f"the inbox job runs only every {every} minutes: approved emails wait for a read just before they go, so they "
+            "will often be held. Set it to 15 minutes or less", "warning")

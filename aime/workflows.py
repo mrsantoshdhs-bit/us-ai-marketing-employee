@@ -12,20 +12,21 @@ from aime.agents import (AnalyticsReportingAgent, AuthorizedPublishingAgent, Com
                          InboxAgent,
                          LeadQualificationAgent, LinkedInContentAgent, MarketingManagerAgent, SalesWorkflowAgent,
                          USBusinessResearchAgent)
-from aime.agents.base import AgentResult
+from aime.agents.base import AgentResult, agent_enabled
 from aime.backup import (PREDEPLOY_KEPT, backup_sqlite_file, checkpoint, integrity_check, prune_backups, verify_backup,
                          weekly_restore_drill, write_offsite)
 from aime.context import AppContext
 from aime.db import kv_get, kv_set
 from aime.doctor import run_checks
-from aime.models import AgentRun, JobRun, MarketingPlan
+from aime.models import AgentRun, JobRun, JobState, MarketingPlan
 from aime.monitoring import alert_once, check_health, resolve_alerts
 from aime.policy import evaluate_shadow
 from aime.redact import redact
 from aime.sources.census import CensusMarketSource
 from aime.timeutil import utcnow
 
-MAILBOX_READ = "mailbox.last_read"  # when every mailbox was last read to the end
+MAILBOX_READ = "mailbox.last_read"  # when every mailbox was last read to the end; empty once a read failed or stopped short
+MAILBOX_READ_SHORT = "mailbox.read_short"  # that the last read was fine but more mail is waiting
 # The inbox job runs at every check-in and before followups, so a real run finds a read from seconds ago. This much
 # slack is for a followups run started by hand between two check-ins.
 MAILBOX_READ_FRESH = timedelta(minutes=20)
@@ -131,12 +132,27 @@ def mailbox_hold(ctx: AppContext) -> str | None:
         if not ctx.settings.network_enabled or not (ctx.settings.imap_configured or mail_accounts.readable(s)):
             return None
         read = kv_get(s, MAILBOX_READ)
+        short = kv_get(s, MAILBOX_READ_SHORT)
+        job = s.get(JobState, "inbox")
+        switched_off = job is not None and not job.enabled
     try:
         age = now - datetime.fromisoformat(read)
     except (TypeError, ValueError):
         age = None
     if age is not None and timedelta(minutes=-5) <= age <= MAILBOX_READ_FRESH:
         return None
+    settings = ctx.settings.schedule.get("jobs", {}).get("inbox", {})
+    every = int(settings.get("every_minutes") or 0)
+    if switched_off or not settings.get("enabled", True) or not agent_enabled(ctx, "inbox_monitor"):
+        return ("Held: reading the sales mailbox is switched off, so a reply or opt-out may be waiting in it; "
+                "it goes out once reading is back on and has run")
+    if every > 15:
+        return (f"Held: the sales mailbox is read only every {every} minutes, so it was not read just before this run and a reply "
+                "or opt-out may be waiting in it; it goes out after a read just before a run, and the inbox job should run at least "
+                "every 15 minutes")
+    if short:
+        return ("Held: more mail is waiting in the sales mailbox than one read takes in, and a reply or opt-out may be among it; "
+                "it goes out once the mailbox has been read to the end")
     return ("Held: the sales mailbox could not be read just before this run, and a reply or opt-out may be waiting in "
             "it; it goes out after the next good read")
 
@@ -169,9 +185,12 @@ def job_inbox(ctx: AppContext, job: str = "inbox") -> JobOutcome:
     """Read the sales mailbox (read-only) and handle replies; approved emails are sent by the followups job."""
     out = JobOutcome()
     read = out.add(InboxAgent(ctx).run({}, job=job))
-    if read.ok and read.output.mailbox != "not configured":  # a mailbox that failed fails the run: no record of a read
+    configured = not read.ok or (read.output is not None and read.output.mailbox != "not configured")
+    if configured:  # a read that failed or stopped short is no read: nothing goes out in this tick on an older one
+        to_end = read.ok and read.output is not None and read.output.read_to_end
         with ctx.db.session() as s:
-            kv_set(s, MAILBOX_READ, utcnow().isoformat())
+            kv_set(s, MAILBOX_READ, utcnow().isoformat() if to_end else None)
+            kv_set(s, MAILBOX_READ_SHORT, bool(read.ok and not to_end))
     return out
 
 

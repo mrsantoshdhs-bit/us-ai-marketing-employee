@@ -31,19 +31,27 @@ def trusted_authserv_ids(settings) -> set[str]:
     return {x.strip().lower() for x in (getattr(settings, "trusted_authserv_ids", "") or "").split(",") if x.strip()}
 
 
-def passing_domains(auth_results: str | None) -> set[str]:
-    """Domains with a passing DKIM or DMARC result (SPF only counts with DMARC's alignment, so it is not used)."""
-    out = set()
+def _passes(auth_results: str | None) -> list[tuple[str, bool]]:
+    """(domain, whether the signature covers the To line) for each passing DKIM or DMARC result. SPF only counts with DMARC's
+    alignment, so it is not used. Only AIME's own line says when To is left out (Microsoft 365 commonly does)."""
+    out = []
     for method, rest in _PASS.findall(auth_results or ""):
         if method.lower() not in ("dkim", "dmarc"):
             continue
         # Whole properties only, each value a whole hostname: "header.d=a,header.d=calendly.com,.evil.example" names nobody.
-        for token in re.sub(r"\s*=\s*", "=", _COMMENT.sub(" ", rest)).split():
+        tokens = re.sub(r"\s*=\s*", "=", _COMMENT.sub(" ", rest)).split()
+        to_signed = "header.to=unsigned" not in tokens
+        for token in tokens:
             key, _, value = token.partition("=")
             value = value.strip('"').rsplit("@", 1)[-1].lower().rstrip(".")
             if key.lower() in _PROPERTIES and len(value) <= 253 and _HOSTNAME.fullmatch(value):
-                out.add(value)
+                out.append((value, to_signed))
     return out
+
+
+def passing_domains(auth_results: str | None) -> set[str]:
+    """Domains with a passing DKIM or DMARC result."""
+    return {domain for domain, _ in _passes(auth_results)}
 
 
 def _within(domain: str, parent: str) -> bool:
@@ -80,9 +88,13 @@ def calendly_verified(session, settings, from_email: str | None, auth_results: s
     domains = passing_domains(auth_results)
     if _within(sender_domain, "calendly.com"):
         if any(_within(d, "calendly.com") for d in domains):
+            if to_email is not None and not to_email:
+                return False, "Calendly signed it, but it has no To line, so it cannot be shown to be meant for us"
             if to_email is not None and to_email.lower() not in trusted_forwarders(session, settings):
-                return False, (f"Calendly signed it, but it is addressed to {to_email or 'nobody'}, not to one of our addresses "
+                return False, (f"Calendly signed it, but it is addressed to {to_email}, not to one of our addresses "
                                "(if that address is ours, add it to the Calendly forwarders)")
+            if to_email is not None and not any(_within(d, "calendly.com") and to_signed for d, to_signed in _passes(auth_results)):
+                return False, "Calendly signed it, but its signature does not cover who it is addressed to"
             return True, "signed by calendly.com (DKIM/DMARC pass)"
         return False, "it claims to come from Calendly but has no passing calendly.com signature"
     if sender in trusted_forwarders(session, settings):

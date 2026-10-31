@@ -72,7 +72,7 @@ class ParsedEmail:
     bounced_addresses: list[str] = field(default_factory=list)
     bounced_message_id: str | None = None
     auth_results: str | None = None  # the topmost Authentication-Results header: added by the receiving server
-    kind: str | None = None  # bounce | delay | receipt | sending_problem (see _delivery_notice) | calendar
+    kind: str | None = None  # bounce | delay | receipt | sending_problem (see _delivery_notice) | calendar | list
     note: str | None = None  # what a person should know: no readable text, or why a delivery failed
 
 
@@ -211,13 +211,28 @@ TEXT_RECIPIENT = re.compile(r"(?:Final-Recipient: rfc822;\s*|\bto\s+<?|\baddress
 COPY_MESSAGE_ID = re.compile(r"(?im)^message-id:\s*(<[^<>\s]{1,290}>)")
 # A failure that says something about US, not about the address: our server's own limit, our address or server refused
 # or blocklisted, our email judged as spam. The prospect's address is good: nothing is suppressed, and the owner is told.
-ABOUT_US = re.compile(r"\b(5\.7\.\d{1,3}|exceeded the max|(rate|sending|hourly|daily|message|send) limit|too many (messages|e-?mails|connections)|"
-                      r"block(ed|list|listed|ing)?|black-?list(ed)?|spamhaus|barracuda|ipcheck|reputation|spam|"
-                      r"administrative prohibition|not authori[sz]ed to send|relay(ing)? (access )?(denied|not permitted)|"
-                      r"(spf|dkim|dmarc)\W+(\w+\W+)?(fail\w*|reject\w*)|security policy)\b", re.I)
+OUR_REPUTATION = re.compile(r"\b(spamhaus|barracuda|ipcheck|block-?list(ed)?|black-?list(ed)?|reputation|spam|exceeded the max|"
+                            r"(rate|sending|hourly|daily|message|send) limit|too many (messages|e-?mails|connections))\b", re.I)
+ABOUT_US = re.compile(r"\b(5\.7\.\d{1,3}|block(ed|ing)?|administrative prohibition|not authori[sz]ed to send|"
+                      r"relay(ing)? (access )?(denied|not permitted)|(spf|dkim|dmarc)\W+(\w+\W+)?(fail\w*|reject\w*)|"
+                      r"unauthenticated|security policy)\b", re.I)
 # Beats the above: the address itself is reported as gone.
 ADDRESS_GONE = re.compile(r"\b(5\.1\.\d{1,3}|5\.2\.1|user unknown|unknown user|no such (user|address|mailbox|recipient)|does ?n.?t exist|"
                           r"address not found|recipient not found|no mailbox|unrouteable)\b", re.I)
+# This recipient refuses us for good, whoever sends: a group that takes no outsiders, or access denied for this address.
+RECIPIENT_REFUSES = re.compile(r"\b(5\.7\.13[3-6]|not ?authenticated ?for ?group|recipient address rejected|access denied|"
+                               r"delivery not authori[sz]ed)\b", re.I)
+
+
+def _failure_kind(reason: str) -> str:
+    """Whose fault is a permanent failure? When in doubt it is a bounce only if the address is what the report complains of."""
+    if ADDRESS_GONE.search(reason):
+        return "bounce"
+    if OUR_REPUTATION.search(reason):
+        return "sending_problem"
+    if RECIPIENT_REFUSES.search(reason):
+        return "bounce"
+    return "sending_problem" if ABOUT_US.search(reason) else "bounce"
 
 
 def _report_text(part: Message) -> str:
@@ -295,8 +310,7 @@ def _delivery_notice(msg: Message, sender: str, subject: str, auto: bool,
             delayed = True
     reason = " ".join(" ".join(why).split())
     if why:
-        kind = "sending_problem" if ABOUT_US.search(reason) and not ADDRESS_GONE.search(reason) else "bounce"
-        return kind, recipients, original, reason[:300] or None
+        return _failure_kind(reason), recipients, original, reason[:300] or None
     return ("delay" if delayed else "receipt" if delivered else "bounce"), [], original, None
 
 
@@ -342,6 +356,9 @@ def parse_message(raw: bytes, own: frozenset[str] | set[str] = frozenset()) -> P
     if kind is None and any(f.get_content_type() in ("text/calendar", "application/ics")
                             or ".ics" in _file_label(f).lower() for f in files):
         kind = "calendar"
+    if kind is None and (msg.get("List-Unsubscribe") is not None or msg.get("List-Id") is not None
+                         or _header(msg, "Precedence").lower() == "bulk"):
+        kind = "list"  # a newsletter's own "Unsubscribe" is nobody asking for anything
     answers = _thread_ids(_header(msg, "In-Reply-To"))
     in_reply_to = answers[0] if answers else None
     references = list(dict.fromkeys([*answers[1:], *_thread_ids(_header(msg, "References"))]))
@@ -438,7 +455,11 @@ FETCH_TRIES = 3  # a message that cannot be fetched is tried again on this many 
 
 class Mailbox:
     """Read-only IMAP access. `fetch_new(state)` returns ([(uid_key, raw bytes)], new_state). With MAIL_AUTH=oauth
-    it signs in with XOAUTH2 using `token()`, an access token from aime/integrations/oauth.py."""
+    it signs in with XOAUTH2 using `token()`, an access token from aime/integrations/oauth.py.
+
+    new_state also says how the read went, for the caller to take out before it saves the rest: "complete" (False: more mail
+    is waiting, so nobody may act as if the mailbox had been read), "connection_lost" (the UID being fetched when the
+    connection dropped) and "skipped_headers" (the header lines of emails given up on, so they can be named)."""
 
     def __init__(self, settings, imap_factory=imaplib.IMAP4_SSL, first_run_days: int = 14, batch: int = 50):
         self.settings = settings
@@ -473,31 +494,47 @@ class Mailbox:
                 typ, data = conn.uid("SEARCH", None, "SINCE", since.strftime("%d-%b-%Y"))
             else:
                 typ, data = conn.uid("SEARCH", None, f"UID {int(state['last_uid']) + 1}:*")
-            uids = sorted(int(u) for u in (data[0] or b"").split() if int(u) > int(state.get("last_uid", 0)))[: self.batch]
+            found = sorted(int(u) for u in (data[0] or b"").split() if int(u) > int(state.get("last_uid", 0)))
+            uids = found[: self.batch]
+            complete = len(found) <= self.batch
             out = []
             failed = dict(state.get("failed") or {})
+            skipped_headers = {}
             for uid in uids:
                 broken = False
                 try:
                     typ, parts = conn.uid("FETCH", str(uid), "(BODY.PEEK[])")
-                except (imaplib.IMAP4.error, OSError, MemoryError) as exc:  # counted like a refusal: the mail before it is still handled
+                except (imaplib.IMAP4.abort, OSError):  # the connection dropped, which says nothing about this email: not counted
+                    state["connection_lost"] = uid
+                    dropped = dict(state.get("dropped") or {})
+                    state["dropped"] = {str(uid): int(dropped.get(str(uid), 0)) + 1}
+                    complete = False
+                    break
+                except (imaplib.IMAP4.error, MemoryError) as exc:  # about this email (BAD, or too big): counted like a refusal
                     typ, parts = "NO", None
-                    broken = not isinstance(exc, imaplib.IMAP4.error) or isinstance(exc, imaplib.IMAP4.abort)
+                    broken = isinstance(exc, MemoryError)  # what the connection holds next is unknown
                 raw = next((p[1] for p in parts or [] if isinstance(p, tuple) and len(p) > 1), None)
                 if typ == "OK" and raw:
                     out.append((f"{validity}:{uid}", raw))
                     failed.pop(str(uid), None)
+                    state.pop("dropped", None)
                 else:
                     tries = failed.get(str(uid), 0) + 1
                     if tries < FETCH_TRIES:  # stop here: this message (and the ones after it) are fetched next run
                         failed[str(uid)] = tries
+                        complete = False
                         break
                     failed.pop(str(uid), None)
                     state["skipped_uids"] = (list(state.get("skipped_uids") or []) + [uid])[-20:]
+                    if not broken and (head := self._header_lines(conn, uid)):
+                        skipped_headers[str(uid)] = head
                 state["last_uid"] = uid
-                if broken:  # the connection is gone: the rest wait for the next run
+                if broken:  # the rest wait for the next run
+                    complete = False
                     break
             state["failed"] = failed
+            state["complete"] = complete
+            state["skipped_headers"] = skipped_headers
             state["read_at"] = utcnow().isoformat(timespec="seconds")
             return out, state
         finally:
@@ -505,6 +542,16 @@ class Mailbox:
                 conn.logout()
             except Exception:  # noqa: S110 -- closing a broken connection: nothing else to do
                 pass
+
+    @staticmethod
+    def _header_lines(conn, uid: int) -> bytes | None:
+        """Who an email given up on is from: its body may be what cannot be fetched."""
+        try:
+            typ, parts = conn.uid("FETCH", str(uid), "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)])")
+        except (imaplib.IMAP4.error, OSError, MemoryError):
+            return None
+        raw = next((p[1] for p in parts or [] if isinstance(p, tuple) and len(p) > 1), None)
+        return raw[:HEADER_LIMIT] if typ == "OK" and raw else None
 
     @staticmethod
     def _uidvalidity(conn) -> str:
