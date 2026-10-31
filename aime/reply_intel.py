@@ -527,13 +527,18 @@ def reply_footer(settings) -> str:
             f"{settings.company_name} · {address}")
 
 
+# A shared mailbox answers under a display name such as "Sales Team": nobody there is called Sales.
+MAILBOX_NAMES = re.compile(r"\b(sales|team|support|info|hello|contact|admin|office|marketing|service|services|billing|help|"
+                           r"customer|no-?reply|enquir\w+|inquir\w+|desk)\b", re.I)
+
+
 def suggest(settings, category: str, row: InboundEmail, contact: Contact | None, lead: Lead | None = None,
             meeting: Meeting | None = None) -> tuple[str, str] | None:
     """The reply a person approves (or edits) before it goes out, in the prospect's thread. An interested reply gets
     the booking link, mentioning the day they asked for and what the call is about; one from a lead that has already
     booked (`meeting`) confirms that meeting instead of offering a second booking."""
     words = (row.from_name or "").split() or ((contact.first_name or "").split() if contact else [])
-    name = words[0] if words else "there"
+    name = words[0] if words and not MAILBOX_NAMES.search(row.from_name or "") else "there"
     subject = row.subject or ""
     subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
     sign = _signature(settings)
@@ -669,8 +674,8 @@ def _act_on_bounce(session: Session, settings, row: InboundEmail, f: FollowUp | 
         notes.append(f"A delivery report naming {len(named)} address(es) that it cannot tie to an email of ours: "
                      "nothing was changed; a person checks it")
     if not named and not failed:
-        notes.append("No permanently failed address found (for example a delay notice): nothing suppressed; "
-                     "check it, and reclassify it as a bounce if delivery failed")
+        notes.append("Could not read a failed address from this delivery report, so nothing was suppressed. It may be a "
+                     "delay or a failure: read it, and reclassify it as a bounce if delivery failed")
     row.status = "actioned" if failed and certain and (f or contact) else "needs_review"  # unmatched: a person checks
     return notes
 

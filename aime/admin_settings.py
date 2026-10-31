@@ -116,7 +116,7 @@ FIELDS: list[tuple[str, str, str, Any, str]] = [
     ("outreach", "min_grade", "Draft outreach for grade (A, B or C) and better", None, "grade"),
     ("outreach", "daily_send_limit", "Outreach emails a day", _int(1, 200), "number"),
     ("outreach", "per_domain_daily_limit", "Emails per company domain a day", _int(1, 10), "number"),
-    ("outreach", "sends_per_run", "Outreach emails per run (every 15 min)", _int(1, 50), "number"),
+    ("outreach", "sends_per_run", "Outreach emails per follow-ups run", _int(1, 50), "number"),
     ("outreach", "mailbox_daily_limit", "All emails per mailbox in 24 hours", _int(1, 500), "number"),
     ("outreach", "max_touches", "Emails in a sequence", _int(1, 5), "number"),
     ("outreach", "intervals_days", "Days of each sequence email (0, 4, 10)", _days, "text"),

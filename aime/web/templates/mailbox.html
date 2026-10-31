@@ -7,8 +7,18 @@
   Every human reply stops the automated sequence. Unsubscribes and bounces are suppressed. Suggested replies wait
   in <a href="/followups">Follow-ups</a> for your approval. Simulated replies (testing only) are marked SIMULATED.
   <div style="margin-top:6px">{% for c, n in counts.items() if c %}<span class="pill">{{ c|replace('_', ' ') }}: {{ n }}</span> {% endfor %}
-    <a href="?show={{ 'all' if show == 'review' else 'review' }}">{{ 'Show all' if show == 'review' else 'Show only those needing review' }}</a></div>
+    <a href="?show={{ 'all' if show == 'review' else 'review' }}">{{ 'Show all' if show == 'review' else 'Show only those needing review' }}</a>
+    {% if can_view_all %} · <a href="?show=skipped">Mail read as not sales</a>{% endif %}</div>
 </div>
+{% if show == 'skipped' %}
+<div class="card table-wrap">
+  <p class="small muted" style="margin-top:0">Read in the last 30 days and not treated as sales mail. Only the sender, subject and date are kept. If one is a real answer, open it in the mailbox and act on it there.</p>
+  <table><tr><th>Date</th><th>From</th><th>Subject</th></tr>
+  {% for m in skipped %}<tr><td class="small">{{ m.skipped_at|local }}</td><td class="small">{{ m.from_email }}</td><td class="small">{{ m.subject or '(no subject)' }}</td></tr>
+  {% else %}<tr><td colspan="3" class="muted">{{ 'Nothing was set aside.' if can_view_all else 'Only a role that sees everything can list this.' }}</td></tr>{% endfor %}
+  </table>
+</div>
+{% else %}
 {% for r in rows %}
 <div class="card" id="r{{ r.id }}">
   <div><strong>{{ r.subject or '(no subject)' }}</strong>
@@ -32,4 +42,5 @@
   </form>{% endif %}
 </div>
 {% else %}<div class="card muted">{{ 'Nothing needs review.' if show == 'review' else 'No replies yet.' }}</div>{% endfor %}
+{% endif %}
 {% endblock %}

@@ -53,6 +53,7 @@ from aime.models import (MailAccount, MeetingProposal, Activity, AgentRun, Alert
 from aime.monitoring import agent_stats, alert_key, read_heartbeat
 from aime.policy import agreement, environment_blockers, evaluate_shadow, policy_config
 from aime.qc import summary as qc_summary
+from aime.reply_intel import skipped_mail as reply_skipped_mail
 from aime.outreach import REACHED_PROSPECT, record_delivery
 from aime.outreach import set_status as set_outreach_status
 from aime.outreach import stop_sequence
@@ -515,9 +516,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         settings = C().settings
         with C().db.session() as s:
             stmt = select(InboundEmail).where(record_condition(scope(request), InboundEmail.lead_id))
-            if show == "review":
+            if show != "all":
                 stmt = stmt.where(InboundEmail.status == "needs_review")
-            rows = s.execute(stmt.order_by(InboundEmail.received_at.desc()).limit(200)).scalars().all()
+            rows = ([] if show == "skipped" else
+                    s.execute(stmt.order_by(InboundEmail.received_at.desc()).limit(200)).scalars().all())
             for r in rows:
                 _ = r.lead.company if r.lead else None
             counts = dict(s.execute(select(InboundEmail.category, func.count(InboundEmail.id))
@@ -527,7 +529,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             state = kv_get(s, "inbox.state") or next(
                 (kv_get(s, f"inbox.state.mailbox{a.id}") for a in mail_accounts.readable(s)), None)
             reading, where = mail_accounts.reading_status(s, settings)
-        return render(request, "mailbox.html", rows=rows, show=show, counts=counts, state=state,
+            # Not sales mail, so it belongs to nobody's leads: only a role that sees everything may list its senders.
+            user = getattr(request.state, "user", None)
+            skipped = (reply_skipped_mail(s) if show == "skipped" and (user is None or "view_all" in user.get("perms", ()))
+                       else [])
+        return render(request, "mailbox.html", rows=rows, show=show, counts=counts, state=state, skipped=skipped,
                       mailbox=where.removesuffix(", read-only") if reading else None)
 
     @app.post("/inbox/{eid}/{action}")
@@ -1568,7 +1574,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                        ("Reading replies (IMAP)", read_where if reading else "off"),
                        ("Test mode recipients", ", ".join(sorted(st.test_recipients)) or "off")]),
             ("Outreach rules", [("Send window", f"{follow.get('send_window_start', '08:00')}–{follow.get('send_window_end', '18:00')} "
-                                                f"{follow.get('send_window_timezone', 'America/New_York')}, weekdays"),
+                                                f"{follow.get('send_window_timezone', 'America/New_York')}, weekdays except listed holidays"),
                                 ("Daily outreach limit", str(outreach.get("daily_send_limit", 20))),
                                 ("Per domain per day", str(outreach.get("per_domain_daily_limit", 1))),
                                 ("Sequence (days after the first email)", ", ".join(str(d) for d in outreach.get("intervals_days", [0, 4, 10])))]),
