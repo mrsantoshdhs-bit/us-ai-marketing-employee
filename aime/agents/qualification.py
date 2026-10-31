@@ -165,13 +165,17 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                              self.name, type_="status_change", company_id=company.id, lead_id=lead.id)
                 moved[lead.status] += 1
             if out.scored % WRITE_BATCH == 0:  # the write lock is not held for the whole run: clicks wait for no one
+                self._say_moved(session, moved)  # with the moves it counts: a run that fails later has still told someone
                 session.commit()
+        self._say_moved(session, moved)
+        out.grade_counts = dict(grades)
+        return out
+
+    def _say_moved(self, session: Session, moved: Counter) -> None:
         if moved:
             words = ", ".join(f"{n} to {status}" for status, n in sorted(moved.items()))
             alert_once(session, "info", self.name, f"Scoring moved {sum(moved.values())} lead(s): {words}. Each lead's page "
                        "says why, and a wrong competitor flag can be cleared there.", self.settings, key="leads:moved")
-        out.grade_counts = dict(grades)
-        return out
 
     def _may_requalify(self, session: Session, lead: Lead, company: Company, signals: list[Signal],
                        prev_status: str) -> bool:

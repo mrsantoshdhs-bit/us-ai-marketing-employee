@@ -678,13 +678,60 @@ def test_the_mailboxes_page_says_it_plainly(make_ctx, monkeypatch):
 
 
 def test_a_sign_in_key_from_another_pc_only_signs_everyone_out(tmp_path, monkeypatch):
+    from aime.secure_store import SecretUnreadable
     from aime.web import auth
 
+    def not_decryptable(_stored):
+        raise SecretUnreadable("another PC")
     (tmp_path / "session.key").write_text("dpapi:AAAA", encoding="utf-8")
-    monkeypatch.setattr(auth, "unprotect", cannot_read)
+    monkeypatch.setattr(auth, "unprotect", not_decryptable)
     monkeypatch.setattr(auth, "protect", lambda v: "plain:" + v)
     assert len(auth.session_secret(tmp_path)) == 32
     assert (tmp_path / "session.key").read_text(encoding="utf-8").startswith("plain:")
+
+
+def test_a_sign_in_key_emptied_by_a_power_cut_is_replaced_not_used(tmp_path, monkeypatch):
+    from aime.web import auth
+
+    monkeypatch.setattr(auth, "protect", lambda v: "plain:" + v)
+    for short in ("", "plain:QUJD"):  # nothing, and three bytes
+        auth._SECRETS.clear()
+        (tmp_path / "session.key").write_text(short, encoding="utf-8")
+        assert len(auth.session_secret(tmp_path)) == 32
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_a_passing_failure_to_read_the_sign_in_key_keeps_the_key(tmp_path, monkeypatch):
+    from aime.web import auth
+
+    auth._SECRETS.clear()
+    (tmp_path / "session.key").write_text("dpapi:AAAA", encoding="utf-8")
+
+    def passing(_stored):
+        raise OSError(5, "held for a moment")
+    monkeypatch.setattr(auth, "unprotect", passing)
+    assert len(auth.session_secret(tmp_path)) == 32
+    assert (tmp_path / "session.key").read_text(encoding="utf-8") == "dpapi:AAAA", "the key file stays"
+    assert not auth._SECRETS, "and the next request reads it again"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="DPAPI")
+def test_only_a_definite_dpapi_failure_counts_as_unreadable(monkeypatch):
+    import aime.secure_store as ss
+
+    def fails_with(code):
+        def dpapi(*_a):
+            error = OSError(22, "x")
+            error.winerror = code
+            raise error
+        return dpapi
+    monkeypatch.setattr(ss, "_dpapi", fails_with(-2146893813))
+    with pytest.raises(ss.SecretUnreadable):
+        ss.unprotect("dpapi:QUJD")
+    monkeypatch.setattr(ss, "_dpapi", fails_with(1450))  # ERROR_NO_SYSTEM_RESOURCES: it passes
+    with pytest.raises(OSError) as passing:
+        ss.unprotect("dpapi:QUJD")
+    assert not isinstance(passing.value, ss.SecretUnreadable)
 
 
 # ---------------------------------------------------------------------------------------- the dashboard looking after itself
@@ -748,3 +795,331 @@ def test_a_long_job_is_not_reported_as_stopped_ticks(tmp_path):
     beat["at"] = (now - timedelta(minutes=80)).replace(tzinfo=None).isoformat() + "Z"
     (tmp_path / "heartbeat.json").write_text(json.dumps(beat), encoding="utf-8")
     assert "stopped" in wd.check(tmp_path, now)[0]
+
+
+# ---------------------------------------------------------------------------------------- second review
+class _NoConnection:
+    def __init__(self, error):
+        self.engine = self
+        self.error = error
+
+    def connect(self):
+        raise self.error
+
+
+@pytest.mark.parametrize("words", ["database is locked", "disk I/O error", "unable to open database file"])
+def test_a_passing_database_error_is_no_finding_about_the_file(words):
+    from sqlalchemy.exc import OperationalError
+
+    from aime.backup import integrity_check
+
+    check = integrity_check(_NoConnection(OperationalError("PRAGMA", {}, sqlite3.OperationalError(words))))
+    assert not check["ok"] and check["passing"] is True
+
+
+@pytest.mark.parametrize("words", ["database disk image is malformed", "file is not a database"])
+def test_real_damage_is_a_finding(words):
+    from sqlalchemy.exc import DatabaseError
+
+    from aime.backup import integrity_check
+
+    check = integrity_check(_NoConnection(DatabaseError("PRAGMA", {}, sqlite3.DatabaseError(words))))
+    assert not check["ok"] and "passing" not in check
+
+
+def test_a_busy_database_waits_this_run_with_no_hold_and_no_alert(make_ctx, monkeypatch):
+    import aime.backup as backup
+
+    ctx = make_ctx(**MAIL)
+    fid = approved_email(ctx)
+    real = backup.integrity_check
+    busy = lambda db: {"integrity": "unreadable: database is locked", "foreign_key_violations": 0, "ok": False, "passing": True}  # noqa: E731
+    monkeypatch.setattr(backup, "integrity_check", busy)
+    monkeypatch.setattr("aime.doctor.integrity_check", busy)
+    send_run(ctx)
+    assert FakeSMTP.sent == [] and send_journal.hold(ctx.settings.data_dir) is None
+    status, why = status_of(ctx, fid)
+    assert status == "approved" and why.startswith("Waiting") and "opt-out" not in why
+    with ctx.db.session() as s:
+        assert not [a for a in s.execute(select(Alert)).scalars() if "ON HOLD" in a.message]
+    assert next(c for c in run_checks(ctx) if c["name"] == "SQLite integrity")["severity"] == "warning"
+    monkeypatch.setattr(backup, "integrity_check", real)
+    send_run(ctx)
+    assert FakeSMTP.sent == ["p@a.example"], "the next run goes on by itself"
+
+
+def test_home_and_manager_today_say_the_clock_stopped_the_work(make_ctx, monkeypatch):
+    from aime import automation as am
+    from aime.web.app import employee_duty, manager_today
+
+    ctx, _ = stopped_a_year_ahead(make_ctx, monkeypatch)
+    with ctx.db.session() as s:
+        status, tone, detail, headline = employee_duty(ctx.settings, am.get_state(s), s)
+        assert tone == "bad" and "clock" in headline and clock_check.ADVICE in detail
+        assert "working for you" not in headline
+        board = manager_today(ctx, s)
+    assert "clock" in json.dumps(board, default=str).lower()
+    assert '"ACTIVE", "last check-in' not in json.dumps(board, default=str)
+
+
+def test_a_journal_that_stays_unwritable_raises_one_alert_that_closes(make_ctx, monkeypatch):
+    ctx = make_ctx(**MAIL)
+    approved_email(ctx)
+
+    def refuse(*a, **k):
+        raise PermissionError(13, "held")
+    monkeypatch.setattr(send_journal, "record_claim", refuse)
+    send_run(ctx)
+    send_run(ctx)
+    with ctx.db.session() as s:
+        found = s.execute(select(Alert).where(Alert.key == "sending:journal")).scalars().all()
+    assert len(found) == 1 and "record of sent emails" in found[0].message and FakeSMTP.sent == []
+    monkeypatch.undo()
+    send_run(ctx)
+    with ctx.db.session() as s:
+        assert s.execute(select(Alert).where(Alert.key == "sending:journal")).scalars().one().resolved_at
+    assert FakeSMTP.sent == ["p@a.example"]
+
+
+def test_a_locked_journal_does_not_fail_the_monitor_or_give_a_bare_error_on_requeue(make_ctx, monkeypatch):
+    ctx = make_ctx(**MAIL)
+    fid = approved_email(ctx)
+    Refusing.error = TimeoutError("timed out")
+    run_with(ctx, Refusing)
+
+    def locked(*a, **k):
+        raise PermissionError(13, "locked")
+    monkeypatch.setattr(send_journal, "read", locked)
+    check = next(c for c in run_checks(ctx) if c["name"] == "Database knows what was sent")
+    assert not check["ok"] and check["severity"] == "warning"
+    assert any(c["name"] == "No uncertain publications/sends awaiting review" for c in run_checks(ctx)), "the other checks ran"
+    assert run_job(ctx, "monitor")["status"] == "success"
+    monkeypatch.setattr(send_journal, "record_released", locked)
+    client = TestClient(create_app(ctx), follow_redirects=False)
+    assert client.post(f"/followups/{fid}/requeue", headers={"Origin": "http://testserver"}).status_code < 500
+    assert status_of(ctx, fid)[0] == "uncertain", "nothing changed"
+
+
+def test_thousands_of_claims_do_not_break_the_check(make_ctx):
+    ctx = make_ctx(**MAIL)
+    data = ctx.settings.data_dir
+    send_journal._append(data, *[send_journal._record("claim", i, f"p{i}@x.example", None) for i in range(1, 40_000)])
+    with ctx.db.session() as s:
+        found = send_journal.restore_evidence(s, send_journal.read(data))
+    assert len(found) == 39_999, "asked for in chunks: one statement cannot name them all"
+
+
+def test_the_journal_is_read_once_per_send_run(make_ctx, monkeypatch):
+    ctx = make_ctx(**MAIL)
+    for tag in "abc":
+        approved_email(ctx, tag=tag)
+    reads = []
+    real = send_journal.read
+    monkeypatch.setattr(send_journal, "read", lambda d: (reads.append(1), real(d))[1])
+    send_run(ctx)
+    assert len(FakeSMTP.sent) == 3 and len(reads) <= 2  # the hold check and the sending
+
+
+def test_two_processes_appending_at_once_lose_nothing(tmp_path):
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[2]
+    code = ("import sys\nfrom pathlib import Path\nfrom aime import send_journal as j\n"
+            "for i in range(300):\n    j.record_claim(Path(sys.argv[1]), int(sys.argv[2]) + i, 'a@b.example', None)\n")
+    env = dict(os.environ, PYTHONPATH=str(root), PYTHONDONTWRITEBYTECODE="1")
+    kids = [subprocess.Popen([sys.executable, "-c", code, str(tmp_path), str(base)], env=env, cwd=str(tmp_path)) for base in (0, 1000, 2000)]
+    for kid in kids:
+        assert kid.wait(timeout=120) == 0
+    lines = send_journal.journal_path(tmp_path).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 900 and len({json.loads(line)["followup_id"] for line in lines}) == 900
+
+
+def test_an_email_requeued_by_older_code_goes_to_a_person_without_a_global_hold(make_ctx):
+    from aime.crm_ops import log_activity
+
+    ctx = make_ctx(**MAIL)
+    fid = approved_email(ctx)
+    Refusing.error = TimeoutError("timed out")
+    run_with(ctx, Refusing)
+    with ctx.db.session() as s:  # what the code before this journal did: no "released" in the journal
+        f = s.get(FollowUp, fid)
+        f.status, f.send_started_at, f.blocked_reason = "approved", None, "Requeued after a person confirmed it was not delivered"
+        log_activity(s, f"Follow-up #{fid} requeue", "owner", type_="followup")
+    send_run(ctx)
+    assert FakeSMTP.sent == [] and send_journal.hold(ctx.settings.data_dir) is None
+    status, why = status_of(ctx, fid)
+    assert status == "uncertain" and "restored" not in why and "Sent folder" in why
+
+
+def test_a_requeue_before_the_claim_does_not_hide_a_restore(make_ctx, tmp_path):
+    from aime.crm_ops import log_activity
+
+    ctx = make_ctx(**MAIL)
+    send_run(ctx)
+    fid = approved_email(ctx)
+    with ctx.db.session() as s:
+        log_activity(s, f"Follow-up #{fid} requeue", "owner", type_="followup")
+    time.sleep(1.1)
+    backup = backup_sqlite_file(Path(ctx.db.engine.url.database), tmp_path / "keep", label="nightly")
+    send_run(ctx)
+    literal_restore(ctx, backup)
+    again = make_ctx(**MAIL, data_dir=ctx.settings.data_dir)
+    send_run(again)
+    assert send_journal.hold(again.settings.data_dir), "that requeue is older than the send"
+    assert FakeSMTP.sent == ["p@a.example"]
+
+
+def test_run_now_on_a_wrong_clock_does_nothing_and_says_so(make_ctx, monkeypatch):
+    ctx, calls = stopped_a_year_ahead(make_ctx, monkeypatch)
+    result = run_job(ctx, "monitor", trigger="manual")
+    assert result["status"] == "skipped" and "clock" in result["reason"] and calls == []
+    monkeypatch.setattr(aime.timeutil, "CLOCK_OFFSET", aime.timeutil.CLOCK_OFFSET - timedelta(days=365) + timedelta(minutes=30))
+    assert tick(ctx, trigger="scheduler")["status"] == "ok", "no future row was left, so nothing to confirm"
+
+
+def test_a_maintenance_beat_on_a_wrong_clock_does_not_hide_it(make_ctx, monkeypatch):
+    ctx = make_ctx()
+    calls = stub_jobs(monkeypatch)
+    assert tick(ctx, trigger="scheduler")["status"] == "ok"
+    monkeypatch.setattr(aime.timeutil, "CLOCK_OFFSET", aime.timeutil.CLOCK_OFFSET + timedelta(days=365))
+    maintenance.start(ctx.settings.data_dir, 1, "deploy")
+    assert tick(ctx, trigger="scheduler")["status"] == "skipped"
+    maintenance.stop(ctx.settings.data_dir)
+    calls.clear()
+    assert tick(ctx, trigger="scheduler")["status"] == "skipped" and calls == []
+
+
+def test_the_clock_alert_closes_after_a_maintenance_beat_came_between(make_ctx, monkeypatch):
+    ctx, calls = stopped_a_year_ahead(make_ctx, monkeypatch)
+    maintenance.start(ctx.settings.data_dir, 1, "deploy")
+    tick(ctx, trigger="scheduler")
+    maintenance.stop(ctx.settings.data_dir)
+    monkeypatch.setattr(aime.timeutil, "CLOCK_OFFSET", aime.timeutil.CLOCK_OFFSET - timedelta(days=365) + timedelta(minutes=30))
+    assert tick(ctx, trigger="scheduler")["status"] == "ok"
+    with ctx.db.session() as s:
+        assert s.execute(select(Alert).where(Alert.key == clock_check.ALERT_KEY)).scalars().one().resolved_at
+
+
+def test_ordinary_maintenance_beats_do_not_stop_the_next_tick(make_ctx, monkeypatch):
+    ctx = make_ctx()
+    stub_jobs(monkeypatch)
+    assert tick(ctx, trigger="scheduler")["status"] == "ok"
+    maintenance.start(ctx.settings.data_dir, 1, "deploy")
+    tick(ctx, trigger="scheduler")
+    maintenance.stop(ctx.settings.data_dir)
+    assert tick(ctx, trigger="scheduler")["status"] == "ok"
+
+
+def test_a_lock_that_cannot_be_touched_skips_the_tick_cleanly(make_ctx, monkeypatch):
+    ctx = make_ctx()
+    calls = stub_jobs(monkeypatch)
+    for error in (PermissionError(13, "being deleted"), OSError(28, "No space left on device")):
+        def refuse(*a, error=error, **k):
+            raise error
+        monkeypatch.setattr(runner.os, "open", refuse)
+        result = tick(ctx, trigger="scheduler")
+        monkeypatch.undo()
+        calls = stub_jobs(monkeypatch)
+        assert result["status"] == "skipped" and calls == []
+
+
+def test_a_second_process_cannot_delete_the_lock_the_first_has_just_taken(tmp_path, monkeypatch):
+    lock = tmp_path / "x.lock"
+    lock.write_text("", encoding="utf-8")
+    os.utime(lock, (time.time() - 300, time.time() - 300))
+    first, second = runner.FileLock(lock), runner.FileLock(lock)
+    real = runner.FileLock._stale
+    # the second has judged the file stale; before it acts, the first takes over and holds the lock
+    state = {"raced": False}
+
+    def racing(self):
+        answer = real(self)
+        if self is second and not state["raced"]:
+            state["raced"] = True
+            assert first.acquire()
+        return answer
+    monkeypatch.setattr(runner.FileLock, "_stale", racing)
+    assert second.acquire() is False, "it judges the file again under the guard, and finds a live owner"
+    assert first.held and lock.exists()
+    first.release()
+
+
+def test_a_live_owner_is_not_judged_gone_when_the_clock_stepped_back(tmp_path):
+    lock = tmp_path / "x.lock"
+    held = runner.FileLock(lock)
+    assert held.acquire()
+    before = time.time() - 30 * 86400  # as if written with the clock a month behind the process's own start
+    os.utime(lock, (before, before))
+    if runner.pid_started(os.getpid()) is not None:
+        assert runner.lock_owner_gone(lock) is False
+    held.release()
+
+
+def test_status_says_what_is_wrong_on_a_damaged_page_instead_of_a_traceback(make_ctx, tmp_path, monkeypatch, capsys):
+    ctx = make_ctx()
+    data = ctx.settings.data_dir
+    damage_table(ctx, "job_state")
+    monkeypatch.setenv("AIME_ENV_FILE", str(tmp_path / "no.env"))
+    monkeypatch.setenv("AIME_DATA_DIR", str(data))
+    monkeypatch.setenv("AIME_DATA_ROLE", "test")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert aime_cli.main(["status"]) == 1
+    assert "Database:" in capsys.readouterr().out
+
+
+def test_a_restore_that_fails_half_way_says_what_state_it_left(make_ctx, monkeypatch):
+    import aime.restore as restore_module
+
+    ctx = restore_settings(make_ctx)
+    backup = backup_sqlite_file(Path(ctx.db.engine.url.database), ctx.settings.backups_dir, label="nightly")
+    ctx.db.dispose()
+
+    def full(*a, **k):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(restore_module.shutil, "copyfile", full)
+    with pytest.raises(RestoreRefused) as said:
+        restore_database(ctx.settings, backup)
+    words = str(said.value)
+    assert "was not replaced" in words and "on hold" in words and "aime-pre-restore-" in words
+    assert (ctx.settings.data_dir / "aime.db").exists() and send_journal.hold(ctx.settings.data_dir)
+
+
+def test_a_held_side_file_does_not_fail_the_tidying(tmp_path, monkeypatch):
+    (tmp_path / "aime-x.db-wal").write_bytes(b"")
+    real = Path.unlink
+
+    def held(self, *a, **k):
+        if self.name.endswith("-wal"):
+            raise PermissionError(32, "held")
+        return real(self, *a, **k)
+    monkeypatch.setattr(Path, "unlink", held)
+    assert prune_manual_backups(tmp_path, keep=2) == []
+    assert (tmp_path / "aime-x.db-wal").exists()
+
+
+def test_moves_of_a_failed_scoring_run_still_reach_the_alert(make_ctx, monkeypatch):
+    from aime.agents import qualification as q
+    from aime.models import Company, Lead
+
+    ctx = make_ctx()
+    with ctx.db.session() as s:
+        for i in range(80):
+            co = Company(name=f"Synth {i}", normalized_name=f"synth {i}", source="test", domain=f"s{i}.example")
+            s.add(co)
+            s.flush()
+            s.add(Lead(company_id=co.id, source="inbound", status="new", score=0))
+    real, seen = q.score_lead, {"n": 0}
+
+    def fails_late(*a, **k):
+        seen["n"] += 1
+        if seen["n"] == 70:
+            raise RuntimeError("a bad lead")
+        return real(*a, **k)
+    monkeypatch.setattr(q, "score_lead", fails_late)
+    assert not q.LeadQualificationAgent(ctx).run({}).ok
+    with ctx.db.session() as s:
+        moved = s.execute(select(Lead).where(Lead.status != "new")).scalars().all()
+        said = s.execute(select(Alert).where(Alert.key == "leads:moved")).scalars().all()
+    assert moved, "the first batch was saved"
+    assert len(said) == 1 and f"moved {len(moved)} lead(s)" in said[0].message

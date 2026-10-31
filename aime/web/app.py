@@ -29,7 +29,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from aime import maintenance, send_journal
+from aime import clock_check, maintenance, send_journal
 from aime.agents import AGENTS
 from aime.agents.sales_workflow import SIGN_IN_ALERT
 from aime.context import AppContext, get_context
@@ -1164,7 +1164,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                                 EmailSender(C().settings).recipient_for(to)[0] if to else None, who(request))
                 msg = "Marked as sent (confirmed in your Sent folder)"
             elif action == "requeue" and f.status == "uncertain":
-                send_journal.record_released(C().settings.data_dir, f.id, f.to_email or (f.contact.email if f.contact else None))
+                try:
+                    send_journal.record_released(C().settings.data_dir, f.id, f.to_email or (f.contact.email if f.contact else None))
+                except OSError as exc:
+                    return back("/followups", "Not requeued: the record of sent emails cannot be written just now "
+                                f"({type(exc).__name__}). Nothing changed; try again in a moment.")
                 f.status, f.send_started_at = "approved", None
                 f.blocked_reason = "Requeued after a person confirmed it was not delivered"
                 msg = "Requeued"
@@ -2363,6 +2367,9 @@ def employee_duty(settings, state: str, session=None) -> tuple[str, str, str, st
         duty = ("Stopped", "bad", "automation is stopped in the Control Center", "AI is stopped")
     elif hb is None:
         duty = ("Off duty", "warn", "no scheduled run recorded for this database", "AI is off duty")
+    elif hb.get("state") == clock_check.HOLD_STATE:
+        duty = ("Stopped", "bad", f"the PC's clock looks wrong, so no work is being done. {clock_check.ADVICE}",
+                "AI is stopped: check the clock")
     else:
         beat = datetime.fromisoformat(hb["at"].rstrip("Z"))
         # "running" is written as a tick starts: sleep or a crash before its end leaves it, so it holds only so long
@@ -2576,6 +2583,8 @@ def system_status(ctx: AppContext, s, team: list[dict], sender: tuple[bool, str]
     elif stopped:
         add("Scheduled jobs", "PAUSED", "stopped in Automation Control: jobs wait until an administrator starts them",
             "/automation")
+    elif beat.get("state") == clock_check.HOLD_STATE:
+        add("Scheduled jobs", "FAILED", f"the PC's clock looks wrong, so no work is being done. {clock_check.ADVICE}", "/system")
     elif now - at <= timedelta(minutes=2 * tick + 5):
         add("Scheduled jobs", "ACTIVE", f"last check-in {ago(at, now)}; it checks in every {tick} minutes", "/jobs")
     else:

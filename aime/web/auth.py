@@ -14,6 +14,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import threading
@@ -31,7 +32,7 @@ from aime.db import kv_set
 from aime.models import User
 from aime.permissions import BUILTIN_ROLES, permissions_of
 from aime.visibility import EVERYTHING, org_page, record_visible, scope_for
-from aime.secure_store import protect, unprotect
+from aime.secure_store import SecretUnreadable, protect, unprotect
 from aime.timeutil import utcnow
 
 COOKIE = "aime_session"
@@ -46,6 +47,8 @@ SCRYPT_MAXMEM = 64 * 1024 * 1024
 # a well-formed hash nobody's password matches: an unknown user or a locked account costs the same scrypt work as a
 # wrong password, so timing does not reveal which accounts exist
 DUMMY_HASH = f"scrypt${SCRYPT_N}$8$1$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+log = logging.getLogger("aime.web.auth")
+SESSION_KEY_BYTES = 32
 PUBLIC_PREFIXES = ("/login", "/static/", "/setup")  # /setup: a one-time account link
 PUBLIC_PATHS = ("/api/inbound",)  # protected by its own token and rate limit
 _SECRETS: dict[str, bytes] = {}
@@ -84,14 +87,28 @@ def session_secret(data_dir) -> bytes:
         if path.exists():
             try:
                 raw = base64.b64decode(unprotect(path.read_text(encoding="utf-8").strip()))
-            except (OSError, ValueError, RuntimeError):  # another PC, a Windows password reset: everyone signs in again
+            except (SecretUnreadable, ValueError):  # another PC, a Windows password reset: everyone signs in again
                 raw = None
-        if raw is None:
-            raw = os.urandom(32)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(protect(base64.b64encode(raw).decode()), encoding="utf-8")
+            except OSError:  # held for a moment, or a passing failure: the key stays. Whoever asks now signs in again
+                log.warning("The sign-in key cannot be read just now", exc_info=True)
+                return os.urandom(32)
+        if not raw or len(raw) < SESSION_KEY_BYTES:  # none, or cut short by a power cut: an empty key would sign anything
+            raw = os.urandom(SESSION_KEY_BYTES)
+            _write_session_key(path, raw)
         _SECRETS[key] = raw
     return _SECRETS[key]
+
+
+def _write_session_key(path, raw: bytes) -> None:
+    """Whole or not at all. A key that cannot be saved still works until this process ends."""
+    partial = path.with_name(f"session.key.{os.getpid()}.partial")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial.write_text(protect(base64.b64encode(raw).decode()), encoding="utf-8")
+        partial.replace(path)
+    except OSError:
+        log.warning("The sign-in key could not be saved", exc_info=True)
+        partial.unlink(missing_ok=True)
 
 
 def make_cookie(secret: bytes, user: User, now: float | None = None) -> str:

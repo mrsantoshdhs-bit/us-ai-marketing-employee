@@ -25,6 +25,8 @@ import hashlib
 import json
 import logging
 import os
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,7 +34,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from aime.models import Alert, FollowUp
+from aime.models import Activity, Alert, FollowUp
 from aime.timeutil import utcnow
 
 log = logging.getLogger("aime.send_journal")
@@ -41,8 +43,10 @@ STARTED_KEY = "sent_journal.started"  # in the database: this database has been 
 HOLD_ALERT = "sending:hold"
 ACCOUNTED_FOR = ("sending", "sent", "uncertain")  # where a claimed email can be on an ordinary day
 NOT_YET_SENT = ("pending", "awaiting_approval", "approved")  # a claimed email here: this database is older than the claim
-ALREADY_SENT = ("This email already went to the mail server on {at} UTC, after the backup this database was restored from. "
+ALREADY_SENT = ("The record of sent emails says this email already went to the mail server on {at} UTC. "
                 "It was not sent again: check your Sent folder, then mark sent or requeue")
+LOCK_WAIT = 5.0  # seconds; an append takes milliseconds
+IN_LIST = 500  # row numbers asked for at a time: SQLite takes only so many in one statement
 CONFIRM = "run `python -m aime confirm-sending`"
 
 
@@ -59,11 +63,44 @@ def _mark(address: str | None) -> str | None:
     return hashlib.sha256(clean.encode("utf-8")).hexdigest()[:16] if clean else None
 
 
+def _lock_byte(fh, on: bool) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK if on else msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fh.fileno(), (fcntl.LOCK_EX | fcntl.LOCK_NB) if on else fcntl.LOCK_UN)
+
+
+@contextmanager
+def _one_writer(data_dir: Path):
+    """On Windows an append is a seek and a write, so two processes appending at once can overwrite each other's line (51
+    of 6,000 in a tight loop). The lock is the operating system's: it ends with the process, so a crash leaves none behind.
+    Raises OSError if it cannot be had in LOCK_WAIT seconds, which stops a send the way an unwritable journal does."""
+    with (Path(data_dir) / "sent_journal.lock").open("a+b") as fh:
+        deadline = time.monotonic() + LOCK_WAIT
+        while True:
+            try:
+                _lock_byte(fh, True)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            _lock_byte(fh, False)
+
+
 def _append(data_dir: Path, *records: dict) -> None:
     path = journal_path(data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     text = "".join(json.dumps(r) + "\n" for r in records)
-    with path.open("a+b") as fh:
+    with _one_writer(data_dir), path.open("a+b") as fh:
         if fh.seek(0, os.SEEK_END):
             fh.seek(-1, os.SEEK_END)
             if fh.read(1) != b"\n":  # a power cut cut the last line short: it must not swallow this one
@@ -185,9 +222,11 @@ def restore_evidence(session: Session, view: View) -> list[dict]:
     deletes follow-ups, but an erased or merged record must never be able to stop sending, so a hole counts for nothing."""
     if not view.since_confirmed:
         return []
-    ids = {i for i, _ in view.since_confirmed}
-    rows = {i: (st, to) for i, st, to in session.execute(select(FollowUp.id, FollowUp.status, FollowUp.to_email)
-                                                         .where(FollowUp.id.in_(ids)))}
+    ids = sorted({i for i, _ in view.since_confirmed})
+    rows = {}
+    for start in range(0, len(ids), IN_LIST):
+        rows.update({i: (st, to) for i, st, to in session.execute(select(FollowUp.id, FollowUp.status, FollowUp.to_email).where(
+            FollowUp.id.in_(ids[start:start + IN_LIST])))})
     newest = session.execute(select(func.max(FollowUp.id))).scalar() or 0
     found = []
     for rec in view.since_confirmed.values():
@@ -195,9 +234,19 @@ def restore_evidence(session: Session, view: View) -> list[dict]:
         if row is None:
             if rec["followup_id"] > newest:
                 found.append(rec)
-        elif row[0] in NOT_YET_SENT or (row[1] and rec.get("to") and _mark(row[1]) != rec["to"]):
+        elif row[1] and rec.get("to") and _mark(row[1]) != rec["to"]:
+            found.append(rec)
+        elif row[0] in NOT_YET_SENT and not _requeued_since(session, rec):
             found.append(rec)
     return found
+
+
+def _requeued_since(session: Session, rec: dict) -> bool:
+    """A requeue on record after the claim: this database is newer than the claim, so it was not restored. Code from before
+    this journal writes no "released" (a rollback and forward again). The send gate still gives that email to a person."""
+    when = session.execute(select(func.max(Activity.created_at)).where(
+        Activity.subject == f"Follow-up #{rec['followup_id']} requeue")).scalar()
+    return when is not None and when.isoformat(timespec="seconds") >= str(rec.get("at"))
 
 
 def mark_for_a_person(session: Session, f: FollowUp, rec: dict, source: str) -> None:
@@ -229,8 +278,9 @@ def why_held(ctx, session: Session, check_integrity: bool, source: str = "sales_
     try:
         view = read(settings.data_dir)
     except OSError as exc:
-        return f"ON HOLD: the record of sent emails cannot be read ({type(exc).__name__}); it is tried again on the next run"
+        return f"Waiting: the record of sent emails cannot be read just now ({type(exc).__name__}); it is tried again on the next run"
     reasons: list[tuple[str, str]] = []
+    waiting = None
     evidence = restore_evidence(session, view)
     if evidence:
         marked = review_rows(session, view, source)
@@ -238,7 +288,9 @@ def why_held(ctx, session: Session, check_integrity: bool, source: str = "sales_
                         f"that it does not know; {len(marked)} of its open emails already went out), so it was restored"))
     if check_integrity:
         check = integrity_check(ctx.db)
-        if check["integrity"] != "ok" and check["integrity"] != view.accepted_damage:
+        if check.get("passing"):  # busy, or an I/O error: no finding about the file, so no hold and no alert
+            waiting = f"Waiting: the database could not be checked just now ({str(check['integrity'])[:100]}); it is tried again on the next run"
+        elif check["integrity"] != "ok" and check["integrity"] != view.accepted_damage:
             reasons.append(("integrity", "the database failed its integrity check, so its opt-outs and its record of what "
                             f"was sent cannot be trusted ({str(check['integrity'])[:120]})"))
     info = hold(settings.data_dir)
@@ -249,7 +301,7 @@ def why_held(ctx, session: Session, check_integrity: bool, source: str = "sales_
             log.exception("Could not write the sending hold")
             info = {"kind": kind, "reason": reason}
     if info is None:
-        return None
+        return waiting
     message = held_message(info)
     alert_once(session, "error", "recovery", message, settings, key=HOLD_ALERT)
     return message

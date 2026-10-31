@@ -58,7 +58,12 @@ def protect(value: str) -> str:
 
 
 class SecretUnreadable(OSError, RuntimeError):
-    """Encrypted on another PC or under another Windows password, or damaged: only entering it again helps."""
+    """Encrypted on another PC or under another Windows password, or damaged: only entering it again helps. Any other
+    OSError from `unprotect` may pass by itself."""
+
+
+# NTE_BAD_KEY_STATE (another user or a reset password), NTE_BAD_DATA, ERROR_INVALID_DATA, CRYPT_E_ASN1_BADTAG: never passing.
+_NOT_DECRYPTABLE = {0x8009000B, 0x80090005, 13, 0x8009310B}
 
 
 def unprotect(stored: str) -> str:
@@ -67,8 +72,12 @@ def unprotect(stored: str) -> str:
             raise SecretUnreadable("Secret was encrypted with Windows DPAPI on another machine; reconnect the integration")
         try:
             return _dpapi(base64.b64decode(stored[6:]), False).decode("utf-8")
-        except (OSError, ValueError) as exc:
-            raise SecretUnreadable("Secret cannot be read on this PC or under this Windows account; enter it again") from exc
+        except ValueError as exc:
+            raise SecretUnreadable("Secret is damaged; enter it again") from exc
+        except OSError as exc:
+            if (getattr(exc, "winerror", None) or 0) & 0xFFFFFFFF in _NOT_DECRYPTABLE:
+                raise SecretUnreadable("Secret cannot be read on this PC or under this Windows account; enter it again") from exc
+            raise
     if stored.startswith("plain:"):
         return stored[6:]
     return stored  # legacy plaintext

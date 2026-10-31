@@ -552,6 +552,9 @@ def cmd_restore(args, settings) -> int:
         print(f"The backup is in place and sending is on hold, but the database could not be started: {redact_error(exc)}. "
               "Run `python -m aime doctor`.")
         return 1
+    except OSError as exc:  # before anything changed: restore_database says so itself when something had
+        print(f"Restore stopped before anything was replaced: {exc}. Run `python -m aime doctor`.")
+        return 1
     print(f"Restored from {done['source']}.")
     if done["kept"]:
         print(f"The database it replaced is kept as {done['kept']} in the backups folder.")
@@ -580,12 +583,16 @@ def cmd_confirm_sending(args, ctx) -> int:
         return 0
     print(f"The hold: {held['reason']}")
     check = integrity_check(ctx.db)["integrity"]
-    with ctx.db.session() as s:
-        marked = send_journal.review_rows(s, send_journal.read(ctx.settings.data_dir), "recovery")
-        send_journal.record_confirmed(ctx.settings.data_dir, args.who, None if check == "ok" else check)
-        send_journal.clear_hold(ctx.settings.data_dir)
-        resolve_alerts(s, (send_journal.HOLD_ALERT,), set())
-        automation.audit(s, args.who, "sending_confirmed", "sending hold", held["reason"][:300])
+    try:
+        with ctx.db.session() as s:
+            marked = send_journal.review_rows(s, send_journal.read(ctx.settings.data_dir), "recovery")
+            send_journal.record_confirmed(ctx.settings.data_dir, args.who, None if check == "ok" else check)
+            send_journal.clear_hold(ctx.settings.data_dir)
+            resolve_alerts(s, (send_journal.HOLD_ALERT,), set())
+            automation.audit(s, args.who, "sending_confirmed", "sending hold", held["reason"][:300])
+    except OSError as exc:
+        print(f"Sending stays on hold: the record of sent emails cannot be used just now ({exc}). Try again in a moment.")
+        return 1
     if check != "ok":
         print(f"WARNING: the database still fails its integrity check ({str(check)[:200]}). You have accepted this result; a "
               "different one holds sending again.")
@@ -882,7 +889,10 @@ def main(argv: list[str] | None = None) -> int:
     except (DatabaseMissing, SQLAlchemyError, sqlite3.Error) as exc:
         return _without_database(args, settings, exc)
     set_context(ctx)
-    return COMMANDS[args.cmd](args, ctx)
+    try:
+        return COMMANDS[args.cmd](args, ctx)
+    except (SQLAlchemyError, sqlite3.Error) as exc:  # it opened, but a damaged page or a long lock stopped this command
+        return _without_database(args, settings, exc)
 
 
 if __name__ == "__main__":
