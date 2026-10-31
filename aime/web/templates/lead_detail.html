@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% from "_macros.html" import grade, status_pill, ext, tier %}
+{% extends "base.html" %}{% from "_macros.html" import grade, status_pill, ext, tier, activity_text %}
 {% block title %}{{ lead.company.name }} · Lead{% endblock %}
 {% block content %}
 {% set c = lead.company %}
@@ -110,7 +110,7 @@
     </div>
     <h2>Activity</h2>
     <div class="card">
-      {% for a in acts %}<div class="small" style="margin-bottom:6px"><span class="muted">{{ a.created_at|local }} · {{ a.actor }}</span><br>{{ a.subject }}</div>
+      {% for a in acts %}<div class="small" style="margin-bottom:6px"><span class="muted">{{ a.created_at|local }} · {{ a.actor }}</span><br>{{ activity_text(a, a.lead_id not in not_mine) }}</div>
       {% else %}<span class="muted">No activity.</span>{% endfor %}
     </div>
   </div>

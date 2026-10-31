@@ -206,6 +206,22 @@ def plain(text: str | None) -> str:
     return _SETTING.sub(word, _STATE_WORD.sub("", text or ""))
 
 
+# How a follow-up's Activity line is stored ("Follow-up #76 reject"; the send journal reads the word) and how a person reads it.
+_FOLLOWUP_LINE = re.compile(r"(Follow-up #\d+) ([a-z_]+)")
+_FOLLOWUP_WORDS = {"approve": "approved", "reject": "rejected", "save": "edited and saved", "reconfirm": "confirmed again",
+                   "mark_sent": "marked as sent", "requeue": "put back in the queue"}
+
+
+def activity_words(subject: str | None) -> str:
+    m = _FOLLOWUP_LINE.fullmatch(subject or "")
+    return f"{m.group(1)} {_FOLLOWUP_WORDS.get(m.group(2), m.group(2))}" if m else subject or ""
+
+
+def activity_line(a: Activity) -> str:
+    """An Activity row on one line, for the feeds: a note's own words, not just "Note". A sent email's body is not repeated."""
+    return f"{a.subject}: {a.body}"[:200] if a.body and a.type != "email_sent" else activity_words(a.subject)
+
+
 def owner_tz(settings):
     """The owner's clock: what "today", "this week" and every time on a page are read in."""
     return local_tz(settings.schedule.get("timezone"))
@@ -308,7 +324,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return fmt_local(dt, tz_name, fmt) if tz_name else stamp(dt, C().settings, fmt)
 
     env.filters.update(local=local_filter, et=fmt_et, service=service_name, industry=industry_label, safe_url=safe_url,
-                       tier=lead_tier, tier_reason=tier_reason, run_summary=run_summary, plain=plain, waited=waiting_for,
+                       tier=lead_tier, tier_reason=tier_reason, run_summary=run_summary, plain=plain, activity_words=activity_words, waited=waiting_for,
                        intent_label=lambda i: INTENT_LABELS.get(i or "", ""))
     env.globals.update(org_page=org_page, describe_rule=am.describe_rule, ADDRESS_RULES=am.ADDRESS_RULES, SERVICES=SERVICES, INDUSTRIES=INDUSTRIES, STATES=US_REGIONS, STAGES=STAGES,
                        LEAD_STATUSES=LEAD_STATUSES)
@@ -698,7 +714,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         return render(request, "lead_detail.html", lead=lead, signals=signals, acts=acts, fups=fups, opps=opps,
                       people=people, research=research, meetings=meetings, withdrawn=withdrawn, thread=thread,
                       assignments=assignments, assignees=assignees, can_assign=can_assign, coming=coming, stage_why=stage_why,
-                      reopen_why=reopen_why)
+                      reopen_why=reopen_why, not_mine=not_mine)
 
     @app.get("/contacts", response_class=HTMLResponse)
     def contacts_page(request: Request, confidence: str = "", role: str = "", reachable: str = ""):
@@ -2372,7 +2388,7 @@ def operations_view(ctx: AppContext, s) -> dict:
                          "sub": f"{(r.job or 'manual').replace('_', ' ')}{took}", "href": f"/agents/runs/{r.id}"})
     for a in s.execute(select(Activity).order_by(Activity.id.desc()).limit(10)).scalars():
         timeline.append({"at": a.created_at, "kind": "CRM", "icon": ACTIVITY_LOOK.get(a.type, ("sparkle",))[0],
-                         "status": "logged", "text": a.subject, "sub": f"by {a.actor}",
+                         "status": "logged", "text": activity_line(a), "sub": f"by {a.actor}",
                          "href": f"/leads/{a.lead_id}" if a.lead_id else None})
     for e in s.execute(select(AuditEvent).order_by(AuditEvent.id.desc()).limit(6)).scalars():
         timeline.append({"at": e.at, "kind": "Control", "icon": "sliders", "status": "control",
@@ -2951,7 +2967,7 @@ def dashboard_view(ctx: AppContext, s, days: int) -> dict:
         icon, tone, word = ACTIVITY_LOOK.get(a.type, ("sparkle", "slate", "Logged"))
         if a.type == "meeting" and "cancel" in a.subject.lower():
             word = "Cancelled"
-        feed.append({"at": a.created_at, "icon": icon, "tone": tone, "status": word, "title": a.subject,
+        feed.append({"at": a.created_at, "icon": icon, "tone": tone, "status": word, "title": activity_line(a),
                      "sub": " · ".join(x for x in (names.get(a.company_id), f"by {a.actor}") if x),
                      "href": f"/leads/{a.lead_id}" if a.lead_id else None})
     for r in s.execute(select(AgentRun).where(AgentRun.status != "running").order_by(AgentRun.id.desc()).limit(4)).scalars():

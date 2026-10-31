@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% from "_icons.html" import icon %}{% from "_macros.html" import status_pill %}
+{% extends "base.html" %}{% from "_icons.html" import icon %}{% from "_macros.html" import status_pill, activity_text %}
 {% block title %}{{ opp.name }} · AI Sales Employee{% endblock %}
 {% block content %}
 <div class="page-head"><div>
@@ -56,7 +56,7 @@
   </div>
 
   <h2>Activity</h2>
-  <div class="card small">{% for a in acts %}<div>{{ a.created_at|local }} · {{ a.subject }} <span class="muted">· {{ a.actor }}</span></div>{% else %}<span class="muted">Nothing yet.</span>{% endfor %}</div>
+  <div class="card small">{% for a in acts %}<div>{{ a.created_at|local }} · <span class="muted">{{ a.actor }}</span><br>{{ activity_text(a, show_notes) }}</div>{% else %}<span class="muted">Nothing yet.</span>{% endfor %}</div>
 </div>
 </div>
 {% endblock %}
