@@ -50,8 +50,12 @@ BROWSER_CANDIDATES = [
     r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe",
 ]
 # The browser's own answer to "is the Windows password blank?" ("Local State" › password_manager › os_password_*),
-# shared by every render of this Windows user (the scheduled tasks, the dashboard and test runs alike).
-OS_PASSWORD_STATE = Path(tempfile.gettempdir()) / "aime-browser-os-password.json"
+# shared by every render of this Windows user (the scheduled tasks, the dashboard and test runs alike). So not in a data
+# folder or a render's own temp folder: each new one of those (a test run, a copy) would sign in once more, and that is what
+# locked the account. %TEMP% can be changed by other groups on some PCs, %LOCALAPPDATA% only by this user and administrators.
+OLD_OS_PASSWORD_STATE = Path(tempfile.gettempdir()) / "aime-browser-os-password.json"
+OS_PASSWORD_STATE = (Path(os.environ["LOCALAPPDATA"]) / "aime" / "browser-os-password.json" if os.environ.get("LOCALAPPDATA")
+                     else OLD_OS_PASSWORD_STATE)
 # Seconds for one browser start. A first start took 16-76 s on this PC with other work running: 60 s was too tight.
 BROWSER_TIMEOUT = 120
 
@@ -146,13 +150,41 @@ def _run(args: list[str], timeout: float) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(args, code, out.read().decode("utf-8", "replace"), "")
 
 
+def _only_the_answer(saved: dict) -> dict:
+    """The browser's answer and nothing else: a file can hold anything, and this goes into a browser's settings."""
+    return {k: v for k, v in saved.items() if k.startswith("os_password_") and isinstance(v, (bool, int, str))}
+
+
+def _save_answer(answer: dict) -> None:
+    OS_PASSWORD_STATE.parent.mkdir(parents=True, exist_ok=True)
+    OS_PASSWORD_STATE.write_text(json.dumps(answer), encoding="utf-8")
+
+
+def _bring_over_old_answer() -> None:
+    """Once, on the first render after the file moved: the answer already known, so that the move costs no sign-in. The old
+    file stays, for the older version a rollback brings back; nothing reads it after this."""
+    if OS_PASSWORD_STATE == OLD_OS_PASSWORD_STATE or OS_PASSWORD_STATE.exists():
+        return
+    try:
+        old = json.loads(OLD_OS_PASSWORD_STATE.read_text(encoding="utf-8"))
+        answer = _only_the_answer(old) if isinstance(old, dict) else {}
+        if answer:
+            _save_answer(answer)
+    except (OSError, ValueError):
+        pass
+
+
+_bring_over_old_answer()
+
+
 def seed_profile(profile: Path) -> None:
     """Give a new profile the browser's saved answer about the Windows password, so it does not sign in to find out."""
     try:
         answer = json.loads(OS_PASSWORD_STATE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
-    if isinstance(answer, dict) and answer:
+    answer = _only_the_answer(answer) if isinstance(answer, dict) else {}
+    if answer:
         profile.mkdir(parents=True, exist_ok=True)
         (profile / "Local State").write_text(json.dumps({"password_manager": answer}), encoding="utf-8")
 
@@ -161,9 +193,9 @@ def keep_answer(profile: Path) -> None:
     """Save the answer the browser wrote into this profile, for the next new profile."""
     try:
         saved = json.loads((profile / "Local State").read_text(encoding="utf-8")).get("password_manager") or {}
-        answer = {k: v for k, v in saved.items() if k.startswith("os_password_")}
+        answer = _only_the_answer(saved)
         if answer:
-            OS_PASSWORD_STATE.write_text(json.dumps(answer), encoding="utf-8")
+            _save_answer(answer)
     except (OSError, ValueError, AttributeError):
         pass
 
