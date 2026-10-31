@@ -128,9 +128,6 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
             lead.last_scored_at = now
             out.scored += 1
             lasting = lasting_grade(facts, thresholds) if result.grade in ("A", "B") else result.grade
-            if lasting not in ("A", "B") and result.grade in ("A", "B") and prev_status in ("new", "nurture") and not result.disqualify_reason:
-                lead.score_breakdown = [*result.reasons, f"Not moved to qualified: grade {result.grade} today, but grade {lasting} "
-                                        "within a month, as its newest hiring post counts for less"]
             grades[result.grade] += 1
 
             if result.disqualify_reason:
@@ -168,6 +165,9 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                         FollowUp.status.in_(("awaiting_approval", "approved")))).scalars():
                     f.status, f.blocked_reason = "cancelled", "Score fell below the qualification threshold"
                 clear_stage(session, lead, self.name, "the score fell below the qualification threshold")
+            if lead.status == "nurture" and prev_status in ("new", "nurture") and result.grade in ("A", "B") and lasting not in ("A", "B"):
+                lead.score_breakdown = [*result.reasons, f"Not moved to qualified: grade {result.grade} today, but grade {lasting} "
+                                        "within a month, as its newest hiring post counts for less"]
             lead.category = categorize(lead.source, result.grade, lead.primary_service, lead.status == "disqualified")
             if lead.status != prev_status:
                 log_activity(session, f"Lead {prev_status} → {lead.status} (score {result.total}, grade {result.grade})",
@@ -191,24 +191,25 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
         kept = (kv_get(session, MOVED_TODAY) or {}) if unread else {}
         if not unread:
             resolve_alerts(session, (MOVED_ALERT,), set())  # that one was read: this is a new notice, not silenced by the dismissal
-        counts = Counter(kept.get("moved") or {})
         leads: dict[str, list[int]] = {status: list(ids) for status, ids in (kept.get("leads") or {}).items()}
+        # a notice from before leads were named left only a count: it is kept beside the total, which counts leads
+        earlier = int(kept.get("earlier") or 0) or (0 if "leads" in kept else sum((kept.get("moved") or {}).values()))
         for status, lead_id in moved:
-            counts[status] += 1
-            leads.setdefault(status, []).append(lead_id)
+            if lead_id not in leads.setdefault(status, []):
+                leads[status].append(lead_id)
         moved.clear()
-        kv_set(session, MOVED_TODAY, {"moved": dict(counts), "leads": leads})
-        words = ", ".join(f"{n} to {status}" for status, n in sorted(counts.items()))
+        kv_set(session, MOVED_TODAY, {"leads": leads, "earlier": earlier})
+        total = len({i for ids in leads.values() for i in ids})
+        words = ", ".join(f"{len(ids)} to {status}" for status, ids in sorted(leads.items()))
         named, left = [], MOVED_NAMED
         for status, ids in sorted(leads.items()):
-            ids = list(dict.fromkeys(ids))
-            if ids and left > 0:
+            if left > 0:
                 named.append(f"{status}: " + ", ".join(f"#{i}" for i in ids[:left]))
             left -= len(ids)
         more = f", and {-left} more" if left < 0 else ""
-        alert_once(session, "warning", self.name, f"Scoring moved {sum(counts.values())} lead(s) since this was last read: {words}. "
-                   f"Leads {'; '.join(named)}{more}. Each lead's page says why, and a wrong competitor flag can be cleared there.",
-                   self.settings, key=MOVED_ALERT)
+        before = f" {earlier} earlier move(s) were counted without lead numbers." if earlier else ""
+        alert_once(session, "warning", self.name, f"Scoring moved {total} lead(s) since this was last read: {words}. Leads {'; '.join(named)}{more}."
+                   f"{before} Each lead's page says why, and a wrong competitor flag can be cleared there.", self.settings, key=MOVED_ALERT)
 
     def _may_requalify(self, session: Session, lead: Lead, company: Company, signals: list[Signal],
                        prev_status: str) -> bool:

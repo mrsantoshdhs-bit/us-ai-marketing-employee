@@ -22,6 +22,7 @@ from aime.knowledge.geo import normalize_state
 from aime.knowledge.industries import INDUSTRIES
 from aime.matching import classify_industry, competitor_evidence, competitor_in_post
 from aime.models import Activity, Alert, Company, FollowUp, InboundInquiry, Lead, Opportunity, ResearchSnapshot, Signal
+from aime.monitoring import alert_once
 from aime.sources.base import CompanyCandidate
 from aime.timeutil import utcnow
 from aime.website_check import check_website
@@ -109,7 +110,7 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
     def _sync_linkedin_leads(self, session: Session, out: CRMOutput) -> None:
         """New LinkedIn lead form responses become inbound inquiries (aime/integrations/linkedin_leads.py)."""
         from aime.integrations import linkedin_leads
-        from aime.monitoring import alert_once, resolve_alerts
+        from aime.monitoring import resolve_alerts
 
         try:
             with self.ctx.http() as http:
@@ -290,9 +291,10 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         keeps it closed, for a person to decide."""
         changes = session.execute(select(Activity).where(Activity.lead_id == lead.id, Activity.type == "status_change")
                                   .order_by(Activity.created_at.desc(), Activity.id.desc())).scalars().all()
-        if changes and (changes[0].actor or "") not in NOT_A_PERSON:
-            return
         contact = lead.contact
+        if changes and (changes[0].actor or "") not in NOT_A_PERSON:
+            self._tell_it_stays_closed(session, lead, company, "a person set its status last")
+            return
         if is_suppressed(session, contact.email if contact else None, company.domain) or (contact and contact.consent_status == "opted_out"):
             lead.disqualify_reason = "Contact or domain is on the suppression list"
             why = "the contact or domain is on the suppression list"
@@ -300,15 +302,22 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             lead.disqualify_reason = "Competitor flag removed; its outreach had begun, so a person decides whether to reopen it"
             why = "its outreach had begun, so a person decides whether to reopen it"
         else:
-            # one that a person parked goes back to being parked: the score alone does not take it further
-            by_person = next((a for a in changes if (a.actor or "") not in NOT_A_PERSON), None)
-            status = "nurture" if by_person is not None and "→ nurture" in (by_person.subject or "") else "new"
+            # one a person or the stale-lead rule had parked goes back to being parked: the score alone does not take it further
+            before = next((a for a in changes if "→ disqualified" not in (a.subject or "")), None)
+            parked = before is not None and before.actor != "qualification" and "nurture" in (before.subject or "")
+            status = "nurture" if parked else "new"
             log_activity(session, f"Lead disqualified → {status}: the competitor flag was removed, so the next scoring run decides",
                          self.name, type_="status_change", company_id=company.id, lead_id=lead.id)
             lead.status, lead.disqualify_reason = status, None
+            lead.last_activity_at = utcnow()  # or the stale-lead rule could park it again the next morning
             return
+        self._tell_it_stays_closed(session, lead, company, why)
+
+    def _tell_it_stays_closed(self, session: Session, lead: Lead, company: Company, why: str) -> None:
         log_activity(session, f"Competitor flag removed, but the lead stays closed: {why}", self.name, type_="data_quality",
                      company_id=company.id, lead_id=lead.id)
+        alert_once(session, "warning", self.name, f"Lead #{lead.id}: its competitor flag was removed, but it stays closed: {why}. "
+                   "Nothing was reopened; a person decides on the lead's page.", self.settings, key=f"lead_closed:{lead.id}")
 
     def _dedupe(self, session: Session) -> int:
         companies = session.execute(select(Company).where(Company.merged_into_id.is_(None))

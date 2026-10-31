@@ -763,7 +763,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             lead.last_activity_at = utcnow()
             log_activity(s, f"Status {old} → {status} (manual)", who(request), type_="status_change", body=note or None,
                          company_id=lead.company_id, lead_id=lead.id)
-        return back(f"/leads/{lead_id}", "Status updated")
+        return back(f"/leads/{lead_id}", "Status updated. New only lasts until the next scoring run, which moves it to qualified or "
+                    "nurture by its score." if status == "new" else "Status updated")
 
     @app.post("/leads/{lead_id}/note")
     def lead_note(request: Request, lead_id: int, note: str = Form(...)):

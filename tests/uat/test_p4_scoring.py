@@ -12,6 +12,7 @@ import aime.timeutil as tu
 from aime.agents.crm import CRMManagementAgent
 from aime.agents.qualification import LeadQualificationAgent
 from aime.crm_ops import upsert_company
+from aime.db import kv_set
 from aime.matching import competitor_evidence, competitor_in_post, match_services
 from aime.models import Activity, Alert, Company, FollowUp, Lead, ResearchSnapshot, Signal, Suppression
 from aime.people import decision_maker_title
@@ -360,7 +361,7 @@ def test_a_label_a_post_does_not_support_earns_no_industry_points():
 
 
 @pytest.mark.parametrize("place, stated", [("Co | Remote (Global / US/EU/Africa time zones welcome)", False), ("Co | Remote", False),
-                                           ("Co | Remote (US)", True), ("Co | US only", True)])
+                                           ("Co | Remote (US)", True), ("Co | US only", True), ("Co | Remote (anywhere in the US)", True), ("Co Global | Remote (US)", True)])
 def test_us_points_come_only_from_what_the_post_says(place, stated):
     company = SimpleNamespace(source="hn_hiring", industry=None, state=None, country="US", location_text=place, verified=False)
     assert read_company(company, [])["us_stated"] is stated
@@ -372,7 +373,10 @@ def test_us_points_come_only_from_what_the_post_says(place, stated):
 
 @pytest.mark.parametrize("title, decides", [("Pet Owner Support", False), ("Clinics, Start HerePet Owner Support", False), ("Former CEO", False),
                                             ("We believe that each team member is an owner.", False), ("COO of a $6M family-owned HVAC business.", False),
-                                            ("Founder and CEO", True), ("Owner", True), ("Owner and CEO", True), ("Co-Founder, Owner", True), ("CTO", True)])
+                                            ("Founder and CEO", True), ("Owner", True), ("Owner and CEO", True), ("Co-Founder, Owner", True), ("CTO", True),
+                                            ("Owner CEO", True), ("President, Smith & Co.", True), ("Founder & CEO, Acme Inc.", True),
+                                            ("Chairman of the Board, President and Chief Executive Officer of Acme Holdings, Inc.", True),
+                                            ("Product Owner", False), ("Process Owner", False), ("Product Owner & Founder", True)])
 def test_a_decision_maker_is_someone_whose_title_says_so(title, decides):
     assert decision_maker_title(title) is decides
 
@@ -534,3 +538,69 @@ def test_real_need_beside_an_investor_or_a_workflow_is_kept(text, services):
                                   "Investors include Benchmark, Anthropic and others."])
 def test_a_vendor_named_only_as_investor_or_past_employer_is_no_need(text):
     assert "ai_agents" not in [m.service_id for m in match_services(text)]
+
+
+def test_a_stale_parked_lead_returns_parked_and_its_clock_restarts(make_ctx):
+    ctx = make_ctx()
+    a, ca = _flagged_lead(ctx)
+    with ctx.db.session() as s:
+        s.query(Activity).filter(Activity.type == "status_change").delete()
+        t0 = tu.utcnow() - timedelta(days=9)
+        s.add(Activity(subject="No activity for 30+ days: moved to nurture", actor="crm", type="status_change", company_id=ca, lead_id=a, created_at=t0))
+        s.add(Activity(subject="Lead nurture → disqualified (score 60, grade B)", actor="qualification", type="status_change", company_id=ca, lead_id=a,
+                       created_at=t0 + timedelta(days=1)))
+        s.get(Lead, a).last_activity_at = t0
+    _review(ctx)
+    assert _state(ctx, a, ca) == (False, "nurture", None)
+    with ctx.db.session() as s:
+        assert s.get(Lead, a).last_activity_at > tu.utcnow() - timedelta(minutes=5)
+    LeadQualificationAgent(ctx).run({"rescore_all": True})
+    assert _status(ctx, a)[0] == "nurture"
+
+
+def test_a_lead_that_stays_closed_when_the_flag_goes_is_named_to_someone(make_ctx):
+    ctx = make_ctx()
+    a, ca = _flagged_lead(ctx, outreach="stopped")
+    _review(ctx)
+    with ctx.db.session() as s:
+        (alert,) = s.query(Alert).filter(Alert.key == f"lead_closed:{a}").all()
+        assert alert.level == "warning" and f"#{a}" in alert.message
+    assert _state(ctx, a, ca)[1] == "disqualified"
+
+
+def test_the_notice_counts_leads_not_moves_and_an_old_count_is_not_added_to_the_total(make_ctx):
+    ctx = make_ctx()
+    agent = LeadQualificationAgent(ctx)
+    with ctx.db.session() as s:
+        agent._say_moved(s, [("nurture", 1), ("qualified", 1), ("nurture", 2), ("nurture", 2)])
+    with ctx.db.session() as s:
+        (alert,) = s.query(Alert).filter(Alert.key == "leads:moved").all()
+        assert "moved 2 lead(s)" in alert.message and "2 to nurture, 1 to qualified" in alert.message
+        s.delete(alert)
+    with ctx.db.session() as s:
+        s.add(Alert(level="info", source="qualification", key="leads:moved", message="Scoring moved 4 lead(s) today: 4 to nurture."))
+        kv_set(s, "qualification.moved_today", {"day": "2026-10-31", "moved": {"nurture": 4}})
+    with ctx.db.session() as s:
+        agent._say_moved(s, [("nurture", 7)])
+    with ctx.db.session() as s:
+        (alert,) = s.query(Alert).filter(Alert.key == "leads:moved").all()
+        assert "moved 1 lead(s)" in alert.message and "4 earlier move(s)" in alert.message and alert.level == "warning"
+
+
+def test_setting_new_by_hand_says_the_next_run_will_move_it(make_ctx):
+    ctx = make_ctx()
+    lead_id, _ = _hn_lead(ctx, days_old=5, status="nurture")
+    assert "next scoring run" in _set_status(ctx, lead_id, "new")
+    assert _status(ctx, lead_id)[0] == "new"
+
+
+def test_not_moved_is_not_written_on_a_sequence_that_was_put_back(make_ctx):
+    ctx = make_ctx()
+    lead_id, cid = _hn_lead(ctx, days_old=60, status="nurture")
+    with ctx.db.session() as s:
+        s.get(Lead, lead_id).outreach_status = "contacted"
+        s.add(Activity(subject="Lead qualified → nurture (score 54, grade C)", actor="qualification", type="status_change", company_id=cid, lead_id=lead_id))
+    LeadQualificationAgent(ctx).run({"rescore_all": True})
+    with ctx.db.session() as s:
+        lead = s.get(Lead, lead_id)
+        assert lead.status == "qualified" and not any("Not moved" in r for r in lead.score_breakdown)
