@@ -13,6 +13,7 @@ from pathlib import Path
 from sqlalchemy import false, select
 from sqlalchemy.orm import Session
 
+from aime.backup import OFFSITE_PROBLEM, offsite_problem_words
 from aime.config import Settings
 from aime.db import kv_get, kv_set
 from aime.llm.ollama import OllamaProvider
@@ -167,8 +168,12 @@ def check_health(session: Session, settings: Settings, llm_probe: Callable[[], b
         st = states.get(spec.name)
         if st is None or not spec.enabled or not st.enabled:
             continue
+        # the backup job's trouble may be only its off-machine copy, while the local backup is fine: then that is what is said
+        offsite = kv_get(session, OFFSITE_PROBLEM) if spec.name == "db_maintenance" else None
+        offsite = offsite if offsite and offsite.get("local_ok") else None
         if st.consecutive_failures >= 2:
-            msg = f"Job '{spec.name}' failed {st.consecutive_failures} times in a row"
+            msg = (offsite_problem_words(offsite, st.consecutive_failures) if offsite
+                   else f"Job '{spec.name}' failed {st.consecutive_failures} times in a row")
             issues.append(msg)
             active.add(f"job_failing:{spec.name}")
             created += alert_once(session, "error", "monitor", msg, settings, key=f"job_failing:{spec.name}")
@@ -179,7 +184,8 @@ def check_health(session: Session, settings: Settings, llm_probe: Callable[[], b
         else:
             expected = timedelta(days=8) if spec.weekdays else timedelta(hours=26)
         if st.last_success_at and now - st.last_success_at > expected:
-            msg = f"Job '{spec.name}' has not succeeded since {st.last_success_at:%Y-%m-%d %H:%M} UTC"
+            msg = (offsite_problem_words(offsite) if offsite
+                   else f"Job '{spec.name}' has not succeeded since {st.last_success_at:%Y-%m-%d %H:%M} UTC")
             issues.append(msg)
             active.add(f"job_stale:{spec.name}")
             created += alert_once(session, "warning", "monitor", msg, settings, key=f"job_stale:{spec.name}")

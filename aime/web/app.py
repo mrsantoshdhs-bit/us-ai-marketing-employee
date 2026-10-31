@@ -2223,7 +2223,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
 def health_strip(ctx: AppContext, s) -> list[tuple[str, str, str]]:
     """(label, ok|warn|bad, detail) for the things a Sales Manager needs to trust before reading anything else."""
-    from aime.backup import offsite_status
+    from aime.backup import OFFSITE_PROBLEM, offsite_problem_words, offsite_status
     from aime.design.render import find_browser
     from aime.integrations.status import llm_reachable
 
@@ -2268,7 +2268,9 @@ def health_strip(ctx: AppContext, s) -> list[tuple[str, str, str]]:
     else:
         rows.append(("Backup", "warn", "no verified backup recorded yet"))
     ready, reason = offsite_status(st)
-    rows.append(("Off-machine backup", "ok" if ready else "warn", "configured" if ready else reason))
+    trouble = kv_get(s, OFFSITE_PROBLEM) if ready else None
+    rows.append(("Off-machine backup", "warn", offsite_problem_words(trouble)) if trouble
+                else ("Off-machine backup", "ok" if ready else "warn", "configured" if ready else reason))
     return rows
 
 

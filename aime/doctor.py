@@ -10,7 +10,8 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DatabaseError
 
 from aime import clock_check, maintenance, send_journal
-from aime.backup import free_space_problem, integrity_check, newest_good_backup, offsite_status, offsite_sync, verify_backup
+from aime.backup import (OFFSITE_KEY_CHANGED, OFFSITE_PROBLEM, free_space_problem, integrity_check, newest_good_backup,
+                         offsite_copy_problem, offsite_problem_words, offsite_status, offsite_sync, verify_backup)
 from aime.context import AppContext
 from aime.db import kv_get
 from aime.integrations.linkedin import configured_author_urn
@@ -182,6 +183,7 @@ def _setup_checks(ctx: AppContext, add) -> None:
     """Sign-in accounts, backups and the sales mailbox (their state is kept in the database)."""
     with ctx.db.session() as s:
         last, off = kv_get(s, "backup.last_verified"), kv_get(s, "backup.last_offsite")
+        off_problem, key_changed = kv_get(s, OFFSITE_PROBLEM), kv_get(s, OFFSITE_KEY_CHANGED)
         users = s.execute(select(func.count(User.id)).where(User.active.is_(True))).scalar_one()
         admins = s.execute(select(func.count(User.id)).where(User.active.is_(True), User.role.in_(("admin", "super_admin")))).scalar_one()
     if not ctx.settings.dashboard_auth:
@@ -211,11 +213,19 @@ def _setup_checks(ctx: AppContext, add) -> None:
     off_ready, off_reason = offsite_status(ctx.settings)
     if not off_ready:
         add("Off-machine encrypted backup", False, f"Off-machine backup {off_reason}", "warning")
+    elif off_problem:  # at once, not after 30 hours; the monitor's alert on repeated failures says the same, once
+        add("Off-machine encrypted backup", False, offsite_problem_words(off_problem), own_alert=True)
     elif off is None:
         add("Off-machine encrypted backup", False, "Configured; no copy written yet", "warning")
     else:
         hours = (utcnow() - datetime.fromisoformat(off["at"])).total_seconds() / 3600
-        add("Off-machine encrypted backup", hours <= BACKUP_MAX_AGE_HOURS, f"{off['file']}, {hours:.0f} h ago")
+        wrong = offsite_copy_problem(ctx.settings, off)
+        add("Off-machine encrypted backup", hours <= BACKUP_MAX_AGE_HOURS and not wrong,
+            f"{off['file']}, {hours:.0f} h ago" + (f"; {wrong}" if wrong else ""))
+    if off_ready and key_changed and (Path(ctx.settings.backup_offsite_dir).expanduser() / key_changed["file"]).exists():
+        add("Older off-machine copies open", False, f"The copy {key_changed['file']} and those before it do not open with the backup "
+            "passphrase in use now: it was changed, or that copy is damaged. Keep the old passphrase until those copies have aged "
+            "out, about 30 days.", "warning")
     if ctx.settings.backup_offsite_dir:
         leaves, why = offsite_sync(ctx.settings.backup_offsite_dir)
         add("Off-machine folder leaves this PC", leaves is True, why, "warning")
