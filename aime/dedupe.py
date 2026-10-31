@@ -75,7 +75,10 @@ def name_from_title(title: str | None, domain: str | None) -> str | None:
 
 
 def registrable_domain(host: str) -> str:
-    host = host.lower().strip(".")
+    host = host.lower().rsplit("@", 1)[-1]
+    if host.count(":") == 1:  # "www.example.com:443"; several colons are an IPv6 address
+        host = host.split(":")[0]
+    host = host.strip(".")
     if host.startswith("www."):
         host = host[4:]
     parts = host.split(".")
