@@ -1022,9 +1022,12 @@ def test_ok_home_cards_match_records(scenario):
     assert cards["Usable contacts"]["period"] == 3 and cards["Emails sent"]["period"] == 3
     assert view["leads_badge"]["count"] == 6
     html = client_for(scenario).get("/").text
-    assert re.findall(r'class="kpi-value">([\d,]+)<', html) == ["7", "3", "3", "2"]
+    # the big number is the chosen period (T03); the total stays beside it
+    assert re.findall(r'class="kpi-value">([\d,]+)<', html) == ["4", "3", "3", "2"]
+    assert re.findall(r'class="kpi-total">Last 7 days · ([\d,]+) in total<', html) == ["7", "3", "3", "2"]
     stages = {st["label"]: st["value"] for st in view["pipeline_stages"]}
-    assert stages == {"New leads": 6, "Contacted": 2, "Interested": 1, "Meeting booked": 2, "Closed won": 1}
+    # the disqualified lead is not among the new leads (T04)
+    assert stages == {"New leads": 5, "Contacted": 2, "Interested": 1, "Meeting booked": 2, "Closed won": 1}
 
 
 def test_ok_funnel_tiles_and_api_stats_match_records(scenario):
@@ -1063,7 +1066,8 @@ def test_ok_performance_page_matches_records(scenario):
     alice = next(x for x in r.rows if x.username == "alice")
     # leads 0 and 1 belong to alice: 3 sent, 2 interested, 2 negative, 2 non-simulated... meetings created in the period
     assert (alice.leads_owned, alice.emails_sent, alice.positive_replies, alice.negative_replies) == (2, 3, 2, 2)
-    assert (alice.meetings, alice.won, alice.lost, alice.won_value, alice.won_value_ai_sourced) == (3, 1, 1, 5000.0, 5000.0)
+    # a cancelled meeting is not counted, as on the home page and the funnel (T05)
+    assert (alice.meetings, alice.won, alice.lost, alice.won_value, alice.won_value_ai_sourced) == (2, 1, 1, 5000.0, 5000.0)
     assert alice.conversion == 0.5 and r.total.won_value == 5000.0 and r.ai["won_value_human_sourced"] == 0
     html = client_for(scenario).get("/performance").text
     assert "50%" in html and "$5,000" in html

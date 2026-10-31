@@ -112,7 +112,7 @@
     <div class="wait-chips">{% for label, n, href in employee.waiting %}<a href="{{ href }}" class="wait-chip{{ ' hot' if n }}"><b>{{ n }}</b>{{ label }}</a>{% endfor %}</div>
     <div class="needs-list">
       {% for kind, href, text in exceptions %}
-      <div class="row-item"><span class="pill bad">{{ kind }}</span> <a href="{{ href }}">{{ text[:140] }}</a></div>
+      <div class="row-item"><span class="pill bad">{{ kind }}</span> <a href="{{ href }}">{{ (text|plain)[:140] }}</a></div>
       {% endfor %}
       {% for r in replies %}
       <div class="row-item"><span class="pill warn">{{ 'SIMULATED ' if r.is_simulated }}reply: {{ (r.category or '')|replace('_', ' ') }}</span>
