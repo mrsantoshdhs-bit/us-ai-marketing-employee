@@ -47,6 +47,12 @@ DEFAULT_BUSINESS: dict[str, Any] = {
         "send_window_end": "18:00",
         "send_window_timezone": "America/New_York",
         "stale_lead_days": 30,
+        # Days nothing is sent on, by name (aime/calendar_slots.py) or as "2026-12-24". Columbus Day and Veterans Day are
+        # known names, left out because most US businesses work on them.
+        "holidays": ["new_years_day", "mlk_day", "presidents_day", "memorial_day", "juneteenth", "independence_day",
+                     "labor_day", "thanksgiving", "day_after_thanksgiving", "christmas"],
+        "draft_reminder_days": 2,
+        "draft_fresh_days": 14,
     },
 }
 
