@@ -557,6 +557,11 @@ def test_a_newsletter_footer_with_list_headers_is_nobody_opting_out(make_ctx):
     assert r.category != "unsubscribe" and f"news@{SITE}" not in suppressed(ctx) and lead_of(ctx).outreach_status == "contacted"
 
 
+@pytest.mark.parametrize("word", ["unsubscribe", "opt out"])
+def test_the_one_word_through_a_gateway_that_marks_mail_bulk_is_still_an_opt_out(word):
+    assert body_of(word, auto=True, kind="list")[0] == "unsubscribe"
+
+
 def test_someone_writing_through_a_mailing_list_can_still_opt_out(make_ctx):
     ctx, _, sent = contacted(make_ctx)
     deliver(ctx, in_thread(sent, "Please remove me from your list.", headers={"List-Id": "<team.acme.example>"}))

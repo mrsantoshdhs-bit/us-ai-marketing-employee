@@ -372,7 +372,8 @@ def _classify(row: InboundEmail, text: str | None = None) -> tuple[str, str, lis
             if category == "unsubscribe":  # they say it themselves as well
                 return category, confidence, why
             word = hits["unsubscribe"] if "unsubscribe" in hits else elsewhere.group(0)
-            if category == "other" and "unsubscribe" in hits and kind != "list":  # nothing else is said: so it is what they say
+            # Nothing else is said, so it is what they say; a list's newsletter says something else as well.
+            if category == "other" and "unsubscribe" in hits and (kind != "list" or not kept.strip()):
                 return "unsubscribe", "medium", [f'"{word}" is all it says, in a line like a footer: a person checks']
             return category, "low", [*why, f'{FOOTER_REASON}: "{word}". The sequence stops; a person reads it']
     negated = None
