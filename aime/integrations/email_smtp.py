@@ -51,21 +51,24 @@ def compliance_problem(settings: Settings, body: str) -> str | None:
     return None
 
 
+def sender_line(settings: Settings) -> str:
+    """Who writes, and from where. A postal address often starts with the company's name: the name is then written once."""
+    address = settings.company_postal_address or POSTAL_PLACEHOLDER
+    return address if address.lower().startswith(settings.company_name.lower()) else f"{settings.company_name} · {address}"
+
+
 def compliance_footer(settings: Settings, outreach: bool = False, why: str | None = None) -> str:
     """CAN-SPAM footer: why the person is receiving this, how to opt out, and our postal address.
     Outreach (B2B first touch) says it was sent to a business contact the company published, unless `why` gives
     the true reason (for an address that was given to us rather than published)."""
     unsub = settings.unsubscribe_email or settings.smtp_from or "this address"
-    address = settings.company_postal_address or POSTAL_PLACEHOLDER
     why = why or ("We emailed you because your company publishes this address as a business contact."
                   if outreach else f"You are receiving this because you contacted {settings.company_name}.")
-    # A postal address often starts with the company's name: the name is then written once.
-    sender = address if address.lower().startswith(settings.company_name.lower()) else f"{settings.company_name} · {address}"
     return (
         "\n\n---\n"
         f"{why} "
         f"To stop receiving emails from us, reply with \"unsubscribe\" or write to {unsub}.\n"
-        f"{sender}"
+        f"{sender_line(settings)}"
     )
 
 

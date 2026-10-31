@@ -162,7 +162,7 @@ def test_controlled_send_then_follow_up_then_stop_on_reply(make_ctx):
     later = TUESDAY_11AM_ET + timedelta(days=4, minutes=5)
     assert SalesWorkflowAgent(ctx, sender=sender).run({"now": later.isoformat()}).output.outreach_drafts == 1
     step2 = drafts(ctx)[-1]
-    assert step2.step == 2 and step2.status == "awaiting_approval" and step2.subject.startswith("Following up")
+    assert step2.step == 2 and step2.status == "awaiting_approval" and step2.subject == f"Re: {drafts(ctx)[0].subject}"
     assert step2.quality["qc"]["status"] == "passed", step2.quality["qc"]
     lead = lead_of(ctx)
     TestClient(create_app(ctx)).post(f"/leads/{lead.id}/replied", headers=ORIGIN)
@@ -335,7 +335,7 @@ def test_every_follow_up_template_passes_the_quality_checks(make_ctx, step):
     with ctx.db.session() as s:
         lead = s.get(Lead, lead.id)
         subject, body = draft_outreach(ctx.settings, step, lead, lead.contact, [])
-        qc = run_email_checks(subject, body, [], lead.contact, False, step=step)
+        qc = run_email_checks(subject, body, [], lead.contact, False, step=step, sent_subjects=[subject.removeprefix("Re: ")])
     assert qc["status"] == "passed", qc  # a template that always fails could only be sent with an override
 
 
