@@ -39,7 +39,7 @@
     <p class="small">Fit {{ lead.fit_score }}/35 · Need {{ lead.need_score }}/35 · Intent {{ lead.intent_score }}/20 · Data {{ lead.data_score }}/10</p>
     <ul class="reasons small">{% for r in lead.score_breakdown or [] %}<li>{{ r }}</li>{% endfor %}</ul>
     <p class="small">Matched services: {% for s in lead.matched_services or [] %}<span class="pill">{{ s|service }}</span> {% else %}none{% endfor %}</p>
-    {% if lead.outreach_status or lead.owner %}<p class="small">Outreach: {{ status_pill(lead.outreach_status or 'none') }}{% if lead.outreach_updated_at %} <span class="muted">since {{ lead.outreach_updated_at|local }}</span>{% endif %}{% if lead.owner %} · owner {{ lead.owner }}{% endif %}{% if stage_why %}<br><span class="muted">Why: {{ stage_why }}</span>{% endif %}</p>{% endif %}
+    {% if lead.outreach_status or lead.owner %}<p class="small">Outreach: {{ status_pill((lead.outreach_status or 'none')|replace('_', ' ')) }}{% if lead.outreach_updated_at %} <span class="muted">since {{ lead.outreach_updated_at|local }}</span>{% endif %}{% if lead.owner %} · owner {{ lead.owner }}{% endif %}{% if stage_why %}<br><span class="muted">Why: {{ stage_why }}</span>{% endif %}</p>{% endif %}
     <p class="small">{{ coming.text }}{% if coming.at %} {{ coming.at|local(None, '%a %d %b') }}{% endif %}.</p>
     {% if lead.disqualify_reason %}<p class="small"><span class="pill bad">{{ lead.disqualify_reason }}</span></p>{% endif %}
     {% if can_edit %}<h2>Actions</h2>
@@ -58,7 +58,7 @@
     {% if can_assign %}<form method="post" action="/leads/{{ lead.id }}/assign" class="filters">
       <select name="owner"><option value="">Unassigned</option>{% for p in assignees %}<option value="{{ p.name }}" {{ 'selected' if p.name == lead.owner }}>{{ p.name }}{% if p.away %} (away){% endif %}</option>{% endfor %}</select>
       <input name="reason" placeholder="Reason (optional)" maxlength="200"><button class="secondary">Assign lead and its open deals</button></form>{% endif %}
-    {% if assignments %}<ul class="small">{% for a in assignments %}<li>{{ a.created_at|local }}: {{ a.from_owner or 'unassigned' }} → {{ a.to_owner or 'unassigned' }} ({{ a.method|replace('_', ' ') }}{% if a.reason %}: {{ a.reason }}{% endif %}) by {{ a.actor }}</li>{% endfor %}</ul>{% endif %}
+    {% if assignments %}<ul class="small">{% for a in assignments %}<li>{{ a.created_at|local }}: {{ a.from_owner or 'unassigned' }} → {{ a.to_owner or 'unassigned' }} ({{ a.method|replace('_', ' ') }}{% if a.reason %}: {{ a.reason|trim(': ') }}{% endif %}) by {{ a.actor }}</li>{% endfor %}</ul>{% endif %}
     <h2>Meetings</h2>
     {% for m in meetings %}<div class="row-item small">{% if m.is_simulated %}<span class="pill bad">SIMULATED</span> {% endif %}{{ m.starts_at|et }} · {{ m.title }} · {{ m.status|replace('_', ' ') }} <span class="muted">({{ m.source|replace('_', ' ') }})</span></div>
     {% else %}<p class="muted small">None yet.</p>{% endfor %}

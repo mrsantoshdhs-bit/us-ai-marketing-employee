@@ -612,7 +612,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 out.cancelled += 1
                 continue
             elif f.step > 1 and lead.outreach_status in STOP_STATUSES:  # step 1 answers a new inquiry: always fine
-                f.status, f.blocked_reason = "cancelled", f"Not sent: the sequence stopped ({lead.outreach_status})"
+                f.status, f.blocked_reason = ("cancelled", "Not sent: the sequence was stopped" if lead.outreach_status == "stopped"
+                                              else f"Not sent: the sequence stopped ({lead.outreach_status})")
                 out.cancelled += 1
                 continue
             answerable = (lead.status == "qualified" or reengaging

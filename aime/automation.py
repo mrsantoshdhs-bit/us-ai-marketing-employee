@@ -487,7 +487,8 @@ def test_contact_authorization(session: Session, f: FollowUp, now: datetime) -> 
     if (f.contact and f.contact.consent_status == "opted_out") or is_suppressed(session, to):
         return None, "the address opted out or is suppressed"
     if f.lead is not None and f.lead.outreach_status in STOP_STATUSES:
-        return None, f"the sequence stopped ({f.lead.outreach_status})"
+        stage = f.lead.outreach_status.replace("_", " ")
+        return None, "the sequence was stopped" if stage == "stopped" else f"the sequence stopped ({stage})"
     camps = [a for a in active_authorizations(session, now) if to in (a.recipients or []) and "outreach" in (a.kinds or [])]
     if not camps:
         return None, "no active campaign authorization names this exact address"

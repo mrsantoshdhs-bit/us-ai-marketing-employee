@@ -52,7 +52,7 @@
     {% if can_assign %}<form class="filters" method="post" action="/opportunities/{{ opp.id }}/assign">
       <select name="owner"><option value="">Unassigned</option>{% for p in assignees %}<option value="{{ p.name }}" {{ 'selected' if p.name == opp.owner }}>{{ p.name }}{% if p.away %} (away){% endif %}</option>{% endfor %}</select>
       <input name="reason" placeholder="Reason (optional)" maxlength="200"><button class="secondary">Assign</button></form>{% endif %}
-    {% for a in owners %}<div>{{ a.created_at|local }}: {{ a.from_owner or 'unassigned' }} → {{ a.to_owner or 'unassigned' }} ({{ a.method|replace('_', ' ') }}{% if a.reason %}: {{ a.reason }}{% endif %}) by {{ a.actor }}</div>{% endfor %}
+    {% for a in owners %}<div>{{ a.created_at|local }}: {{ a.from_owner or 'unassigned' }} → {{ a.to_owner or 'unassigned' }} ({{ a.method|replace('_', ' ') }}{% if a.reason %}: {{ a.reason|trim(': ') }}{% endif %}) by {{ a.actor }}</div>{% endfor %}
   </div>
 
   <h2>Activity</h2>

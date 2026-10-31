@@ -129,7 +129,7 @@ def test_offer_book_and_confirm_on_their_own_and_hand_over_to_the_sales_manager(
         assert s.execute(select(Alert).where(Alert.source == "handover")).scalars().first().message.startswith(
             "Handed over to manager")
         pid, offer_id = p.id, p.offer_followup_id
-    assert "Sales Manager: manager" in TestClient(create_app(ctx)).get("/pipeline").text
+    assert "Owner: manager" in TestClient(create_app(ctx)).get("/pipeline").text
     run(ctx, sender, NOW + timedelta(hours=1))  # the offer goes out under the campaign
     offer = followup(ctx, offer_id)
     assert offer.status == "sent" and offer.approved_by == f"campaign #{aid}" and len(FakeSMTP.sent) == 1

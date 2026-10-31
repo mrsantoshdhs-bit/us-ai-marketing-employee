@@ -37,7 +37,7 @@ from aime.assignment import owner_choices
 from aime.crm_ops import CONTACT_NOT_SUPPRESSED, is_suppressed, log_activity, suppress
 from aime.db import kv_get, kv_set, take_write_lock
 from aime.inbound import InboundPayload, record_inquiry
-from aime.integrations.email_smtp import POSTAL_PLACEHOLDER, EmailSender, compliance_problem
+from aime.integrations.email_smtp import POSTAL_PLACEHOLDER, EmailSender, compliance_footer, compliance_problem
 from aime import mail_accounts
 from aime.integrations import linkedin_leads, oauth
 from aime.integrations.linkedin import (POST_REF_RE, LinkedInAPIError, LinkedInClient, get_auth_status, get_token,
@@ -61,7 +61,7 @@ from aime.outreach import outreach_footer, stop_sequence
 from aime.pipeline import settle_next_steps
 from aime.qc.checks import run_quality_checks
 from aime.qc.email_checks import run_email_checks
-from aime.reply_intel import INTENT_LABELS, QUESTION_PLACEHOLDER
+from aime.reply_intel import INTENT_LABELS, QUESTION_PLACEHOLDER, reply_footer
 from aime.reply_intel import act as act_on_reply
 from aime.meetings import check_double_bookings, record_meeting, reopen_after_cancel
 from aime.scheduler.runner import ABANDON_AFTER, due_jobs, load_job_specs, next_run, run_job
@@ -189,6 +189,8 @@ PLAIN_SETTINGS = {
     "PUBLISHING_ENABLED=false": "publishing is switched off", "PUBLISHING_ENABLED=true": "publishing is switched on",
     "PUBLISHING_ENABLED": "the publishing switch",
     "MEETING_BOOKING_ENABLED=false": "booking is switched off", "MEETING_BOOKING_ENABLED": "the booking switch",
+    "no calendar is connected (CALENDAR_PROVIDER is not set)": "no calendar is connected",
+    "MEETING_BOOKING_ENABLED=false: meeting booking is switched off": "meeting booking is switched off",
     "CALENDAR_PROVIDER": "the calendar choice", "COMPANY_POSTAL_ADDRESS": "the company's postal address",
     "SMTP_HOST / SMTP_FROM missing": "no mail server or sender address is set",
     "SMTP_PASSWORD missing (the mailbox's app password)": "the mailbox password is missing",
@@ -1251,7 +1253,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 elif suppressed:  # checked on every approval, edited or not
                     return back(f"/followups#f{f.id}", "Cannot approve: this address is on the do-not-contact list")
                 elif problem := compliance_problem(C().settings, f.body or ""):
-                    return back(f"/followups#f{f.id}", f"Cannot approve: {problem}. Put the footer back first")
+                    # this email's own footer, word for word: outreach says why they hear from us, a reply does not
+                    footer = (outreach_footer(C().settings, f.contact) if f.kind == "outreach" else reply_footer(C().settings)
+                              if f.kind == "response" else compliance_footer(C().settings))
+                    return back(f"/followups#f{f.id}", f"Cannot approve: {problem}. Put the footer back first, at the end of the "
+                                                       f"email: {' '.join(footer.replace('---', '').split())}")
                 elif qc_status in ("held", "failed") and qc_override != "yes":
                     return back(f"/followups#f{f.id}", f"Quality checks {qc_status}: review the findings and tick "
                                                        "'I reviewed the quality findings' to approve")
@@ -1915,7 +1921,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         path = Path(r.path_html)
         if not path.exists():
             raise HTTPException(404, "Report file missing")
-        return HTMLResponse(path.read_text(encoding="utf-8"))
+        return HTMLResponse(report_page(path.read_text(encoding="utf-8")))
 
     # ------------------------------------------------------------------ integrations
     # ------------------------------------------------------------------ Super Admin: mailboxes

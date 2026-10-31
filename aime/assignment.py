@@ -185,7 +185,7 @@ def reassign(session: Session, *, to_owner: str | None, actor: str, reason: str,
             if o.owner != to_owner:
                 o_old, o.owner = o.owner, to_owner
                 record(session, lead_id=lead.id, opportunity_id=o.id, from_owner=o_old, to_owner=to_owner,
-                       method="manual", reason=f"with its lead: {reason}", actor=actor)
+                       method="manual", reason=f"with its lead: {reason}" if reason else "with its lead", actor=actor)
         target, lead_id, company_id = f"lead #{lead.id}", lead.id, lead.company_id
     note = f"Assigned {target} from {old or 'unassigned'} to {to_owner or 'unassigned'}" + (f": {reason}" if reason else "")
     # On record in Activity and Assignment. No alert: the person who did it knows, and alerts are not what the new

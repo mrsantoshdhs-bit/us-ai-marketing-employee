@@ -13,7 +13,7 @@
   "record the outcome" task closes. Simulated bookings (testing only) are marked SIMULATED.
 </div>
 <h2 id="proposals">Meeting times offered</h2>
-<div class="card small">{% if booking_ready %}Free times come from your calendar. The email offering them waits for your approval; when the prospect answers, book the time they chose: it is checked against the calendar again, then one event is created.{% else %}Booking from your calendar is off: {{ booking_why }}. The booking link in replies works as before.{% endif %}</div>
+<div class="card small">{% if booking_ready %}Free times come from your calendar. The email offering them waits for your approval; when the prospect answers, book the time they chose: it is checked against the calendar again, then one event is created.{% else %}Booking from your calendar is off: {{ booking_why|plain }}. The booking link in replies works as before.{% endif %}</div>
 {% for p in proposals %}
 <div class="card">
   <strong>{{ p.lead.company.name }}</strong> · {{ p.prospect_email }} · <span class="pill">{{ p.status }}</span>
