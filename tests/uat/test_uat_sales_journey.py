@@ -1352,7 +1352,8 @@ def test_ok_search_and_api_respect_who_may_see(org):
 def test_defect_report_date_filter_uses_utc_while_every_date_on_screen_is_local(org, monkeypatch):
     """An owner in India wins a deal at 01:30 on 28 Oct local time. The deal's history says 28 Oct; the report for
     28 Oct says nothing was won (it filters by the UTC date, 27 Oct)."""
-    monkeypatch.setattr("aime.timeutil.local_tz", lambda name=None: ZoneInfo("Asia/Kolkata"))
+    for where in ("aime.timeutil.local_tz", "aime.web.app.local_tz"):
+        monkeypatch.setattr(where, lambda name=None: ZoneInfo("Asia/Kolkata"))
     oid = make_deal(org, make_lead(org, owner="eva", email="a@a.example"), value=5000)
     post(client(org, "eva"), f"/opportunities/{oid}", stage="won")
     with org.db.session() as s:
