@@ -139,6 +139,23 @@ def test_re_passes_only_on_an_answer_to_an_email_really_sent(subject, sent, stat
     assert checks(subject, sent)["status"] == status
 
 
+@pytest.mark.parametrize("subject", ["RE[2]: Foo at Acme", "RE(2): Foo at Acme", "AW: Foo at Acme", "SV: Foo at Acme", "Re\uff1a Foo at Acme", "Re - Foo at Acme", "\u200bRe: Foo at Acme", "R\u200be: Foo at Acme",
+                                     "Re: Re: Foo at Acme", "Fwd: Foo at Acme", "Re: Foo at Acme\u200b", "Re:Foo at Acme\nBcc: a@b.example"])
+@pytest.mark.parametrize("sent", [["Foo at Acme"], ["Foo at Acme", "Re: Foo at Acme"], []])
+def test_a_hand_cannot_slip_a_fake_reply_past_the_check(subject, sent):
+    assert checks(subject, sent)["status"] == "fail", (subject, sent)
+
+
+@pytest.mark.parametrize("sent", [["Foo at Acme"], ["Foo at Acme", "Re: Foo at Acme"], ["Foo at Acme", "Following up: Foo"]])
+def test_the_real_answer_passes_and_only_under_the_first_subject(sent):
+    assert checks("Re: Foo at Acme", sent)["status"] == "pass"
+    assert checks("Re: Following up: Foo", sent)["status"] == "fail"
+
+
+def test_invisible_characters_fail_without_any_reply_word():
+    assert checks("Foo\u200b at Acme")["status"] == "fail"
+
+
 def test_the_two_characters_of_re_do_not_push_a_full_length_subject_over_the_limit():
     first = "Question about tools " * 3 + "abcdefg"
     assert len(first) == 70 and checks(f"Re: {first}", [first])["status"] == "pass"
@@ -188,6 +205,17 @@ def test_what_was_sent_before_comes_only_from_this_lead_and_only_if_it_went_out(
         s.get(FollowUp, sent.id).status = "uncertain"
         assert sent_earlier(s, sent.lead_id, sent.message_id) == []
         s.rollback()
+
+
+def test_in_test_mode_the_panel_names_who_really_received_it(make_ctx):
+    ctx, sender, sent = contacted(make_ctx)
+    with ctx.db.session() as s:
+        s.get(FollowUp, sent.id).delivered_to = "owner@test.example"
+    run(ctx, sender, TUESDAY_11AM_ET + timedelta(days=4, minutes=5))
+    page = TestClient(create_app(ctx)).get("/followups").text
+    panel = page[page.index("Already sent in this thread"):]
+    panel = panel[:panel.index("</details>")]
+    assert "owner@test.example" in panel and sent.to_email not in panel
 
 
 def test_the_approval_page_shows_the_sent_text_read_only_in_both_kinds_of_draft(make_ctx):
@@ -363,7 +391,7 @@ def test_a_refused_check_back_is_no_promise_and_no_task(st, make_ctx, text):
         assert not s.execute(select(FollowUp).where(FollowUp.channel == "task", FollowUp.lead_id == sent.lead_id, FollowUp.subject.like("Check back%"))).first()
 
 
-@pytest.mark.parametrize("text", ["Actually, let's reconnect in March.", "Can we reconnect in June?", "You can check back in May.", "Don't call now. Please check back in March."])
+@pytest.mark.parametrize("text", ["Actually, let's reconnect in March.", "Can we reconnect in June?", "You can check back in May.", "Don't call now. Please check back in March.", "If you can check back in March, please do."])
 def test_a_real_request_still_counts(text):
     assert check_back_month(row(text))
 
@@ -582,6 +610,19 @@ def test_a_post_that_passes_today_is_as_it_was_and_a_stored_failure_is_not_lifte
         assert s.get(ContentItem, clean).status == "approved"
 
 
+def test_a_post_never_checked_does_not_claim_it_was(make_ctx):
+    ctx = make_ctx()
+    with ctx.db.session() as s:
+        item = ContentItem(title="T", body=CLAIM, status="awaiting_approval", hashtags=[], service="custom_crm", industry="real_estate",
+                           scheduled_for=utcnow() + timedelta(days=1), generator="template", fingerprint="p4-undated", quality={})
+        s.add(item)
+        s.flush()
+        pid = item.id
+        assert "checked_at" not in item.qc
+    page = TestClient(create_app(ctx)).get(f"/content/{pid}").text
+    assert "Checked " not in page and "Not checked yet" in page and "claims first-hand experience" in page
+
+
 def test_a_post_never_checked_that_makes_a_claim_is_held_too(make_ctx):
     ctx = make_ctx()
     with ctx.db.session() as s:
@@ -639,8 +680,8 @@ def test_decision_makers_do_not_count_people_who_decide_nothing_and_drafted_no_c
         co = Company(name="Co", normalized_name="co", source="test", domain="co.example")
         s.add(co)
         s.flush()
-        titles = ["CEO", None, "Chief Performance Officer", "Former CEO", "CEO (former)", "Formerly CTO", "Executive Assistant", "Office Manager",
-                  "Social Media Manager", "Ex-CEO", "Co-founder, former CTO"]
+        titles = ["CEO", None, "Chief Performance Officer", "Assistant Vice President", "Founder (formerly at Globex)", "Former CEO", "CEO (former)", "Formerly CTO", "Executive Assistant",
+                  "Office Manager", "Social Media Manager", "Ex-CEO", "Co-founder, former CTO", "Former Assistant Vice President", "Assistant to the CEO"]
         for i, title in enumerate(titles):
             s.add(Contact(company_id=co.id, first_name="A", last_name=f"B{i}", email=f"a{i}@co.example", source="website", title=title))
         lead = Lead(company_id=co.id, source="research", status="qualified", score=70, grade="B")
@@ -649,7 +690,7 @@ def test_decision_makers_do_not_count_people_who_decide_nothing_and_drafted_no_c
         for status, approved in (("awaiting_approval", None), ("sent", utcnow()), ("cancelled", None), ("cancelled", utcnow()), ("rejected", None)):
             s.add(FollowUp(lead_id=lead.id, company_id=co.id, channel="email", kind="outreach", step=1, due_at=utcnow(), status=status, subject="s", body="b", approved_at=approved))
     k = kpis(ctx)
-    assert k["decision_makers_total"] == k["decision_makers_period"] == 3
+    assert k["decision_makers_total"] == k["decision_makers_period"] == 5
     assert k["outreach_drafted_total"] == k["outreach_drafted_period"] == 4
 
 

@@ -15,6 +15,7 @@ from aime.contact_validation import STATUS_OK
 from aime.dedupe import company_to_address
 from aime.qc import CheckResult, build_report
 from aime.qc.checks import check_cliches, check_grammar, check_spelling
+from aime.reply_intel import REPLY_WORDS
 
 MIN_WORDS, MAX_WORDS = 40, 160
 SPAM_RE = re.compile(r"\b(free|guarantee[ds]?|risk[- ]free|act now|limited time|urgent|winner|cash|buy now|"
@@ -27,6 +28,10 @@ CLAIM_RE = re.compile(r"\b(we (increased|doubled|tripled|saved|cut|helped)|clien
                       r"leading|leader in|award[- ]winning|proven to|industry[- ]best|world[- ]class)\b", re.I)
 QUOTE_RE = re.compile(r'"([^"]{8,})"')
 LINK_RE = re.compile(r"https?://|www\.", re.I)
+_INVISIBLE = re.compile("[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
+# What mail programs put before a subject, in any language, and what a hand can type for it ("Re - x").
+_REPLY_PREFIX = re.compile(rf"\s*(?:(?:{REPLY_WORDS})\s*[:\uff1a]|re\s*-\s)\s*", re.I)
+PLAIN_RE = re.compile(r"\s*re:\s*", re.I)  # all that an answer of ours ever starts with
 
 
 def split_footer(body: str) -> tuple[str, str]:
@@ -56,14 +61,18 @@ def run_email_checks(subject: str, body: str, evidence: list[dict], contact, sup
                            f"{words} words (keep it between {MIN_WORDS} and {MAX_WORDS})")]
 
     subj_problems = []
-    # "Re:" is true only of an answer to an email we really sent in this thread, under that email's own subject.
-    prefix = re.match(r"\s*(re|fwd?)\s*:\s*", subject, re.I)
-    answers = bool(prefix) and prefix.group(1).lower() == "re" and _normalize(subject[prefix.end():]) in {
-        _normalize(s) for s in sent_subjects or []}
-    if len(subject[prefix.end():] if answers else subject) > 70:
+    # "Re:" is true only of an answer to an email we really sent in this thread, under the subject the thread began with.
+    seen = _INVISIBLE.sub("", subject)
+    prefix = _REPLY_PREFIX.match(seen)
+    first = PLAIN_RE.sub("", sent_subjects[0]) if sent_subjects else None
+    plain = PLAIN_RE.match(seen)
+    answers = seen == subject and first is not None and bool(plain) and _normalize(seen[plain.end():]) == _normalize(first)
+    if len(seen[plain.end():] if answers else subject) > 70:
         subj_problems.append("longer than 70 characters")
     if prefix and not answers:
         subj_problems.append("pretends to be a reply or forward")
+    elif seen != subject:
+        subj_problems.append("has invisible characters")
     # A name in capitals is how that company writes itself, not shouting; anything else in capitals still is.
     own_name = getattr(getattr(contact, "company", None), "name", None)
     without_name = subject.replace(own_name.rstrip(" .,"), " ") if own_name else subject

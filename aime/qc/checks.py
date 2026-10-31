@@ -97,8 +97,7 @@ def with_todays_claims(report: dict, title: str, body: str) -> dict:
         return report
     failed = report.get("status") == "failed"
     return {**report, "status": "failed" if failed else "held", "decision": "fail" if failed else "hold",
-            "checked_at": report.get("checked_at") or utcnow().isoformat(timespec="seconds"),
-            "checks": [*(c for c in report.get("checks", []) if c.get("name") != today.name), asdict(today)]}
+            "checks": [*(c for c in report.get("checks", []) if c.get("name") != today.name), asdict(today)]}  # no date: only a stored report has one
 
 
 _SPELLER: list = []

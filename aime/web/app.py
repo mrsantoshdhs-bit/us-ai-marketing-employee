@@ -1156,7 +1156,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 InboundEmail.suggested_followup_id.in_([f.id for f in first] or [0]))).scalars()}
             simulated = {fid for fid, r in answers.items() if r.is_simulated}
             reply_to = {fid: r.reply_to for fid, r in answers.items() if getattr(r, "reply_to", None)}
-            earlier = {f.id: [{"subject": e.subject, "body": e.body, "sent_at": e.sent_at, "to": e.to_email}
+            earlier = {f.id: [{"subject": e.subject, "body": e.body, "sent_at": e.sent_at, "to": e.delivered_to or e.to_email}
                               for e in sent_earlier(s, f.lead_id, f.in_reply_to)]
                        for f in first if f.status == "awaiting_approval" and f.in_reply_to}
             later = later_replies(s, first)

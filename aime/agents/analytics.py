@@ -8,7 +8,7 @@ from typing import Literal
 
 from jinja2 import Environment, select_autoescape
 from pydantic import BaseModel, Field
-from sqlalchemy import func, not_, or_, select
+from sqlalchemy import and_, func, not_, or_, select
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent
@@ -38,6 +38,8 @@ def md_safe(value):
 REAL_REPLY = ("interested", "not_interested", "objection", "referral", "question", "other")
 # A title on a company's page that decides nothing: someone who has left, an assistant, whoever runs the office or the social accounts.
 NOT_DECIDING = ("former%", "% former%", "%(former%", "ex-%", "% ex-%", "%assistant%", "%office manager%", "%social media%")
+# Those words in a title that does decide: an officer's rank, and where a founder used to be.
+DECIDING_ANYWAY = ("%assistant vice president%", "%assistant vp%", "%(formerly at%", "%formerly at %", "%formerly with %", "%formerly of %")
 
 
 def _rate(part: int, whole: int) -> str:
@@ -47,7 +49,9 @@ def _rate(part: int, whole: int) -> str:
 def sales_kpis(count, since) -> dict:
     """Sales pipeline counts from records only. Simulated replies and meetings are kept apart."""
     researched = (Contact.source.in_(("website", "sec_filing")),)
-    deciding = or_(Contact.title.is_(None), not_(or_(*(func.lower(Contact.title).like(p) for p in NOT_DECIDING))))
+    title = func.lower(Contact.title)
+    deciding = or_(Contact.title.is_(None), not_(or_(*(title.like(p) for p in NOT_DECIDING))),
+                   and_(or_(*(title.like(p) for p in DECIDING_ANYWAY)), not_(title.like("former %"))))
     # a draft cancelled before any person approved it was never part of the work
     drafted = (FollowUp.kind == "outreach", or_(FollowUp.status != "cancelled", FollowUp.approved_at.is_not(None)))
     real = (InboundEmail.is_simulated.is_(False),)

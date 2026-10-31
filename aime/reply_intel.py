@@ -336,7 +336,7 @@ CHECK_BACK = re.compile(r"\b((check|circle|come|get) back|touch base|reach (back
                         r"(ping|write to|contact|email|e-mail|call) (me|us))\b( \w+){0,4}? "
                         rf"(?P<prep>in|around|after|until|till|by|from)( (?P<part>early|mid|late|the start of|the end of))?[ -](?P<month>{'|'.join(_MONTHS)})\b( (?P<year>20\d\d)\b)?", re.I)
 # Someone else will write, or they will: "Our CFO will get back to you in March", "Sam can reach out in March". Not "you can", not "can we".
-_SOMEONE_WILL = re.compile(r"\b(?!you\b|we\b)[\w']+( \w+)?('ll| will| shall| would| might| may| is going to| are going to| can| could)( \w+){0,2} $|"
+_SOMEONE_WILL = re.compile(r"\b(?!you\b|we\b)[\w']+('ll| will| shall| would| might| may| is going to| are going to| can| could)( \w+){0,2} $|"
                            r"\b(i|we)('ll| will| shall| am going to| are going to)( \w+){0,2} $", re.I)
 _PART_DAY = {"early": 1, "the start of": 1, "mid": 15, "late": 25, "the end of": 25}
 _PART_WORD = {"early": "early ", "the start of": "early ", "mid": "mid-", "late": "late ", "the end of": "late "}
