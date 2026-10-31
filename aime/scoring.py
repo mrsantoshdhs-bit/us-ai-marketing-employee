@@ -124,7 +124,10 @@ def signal_fact(signal) -> SignalFact:
 OLD_DEFAULT_INDUSTRY = "tech_startups"
 
 
-_WORLDWIDE_RE = re.compile(r"\b(?:global|globally|worldwide|anywhere)\b", re.I)
+# Hiring from anywhere says nothing about where a company is: "Remote (Global / US/EU time zones)". A company's name or "anywhere
+# in the US" does not count.
+_WORLDWIDE_RE = re.compile(r"\bremote\b[^|]{0,12}\b(?:global|globally|worldwide|anywhere)\b(?!\s+in\s+the\s+(?:us|usa|u\.s\.|united states))"
+                           r"|\b(?:global|worldwide|anywhere)[ /-]+remote\b(?!\s*\(?(?:us|usa)\b)", re.I)
 
 
 def read_company(company, signals) -> dict:

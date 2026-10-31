@@ -11,10 +11,13 @@ from fastapi.testclient import TestClient
 import aime.timeutil as tu
 from aime.agents.crm import CRMManagementAgent
 from aime.agents.qualification import LeadQualificationAgent
+from aime.crm_ops import upsert_company
+from aime.db import kv_set
 from aime.matching import competitor_evidence, competitor_in_post, match_services
 from aime.models import Activity, Alert, Company, FollowUp, Lead, ResearchSnapshot, Signal, Suppression
 from aime.people import decision_maker_title
 from aime.scoring import LeadFacts, SignalFact, lasting_grade, read_company, score_lead
+from aime.sources.base import CompanyCandidate
 from aime.web.app import create_app
 
 
@@ -308,7 +311,7 @@ def test_the_page_says_plainly_why_an_outside_us_lead_cannot_be_reopened(make_ct
         s.flush()
         lead_id = lead.id
     where = _set_status(ctx, lead_id, "qualified")
-    assert "Status not changed" in where and "outside the US" in where and "administrator" in where
+    assert "Status not changed" in where and "outside the US" in where and "cannot be changed" in where and "administrator" not in where
     assert _status(ctx, lead_id)[0] == "disqualified"
     LeadQualificationAgent(ctx).run({"rescore_all": True})
     assert _status(ctx, lead_id)[0] == "disqualified"
@@ -359,7 +362,7 @@ def test_a_label_a_post_does_not_support_earns_no_industry_points():
 
 
 @pytest.mark.parametrize("place, stated", [("Co | Remote (Global / US/EU/Africa time zones welcome)", False), ("Co | Remote", False),
-                                           ("Co | Remote (US)", True), ("Co | US only", True)])
+                                           ("Co | Remote (US)", True), ("Co | US only", True), ("Co | Remote (anywhere in the US)", True), ("Co Global | Remote (US)", True)])
 def test_us_points_come_only_from_what_the_post_says(place, stated):
     company = SimpleNamespace(source="hn_hiring", industry=None, state=None, country="US", location_text=place, verified=False)
     assert read_company(company, [])["us_stated"] is stated
@@ -371,7 +374,10 @@ def test_us_points_come_only_from_what_the_post_says(place, stated):
 
 @pytest.mark.parametrize("title, decides", [("Pet Owner Support", False), ("Clinics, Start HerePet Owner Support", False), ("Former CEO", False),
                                             ("We believe that each team member is an owner.", False), ("COO of a $6M family-owned HVAC business.", False),
-                                            ("Founder and CEO", True), ("Owner", True), ("Owner and CEO", True), ("Co-Founder, Owner", True), ("CTO", True)])
+                                            ("Founder and CEO", True), ("Owner", True), ("Owner and CEO", True), ("Co-Founder, Owner", True), ("CTO", True),
+                                            ("Owner CEO", True), ("President, Smith & Co.", True), ("Founder & CEO, Acme Inc.", True),
+                                            ("Chairman of the Board, President and Chief Executive Officer of Acme Holdings, Inc.", True),
+                                            ("Product Owner", False), ("Process Owner", False), ("Product Owner & Founder", True)])
 def test_a_decision_maker_is_someone_whose_title_says_so(title, decides):
     assert decision_maker_title(title) is decides
 
@@ -383,3 +389,219 @@ def test_reasons_read_in_plain_words():
     text = " ".join(reasons)
     assert "AI Agent Orchestration (strong)" in text and "agent_orchestration" not in text and "strength" not in text
     assert "target industry (SaaS)" in text
+
+
+# ------------------------------------------------------------------ review of this branch, 31 Oct
+def test_a_new_post_on_a_company_on_file_never_sets_the_flag_by_itself(make_ctx):
+    ctx = make_ctx()
+    lead_id, _ = _hn_lead(ctx, days_old=5, status="qualified")
+    with ctx.db.session() as s:
+        lead = s.get(Lead, lead_id)
+        lead.outreach_status = "contacted"
+        cand = CompanyCandidate(name="Acme Tools", source="hn_hiring", source_url="https://example.test/9", domain="acme.example", state="TX",
+                                is_us=True, signal_type="hiring", signal_text="We are a small IT consulting firm.")
+        existing, created = upsert_company(s, cand)
+        assert not created and not existing.is_competitor
+    _review(ctx)
+    assert _state(ctx, lead_id, _company_of(ctx, lead_id))[:2] == (False, "qualified")  # already emailed: left alone
+
+
+def _company_of(ctx, lead_id):
+    with ctx.db.session() as s:
+        return s.get(Lead, lead_id).company_id
+
+
+def test_a_new_company_is_still_flagged_from_its_first_post(make_ctx):
+    ctx = make_ctx()
+    with ctx.db.session() as s:
+        cand = CompanyCandidate(name="Firm Co", source="hn_hiring", source_url="https://example.test/8", domain="firm.example", state="TX",
+                                is_us=True, signal_type="hiring", signal_text="We are a small IT consulting firm.")
+        company, created = upsert_company(s, cand)
+        assert created and company.is_competitor
+
+
+def test_the_morning_check_flags_a_company_on_file_and_logs_the_phrase(make_ctx):
+    ctx = make_ctx()
+    lead_id, cid = _hn_lead(ctx, days_old=5, status="qualified")
+    with ctx.db.session() as s:
+        s.add(Signal(company_id=cid, signal_type="hiring", text="We are a small IT consulting firm.", source="hn_hiring",
+                     source_url="https://example.test/7", fingerprint="p4b", observed_at=tu.utcnow()))
+    _review(ctx)
+    with ctx.db.session() as s:
+        assert s.get(Company, cid).is_competitor
+        assert s.query(Activity).filter(Activity.subject.like("Marked as a possible competitor%IT consulting firm%")).count() == 1
+
+
+@pytest.mark.parametrize("post", [
+    "Experience in an IT consulting firm is a plus.",
+    "Prior work with a software consulting company helps.",
+    "Our customer, a leading IT consulting firm, runs on our product.",
+    "Our customer is a leading IT consulting firm.",
+    "We sell to a technology consulting company.",
+    "No agencies, no outstaffing please.",
+    "We aren't an outsourcing company.",
+    "We replaced an outsourcing firm last year.",
+    "10 years of experience in IT services and consulting.",
+    "You will lead AI and software development for autonomous drones.",
+])
+def test_a_post_naming_such_a_firm_is_not_the_firm(post):
+    assert competitor_in_post(post) is None
+
+
+@pytest.mark.parametrize("post", [
+    "We are a people-first, boutique tech agency creating teams for clients.",
+    "We’re a small IT consulting firm in regulated environments.",
+    "Acme is a boutique outsourcing company based abroad.",
+    "We are an outstaffing company.",
+    "Acme is a small R&D company specializing in AI/ML and software development for defense and healthcare.",
+])
+def test_a_post_saying_it_is_such_a_firm_still_counts(post):
+    assert competitor_in_post(post) is not None
+
+
+def test_engineering_services_of_another_trade_are_no_competitor():
+    assert competitor_evidence("An environmental services and consulting company.") is None
+
+
+def test_a_flag_shown_only_by_the_homepage_title_stays(make_ctx):
+    ctx = make_ctx()
+    a, ca = _flagged_lead(ctx, own_words="We help teams.")
+    with ctx.db.session() as s:
+        snap = s.query(ResearchSnapshot).filter(ResearchSnapshot.company_id == ca).one()
+        snap.pages = [{"url": "https://flagged.example/", "kind": "home", "status": 200, "title": "Flagged | Custom AI development"}]
+    _review(ctx)
+    assert _state(ctx, a, ca)[:2] == (True, "disqualified")
+
+
+@pytest.mark.parametrize("own_words", [
+    "The leading AI automation agency.", "We are an AI consultancy.", "An AI development company.", "AI development services for banks.",
+    "An AI agent development company.", "A software consultancy in Boston.", "Custom software development for hospitals and clinics.",
+    "IT consulting services.", "AI consulting services for retailers.", "IT Services and IT Consulting",
+])
+def test_plain_firm_descriptions_on_its_own_site_count(own_words):
+    assert competitor_evidence(own_words) is not None
+
+
+@pytest.mark.parametrize("post", ["We are hiring for AI consulting services work.", "Custom software development for hospitals is what our client wanted."])
+def test_those_descriptions_do_not_decide_from_a_post(post):
+    assert competitor_in_post(post) is None
+
+
+def test_we_build_ai_agents_for_someone_stays_unflagged():
+    """Decided 31 Oct: alone it could be a product or a service, and a person approves every email."""
+    assert competitor_evidence("We build AI agents for insurers.") is None
+    assert competitor_in_post("We build AI agents for insurers.") is None
+
+
+def test_a_persons_note_keeps_the_flag(make_ctx):
+    ctx = make_ctx()
+    a, ca = _flagged_lead(ctx)
+    with ctx.db.session() as s:
+        s.add(Activity(subject="Note", actor="owner", type="note", body="Confirmed by phone, do not reopen", company_id=ca, lead_id=a))
+    _review(ctx)
+    assert _state(ctx, a, ca)[:2] == (True, "disqualified")
+
+
+def test_a_refused_status_keeps_the_note_the_person_typed(make_ctx):
+    ctx = make_ctx()
+    lead_id, cid = _hn_lead(ctx, days_old=5, status="disqualified", competitor=True)
+    client = TestClient(create_app(ctx), base_url="http://127.0.0.1", follow_redirects=False, headers={"origin": "http://127.0.0.1"})
+    where = unquote(client.post(f"/leads/{lead_id}/status", data={"status": "qualified", "note": "They asked us to call"}).headers["location"])
+    assert "Your note was saved" in where
+    with ctx.db.session() as s:
+        assert s.query(Activity).filter(Activity.type == "note", Activity.lead_id == lead_id, Activity.body == "They asked us to call").count() == 1
+    assert _status(ctx, lead_id)[0] == "disqualified"
+
+
+def test_the_suppression_refusal_promises_nothing_that_does_not_exist(make_ctx):
+    ctx = make_ctx()
+    lead_id, cid = _hn_lead(ctx, days_old=5, status="disqualified")
+    with ctx.db.session() as s:
+        s.add(Suppression(value="acme.example", kind="domain", reason="opt-out"))
+    where = _set_status(ctx, lead_id, "qualified")
+    assert "suppression list" in where and "no way to take" in where and "administrator" not in where
+
+
+@pytest.mark.parametrize("text, services", [
+    ("Backed by Benchmark, we help clinics with AI agents built on Anthropic.", ["ai_agents"]),
+    ("We raised $5M from Benchmark to replace our CRM with OpenAI tooling.", ["custom_crm", "ai_agents"]),
+    ("Funded by NIH to build a RAG chatbot using Claude.", ["ai_agents"]),
+    ("LLM workflow orchestration is the core of the job.", ["agent_orchestration"]),
+    ("Workflow orchestration of our agents.", ["agent_orchestration"]),
+    ("Pipelines and orchestration of AI agents.", ["agent_orchestration"]),
+])
+def test_real_need_beside_an_investor_or_a_workflow_is_kept(text, services):
+    found = [m.service_id for m in match_services(text)]
+    assert all(x in found for x in services), found
+
+
+@pytest.mark.parametrize("text", ["Backed by OpenAI and Anthropic, we make shoes.", "We are ex-Anthropic, METR, OpenAI people making shoes.",
+                                  "Investors include Benchmark, Anthropic and others."])
+def test_a_vendor_named_only_as_investor_or_past_employer_is_no_need(text):
+    assert "ai_agents" not in [m.service_id for m in match_services(text)]
+
+
+def test_a_stale_parked_lead_returns_parked_and_its_clock_restarts(make_ctx):
+    ctx = make_ctx()
+    a, ca = _flagged_lead(ctx)
+    with ctx.db.session() as s:
+        s.query(Activity).filter(Activity.type == "status_change").delete()
+        t0 = tu.utcnow() - timedelta(days=9)
+        s.add(Activity(subject="No activity for 30+ days: moved to nurture", actor="crm", type="status_change", company_id=ca, lead_id=a, created_at=t0))
+        s.add(Activity(subject="Lead nurture → disqualified (score 60, grade B)", actor="qualification", type="status_change", company_id=ca, lead_id=a,
+                       created_at=t0 + timedelta(days=1)))
+        s.get(Lead, a).last_activity_at = t0
+    _review(ctx)
+    assert _state(ctx, a, ca) == (False, "nurture", None)
+    with ctx.db.session() as s:
+        assert s.get(Lead, a).last_activity_at > tu.utcnow() - timedelta(minutes=5)
+    LeadQualificationAgent(ctx).run({"rescore_all": True})
+    assert _status(ctx, a)[0] == "nurture"
+
+
+def test_a_lead_that_stays_closed_when_the_flag_goes_is_named_to_someone(make_ctx):
+    ctx = make_ctx()
+    a, ca = _flagged_lead(ctx, outreach="stopped")
+    _review(ctx)
+    with ctx.db.session() as s:
+        (alert,) = s.query(Alert).filter(Alert.key == f"lead_closed:{a}").all()
+        assert alert.level == "warning" and f"#{a}" in alert.message
+    assert _state(ctx, a, ca)[1] == "disqualified"
+
+
+def test_the_notice_counts_leads_not_moves_and_an_old_count_is_not_added_to_the_total(make_ctx):
+    ctx = make_ctx()
+    agent = LeadQualificationAgent(ctx)
+    with ctx.db.session() as s:
+        agent._say_moved(s, [("nurture", 1), ("qualified", 1), ("nurture", 2), ("nurture", 2)])
+    with ctx.db.session() as s:
+        (alert,) = s.query(Alert).filter(Alert.key == "leads:moved").all()
+        assert "moved 2 lead(s)" in alert.message and "2 to nurture, 1 to qualified" in alert.message
+        s.delete(alert)
+    with ctx.db.session() as s:
+        s.add(Alert(level="info", source="qualification", key="leads:moved", message="Scoring moved 4 lead(s) today: 4 to nurture."))
+        kv_set(s, "qualification.moved_today", {"day": "2026-10-31", "moved": {"nurture": 4}})
+    with ctx.db.session() as s:
+        agent._say_moved(s, [("nurture", 7)])
+    with ctx.db.session() as s:
+        (alert,) = s.query(Alert).filter(Alert.key == "leads:moved").all()
+        assert "moved 1 lead(s)" in alert.message and "4 earlier move(s)" in alert.message and alert.level == "warning"
+
+
+def test_setting_new_by_hand_says_the_next_run_will_move_it(make_ctx):
+    ctx = make_ctx()
+    lead_id, _ = _hn_lead(ctx, days_old=5, status="nurture")
+    assert "next scoring run" in _set_status(ctx, lead_id, "new")
+    assert _status(ctx, lead_id)[0] == "new"
+
+
+def test_not_moved_is_not_written_on_a_sequence_that_was_put_back(make_ctx):
+    ctx = make_ctx()
+    lead_id, cid = _hn_lead(ctx, days_old=60, status="nurture")
+    with ctx.db.session() as s:
+        s.get(Lead, lead_id).outreach_status = "contacted"
+        s.add(Activity(subject="Lead qualified → nurture (score 54, grade C)", actor="qualification", type="status_change", company_id=cid, lead_id=lead_id))
+    LeadQualificationAgent(ctx).run({"rescore_all": True})
+    with ctx.db.session() as s:
+        lead = s.get(Lead, lead_id)
+        assert lead.status == "qualified" and not any("Not moved" in r for r in lead.score_breakdown)

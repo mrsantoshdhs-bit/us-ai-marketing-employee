@@ -342,13 +342,12 @@ def status_would_not_hold(s, lead: Lead) -> str | None:
     signals = s.execute(select(Signal).where(Signal.company_id == company.id)).scalars().all()
     if read_company(company, signals)["country"] != "US":
         said = f" (its location reads: {company.location_text[:80]})" if company.location_text else ""
-        return (f"This company is outside the US market we sell to{said}, so the next scoring run would close it again, and that rule "
-                "has no exception. Add a note if you want to keep track of it; if its location on record is wrong, ask your "
-                "administrator to correct it.")
+        return (f"This company is outside the US market we sell to{said}, so the next scoring run would close it again. That rule has "
+                "no exception, and a company's location cannot be changed in AIME. A note on this page is kept with the lead.")
     if is_suppressed(s, lead.contact.email if lead.contact else None, company.domain) or (
             lead.contact and lead.contact.consent_status == "opted_out"):
-        return ("This contact or domain is on the suppression list, so the next scoring run would close it again. "
-                "Only an administrator can take it off the list.")
+        return ("This contact or domain is on the suppression list, so AIME will not contact it and the next scoring run would close "
+                "it again. AIME has no way to take an address off the list. A note on this page is kept with the lead.")
     return None
 
 
@@ -815,6 +814,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             old = lead.status
             refused = status_would_not_hold(s, lead) if status in ("new", "qualified", "nurture") else None
             if refused:  # the next scoring run would put it back without a word: say so now, and leave it as it is
+                if note.strip():  # what the person typed is not lost with the refused click
+                    log_activity(s, "Note", who(request), type_="note", body=note, company_id=lead.company_id, lead_id=lead.id)
+                    lead.last_activity_at = utcnow()
+                    refused += " Your note was saved."
                 return back(f"/leads/{lead_id}", f"Status not changed. {refused}")
             lead.status = status
             if status != "disqualified":
@@ -822,7 +825,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             lead.last_activity_at = utcnow()
             log_activity(s, f"Status {old} → {status} (manual)", who(request), type_="status_change", body=note or None,
                          company_id=lead.company_id, lead_id=lead.id)
-        return back(f"/leads/{lead_id}", "Status updated")
+        return back(f"/leads/{lead_id}", "Status updated. New only lasts until the next scoring run, which moves it to qualified or "
+                    "nurture by its score." if status == "new" else "Status updated")
 
     @app.post("/leads/{lead_id}/note")
     def lead_note(request: Request, lead_id: int, note: str = Form(...)):

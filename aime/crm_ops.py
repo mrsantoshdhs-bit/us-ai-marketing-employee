@@ -59,8 +59,7 @@ def upsert_company(session: Session, cand: CompanyCandidate) -> tuple[Company, b
             existing.description = cand.description
         if not existing.location_evidence:
             existing.location_evidence = us_location_evidence(existing.source, existing.state, existing.location_text)
-        if detect_competitor(cand.signal_text or cand.description) and not existing.competitor_cleared_by:
-            existing.is_competitor = True
+        # a company on file is judged by CRMManagementAgent._flag_competitors, which has the guards and logs what it read
         return existing, False
     company = Company(
         name=clean_company_name(cand.name)[:200],
