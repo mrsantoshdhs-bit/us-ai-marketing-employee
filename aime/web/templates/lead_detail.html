@@ -52,7 +52,7 @@
     {% if lead.outreach_status in ['drafted', 'approved', 'contacted'] %}<form method="post" action="/leads/{{ lead.id }}/stop_outreach" style="margin-top:6px"><button class="danger">Stop outreach</button></form>{% endif %}{% endif %}
     {% if can_approve and lead.outreach_status == 'stopped' %}{% if reopen_why %}<p class="small muted">Outreach cannot be reopened: {{ reopen_why }}.</p>
     {% else %}<form method="post" action="/leads/{{ lead.id }}/reopen_outreach" class="filters" style="margin-top:6px"><input name="reason" placeholder="Why reopen it? (required)" maxlength="200" style="flex:1" required><button class="secondary">Reopen outreach</button></form>
-    <p class="small muted">This sends and approves nothing: any next email is drafted as usual and waits for a person's approval.</p>{% endif %}{% endif %}
+    <p class="small muted">This sends and approves nothing. Whether another email follows depends on the usual rules, and any that does waits for a person's approval.</p>{% endif %}{% endif %}
     <h2>Owner</h2>
     <p class="small">{{ lead.owner or 'Unassigned' }}{% for o in opps if o.owner and o.owner != lead.owner %} · deal {{ o.name }}: {{ o.owner }}{% endfor %}</p>
     {% if can_assign %}<form method="post" action="/leads/{{ lead.id }}/assign" class="filters">

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from collections import Counter
 from datetime import timedelta
 from email.utils import format_datetime
@@ -86,7 +87,7 @@ def test_reopen_with_a_sent_email_returns_to_contacted_and_says_who_and_why(peop
     lead = add_lead(people, owner="sam", outreach="stopped")
     add_email(people, lead)
     r = post_reopen(people, lead)
-    assert r.status_code == 303 and "Nothing%20was%20drafted" in r.headers["location"].replace("+", "%20")
+    assert r.status_code == 303 and "Nothing%20was%20drafted%20or%20sent" in r.headers["location"].replace("+", "%20")
     with people.db.session() as s:
         row = s.get(Lead, lead)
         assert row.outreach_status == "contacted"
@@ -243,7 +244,94 @@ def _delivery_report_unread(s, lead):
                        received_at=utcnow(), category="bounce", status="needs_review", lead_id=lead.id, is_simulated=False))
 
 
+def _inbound(lead, **fields):
+    base = dict(message_id=f"<i{id(fields)}@x.example>", from_email="someone@else.example", subject="x", body_text="x", new_text="x",
+                received_at=utcnow(), status="actioned", is_simulated=False)
+    return InboundEmail(**{**base, **fields})
+
+
+def _unprocessed_mail_from_the_company(s, lead):
+    s.add(_inbound(lead, from_email=f"boss@{lead.company.domain}", status="new", category=None))
+
+
+def _unprocessed_mail_on_the_lead(s, lead):
+    s.add(_inbound(lead, status="new", category=None, lead_id=lead.id))
+
+
+def _unread_reply(category):
+    def set_it(s, lead):
+        s.add(_inbound(lead, status="needs_review", category=category, lead_id=lead.id))
+    return set_it
+
+
+def _not_interested_read_long_ago(s, lead):
+    s.add(_inbound(lead, status="reviewed", category="not_interested", lead_id=lead.id))
+
+
+def _not_interested_from_the_domain_not_tied(s, lead):
+    s.add(_inbound(lead, from_email=f"boss@{lead.company.domain}", status="actioned", category="not_interested"))
+
+
+def _another_lead(s, lead):
+    other = Lead(company_id=lead.company_id, source="manual", status="qualified", score=70, grade="B")
+    s.add(other)
+    s.flush()
+    return other
+
+
+def _hold_on_another_lead_of_the_company(s, lead):
+    other = _another_lead(s, lead)
+    s.add(_inbound(lead, status="needs_review", category="other", holds_sending=True, lead_id=other.id))
+
+
+def _suppressed_address_only_on_another_leads_email(s, lead):
+    other = _another_lead(s, lead)
+    s.add(FollowUp(lead_id=other.id, company_id=lead.company_id, channel="email", step=1, status="sent", subject="x", body="x",
+                   to_email="old@elsewhere.example", sent_at=utcnow()))
+    s.add(Suppression(value="old@elsewhere.example", kind="email", reason="test"))
+
+
+def _unsubscribe_on_a_duplicate_merged_earlier(s, lead):
+    """Written before merges moved the mail: the row still names the duplicate."""
+    dup = Company(name="Dup", normalized_name="dup", source="test", domain="dup.example", merged_into_id=lead.company_id)
+    s.add(dup)
+    s.flush()
+    s.add(_inbound(lead, status="actioned", category="unsubscribe", company_id=dup.id))
+
+
+def _unsubscribe_on_a_duplicate_merged_now(s, lead):
+    dup = Company(name="Dup", normalized_name="dup", source="test", domain="dup.example")
+    s.add(dup)
+    s.flush()
+    s.add(_inbound(lead, status="actioned", category="unsubscribe", company_id=dup.id))
+    s.flush()
+    merge_companies(s, lead.company, dup, "sam")
+
+
+def _domain_of_a_merged_duplicate_suppressed(s, lead):
+    s.add(Company(name="Dup", normalized_name="dup", source="test", domain="dup.example", merged_into_id=lead.company_id))
+    s.add(Suppression(value="dup.example", kind="domain", reason="test"))
+
+
+def _delivery_report_naming_the_address_not_tied(s, lead):
+    s.add(_inbound(lead, from_email="mailer-daemon@mail.example", status="needs_review", category="bounce",
+                   body_text=f"Delivery to {lead.contact.email} failed"))
+
+
 REFUSALS = {
+    "a delivery report that only names the address": (_delivery_report_naming_the_address_not_tied, "delivery failure"),
+    "an unprocessed email from the company's domain": (_unprocessed_mail_from_the_company, "not been read"),
+    "an unprocessed email on the lead": (_unprocessed_mail_on_the_lead, "not been read"),
+    "an unread question": (_unread_reply("question"), "not been read"),
+    "an unread other, such as a legal complaint": (_unread_reply("other"), "not been read"),
+    "an unread not interested": (_unread_reply("not_interested"), "not interested"),
+    "a not interested read long ago": (_not_interested_read_long_ago, "not interested"),
+    "a not interested from the domain, not tied": (_not_interested_from_the_domain_not_tied, "not interested"),
+    "a hold on another lead of the company": (_hold_on_another_lead_of_the_company, "holds sending"),
+    "a suppressed address on another lead's email": (_suppressed_address_only_on_another_leads_email, "do-not-contact"),
+    "an unsubscribe on a duplicate merged earlier": (_unsubscribe_on_a_duplicate_merged_earlier, "asked not to be contacted"),
+    "an unsubscribe on a duplicate merged now": (_unsubscribe_on_a_duplicate_merged_now, "asked not to be contacted"),
+    "the domain of a merged duplicate suppressed": (_domain_of_a_merged_duplicate_suppressed, "do-not-contact"),
     "the contact opted out": (_opted_out, "opted out"),
     "a colleague opted out": (_colleague_opted_out, "opted out"),
     "the address is suppressed": (_address_suppressed, "do-not-contact"),
@@ -327,6 +415,117 @@ def test_a_reason_is_required(people):
     for reason in ("", "   \n  "):
         r = post_reopen(people, lead_id, reason=reason)
         assert r.status_code == 303 and "give%20the%20reason" in r.headers["location"].replace("+", "%20")
+    assert state(people, lead_id) == before
+
+
+def test_a_reply_a_person_has_read_no_longer_refuses(people):
+    lead_id = add_lead(people, owner="sam", outreach="stopped")
+    add_reply(people, lead_id, category="question", status="reviewed")
+    assert post_reopen(people, lead_id).status_code == 303
+    with people.db.session() as s:
+        assert s.get(Lead, lead_id).outreach_status is None
+
+
+def test_a_merge_moves_the_mail_with_the_company_and_loses_no_row(make_ctx):
+    ctx = make_ctx()
+    with ctx.db.session() as s:
+        keeper = Company(name="Keeper", normalized_name="keeper", source="test")
+        dup = Company(name="Dup", normalized_name="dup", source="test")
+        s.add_all([keeper, dup])
+        s.flush()
+        s.add_all([_inbound(None, message_id=f"<m{i}@x.example>", company_id=dup.id, category="other") for i in range(3)])
+        s.flush()
+        merge_companies(s, keeper, dup, "sam")
+        s.flush()
+        assert s.execute(select(func.count(InboundEmail.id)).where(InboundEmail.company_id == keeper.id)).scalar_one() == 3
+        assert s.execute(select(func.count(InboundEmail.id))).scalar_one() == 3
+
+
+# ----------------------------------------------------------------------------------------------- 1. what reopening says follows
+def _message(ctx, response) -> str:
+    return words(client(ctx, "sam").get(response.headers["location"]).text)
+
+
+def test_reopen_after_a_rejected_first_email_says_nothing_will_be_drafted_and_nothing_is(make_ctx):
+    ctx = researched(make_ctx, **POSTAL)
+    SalesWorkflowAgent(ctx).run({})
+    (draft,) = drafts(ctx)
+    c = client(ctx, redirects=False)
+    assert c.post(f"/followups/{draft.id}/reject").status_code == 303
+    with ctx.db.session() as s:
+        lead_id = s.execute(select(Lead.id)).scalar_one()
+        s.get(Lead, lead_id).outreach_status = "stopped"
+    r = c.post(REOPEN.format(lead_id), data={"reason": "Changed my mind"})
+    told = client(ctx).get(r.headers["location"]).text
+    assert "a person rejected the next one" in told and "drafted as usual" not in told
+    SalesWorkflowAgent(ctx).run({})
+    assert [f.status for f in drafts(ctx)] == ["rejected"]
+
+
+def test_reopen_says_when_the_next_step_will_come(make_ctx):
+    ctx, *_ = contacted(make_ctx)
+    with ctx.db.session() as s:
+        lead_id = s.execute(select(Lead.id)).scalar_one()
+    c = client(ctx, redirects=False)
+    c.post(f"/leads/{lead_id}/stop_outreach")
+    r = c.post(REOPEN.format(lead_id), data={"reason": "They called us"})
+    assert "The next step is drafted when it falls due" in client(ctx).get(r.headers["location"]).text
+
+
+def test_reopen_says_so_when_the_sequence_is_over_or_the_lead_is_parked(people):
+    done = add_lead(people, owner="sam", outreach="stopped")
+    for step in (1, 2, 3):
+        add_email(people, done, step=step)
+    assert "whole sequence has gone out" in _message(people, post_reopen(people, done))
+    parked = add_lead(people, owner="sam", outreach="stopped", status="nurture")
+    assert "No email is drafted while the lead is nurture" in _message(people, post_reopen(people, parked))
+
+
+# ----------------------------------------------------------------------------------------------- 1. the stop route
+@pytest.mark.parametrize("stage", ["not_interested", "bounced", "no_response", "meeting", "interested", "replied", "unsubscribed", "stopped", None])
+def test_a_stale_stop_cannot_turn_another_stage_into_stopped(people, stage):
+    lead_id = add_lead(people, owner="eva", outreach=stage)
+    before = state(people, lead_id)
+    r = client(people, "eva", redirects=False).post(f"/leads/{lead_id}/stop_outreach")
+    assert r.status_code == 303 and "Nothing%20changed" in r.headers["location"].replace("+", "%20")
+    assert state(people, lead_id) == before
+
+
+@pytest.mark.parametrize("stage", ["drafted", "approved", "contacted"])
+def test_stop_still_works_from_a_running_stage(people, stage):
+    lead_id = add_lead(people, owner="eva", outreach=stage)
+    fid = add_email(people, lead_id, status="awaiting_approval", step=2)
+    client(people, "eva", redirects=False).post(f"/leads/{lead_id}/stop_outreach")
+    with people.db.session() as s:
+        assert s.get(Lead, lead_id).outreach_status == "stopped" and s.get(FollowUp, fid).status == "cancelled"
+
+
+def test_stop_on_another_stage_cancels_what_is_queued_and_leaves_the_stage(people):
+    lead_id = add_lead(people, owner="eva", outreach="not_interested")
+    fid = add_email(people, lead_id, status="approved", step=2)
+    sent = add_email(people, lead_id)
+    r = client(people, "eva", redirects=False).post(f"/leads/{lead_id}/stop_outreach")
+    assert "stage%20stays%20not%20interested" in r.headers["location"].replace("+", "%20")
+    with people.db.session() as s:
+        assert s.get(Lead, lead_id).outreach_status == "not_interested"
+        assert s.get(FollowUp, fid).status == "cancelled" and "eva" in s.get(FollowUp, fid).blocked_reason
+        assert s.get(FollowUp, sent).status == "sent"
+        assert s.execute(select(Activity).where(Activity.lead_id == lead_id, Activity.subject.contains("cancelled by eva"))).first()
+
+
+def test_the_reviewers_scenario_a_stale_stop_after_not_interested_cannot_be_reopened(people):
+    lead_id = add_lead(people, owner="eva", outreach="not_interested", status="nurture")
+    add_email(people, lead_id)
+    add_reply(people, lead_id, category="not_interested", status="needs_review")
+    client(people, "eva", redirects=False).post(f"/leads/{lead_id}/stop_outreach")
+    before = state(people, lead_id)
+    assert before[0] == "not_interested"
+    post_reopen(people, lead_id)
+    assert state(people, lead_id) == before
+    with people.db.session() as s:  # and even a stage written by something else does not pass
+        s.get(Lead, lead_id).outreach_status = "stopped"
+    before = state(people, lead_id)
+    post_reopen(people, lead_id)
     assert state(people, lead_id) == before
 
 
@@ -610,19 +809,23 @@ H3 = timedelta(hours=3)
 OK = timedelta(seconds=2)
 
 
-def test_two_servers_off_by_the_same_amount_raise_one_warning_naming_the_clock(make_ctx, no_servers_heard):
-    ctx = _ask(make_ctx, {"a.example": H3, "b.example": H3 + OK})
+FOUR_OFF = {"a.example": H3, "b.example": H3 + OK, "c.example": H3, "d.example": H3 + OK}
+
+
+def test_most_sites_off_by_the_same_amount_raise_one_warning_naming_the_clock(make_ctx, no_servers_heard):
+    ctx = _ask(make_ctx, FOUR_OFF)
     _judge(ctx)
     (alert,) = _clock_alerts(ctx)
     assert alert.level == "warning" and "clock" in alert.message and "3.0 hours ahead" in alert.message and clock_check.ADVICE in alert.message
     with ctx.http() as http:
-        http.get("https://a.example/"), http.get("https://b.example/")
+        for host in FOUR_OFF:
+            http.get(f"https://{host}/")
     _judge(ctx)
     assert len(_clock_alerts(ctx)) == 1 and not _clock_alerts(ctx)[0].acknowledged
 
 
 def test_a_clock_behind_the_servers_says_behind(make_ctx, no_servers_heard):
-    ctx = _ask(make_ctx, {"a.example": -H3, "b.example": -H3})
+    ctx = _ask(make_ctx, {k: -v for k, v in FOUR_OFF.items()})
     _judge(ctx)
     assert "behind" in _clock_alerts(ctx)[0].message
 
@@ -630,8 +833,10 @@ def test_a_clock_behind_the_servers_says_behind(make_ctx, no_servers_heard):
 @pytest.mark.parametrize("gaps", [
     {"a.example": H3},  # a single wrong server
     {"a.example": H3, "b.example": OK},
-    {"a.example": H3, "b.example": H3, "c.example": OK, "d.example": OK},  # most servers agree with this PC
-    {"a.example": H3, "b.example": timedelta(hours=30)},  # wrong each in its own way: the servers, not the clock
+    {"a.example": H3, "b.example": H3},  # two stale sites in a run with few requests: too few heard
+    {"a.example": H3, "b.example": H3, "c.example": H3},
+    {"a.example": H3, "b.example": H3, "c.example": OK, "d.example": OK},  # no majority
+    {"a.example": H3, "b.example": timedelta(hours=30), "c.example": timedelta(hours=9), "d.example": timedelta(hours=60)},  # each its own way
     {"a.example": H3, "www.a.example": H3},  # one site twice
     {"a.example": OK, "b.example": OK},
 ])
@@ -643,9 +848,35 @@ def test_no_warning_without_several_servers_agreeing_against_the_clock(make_ctx,
 
 def test_a_page_kept_by_a_cache_is_no_evidence(make_ctx, no_servers_heard):
     age = {"age": str(int(H3.total_seconds()))}
-    ctx = _ask(make_ctx, {"a.example": H3, "b.example": H3}, extra={"a.example": age, "b.example": age})
+    ctx = _ask(make_ctx, FOUR_OFF, extra=dict.fromkeys(FOUR_OFF, age))
+    assert clock_check._servers == {}
     _judge(ctx)
     assert _clock_alerts(ctx) == []
+
+
+@pytest.mark.parametrize("look", [{"age": "301"}, {"x-cache": "Hit from cloudfront"}, {"cf-cache-status": "HIT"}])
+def test_a_page_that_looks_kept_is_left_out_of_the_count(make_ctx, no_servers_heard, look):
+    ctx = _ask(make_ctx, {"a.example": H3}, extra={"a.example": look})
+    assert clock_check._servers == {} and ctx
+
+
+def test_a_date_right_beside_its_own_last_modified_is_left_out_and_an_old_page_on_a_live_server_counts(no_servers_heard):
+    frozen = _date(H3)
+    clock_check.note_server_date("frozen.example", frozen, None, frozen)
+    clock_check.note_server_date("live.example", _date(OK), None, _date(timedelta(days=30)))
+    assert list(clock_check._servers) == ["live.example"]
+
+
+@pytest.mark.parametrize("args", [(_date(OK), "9" * 30), (_date(OK), "99999999999999"), ("Mon, 01 Jan 0001 00:00:00 GMT",), ("x", None, "y"),
+                                  (_date(OK), None, "Mon, 01 Jan 0001 00:00:00 GMT"), (None,), ("",)])
+def test_no_header_can_make_it_raise(no_servers_heard, args):
+    clock_check.note_server_date("odd.example", *args)
+
+
+def test_a_huge_age_from_every_site_does_not_stop_a_request(make_ctx, no_servers_heard):
+    ctx = make_ctx(handler=lambda request: httpx.Response(200, headers={"date": _date(OK), "age": "9" * 40}, text="ok"))
+    with ctx.http() as http:
+        assert http.get("https://a.example/").status_code == 200
 
 
 def test_a_server_on_this_pc_or_an_unreadable_date_counts_for_nothing(make_ctx, no_servers_heard):
@@ -659,7 +890,7 @@ def test_a_server_on_this_pc_or_an_unreadable_date_counts_for_nothing(make_ctx, 
 
 
 def test_it_closes_when_the_servers_agree_again(make_ctx, no_servers_heard):
-    ctx = _ask(make_ctx, {"a.example": H3, "b.example": H3})
+    ctx = _ask(make_ctx, FOUR_OFF)
     _judge(ctx)
     assert _clock_alerts(ctx)[0].resolved_at is None
     clock_check.note_server_date("a.example", _date(OK))
@@ -671,8 +902,18 @@ def test_it_closes_when_the_servers_agree_again(make_ctx, no_servers_heard):
     assert _clock_alerts(ctx)[0].resolved_at is not None
 
 
+def test_one_stale_site_does_not_hold_it_open_the_majority_decides(make_ctx, no_servers_heard):
+    ctx = _ask(make_ctx, FOUR_OFF)
+    _judge(ctx)
+    for site in "abcde":
+        clock_check.note_server_date(f"{site}.example", _date(OK))
+    clock_check.note_server_date("stale.example", _date(H3))
+    _judge(ctx)
+    assert _clock_alerts(ctx)[0].resolved_at is not None
+
+
 def test_a_person_who_confirmed_the_clock_is_not_told_again_that_day(make_ctx, no_servers_heard):
-    ctx = _ask(make_ctx, {"a.example": H3, "b.example": H3})
+    ctx = _ask(make_ctx, FOUR_OFF)
     _judge(ctx)
     clock_check.confirm(ctx, None)
     clock_check.note_server_date("a.example", _date(H3))
@@ -683,8 +924,8 @@ def test_a_person_who_confirmed_the_clock_is_not_told_again_that_day(make_ctx, n
 
 def test_a_tick_compares_after_its_jobs_and_the_warning_stops_nothing(make_ctx, no_servers_heard, monkeypatch):
     ctx = make_ctx()
-    clock_check.note_server_date("a.example", _date(H3))
-    clock_check.note_server_date("b.example", _date(H3))
+    for site in "abcd":
+        clock_check.note_server_date(f"{site}.example", _date(H3))
     monkeypatch.setattr(runner, "due_jobs", lambda *a, **k: [])
     assert runner.tick(ctx)["status"] == "ok"
     assert len(_clock_alerts(ctx)) == 1
@@ -819,6 +1060,22 @@ def test_scrub_removes_query_strings_and_keeps_every_other_byte(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["dashboard.log"]  # no temp file left
 
 
+@pytest.mark.parametrize("query", [b'a="quoted"&code=SECRET', b'code=SECRET"', b'x= HTTP/1.1"code=SECRET', b'two words&code=SECRET'])
+def test_scrub_takes_a_query_whatever_it_holds(tmp_path, query):
+    path = _log(tmp_path, [b'INFO:     127.0.0.1:1 - "GET /a?' + query + b' HTTP/1.1" 200 OK\n'])
+    assert logging_setup.scrub_access_log(path)["changed"] == 1
+    assert path.read_bytes() == b'INFO:     127.0.0.1:1 - "GET /a HTTP/1.1" 200 OK\n'
+
+
+def test_a_temp_file_left_by_a_killed_run_goes_on_the_next_run(tmp_path):
+    path = _log(tmp_path)
+    left = tmp_path / "dashboard.log.scrub.99999.tmp"
+    left.write_bytes(b"half a copy")
+    (tmp_path / "other.log.scrub.1.tmp").write_bytes(b"not this log's")
+    logging_setup.scrub_access_log(path)
+    assert not left.exists() and (tmp_path / "other.log.scrub.1.tmp").exists()
+
+
 def test_scrub_is_safe_to_run_twice_and_leaves_a_clean_file_alone(tmp_path):
     path = _log(tmp_path)
     logging_setup.scrub_access_log(path)
@@ -920,6 +1177,67 @@ def test_the_dashboards_output_rotates_by_size_and_holds_no_file_between_writes(
     assert not log.isatty()
 
 
+def _full_log_with_copies(tmp_path, copies=3):
+    path = tmp_path / "dashboard.log"
+    path.write_text("x" * 200 + "\n", encoding="utf-8")
+    for i in range(1, copies + 1):
+        (tmp_path / f"dashboard.log.{i}").write_text(f"copy {i}\n", encoding="utf-8")
+    return path
+
+
+def _older_copies(tmp_path):
+    return {p.name: p.read_text(encoding="utf-8") for p in sorted(tmp_path.glob("dashboard.log.[0-9]*"))}
+
+
+def test_a_held_full_log_costs_no_older_copy_however_many_writes_fail(tmp_path, monkeypatch):
+    path = _full_log_with_copies(tmp_path)
+    before = _older_copies(tmp_path)
+    real = Path.replace
+
+    def held(self, target):
+        if self == path:
+            raise PermissionError("a reader holds it")
+        return real(self, target)
+    monkeypatch.setattr(Path, "replace", held)
+    log = logging_setup.AppendingLog(path, max_bytes=100, keep=5)
+    for i in range(8):
+        log.write(f"line {i}\n")
+    assert _older_copies(tmp_path) == before and "line 7" in path.read_text(encoding="utf-8")
+    monkeypatch.undo()
+    log.write("reader gone\n")
+    after = _older_copies(tmp_path)
+    assert "reader gone" in after["dashboard.log.1"] and after["dashboard.log.2"] == before["dashboard.log.1"]
+    assert after["dashboard.log.4"] == before["dashboard.log.3"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows refuses to rename a file another handle holds")
+def test_a_really_held_full_log_costs_no_older_copy(tmp_path):
+    path = _full_log_with_copies(tmp_path)
+    before = _older_copies(tmp_path)
+    with path.open("rb"):
+        for _ in range(8):
+            assert logging_setup.rotate(path, 100, 5) is False
+        assert _older_copies(tmp_path) == before
+
+
+def test_a_held_older_copy_loses_nothing_and_the_rotation_finishes_later(tmp_path, monkeypatch):
+    path = _full_log_with_copies(tmp_path, copies=1)
+    real = Path.replace
+    copy1 = tmp_path / "dashboard.log.1"
+
+    def held(self, target):
+        if self == copy1:
+            raise PermissionError("a reader holds it")
+        return real(self, target)
+    monkeypatch.setattr(Path, "replace", held)
+    assert logging_setup.rotate(path, 100, 5) is True
+    assert (tmp_path / "dashboard.log.rotating").exists() and copy1.read_text(encoding="utf-8") == "copy 1\n"
+    monkeypatch.undo()
+    assert logging_setup.rotate(path, 100, 5) is False  # nothing full now: only what was waiting
+    assert not (tmp_path / "dashboard.log.rotating").exists()
+    assert (tmp_path / "dashboard.log.2").read_text(encoding="utf-8") == "copy 1\n" and copy1.read_text(encoding="utf-8").startswith("xxx")
+
+
 def test_a_write_that_fails_does_not_stop_the_dashboard(tmp_path):
     log = logging_setup.AppendingLog(tmp_path)  # a folder: the write fails, and nothing else happens
     assert log.write("x\n") == 2
@@ -949,6 +1267,53 @@ def test_the_old_answer_comes_along_so_the_move_costs_no_sign_in(tmp_path, monke
     old.write_text(render_mod.json.dumps({"os_password_blank": True}), encoding="utf-8")
     render_mod._bring_over_old_answer()
     assert render_mod.json.loads(new.read_text(encoding="utf-8")) == ANSWER  # the private copy wins from then on
+
+
+def test_an_empty_or_damaged_new_file_heals_from_the_old_one(tmp_path, monkeypatch):
+    old, new = tmp_path / "old.json", tmp_path / "new.json"
+    monkeypatch.setattr(render_mod, "OLD_OS_PASSWORD_STATE", old)
+    monkeypatch.setattr(render_mod, "OS_PASSWORD_STATE", new)
+    old.write_text(render_mod.json.dumps(ANSWER), encoding="utf-8")
+    for bad in ("", "{half", "{}", "[]"):
+        new.write_text(bad, encoding="utf-8")
+        render_mod._bring_over_old_answer()
+        assert render_mod.json.loads(new.read_text(encoding="utf-8")) == ANSWER, bad
+
+
+def test_a_reader_always_finds_the_answer_while_it_is_rewritten(tmp_path, monkeypatch):
+    new = tmp_path / "new.json"
+    monkeypatch.setattr(render_mod, "OS_PASSWORD_STATE", new)
+    render_mod._save_answer(ANSWER)
+    stop, faults = threading.Event(), []
+
+    def writer():
+        i = 0
+        while not stop.is_set():
+            i += 1
+            try:
+                render_mod._save_answer({**ANSWER, "os_password_last_changed": str(i)})
+            except OSError:  # Windows refuses a replace while a reader has the file open: the answer on file stays
+                pass
+    thread = threading.Thread(target=writer)
+    thread.start()
+    try:
+        for _ in range(400):
+            if not render_mod._read_answer(new):
+                faults.append(1)
+    finally:
+        stop.set()
+        thread.join()
+    assert not faults
+    assert [p.name for p in tmp_path.iterdir()] == ["new.json"]  # no partial file left
+
+
+def test_an_answer_that_did_not_change_is_not_written_again(tmp_path, monkeypatch):
+    new = tmp_path / "new.json"
+    monkeypatch.setattr(render_mod, "OS_PASSWORD_STATE", new)
+    render_mod._save_answer(ANSWER)
+    stamp = new.stat().st_mtime_ns
+    render_mod._save_answer(dict(ANSWER))
+    assert new.stat().st_mtime_ns == stamp
 
 
 def test_a_changed_answer_file_cannot_put_anything_else_into_a_browser_profile(tmp_path, monkeypatch):

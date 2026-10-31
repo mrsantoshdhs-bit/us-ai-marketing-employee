@@ -54,7 +54,7 @@ from aime.monitoring import agent_stats, alert_key, read_heartbeat
 from aime.policy import agreement, environment_blockers, evaluate_shadow, policy_config
 from aime.qc import summary as qc_summary
 from aime.reply_intel import skipped_mail as reply_skipped_mail
-from aime.outreach import REACHED_PROSPECT, record_delivery, reopen_refusal, reopen_stopped
+from aime.outreach import REACHED_PROSPECT, STOPPABLE_STAGES, after_reopen, cancel_queued, record_delivery, reopen_refusal, reopen_stopped
 from aime.outreach import set_status as set_outreach_status
 from aime.outreach import stop_sequence
 from aime.qc.checks import run_quality_checks
@@ -1005,10 +1005,22 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/leads/{lead_id}/stop_outreach")
     def stop_outreach(request: Request, lead_id: int):
+        """From a running stage only: a page left open while a reply came in must not turn "not interested" or "bounced" into a
+        "stopped" that can be reopened. A person's Stop still always cancels what is queued; the stage then stays as it is."""
         with C().db.session() as s:
+            take_write_lock(s)
             lead = s.get(Lead, lead_id) or _404()
-            n = stop_sequence(s, lead, "stopped", f"Stopped by {who(request)}", who(request))
-        return back(f"/leads/{lead_id}", f"Outreach stopped; {n} queued email(s) cancelled")
+            if lead.outreach_status in STOPPABLE_STAGES:
+                n = stop_sequence(s, lead, "stopped", f"Stopped by {who(request)}", who(request))
+                return back(f"/leads/{lead_id}", f"Outreach stopped; {n} queued email(s) cancelled")
+            stage = (lead.outreach_status or "none").replace("_", " ")
+            n = cancel_queued(s, lead, f"Stopped by {who(request)}")
+            if not n:
+                return back(f"/leads/{lead_id}", f"Nothing changed: the outreach stage is {stage} and no email is queued. Your page may "
+                                                 "have been out of date")
+            log_activity(s, f"{n} queued email(s) cancelled by {who(request)}; the outreach stage stays {stage}", who(request),
+                         type_="outreach", company_id=lead.company_id, lead_id=lead.id)
+        return back(f"/leads/{lead_id}", f"{n} queued email(s) cancelled; the outreach stage stays {stage}")
 
     @app.post("/leads/{lead_id}/reopen_outreach")
     def reopen_outreach(request: Request, lead_id: int, reason: str = Form("")):
@@ -1020,8 +1032,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             if not reason:
                 return back(f"/leads/{lead_id}", "Not reopened: give the reason")
             refused = reopen_stopped(s, lead, who(request), reason)
-        return back(f"/leads/{lead_id}", f"Not reopened: {refused}" if refused else
-                    "Outreach reopened. Nothing was drafted or sent: any next email is drafted as usual and waits for approval")
+            if refused:
+                return back(f"/leads/{lead_id}", f"Not reopened: {refused}")
+            follows = after_reopen(s, C().settings, lead)
+        return back(f"/leads/{lead_id}", f"Outreach reopened. Nothing was drafted or sent. {follows}")
 
     @app.post("/companies/{company_id}/name")
     def correct_company_name(request: Request, company_id: int, name: str = Form("")):
