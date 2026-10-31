@@ -73,7 +73,7 @@ from aime.web.team_pages import register as register_team_pages
 from aime.web.deal_pages import register as register_deal_pages
 from aime.visibility import (EVERYTHING, ORG_PAGE_WORDS, can_see_lead, company_condition, contact_condition, lead_condition,
                              opportunity_condition, org_page, record_condition)
-from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username, make_cookie,
+from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username, form_id, make_cookie,
                            safe_next, same_text, session_secret, user_count, wants_page)
 
 log = logging.getLogger("aime.web")
@@ -751,9 +751,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                       reopen_why=reopen_why, not_mine=not_mine)
 
     @app.get("/contacts", response_class=HTMLResponse)
-    def contacts_page(request: Request, confidence: str = "", role: str = "", reachable: str = ""):
+    def contacts_page(request: Request, confidence: str = "", role: str = "", reachable: str = "", contact: str = ""):
+        one = form_id(contact)  # one person, from search: whatever the source, within what this user may see
         with C().db.session() as s:
-            stmt = select(Contact).where(Contact.source.in_(("website", "sec_filing")), contact_condition(scope(request)))
+            stmt = select(Contact).where(Contact.id == one if one else Contact.source.in_(("website", "sec_filing")),
+                                         contact_condition(scope(request)))
             if reachable:
                 stmt = stmt.where(*USABLE_EMAIL)
             if confidence:
@@ -772,7 +774,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             by_status = dict(s.execute(select(Company.research_status, func.count(Company.id)).where(
                 Company.research_status.is_not(None), *open_companies).group_by(Company.research_status)).all())
         return render(request, "contacts.html", rows=rows, leads=leads, confidence=confidence, role=role, reachable=reachable,
-                      researched=researched, with_people=with_people, by_status=by_status)
+                      researched=researched, with_people=with_people, by_status=by_status, one=one)
 
     @app.post("/leads/{lead_id}/status")
     def lead_status(request: Request, lead_id: int, status: str = Form(...), note: str = Form("")):
@@ -1634,8 +1636,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                         x for x in (c.domain, c.state, c.website_status) if x)) for c in companies]))
                 contacts = s.execute(select(Contact).where(contact_condition(scope(request)), or_(
                     full_name.like(like), func.lower(Contact.email).like(like), func.lower(Contact.title).like(like))).limit(12)).scalars().all()
+                # their lead when this user may open one (the lead they are the contact of first), else their own row
+                seen = s.execute(select(Lead).where(Lead.company_id.in_([c.company_id for c in contacts] or [0]), Lead.status != "merged",
+                                                    lead_condition(scope(request))).order_by(Lead.id)).scalars().all()
+                of_person, of_company = {x.contact_id: x.id for x in seen}, {x.company_id: x.id for x in seen}
                 groups.append(("Contacts", "users", [
-                    (c.display_name, "/contacts", " · ".join(x for x in (c.title, c.email, c.company.name if c.company else None) if x))
+                    (c.display_name, f"/leads/{lid}" if (lid := of_person.get(c.id) or of_company.get(c.company_id)) else f"/contacts?contact={c.id}",
+                     " · ".join(x for x in (c.title, c.email, c.company.name if c.company else None) if x))
                     for c in contacts]))
                 emails = s.execute(select(FollowUp).where(FollowUp.channel == "email",
                                                           record_condition(scope(request), FollowUp.lead_id), or_(
