@@ -536,6 +536,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         ready, reason = self.sender.status()
         in_window = self._in_send_window(now, cfg)
         limits = self._outreach_limits(session, now, cfg)
+        replies_sent, replies_per_run = 0, int(cfg.get("replies_per_run", 10))
         sign_in_failed = False
         try:
             journal = send_journal.read(self.settings.data_dir)  # once: this run's own sends are other emails
@@ -544,7 +545,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 f.blocked_reason = f"Waiting: the record of sent emails cannot be read just now ({type(exc).__name__})"
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
             return
-        for f in approved:
+        # someone is waiting on a meeting's time: those notes go first, and no limit on replies holds them
+        for f in sorted(approved, key=lambda f: f.purpose not in automation.MEETING_NOTES):
             went_out = send_journal.claim_for(journal, f)
             if went_out:  # the record outside the database says it left already: never again without a person
                 send_journal.mark_for_a_person(session, f, went_out, self.name)
@@ -646,6 +648,12 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                                     "(its limit); it goes out when the count drops")
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
                 continue
+            limited_reply = f.kind != "outreach" and f.purpose not in automation.MEETING_NOTES
+            if limited_reply and replies_sent >= replies_per_run:  # still approved: only its turn comes later
+                f.blocked_reason = (f"Waiting: at most {replies_per_run} replies leave in one run, so that they do not all go "
+                                    "at once. Nothing is lost: it goes out on the next run")
+                out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+                continue
             if test_auth is not None:  # counts against, and is checked again with, the authorization
                 f.authorization_id = test_auth.id
                 qc = ((f.quality or {}).get("qc") or {}).get("status", "not checked")
@@ -703,6 +711,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             f.message_id = msg_id
             record_delivery(session, f, utcnow(), self.sender.recipient_for(f.to_email or contact.email)[0], self.name)
             limits["mailbox_sent"] += 1
+            replies_sent += limited_reply
             if f.kind == "outreach":
                 limits["sent_today"] += 1
                 limits["run"] += 1

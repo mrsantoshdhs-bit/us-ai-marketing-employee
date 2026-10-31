@@ -82,7 +82,7 @@ intervals_days = [0, 4, 10]
 max_touches = 3
 # Also draft to a published company inbox (info@, hello@ ...) when no named person has an email.
 include_company_inboxes = true
-# Sending limits for approved outreach (replies to people who wrote to us are not limited).
+# Sending limits for approved outreach (replies to people who wrote to us: [followup] replies_per_run).
 daily_send_limit = 20
 per_domain_daily_limit = 1
 sends_per_run = 5
@@ -157,3 +157,4 @@ stale_lead_days = 30
 holidays = ["new_years_day", "mlk_day", "presidents_day", "memorial_day", "juneteenth", "independence_day", "labor_day", "thanksgiving", "day_after_thanksgiving", "christmas"]
 draft_reminder_days = 2  # one reminder stays open while an email has waited this long for approval
 draft_fresh_days = 14  # after this it asks to be read again; an approval this old goes back to a person
+replies_per_run = 10  # approved replies that leave in one run, the rest on the next; notes about a booked meeting go first and are not counted
