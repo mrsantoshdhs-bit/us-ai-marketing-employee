@@ -585,8 +585,9 @@ def cmd_confirm_sending(args, ctx) -> int:
     if check != "ok":
         print(f"WARNING: the database still fails its integrity check ({str(check)[:200]}). You have accepted this result; a "
               "different one holds sending again.")
-    print(f"Sending may go on. {len(marked)} email(s) the record says already went stay on Follow-ups for a person; "
-          "every other approved email goes out on the next run, inside the send window.")
+    print("Sending may go on. Emails the record says already went stay on Follow-ups for a person"
+          + (f" ({len(marked)} more just marked)" if marked else "")
+          + "; every other approved email goes out on the next run, inside the send window.")
     return 0
 
 

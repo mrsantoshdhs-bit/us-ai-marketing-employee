@@ -105,7 +105,7 @@ def public(a: MailAccount) -> dict:
             "smtp_host": a.smtp_host, "smtp_port": a.smtp_port, "active": a.active, "read_replies": a.read_replies,
             "is_primary": a.is_primary, "has_secret": bool(a.secret), "oauth_client_id": a.oauth_client_id,
             "has_oauth_secret": bool(a.oauth_client_secret), "oauth_tenant": a.oauth_tenant,
-            "last_test_at": a.last_test_at.isoformat() if a.last_test_at else None,
+            "last_test_at": a.last_test_at.isoformat() if a.last_test_at else (utcnow().isoformat() if why else None),
             "last_test_ok": False if why else a.last_test_ok, "last_test_detail": why or a.last_test_detail}
 
 

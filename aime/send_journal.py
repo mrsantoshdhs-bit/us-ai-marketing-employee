@@ -73,9 +73,9 @@ def _append(data_dir: Path, *records: dict) -> None:
         os.fsync(fh.fileno())
 
 
-def _record(event: str, followup_id: int, to: str | None, message_id: str | None) -> dict:
+def _record(event: str, followup_id: int, to: str | None, message_id: str | None, at=None) -> dict:
     return {"event": event, "followup_id": followup_id, "to": _mark(to), "message_id": message_id,
-            "at": utcnow().isoformat(timespec="seconds")}
+            "at": (at or utcnow()).isoformat(timespec="seconds")}
 
 
 def record_claim(data_dir: Path, followup_id: int, to: str | None, message_id: str | None) -> None:
@@ -273,10 +273,10 @@ def start(db, settings) -> None:
                 if started:
                     set_hold(settings.data_dir, "restored", "the record of sent emails is missing, so what went out after "
                              "this database's backup is unknown: check the Sent folder")
-                rows = s.execute(select(FollowUp.id, FollowUp.to_email, FollowUp.message_id).where(
-                    FollowUp.channel == "email", FollowUp.status.in_(ACCOUNTED_FOR))).all()
+                rows = s.execute(select(FollowUp.id, FollowUp.to_email, FollowUp.message_id, FollowUp.sent_at, FollowUp.send_started_at)
+                                 .where(FollowUp.channel == "email", FollowUp.status.in_(ACCOUNTED_FOR))).all()
                 _append(settings.data_dir, {"event": "started", "at": utcnow().isoformat(timespec="seconds")},
-                        *[_record("claim", i, to, mid) for i, to, mid in rows])
+                        *[_record("claim", i, to, mid, sent or started) for i, to, mid, sent, started in rows])
             kv_set(s, STARTED_KEY, True)
     except (OSError, SQLAlchemyError):  # the send gate reports what matters; this must never stop a start
         log.exception("Could not start the record of sent emails")

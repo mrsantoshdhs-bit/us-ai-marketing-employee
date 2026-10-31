@@ -340,8 +340,10 @@ def latest_local_backup(backup_dir: Path) -> Path | None:
 
 
 def newest_good_backup(backup_dir: Path, skip: set[str] | None = None) -> Path | None:
-    """The newest copy that passes its check today. Checked now: a file can go bad after it was verified."""
-    files = sorted((p for p in backup_dir.glob("aime-*.db") if p.stat().st_size > 0 and p.name not in (skip or ())),
+    """The newest copy that passes its check today. Checked now: a file can go bad after it was verified. What a restore
+    set aside is not offered: it is what a person chose to replace."""
+    files = sorted((p for p in backup_dir.glob("aime-*.db") if p.stat().st_size > 0 and p.name not in (skip or ())
+                    and not p.name.startswith("aime-pre-restore-")),
                    key=lambda p: p.stat().st_mtime, reverse=True)
     return next((p for p in files if verify_backup(p)["ok"]), None)
 
