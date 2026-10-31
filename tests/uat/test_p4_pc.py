@@ -7,6 +7,7 @@ from __future__ import annotations
 import ctypes
 import http.server
 import importlib.util
+import json
 import logging
 import sys
 import threading
@@ -18,6 +19,7 @@ import httpx
 import pytest
 from sqlalchemy import select
 
+import aime.config
 import aime.timeutil
 from aime import logging_setup
 from aime.agents.crm import CRMManagementAgent
@@ -27,7 +29,7 @@ from aime.backup import encrypt_bytes, prune_offsite, write_offsite
 from aime.db import kv_set
 from aime.doctor import run_checks
 from aime.integrations.email_smtp import EmailSender
-from aime.models import Alert, Company, FollowUp, Lead
+from aime.models import Alert, Company, FollowUp, JobRun, Lead
 from aime.scheduler.runner import run_job
 from aime.timeutil import utcnow
 from aime.web.app import health_strip
@@ -569,9 +571,7 @@ def test_defect_a_log_file_that_cannot_be_written_does_not_stop_the_work(make_ct
 
 # ---------------------------------------------------------------------------------- the port
 def test_defect_another_web_program_on_the_port_is_not_taken_for_the_dashboard():
-    spec = importlib.util.spec_from_file_location("aime_watchdog", Path("scripts/watchdog.py").resolve())
-    watchdog = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(watchdog)
+    watchdog = load_script("watchdog")
 
     class Other(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -589,3 +589,361 @@ def test_defect_another_web_program_on_the_port_is_not_taken_for_the_dashboard()
     finally:
         server.shutdown()
         server.server_close()
+
+
+def load_script(name):
+    spec = importlib.util.spec_from_file_location(f"aime_{name}", Path(__file__).resolve().parents[2] / "scripts" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_sign_in_page_really_carries_the_mark_the_probes_look_for(make_ctx):
+    from fastapi.testclient import TestClient
+
+    from aime.dashboard_probe import PAGE, PAGE_MARK
+    from aime.web.app import create_app
+
+    with TestClient(create_app(make_ctx())) as client:
+        page = client.get(PAGE)
+    assert page.status_code == 200 and PAGE_MARK in page.content
+
+
+def test_the_dashboard_task_says_who_holds_the_port_in_its_log(make_ctx, tmp_path, monkeypatch):
+    task = load_script("dashboard_task")
+    ctx = make_ctx()
+    monkeypatch.setattr(aime.config.Settings, "load", classmethod(lambda cls, *a, **k: ctx.settings))
+    monkeypatch.setattr(task, "still_running", lambda h, p: True)
+    monkeypatch.setattr("aime.dashboard_probe.page_owner", lambda h, p: "other")
+    assert task.run() == 0
+    assert "Another web program" in (ctx.settings.logs_dir / "dashboard.log").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------------- the watchdog after a wake
+def old_beat(data_dir, minutes=120, state="idle"):
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "aime.db").touch()
+    at = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).replace(tzinfo=None).isoformat() + "Z"
+    (data_dir / "heartbeat.json").write_text(json.dumps({"at": at, "state": state}), encoding="utf-8")
+
+
+def test_the_watchdog_gives_ticks_their_turn_right_after_a_wake_and_still_reports_a_real_stop(tmp_path):
+    wd = load_script("watchdog")
+    old_beat(tmp_path)
+    assert wd.check(tmp_path, since_wake=lambda: 30.0) == []  # woke half a minute ago: the Tick task starts now too
+    assert wd.check(tmp_path, since_wake=lambda: wd.WAKE_GRACE_SECONDS + 1.0)  # ticks have had their time since
+    assert wd.check(tmp_path, since_wake=lambda: None)  # never slept
+    old_beat(tmp_path, minutes=50)
+    assert wd.check(tmp_path, since_wake=lambda: 3600.0)
+    assert wd.check(tmp_path, since_wake=lambda: -5.0)  # nonsense from the clock hides nothing
+
+
+def test_the_time_since_a_wake_is_read_without_error_on_this_pc():
+    wd = load_script("watchdog")
+    woke = wd.seconds_since_wake()
+    assert woke is None or woke >= 0
+
+
+# ---------------------------------------------------------------------------------- logs, again
+def test_a_log_that_can_rotate_still_rotates_and_keeps_the_history(tmp_path):
+    main = tmp_path / "aime.log"
+    handler = logging_setup.KeepingRotatingHandler(main, maxBytes=200, backupCount=2, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    try:
+        for i in range(60):
+            handler.emit(logging.LogRecord("t", 20, "", 0, f"line {i:03d} " + "x" * 30, None, None))
+    finally:
+        handler.close()
+    assert (tmp_path / "aime.log.1").exists() and (tmp_path / "aime.log.2").exists() and not (tmp_path / "aime.log.3").exists()
+    assert "line 059" in main.read_text(encoding="utf-8")
+
+
+def test_while_held_the_rotation_is_not_tried_at_every_line(tmp_path, monkeypatch):
+    main = tmp_path / "aime.log"
+    main.write_text("x" * 300, encoding="utf-8")
+    tries = []
+    monkeypatch.setattr(logging_setup, "rotate", lambda *a: tries.append(a) or False)
+    handler = logging_setup.KeepingRotatingHandler(main, maxBytes=200, backupCount=2, encoding="utf-8")
+    try:
+        for i in range(20):
+            handler.emit(logging.LogRecord("t", 20, "", 0, f"line {i}", None, None))
+    finally:
+        handler.close()
+    assert len(tries) == 1
+    assert "line 19" in main.read_text(encoding="utf-8")
+
+
+def test_an_unwritable_run_log_is_said_once_in_words_and_comes_back(tmp_path, monkeypatch, caplog):
+    path = tmp_path / "agent_runs.jsonl"
+    real_open = Path.open
+
+    def refuse(self, *a, **k):
+        if self == path:
+            raise PermissionError(13, "denied", str(self))
+        return real_open(self, *a, **k)
+
+    monkeypatch.setattr(Path, "open", refuse)
+    with caplog.at_level(logging.WARNING, logger="aime.logging"):
+        for i in range(3):
+            logging_setup.append_jsonl(path, {"n": i})
+    said = [r.getMessage() for r in caplog.records if r.name == "aime.logging"]
+    assert len(said) == 1 and "the work goes on" in said[0]
+    monkeypatch.undo()
+    logging_setup.append_jsonl(path, {"n": 9})
+    assert '"n": 9' in path.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------------- the off-machine folder, again
+def job_steps(ctx):
+    with ctx.db.session() as s:
+        row = s.execute(select(JobRun).where(JobRun.job == "db_maintenance").order_by(JobRun.id.desc())).scalars().first()
+        return {st["agent"]: st for st in row.detail["steps"]}, row.error
+
+
+def test_the_cause_is_said_in_words_everywhere_not_as_a_raw_windows_error(make_ctx, tmp_path, capsys):
+    ctx = make_ctx(backup_offsite_dir=gone_folder(tmp_path), backup_passphrase=PASS)
+    run_job(ctx, "db_maintenance", trigger="test")
+    steps, error = job_steps(ctx)
+    check = next(c for c in run_checks(ctx) if c["name"] == "Off-machine encrypted backup")
+    for words in (steps["offsite_backup"]["error"], error, check["detail"]):
+        assert "WinError" not in words and "Errno" not in words and "cannot be reached" in words, words
+    assert not check["ok"] and "local backup is fine" in check["detail"]  # at once, not after 30 hours
+
+
+def test_a_good_copy_ends_the_trouble_everywhere(make_ctx, tmp_path, monkeypatch):
+    ctx = make_ctx(backup_offsite_dir=gone_folder(tmp_path), backup_passphrase=PASS)
+    run_job(ctx, "db_maintenance", trigger="test")
+    ctx.settings.backup_offsite_dir = str(tmp_path / "off")
+    assert run_job(ctx, "db_maintenance", trigger="test")["status"] == "success"
+    with ctx.db.session() as s:
+        row = next(r for r in health_strip(ctx, s) if r[0] == "Off-machine backup")
+    assert row[1] == "ok"
+    assert next(c for c in run_checks(ctx) if c["name"] == "Off-machine encrypted backup")["ok"]
+
+
+def test_when_the_local_backup_fails_too_the_job_is_not_called_fine(make_ctx, tmp_path, monkeypatch):
+    ctx = make_ctx(backup_offsite_dir=gone_folder(tmp_path), backup_passphrase=PASS)
+    monkeypatch.setattr(workflows, "verify_backup", lambda p: {"ok": False, "integrity": "disk error", "tables": 0, "rows": 0})
+    run_job(ctx, "db_maintenance", trigger="test")
+    run_job(ctx, "db_maintenance", trigger="test")
+    run_job(ctx, "monitor", trigger="test")
+    with ctx.db.session() as s:
+        said = " ".join(a.message for a in s.execute(select(Alert)).scalars())
+    assert "local backup is fine" not in said
+
+
+def test_a_retry_reuses_the_good_copy_only_for_a_failed_try_of_the_same_day(make_ctx, tmp_path, clock):
+    ctx = make_ctx()
+    start = clock(datetime(2026, 11, 3, 1, 0))
+    run_job(ctx, "db_maintenance", trigger="test")  # all well: a run by hand then writes its own copy
+    time.sleep(1.05)
+    run_job(ctx, "db_maintenance", trigger="test")
+    assert len(list(ctx.settings.backups_dir.glob("aime-auto-*.db"))) == 2
+    bad = gone_folder(tmp_path)
+    ctx.settings.backup_offsite_dir, ctx.settings.backup_passphrase = bad, PASS
+    time.sleep(1.05)
+    run_job(ctx, "db_maintenance", trigger="test")
+    assert len(list(ctx.settings.backups_dir.glob("aime-auto-*.db"))) == 3
+    time.sleep(1.05)
+    run_job(ctx, "db_maintenance", trigger="test")  # a retry
+    assert len(list(ctx.settings.backups_dir.glob("aime-auto-*.db"))) == 3
+    assert job_steps(ctx)[0]["db_maintenance"]["output"]["backup_verified"]
+    clock(start + timedelta(days=1))
+    time.sleep(1.05)
+    run_job(ctx, "db_maintenance", trigger="test")  # the next day, still failing: that day's own copy
+    assert len(list(ctx.settings.backups_dir.glob("aime-auto-*.db"))) == 4
+
+
+def test_a_retry_writes_a_new_copy_when_the_first_tries_copy_has_gone_bad(make_ctx, tmp_path):
+    ctx = make_ctx(backup_offsite_dir=gone_folder(tmp_path), backup_passphrase=PASS)
+    run_job(ctx, "db_maintenance", trigger="test")
+    only = next(ctx.settings.backups_dir.glob("aime-auto-*.db"))
+    only.write_bytes(b"damaged")
+    time.sleep(1.05)
+    run_job(ctx, "db_maintenance", trigger="test")
+    good = [p for p in ctx.settings.backups_dir.glob("aime-auto-*.db") if p != only]
+    assert len(good) == 1
+
+
+def test_only_this_tools_own_old_half_written_files_are_cleared(make_ctx, tmp_path):
+    ctx = offsite_ctx(make_ctx, tmp_path)
+    folder = tmp_path / "off"
+    folder.mkdir()
+    now = (datetime.now() - timedelta(minutes=5)).strftime("%Y%m%d-%H%M%S")
+    stays = [folder / f"aime-offsite-{now}.partial", folder / "family-photos.partial", folder / "notes.txt"]
+    for p in stays:
+        p.write_bytes(b"x")
+    write_offsite(ctx.settings, Path(ctx.db.engine.url.database))
+    assert all(p.exists() for p in stays)
+    backups = ctx.settings.backups_dir
+    backups.mkdir(parents=True, exist_ok=True)
+    old = [backups / "partial-1234-aime-auto-20200101-061500.db", backups / "partial-1234-aime-auto-20200101-061500.db-journal"]
+    young = backups / f"partial-1234-aime-auto-{now}.db"
+    mine = backups / "partial-notes.db"
+    for p in (*old, young, mine):
+        p.write_bytes(b"x")
+    run_job(ctx, "db_maintenance", trigger="test")
+    assert not any(p.exists() for p in old) and young.exists() and mine.exists()
+
+
+def test_a_held_new_half_written_copy_is_reported_and_not_a_second_error(make_ctx, tmp_path, monkeypatch):
+    ctx = offsite_ctx(make_ctx, tmp_path)
+    real = Path.replace
+
+    def refused(self, target):
+        if self.suffix == ".partial":
+            raise PermissionError(13, "held", str(self))
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "replace", refused)
+    real_unlink = Path.unlink
+
+    def no_unlink(self, missing_ok=False):
+        if self.suffix == ".partial":
+            raise PermissionError(13, "held", str(self))
+        return real_unlink(self, missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", no_unlink)
+    result = run_job(ctx, "db_maintenance", trigger="test")
+    monkeypatch.undo()
+    assert result["status"] == "partial"
+    assert "another program" in job_steps(ctx)[0]["offsite_backup"]["error"]
+
+
+def test_prune_goes_on_past_a_copy_it_may_not_remove(tmp_path, monkeypatch):
+    for i in range(1, 9):
+        (tmp_path / f"aime-offsite-2026100{i}-000000.aimebak").write_bytes(encrypt_bytes(b"x", PASS))
+    oldest = tmp_path / "aime-offsite-20261001-000000.aimebak"
+    real = Path.unlink
+
+    def refused(self, missing_ok=False):
+        if self == oldest:
+            raise PermissionError(13, "held", str(self))
+        return real(self, missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refused)
+    assert prune_offsite(tmp_path, keep=2, passphrase=PASS) == 5
+    assert oldest.exists() and len(list(tmp_path.glob("*.aimebak"))) == 3
+
+
+def test_a_held_old_local_copy_does_not_stop_the_prune_anywhere(tmp_path, monkeypatch):
+    import sqlite3
+
+    from aime.backup import prune_backups
+
+    for i in range(1, 7):
+        con = sqlite3.connect(tmp_path / f"aime-auto-2026100{i}-061500.db")
+        con.execute("CREATE TABLE t (a)")
+        con.execute("INSERT INTO t VALUES (1)")
+        con.commit()
+        con.close()
+    oldest = tmp_path / "aime-auto-20261001-061500.db"
+    real = Path.unlink
+
+    def refused(self, missing_ok=False):
+        if self == oldest:
+            raise PermissionError(13, "held", str(self))
+        return real(self, missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refused)
+    assert prune_backups(tmp_path, keep=2) == 3
+    assert oldest.exists()
+
+
+def test_prune_decrypts_when_it_can_and_a_changed_passphrase_keeps_the_last_copy_that_opens(tmp_path):
+    good = tmp_path / "aime-offsite-20260901-000000.aimebak"
+    good.write_bytes(encrypt_bytes(b"x", PASS))
+    for i in range(1, 4):  # whole, but under another passphrase
+        (tmp_path / f"aime-offsite-2026100{i}-000000.aimebak").write_bytes(encrypt_bytes(b"x", "another-passphrase-here"))
+    assert prune_offsite(tmp_path, keep=3, passphrase=PASS) == 0 and good.exists()
+    assert prune_offsite(tmp_path, keep=3, passphrase="another-passphrase-here") == 1 and not good.exists()
+
+
+def test_a_cloud_only_copy_is_never_opened_or_downloaded(tmp_path, monkeypatch):
+    import aime.backup as backup
+
+    good = tmp_path / "aime-offsite-20260901-000000.aimebak"
+    good.write_bytes(encrypt_bytes(b"x", PASS))
+    new = tmp_path / "aime-offsite-20261001-000000.aimebak"
+    new.write_bytes(encrypt_bytes(b"x", PASS))
+    monkeypatch.setattr(backup, "_cloud_only", lambda p: True)
+    real_open, real_read = Path.open, Path.read_bytes
+    opened = []
+    monkeypatch.setattr(Path, "open", lambda self, *a, **k: opened.append(self) or real_open(self, *a, **k))
+    monkeypatch.setattr(Path, "read_bytes", lambda self: opened.append(self) or real_read(self))
+    assert backup.copy_opens(good, PASS) is None and backup.copy_opens(good) is None
+    assert backup.prune_offsite(tmp_path, keep=1, passphrase=PASS) == 0  # nothing can be proven: it stays
+    assert not opened
+
+
+def test_doctor_says_when_the_newest_copy_is_cut_short_or_no_longer_opens(make_ctx, tmp_path):
+    ctx = offsite_ctx(make_ctx, tmp_path)
+    run_job(ctx, "db_maintenance", trigger="test")
+    copy = next((tmp_path / "off").glob("*.aimebak"))
+    whole = copy.read_bytes()
+    copy.write_bytes(whole[:len(whole) // 2])
+    check = next(c for c in run_checks(ctx) if c["name"] == "Off-machine encrypted backup")
+    assert not check["ok"] and "cut short" in check["detail"]
+    copy.write_bytes(whole)
+    assert next(c for c in run_checks(ctx) if c["name"] == "Off-machine encrypted backup")["ok"]
+    ctx.settings.backup_passphrase = "a-new-passphrase-typed-wrong"
+    check = next(c for c in run_checks(ctx) if c["name"] == "Off-machine encrypted backup")
+    assert not check["ok"] and "passphrase" in check["detail"]
+
+
+def test_after_a_changed_passphrase_doctor_keeps_saying_so_while_older_copies_are_there(make_ctx, tmp_path):
+    ctx = offsite_ctx(make_ctx, tmp_path)
+    run_job(ctx, "db_maintenance", trigger="test")
+    time.sleep(1.05)
+    ctx.settings.backup_passphrase = "a-new-passphrase-typed-wrong"
+    assert run_job(ctx, "db_maintenance", trigger="test")["status"] == "success"
+    checks = {c["name"]: c for c in run_checks(ctx)}
+    assert checks["Off-machine encrypted backup"]["ok"]
+    assert not checks["Older off-machine copies open"]["ok"] and "passphrase" in checks["Older off-machine copies open"]["detail"]
+    for p in sorted((tmp_path / "off").glob("*.aimebak"))[:-1]:
+        p.unlink()  # aged out
+    assert "Older off-machine copies open" not in {c["name"] for c in run_checks(ctx)}
+
+
+def test_the_weekly_drill_also_restores_the_newest_off_machine_copy(make_ctx, tmp_path):
+    ctx = offsite_ctx(make_ctx, tmp_path)
+    run_job(ctx, "db_maintenance", trigger="test")
+    steps = job_steps(ctx)[0]
+    assert steps["offsite_drill"]["status"] == "success" and steps["offsite_drill"]["output"]["ok"]
+    time.sleep(1.05)
+    run_job(ctx, "db_maintenance", trigger="test")
+    assert "offsite_drill" not in job_steps(ctx)[0]  # once a week
+
+
+def test_the_weekly_drill_does_not_download_a_cloud_only_copy(make_ctx, tmp_path, monkeypatch):
+    import aime.backup as backup
+
+    ctx = offsite_ctx(make_ctx, tmp_path)
+    (tmp_path / "off").mkdir()
+    (tmp_path / "off" / "aime-offsite-20261001-000000.aimebak").write_bytes(b"not here")
+    monkeypatch.setattr(backup, "_cloud_only", lambda p: True)
+    assert backup.weekly_offsite_drill(ctx) is None
+
+
+def test_a_bad_folder_by_hand_prints_words_and_no_traceback(make_ctx, tmp_path, capsys):
+    from argparse import Namespace
+
+    from aime.cli import cmd_backup
+
+    ctx = make_ctx(backup_offsite_dir=gone_folder(tmp_path), backup_passphrase=PASS)
+    assert cmd_backup(Namespace(label="manual", offsite=True), ctx) == 1
+    said = capsys.readouterr().out
+    assert "not written" in said and "cannot be reached" in said and "WinError" not in said
+
+
+def test_the_words_for_a_folder_beside_the_onedrive_root_and_a_missing_drive(tmp_path):
+    from aime.backup import offsite_sync
+
+    root = tmp_path / "OneDrive"
+    leaves, why = offsite_sync(tmp_path / "OneDrive-Backups" / "AIME", synced=[root])
+    assert leaves is False and "not signed in" not in why and "outside" in why and str(root) in why
+    if sys.platform == "win32":
+        leaves, why = offsite_sync(r"Z:\OneDrive\AIME", synced=[])
+        assert leaves is False and "not signed in" not in why and "not connected" in why
+        leaves, why = offsite_sync(r"Z:\Backups\AIME", synced=[])
+        assert leaves is False and "not connected" in why
