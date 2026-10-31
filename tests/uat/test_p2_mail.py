@@ -192,7 +192,7 @@ def test_defect_an_opt_out_in_another_language_is_honoured(make_ctx, text):
 
 
 def test_ok_a_non_english_reply_is_never_lost(make_ctx):
-    for key in ("es_hot", "de_no", "hi_opt1"):
+    for key in ("es_hot", "de_no", "hi_no"):  # an opt-out in another language is honoured: test_defect_an_opt_out_in_another_language
         ctx, sender, _, _ = scene(make_ctx, lambda v, key=key: K.thr(v, K.LANG[key] + K.q_gmail(v), tag="lang"))
         assert latest_reply(ctx).status == "needs_review" and lead_of(ctx).outreach_status == "replied"
         assert next_steps(ctx, sender) == []
@@ -300,11 +300,21 @@ def test_defect_a_read_receipt_is_not_a_bounce(make_ctx):
     assert DAVID not in suppressed_values(ctx) and contact_status(ctx) != "bounced" and lead_of(ctx).outreach_status != "bounced"
 
 
-@pytest.mark.parametrize("build", corpus_cases(K.BOUNCES, ["exim_dsn", "postfix_dsn", "postfix_dsn_no_id", "gmail_dsn", "m365_ndr_exchange_sender", "m365_ndr_postmaster", "qmail", "yahoo"]))
+@pytest.mark.parametrize("build", corpus_cases(K.BOUNCES, ["exim_dsn", "postfix_dsn", "gmail_dsn", "m365_ndr_exchange_sender", "m365_ndr_postmaster", "qmail", "yahoo"]))
 def test_ok_a_hard_bounce_in_each_real_format_stops_the_lead(make_ctx, build):
     ctx, sender, sent, _ = scene(make_ctx, build)
     r = latest_reply(ctx)
     assert (r.category, r.status, r.followup_id) == ("bounce", "actioned", sent.id)
+    assert DAVID in suppressed_values(ctx) and contact_status(ctx) == "bounced" and lead_of(ctx).outreach_status == "bounced"
+    assert next_steps(ctx, sender) == []
+
+
+def test_ok_a_mail_systems_bounce_quoting_no_id_stops_the_lead_and_a_person_looks(make_ctx):
+    """Anyone can send a report, and this one quotes nothing of ours (test_p2_hostile forbids blind suppression). A mail system
+    naming an address we wrote to is still honoured, but it is not filed as done."""
+    ctx, sender, sent, _ = scene(make_ctx, K.BOUNCES["postfix_dsn_no_id"])
+    r = latest_reply(ctx)
+    assert (r.category, r.status, r.followup_id) == ("bounce", "needs_review", sent.id)
     assert DAVID in suppressed_values(ctx) and contact_status(ctx) == "bounced" and lead_of(ctx).outreach_status == "bounced"
     assert next_steps(ctx, sender) == []
 
