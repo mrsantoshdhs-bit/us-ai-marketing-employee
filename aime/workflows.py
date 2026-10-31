@@ -158,9 +158,10 @@ def mailbox_hold(ctx: AppContext) -> str | None:
 
 
 def job_followups(ctx: AppContext, job: str = "followups") -> JobOutcome:
-    """The one job that sends approved emails: it runs after the inbox job, and holds them if that read failed."""
+    """The one job that sends approved emails: it runs after the inbox job, and holds them if that read failed. The read is
+    judged again before each email: the PC may sleep in the middle of a run."""
     out = JobOutcome()
-    out.add(SalesWorkflowAgent(ctx).run({"hold_sends": mailbox_hold(ctx)}, job=job))
+    out.add(SalesWorkflowAgent(ctx, read_hold=lambda: mailbox_hold(ctx)).run({"hold_sends": mailbox_hold(ctx)}, job=job))
     return out
 
 

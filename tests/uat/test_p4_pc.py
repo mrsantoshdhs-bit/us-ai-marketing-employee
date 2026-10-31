@@ -23,15 +23,16 @@ from aime import logging_setup
 from aime.agents.crm import CRMManagementAgent
 from aime.agents.qualification import LeadQualificationAgent
 from aime.agents.sales_workflow import SalesWorkflowAgent
-from aime.backup import encrypt_bytes, prune_backups, prune_offsite, restore_drill, write_offsite
+from aime.backup import encrypt_bytes, prune_offsite, write_offsite
 from aime.db import kv_set
 from aime.doctor import run_checks
 from aime.integrations.email_smtp import EmailSender
-from aime.models import Alert, Company, FollowUp, JobRun, Lead
+from aime.models import Alert, Company, FollowUp, Lead
 from aime.scheduler.runner import run_job
 from aime.timeutil import utcnow
 from aime.web.app import health_strip
-from aime.workflows import job_crm_maintenance
+from aime import workflows
+from aime.workflows import MAILBOX_READ, job_crm_maintenance, job_followups
 from tests.test_inbound_sales import FakeSMTP
 from tests.test_time_and_alerts import FOOTER, MAIL, add_lead, add_mail
 
@@ -272,7 +273,7 @@ def two_approved(ctx):
 def test_defect_the_rest_of_a_run_does_not_go_out_at_night_after_the_pc_slept_between_two_emails(make_ctx, clock):
     ctx = make_ctx(**MAIL)
     start = clock(datetime(2026, 11, 3, 22, 59))  # Tuesday 17:59 New York
-    ids = two_approved(ctx)
+    two_approved(ctx)
     sent_at = []
 
     class Sleeps(FakeSMTP):
@@ -283,6 +284,141 @@ def test_defect_the_rest_of_a_run_does_not_go_out_at_night_after_the_pc_slept_be
 
     SalesWorkflowAgent(ctx, sender=EmailSender(ctx.settings, smtp_factory=Sleeps)).run({"now": utcnow().isoformat()})
     assert len(sent_at) == 1, f"{len(sent_at)} emails left; the later ones at {sent_at[1:]} UTC, outside the send window"
+
+
+def smtp_recording(sent, also=None):
+    class Recording(FakeSMTP):
+        def send_message(self, msg, *a, **k):
+            sent.append(msg["To"])
+            if also:
+                also(len(sent))
+            return {}
+    return Recording
+
+
+def followups_job_with(monkeypatch, smtp):
+    """The real job, with a mail server that is not real."""
+    monkeypatch.setattr(workflows, "SalesWorkflowAgent", lambda ctx, read_hold=None: SalesWorkflowAgent(
+        ctx, sender=EmailSender(ctx.settings, smtp_factory=smtp), read_hold=read_hold))
+
+
+def mailbox_read_now(ctx):
+    with ctx.db.session() as s:
+        kv_set(s, MAILBOX_READ, utcnow().isoformat())
+
+
+def rows(ctx, ids):
+    with ctx.db.session() as s:
+        return [(s.get(FollowUp, i).status, s.get(FollowUp, i).blocked_reason or "") for i in ids]
+
+
+def test_what_a_sleep_stopped_goes_out_once_on_the_next_proper_run_and_nothing_twice(make_ctx, clock, monkeypatch):
+    ctx = make_ctx(**MAIL)
+    start = clock(datetime(2026, 11, 3, 22, 59))  # Tuesday 17:59 New York
+    ids = two_approved(ctx)
+    sent = []
+
+    def lid_closes(n):
+        if n == 1:
+            clock(start + timedelta(hours=10))
+
+    followups_job_with(monkeypatch, smtp_recording(sent, lid_closes))
+    mailbox_read_now(ctx)
+    job_followups(ctx)
+    assert len(sent) == 1
+    states = rows(ctx, ids)
+    assert sorted(s for s, _ in states) == ["approved", "sent"]
+    assert any("slept" in why for _, why in states)
+
+    clock(start + timedelta(hours=10, minutes=30))  # still 04:29 New York: a new read does not open the window
+    mailbox_read_now(ctx)
+    job_followups(ctx)
+    assert len(sent) == 1
+
+    clock(start + timedelta(hours=16))  # 09:59 New York
+    mailbox_read_now(ctx)
+    job_followups(ctx)
+    assert sorted(sent) == sorted(set(sent)) and len(sent) == 2
+    assert [s for s, _ in rows(ctx, ids)] == ["sent", "sent"]
+    mailbox_read_now(ctx)
+    job_followups(ctx)  # and once more: nothing is left to send
+    assert len(sent) == 2
+
+
+def test_a_read_that_goes_bad_during_a_run_stops_the_rest_even_inside_the_window(make_ctx, clock, monkeypatch):
+    ctx = make_ctx(**MAIL)
+    clock(datetime(2026, 11, 4, 15, 0))  # Wednesday 10:00 New York
+    ids = two_approved(ctx)
+    sent = []
+
+    def read_fails_meanwhile(n):
+        with ctx.db.session() as s:
+            kv_set(s, MAILBOX_READ, None)
+
+    followups_job_with(monkeypatch, smtp_recording(sent, read_fails_meanwhile))
+    mailbox_read_now(ctx)
+    job_followups(ctx)
+    assert len(sent) == 1
+    assert any(s == "approved" and why.startswith("Held:") for s, why in rows(ctx, ids))
+
+
+def test_a_nap_of_half_an_hour_inside_the_window_stops_the_run_too(make_ctx, clock, monkeypatch):
+    ctx = make_ctx(**MAIL)
+    start = clock(datetime(2026, 11, 4, 15, 0))
+    two_approved(ctx)
+    sent = []
+    followups_job_with(monkeypatch, smtp_recording(sent, lambda n: clock(start + timedelta(minutes=30))))
+    mailbox_read_now(ctx)
+    job_followups(ctx)
+    assert len(sent) == 1
+
+
+def test_a_clock_set_back_inside_a_run_stops_it(make_ctx, clock, monkeypatch):
+    ctx = make_ctx(**MAIL)
+    start = clock(datetime(2026, 11, 4, 15, 0))
+    two_approved(ctx)
+    sent = []
+    followups_job_with(monkeypatch, smtp_recording(sent, lambda n: clock(start - timedelta(hours=1))))
+    mailbox_read_now(ctx)
+    job_followups(ctx)
+    assert len(sent) == 1
+
+
+def test_a_slow_mail_server_does_not_stop_a_run(make_ctx, clock, monkeypatch):
+    ctx = make_ctx(**MAIL)
+    start = clock(datetime(2026, 11, 4, 15, 0))
+    ids = two_approved(ctx)
+    sent = []
+    followups_job_with(monkeypatch, smtp_recording(sent, lambda n: clock(start + timedelta(minutes=2 * n))))
+    mailbox_read_now(ctx)
+    job_followups(ctx)
+    assert len(sent) == 2 and [s for s, _ in rows(ctx, ids)] == ["sent", "sent"]
+
+
+def test_a_run_that_leaves_the_window_while_awake_stops_at_the_edge(make_ctx, clock, monkeypatch):
+    ctx = make_ctx(**MAIL)
+    start = clock(datetime(2026, 11, 3, 22, 59))  # 17:59 New York; two minutes later the window has closed, with no jump
+    ids = two_approved(ctx)
+    sent = []
+    followups_job_with(monkeypatch, smtp_recording(sent, lambda n: clock(start + timedelta(minutes=2))))
+    mailbox_read_now(ctx)
+    job_followups(ctx)
+    assert len(sent) == 1
+    assert any(s == "approved" and "send window" in why for s, why in rows(ctx, ids))
+
+
+def test_a_run_begun_outside_the_window_or_on_a_stale_read_sends_nothing_as_before(make_ctx, clock, monkeypatch):
+    ctx = make_ctx(**MAIL)
+    clock(datetime(2026, 11, 4, 3, 0))  # 22:00 New York
+    ids = two_approved(ctx)
+    sent = []
+    followups_job_with(monkeypatch, smtp_recording(sent))
+    mailbox_read_now(ctx)
+    job_followups(ctx)
+    assert not sent and all(s == "approved" and "send window" in why for s, why in rows(ctx, ids))
+    clock(datetime(2026, 11, 4, 15, 0))  # in the window, the read over 20 minutes old
+    job_followups(ctx)
+    assert not sent and all(s == "approved" and why.startswith("Held:") for s, why in rows(ctx, ids))
 
 
 # ---------------------------------------------------------------------------------- the off-machine folder
