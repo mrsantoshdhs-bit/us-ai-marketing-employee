@@ -315,7 +315,7 @@ def test_recheck_withdraws_people_no_longer_found_but_keeps_anyone_already_email
 
 
 def test_companies_that_sell_ai_agents_are_flagged_and_a_person_can_clear_it(make_ctx):
-    state = {"/": HOME.replace("Brightline Logistics helps regional carriers plan routes, dispatch drivers and invoice "
+    state = {"/": HOME.replace("Brightline Logistics helps regional carriers plan routes, dispatch drivers and update "
                                "customers from one place.", "Brightline builds AI agents that automate dispatch for "
                                "regional carriers.")}
     ctx = recheck_ctx(make_ctx, state)

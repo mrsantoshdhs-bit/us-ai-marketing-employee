@@ -40,15 +40,15 @@ def test_overdue_post_without_free_slot_is_held_not_published(make_ctx, monkeypa
     calls = []
     ctx = make_ctx(handler=_recording(calls), **AUTH)
     cid = _late_post(ctx)
-    monkeypatch.setattr("aime.agents.publishing.free_slots", lambda *a, **k: [])
+    monkeypatch.setattr("aime.calendar_slots.candidate_slots", lambda *a, **k: [])
     out = AuthorizedPublishingAgent(ctx).run({}).output
     assert out.published == [] and calls == []
     with ctx.db.session() as s:
         item = s.get(ContentItem, cid)
-        assert item.status == "awaiting_approval" and item.approved_at is None
-        assert "approve it again" in item.publish_blocked_reason
+        # the approval stands, and nothing goes until a person picks a new time
+        assert item.status == "approved" and item.approved_at is not None and item.published_at is None
+        assert "choose a new time" in item.publish_blocked_reason
         assert s.execute(select(Alert).where(Alert.message.like(f"Post #{cid} missed its slot%"))).first()
-        assert s.execute(select(Activity).where(Activity.subject.like(f"Post #{cid} held%"))).first()
 
 
 def test_overdue_post_with_free_slot_is_rescheduled_and_reported(make_ctx):
