@@ -4,7 +4,7 @@
 <h1>Leads <span class="muted small">{{ total }} matching</span></h1>
 <form class="filters" method="get">
   <input name="q" placeholder="Company name" value="{{ f.q }}">
-  <select name="owner"><option value="">Any owner</option><option value="me" {{ 'selected' if f.owner == 'me' }}>Mine</option><option value="team" {{ 'selected' if f.owner == 'team' }}>Anyone's (owned)</option><option value="none" {{ 'selected' if f.owner == 'none' }}>Unassigned</option>{% for p in people %}<option {{ 'selected' if f.owner == p }}>{{ p }}</option>{% endfor %}</select>
+  <select name="owner"><option value="">Any owner</option><option value="me" {{ 'selected' if f.owner == 'me' }}>Mine</option><option value="team" {{ 'selected' if f.owner == 'team' }}>Owned by someone</option><option value="none" {{ 'selected' if f.owner == 'none' }}>Unassigned</option>{% for p in people %}<option {{ 'selected' if f.owner == p }}>{{ p }}</option>{% endfor %}</select>
   <select name="grade"><option value="">Any grade</option>{% for g in "ABCD" %}<option {{ 'selected' if f.grade == g }}>{{ g }}</option>{% endfor %}</select>
   <select name="status"><option value="">Any status</option>{% for st in LEAD_STATUSES %}<option {{ 'selected' if f.status == st }}>{{ st }}</option>{% endfor %}</select>
   <select name="source"><option value="">Any source</option>{% for so in ['research', 'inbound', 'import', 'manual'] %}<option {{ 'selected' if f.source == so }}>{{ so }}</option>{% endfor %}</select>

@@ -20,7 +20,6 @@
   <a class="mgr-tile" href="/companies"><b>{{ counts.discovered }}</b><span>companies discovered today</span></a>
   <a class="mgr-tile" href="/contacts?reachable=1"><b>{{ counts.verified_contacts }}</b><span>contacts with a usable email</span></a>
   <a class="mgr-tile" href="/leads?ready=1"><b>{{ counts.outreach_ready }}</b><span>qualified leads ready for outreach</span></a>
-  <a class="mgr-tile" href="/followups"><b>{{ counts.review_tasks }}</b><span>review tasks open</span></a>
   <a class="mgr-tile" href="/followups"><b>{{ counts.followups }}</b><span>follow-ups scheduled</span></a>
 </section>
 
@@ -88,7 +87,7 @@
 
 <section class="panel" id="failures">
   <div class="panel-head"><h2>{{ icon('alert') }} Failures and alerts</h2><a class="panel-link" href="/command-center#issues">Details {{ icon('arrow-right') }}</a></div>
-  {% for p in failures %}<div class="row-item"><span class="st-chip st-failed"><i></i>{{ p.what }}</span> {% if p.href %}<a href="{{ p.href }}">{{ p.why }}</a>{% else %}{{ p.why }}{% endif %} <span class="muted small">{{ p.at|local(None, '%a %H:%M') }}</span></div>
+  {% for p in failures %}<div class="row-item"><span class="st-chip st-failed"><i></i>{{ p.what }}</span> {% if p.href %}<a href="{{ p.href }}">{{ p.why|plain }}</a>{% else %}{{ p.why|plain }}{% endif %} <span class="muted small">{{ p.at|local(None, '%a %H:%M') }}</span></div>
   {% else %}<div class="empty-state"><b>No failures in the last 24 hours</b>and no open alerts.</div>{% endfor %}
   {% if earlier %}<h3>Earlier, since you last signed in ({{ since|local(None, '%a %d %b %H:%M') }})</h3>
   {% for p in earlier %}<div class="row-item"><span class="st-chip st-failed"><i></i>{{ p.what }}</span> <a href="{{ p.href }}">{{ p.n }} time{{ 's' if p.n != 1 }}, the last {{ p.at|local(None, '%a %d %b %H:%M') }}</a></div>{% endfor %}{% endif %}

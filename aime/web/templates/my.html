@@ -28,7 +28,7 @@
   {% else %}<tr><td colspan="6" class="muted">No open deals.</td></tr>{% endfor %}
 </table></div>
 <div class="grid">
-  <div><h2>Tasks <span class="muted small">{{ task_total }}</span></h2><div class="card">{% for t in tasks %}<div class="row-item"><a href="/leads/{{ t.lead_id }}">{{ t.subject }}</a> <span class="small muted">{{ t.lead.company.name }} · due {{ t.due_at|local }}</span></div>{% else %}<span class="muted">No open tasks.</span>{% endfor %}
+  <div><h2>Tasks <span class="muted small">{{ task_total }}</span></h2><div class="card">{% for t in tasks %}<div class="row-item"><a href="/leads/{{ t.lead_id }}">{{ t.subject }}</a> <span class="small muted">{{ t.lead.company.name }}{% if t.lead.owner and view == 'team' %} · {{ t.lead.owner }}{% endif %} · due {{ t.due_at|local }}</span></div>{% else %}<span class="muted">No open tasks.</span>{% endfor %}
     {% if task_total > tasks|length %}<div class="small muted">The {{ tasks|length }} due soonest are shown. All of them are on <a href="/followups">Follow-ups</a>.</div>{% endif %}</div></div>
   <div><h2>Meetings</h2><div class="card">{% for m in meetings %}<div class="row-item"><a href="/leads/{{ m.lead_id }}">{{ m.title }}</a> <span class="small muted">{{ m.starts_at|local }}</span></div>{% else %}<span class="muted">No upcoming meetings.</span>{% endfor %}</div></div>
 </div>

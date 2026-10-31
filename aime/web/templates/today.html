@@ -29,9 +29,10 @@
   {% for c in cards %}
   <a class="kpi-card" href="{{ c.href }}">
     <span class="kpi-icon {{ c.tone }}">{{ icon(c.icon) }}</span>
-    <span class="kpi-body"><span class="kpi-label">{{ c.label }}</span><b class="kpi-value">{{ '{:,}'.format(c.period) }}</b><small class="muted">in {{ period_days }} days · {{ '{:,}'.format(c.value) }} in total</small></span>
+    <span class="kpi-body"><span class="kpi-label">{{ c.label }}</span><b class="kpi-value">{{ '{:,}'.format(c.period) }}</b></span>
     <span class="delta {{ c.trend }}" title="{{ c.period }} in the last {{ period_days }} days, against the {{ period_days }} days before">{% if c.trend == 'up' %}↑{% elif c.trend == 'down' %}↓{% endif %} {{ c.change }}</span>
     {{ c.spark }}
+    <small class="kpi-total">Last {{ period_days }} days · {{ '{:,}'.format(c.value) }} in total</small>
   </a>
   {% endfor %}
 </section>

@@ -419,7 +419,13 @@ def register(app, C, render, back, who) -> None:
                             "company": s.get(Lead, a.lead_id).company.name, "reason": a.reason} for a in handed]
             first_day = bool(name) and s.execute(select(Activity.id).where(Activity.actor == name).limit(1)).first() is None
             today = as_aware_utc(now).astimezone(tz).date()
-            overdue = next((d for d in deals if d.expected_close and d.expected_close < today), None)
+            # one line, for this person: what waits on the team first, then their own work, never a colleague's task
+            own = Scope(all=False, usernames=frozenset({name}), unassigned=False) if name else shown
+            overdue = next((d for d in deals if d.expected_close and d.expected_close < today and (not name or d.owner == name)), None)
+            own_task = s.execute(select(FollowUp).where(record_condition(own, FollowUp.lead_id), FollowUp.channel == "task",
+                                                        FollowUp.status == "pending").order_by(FollowUp.due_at).limit(1)).scalars().first()
+            own_lead = s.execute(select(Lead).where(lead_condition(own), Lead.owner == name if name else mine, working)
+                                 .order_by(Lead.score.desc()).limit(1)).scalars().first()
             may_approve = not user or "approve_outbound" in user.get("perms", ())
             if replies:
                 next_step = (f"Read the {replies} repl{'ies' if replies != 1 else 'y'} waiting for a person.", "/inbox")
@@ -427,10 +433,10 @@ def register(app, C, render, back, who) -> None:
                 next_step = (f"Read and approve or reject the {approvals} email{'s' if approvals != 1 else ''} waiting.", "/approvals")
             elif overdue:
                 next_step = (f"Update {overdue.name}: its close date has passed.", f"/leads/{overdue.lead_id}" if overdue.lead_id else "/pipeline")
-            elif tasks:
-                next_step = (f"Do the task: {tasks[0].subject}.", f"/leads/{tasks[0].lead_id}")
-            elif leads:
-                next_step = (f"Open your strongest lead, {leads[0].company.name}, and read its evidence.", f"/leads/{leads[0].id}")
+            elif own_task:
+                next_step = (f"Do the task: {own_task.subject}.", f"/leads/{own_task.lead_id}")
+            elif own_lead:
+                next_step = (f"Open your strongest lead, {own_lead.company.name}, and read its evidence.", f"/leads/{own_lead.id}")
             elif unassigned:
                 next_step = ("No lead is yours yet: ask your manager to assign some of the unassigned ones.", "/leads?status=qualified&owner=none")
             else:

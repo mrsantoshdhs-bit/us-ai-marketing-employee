@@ -2183,7 +2183,10 @@ def health_strip(ctx: AppContext, s) -> list[tuple[str, str, str]]:
         rows.append(("LinkedIn connection", "warn", "not connected"))
     rows.append(("Publishing", "ok", "ON: approved posts go out at their slot") if st.publishing_enabled
                 else ("Publishing", "ok", "off: nothing is posted"))
-    rows.append(("Outbound email", "ok", "ON") if st.outbound_email_enabled else ("Outbound email", "ok", "off"))
+    if st.outbound_email_enabled and mailbox_refused(s):
+        rows.append(("Outbound email", "bad", REFUSED_WORDS))
+    else:
+        rows.append(("Outbound email", "ok", "ON") if st.outbound_email_enabled else ("Outbound email", "ok", "off"))
     last = kv_get(s, "backup.last_verified")
     if last:
         hours = int((utcnow() - datetime.fromisoformat(last["at"])).total_seconds() // 3600)

@@ -17,7 +17,8 @@ external account and needs the owner's approval.
    - add the private host name to `ALLOWED_HOSTS` in `.env` (the dashboard refuses unknown Host headers);
    - keep `DASHBOARD_AUTH=true`.
    - Session cookies are marked Secure automatically over HTTPS.
-4. **Accounts**: create the salesperson's account on Administration › Users with a one-time setup link. Give it the
+4. **Accounts**: create the salesperson's account on Settings › Users & teams with a one-time setup link (for an account that
+   already exists: `python -m aime user set-password --username <name>` on this PC). Give it the
    least role that fits (Sales Executive or Sales Manager); records outside their team stay invisible to them.
 5. **Check**:
    - from the salesperson's PC, the dashboard opens over HTTPS on the private name only;
