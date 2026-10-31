@@ -32,7 +32,7 @@ from aime.integrations.email_smtp import EmailNotReady, EmailSender, compliance_
 from aime.knowledge.services import service_name
 from aime.models import Activity, Alert, Contact, FollowUp, InboundEmail, InboundInquiry, Lead, Opportunity, Signal
 from aime.monitoring import alert_once, resolve_alerts
-from aime.outreach import (STOP_STATUSES, draft_outreach, draft_reengage, eligible, gather_evidence, record_delivery,
+from aime.outreach import (RUNNING_STAGES, STOP_STATUSES, draft_outreach, draft_reengage, eligible, gather_evidence, record_delivery,
                            set_status, stop_sequence)
 from aime.pipeline import pipeline_checks
 from aime.outreach import policy as outreach_policy
@@ -319,7 +319,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             if lead is None or last.step >= max_touches:
                 continue
             if outreach:
-                if (lead.status != "qualified" or lead.outreach_status != "contacted"
+                if (lead.status != "qualified" or lead.outreach_status not in RUNNING_STAGES
                         or not eligible(session, self.settings, lead)[0]):
                     continue  # replied, unsubscribed, bounced, stopped, or no longer reachable
             elif (not self._may_answer(session, lead) or not lead.contact

@@ -59,6 +59,10 @@ def _prose(title: str, body: str) -> str:
     return _URL.sub(" ", _HASHTAG.sub(" ", f"{title}\n{body}"))
 
 
+# First-hand experience, for which there is nothing on record: the check cannot tell a true one from an invented one.
+_FIRST_HAND = re.compile(r"\b(?:first[- ]?hand|in our experience|(?:we|i)(?:'ve|\u2019ve| have) (?:seen|watched|witnessed|helped|worked with))\b", re.I)
+
+
 def check_gate(body: str, settings) -> CheckResult:
     cfg = settings.section("content")
     q = quality_check(body, int(cfg.get("min_words", 70)), int(cfg.get("max_words", 260)))
@@ -76,6 +80,9 @@ def check_claims(title: str, body: str) -> CheckResult:
     named = sorted({n for n in THIRD_PARTIES if re.search(rf"\b{re.escape(n)}\b", text)})
     if named:
         found.append(f"names {', '.join(named)}")
+    first_hand = _FIRST_HAND.search(text)
+    if first_hand:
+        found.append(f"claims first-hand experience ('{first_hand.group(0)}')")
     if not found:
         return CheckResult("factual claims", "pass", "no figures or named third parties")
     return CheckResult("factual claims", "uncertain", "; ".join(found) + " (needs a person to verify the source)")

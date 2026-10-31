@@ -104,7 +104,7 @@ def parse_post(item: dict) -> CompanyCandidate | None:
         state=loc.state,
         city=loc.city,
         is_us=loc.is_us,
-        industry=classify_industry(full_text, default="tech_startups"),
+        industry=classify_industry(full_text),  # none when the post gives no evidence of one: not every employer is a startup
         description=redact_personal(full_text[:600]),
         signal_text=redact_personal(full_text[:1500]),
         signal_type="hiring",

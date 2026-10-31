@@ -19,25 +19,26 @@ from aime.dedupe import clean_company_name, domain_from_email, domain_from_url, 
 from aime.inbound import InboundPayload, load_inbox_files, validate_inquiry
 from aime.knowledge.geo import normalize_state
 from aime.knowledge.industries import INDUSTRIES
-from aime.matching import classify_industry
-from aime.models import Alert, Company, FollowUp, InboundInquiry, Lead, Opportunity
+from aime.matching import classify_industry, competitor_evidence, competitor_in_post
+from aime.models import Alert, Company, FollowUp, InboundInquiry, Lead, Opportunity, ResearchSnapshot, Signal
 from aime.sources.base import CompanyCandidate
 from aime.timeutil import utcnow
 from aime.website_check import check_website
 
-Operation = Literal["ingest_inbound", "verify_websites", "dedupe", "hygiene", "stale", "lifecycle"]
+Operation = Literal["ingest_inbound", "verify_websites", "dedupe", "hygiene", "stale", "lifecycle", "competitors"]
 RECHECK_AFTER = timedelta(days=30)
 US_NAMES = {"us", "usa", "u.s.", "u.s.a.", "united states", "united states of america", "america"}
 
 
 class CRMInput(BaseModel):
     operations: list[Operation] = Field(
-        default_factory=lambda: ["verify_websites", "dedupe", "hygiene", "stale", "lifecycle"])
+        default_factory=lambda: ["verify_websites", "dedupe", "hygiene", "stale", "lifecycle", "competitors"])
     company_ids: list[int] | None = None  # limit website checks to these companies (e.g. new research results)
     website_check_limit: int | None = None  # at most this many website checks (default: research.website_checks_per_run)
 
 
 class CRMOutput(BaseModel):
+    competitors_flagged: int = 0
     linkedin_leads_fetched: int = 0
     linkedin_leads_recorded: int = 0
     inbound_files_loaded: int = 0
@@ -89,6 +90,8 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             out.stale_to_nurture = self._stale(session)
         if "lifecycle" in ops:
             out.lifecycle_updates = self._lifecycle(session)
+        if "competitors" in ops:
+            out.competitors_flagged = self._flag_competitors(session)
         return out
 
     # ------------------------------------------------------------------ inbound
@@ -216,6 +219,31 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
                 time.sleep(self.settings.polite_delay)
 
     # ------------------------------------------------------------------ maintenance
+    def _flag_competitors(self, session: Session) -> int:
+        """Companies already on file get the check new ones get: research reads a company's site only every month, and one
+        whose site could not be read never gets it. What it says about itself decides; its hiring post only when nothing
+        else is on record. A person's "not a competitor" stands, and a lead already emailed keeps its sequence: only a
+        person ends that, so it is left as it is."""
+        flagged = 0
+        rows = session.execute(select(Lead, Company).join(Company, Lead.company_id == Company.id).where(
+            Lead.status.in_(("new", "qualified", "nurture")), or_(Lead.outreach_status.is_(None), Lead.outreach_status.in_(("drafted", "approved"))),
+            Company.merged_into_id.is_(None), Company.is_competitor.is_(False), Company.competitor_cleared_by.is_(None))).all()
+        for lead, company in rows:
+            snap = session.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == company.id)
+                                   .order_by(ResearchSnapshot.id.desc())).scalars().first()
+            description = snap.description if snap else None
+            if description:
+                phrase = competitor_evidence(f"{description} {' '.join(snap.services_offered or [])} {company.website_title or ''}")
+            else:
+                posts = session.execute(select(Signal.text).where(Signal.company_id == company.id, Signal.signal_type == "hiring"))
+                phrase = next((p for p in map(competitor_in_post, posts.scalars()) if p), None) or competitor_evidence(company.website_title)
+            if phrase:
+                company.is_competitor = True
+                flagged += 1
+                log_activity(session, f'Marked as a possible competitor: it says "{phrase}"', self.name, type_="data_quality",
+                             company_id=company.id, lead_id=lead.id)
+        return flagged
+
     def _dedupe(self, session: Session) -> int:
         companies = session.execute(select(Company).where(Company.merged_into_id.is_(None))
                                     .order_by(Company.id)).scalars().all()

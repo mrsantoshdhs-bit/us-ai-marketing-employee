@@ -52,7 +52,7 @@ from aime.models import (MailAccount, MeetingProposal, Activity, AgentRun, Alert
 from aime.monitoring import agent_stats, read_heartbeat
 from aime.policy import agreement, environment_blockers, evaluate_shadow, policy_config
 from aime.qc import summary as qc_summary
-from aime.outreach import record_delivery
+from aime.outreach import REACHED_PROSPECT, record_delivery
 from aime.outreach import set_status as set_outreach_status
 from aime.outreach import stop_sequence
 from aime.qc.checks import run_quality_checks
@@ -2028,7 +2028,7 @@ def funnel_detail(s) -> list[tuple[str, int, str]]:
         ("Posts scheduled", cnt(ContentItem, ContentItem.status == "approved"), "/content"),
         ("Posts published", cnt(ContentItem, ContentItem.status == "published"), "/content?status=published"),
         ("Open opportunities", cnt(Opportunity, Opportunity.stage.not_in(("won", "lost"))), "/pipeline"),
-        ("Outreach emails sent", cnt(FollowUp, FollowUp.kind == "outreach", FollowUp.status == "sent"), "/followups?show=all"),
+        ("Outreach emails sent", cnt(FollowUp, FollowUp.kind == "outreach", FollowUp.status == "sent", REACHED_PROSPECT), "/followups?show=all"),
         ("Replies (real)", cnt(InboundEmail, InboundEmail.is_simulated.is_(False), InboundEmail.category.in_(HUMAN_REPLIES)),
          "/inbox?show=all"),
         ("Interested", cnt(Lead, Lead.outreach_status.in_(("interested", "meeting"))), "/pipeline"),

@@ -31,6 +31,8 @@ JOB_BOARD_DOMAINS = {
     "businessinsider.com", "crunchbase.com", "glassdoor.com", "indeed.com", "builtin.com", "levels.fyi",
     "hnhiring.com", "wikipedia.org", "arxiv.org", "apple.com", "facebook.com", "instagram.com", "tiktok.com",
     "dover.com", "teamtailor.com", "pinpointhq.com", "jobs.lever.co", "welcometothejungle.com", "otta.com",
+    "applytojob.com", "curriculo.me", "jazz.co", "jazzhr.com", "workday.com", "myworkdayjobs.com", "icims.com",
+    "paylocity.com", "gem.com", "ycombinator.co",
 }
 _MULTI_PART_TLDS = {"co.uk", "com.au", "co.in", "com.br", "co.jp"}
 # Hosting platforms give each customer a subdomain: there the full host is the company's site, not the platform.
@@ -48,6 +50,34 @@ def clean_company_name(name: str) -> str:
     return cleaned or name.strip()
 
 
+# A web address used as a name: "meetzentro.com", "Zentro.com", "www.zentro.io".
+_DOMAIN_NAME_RE = re.compile(r"^(?:www\.)?([a-z0-9][a-z0-9-]*)(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|ai|co|app|dev|xyz|so|tech|us|inc|health|bio|me)$",
+                             re.I)
+# A post's first words that describe rather than name: "Looking for a co-founder", "SaaS Startup", "AI x Healthcare Startup".
+_DESCRIPTION_RE = re.compile(r"^(?:looking|seeking|hiring|join|building|we|our)\b|\b(?:start-?up|stealth)$|\sx\s", re.I)
+
+
+def describes_rather_than_names(name: str) -> bool:
+    return bool(_DESCRIPTION_RE.search(name.strip(" .,-")))
+
+
+def domain_part_of_name(name: str) -> str | None:
+    """The name inside a web address used as a name ("Zentro.com" -> "Zentro"); None when it is not a web address."""
+    m = _DOMAIN_NAME_RE.match(name.strip())
+    return m.group(1) if m else None
+
+
+def company_to_address(name: str | None, website_title: str | None = None, domain: str | None = None) -> str | None:
+    """The name to write to the company itself. A web address used as a name gives way to the homepage's own spelling, or
+    to its name part when that was written with capitals ("Zentro.com"). None when there is no name fit to write
+    ("meetzentro.com" with no title, "AI x Healthcare Startup"): a greeting says "team" rather than guess."""
+    name = " ".join((name or "").split()).rstrip(" .,")  # "Acme Inc." would read "Hello Acme Inc. team,"
+    inner = domain_part_of_name(name)
+    if inner:
+        return name_from_title(website_title, domain or name) or (inner if any(c.isupper() for c in inner) else None)
+    return None if not name or describes_rather_than_names(name) else name
+
+
 def normalize_name(name: str) -> str:
     n = name.lower().strip()
     n = re.sub(r"\(.*?\)", " ", n)
@@ -61,21 +91,28 @@ def normalize_name(name: str) -> str:
     return " ".join(words)
 
 
+_DOMAIN_PREFIXES = ("meet", "get", "try", "use", "join", "hello", "hey", "go", "with", "the", "my")
+
+
 def name_from_title(title: str | None, domain: str | None) -> str | None:
     """The company's own name from its homepage title ("Digital Hub Solution | The best ..."), only when one part of
     the title spells the domain's name ("digitalhubsolution.com"). None when nothing matches: no name is guessed."""
     if not title or not domain:
         return None
     label = re.sub(r"[^a-z0-9]", "", registrable_domain(domain).split(".")[0].lower())
+    bare = re.sub(rf"^(?:{'|'.join(_DOMAIN_PREFIXES)})(?=.{{3}})", "", label)  # "meetzentro.com" is the site of "Zentro"
     for part in re.split(r"\s+[|\-\u2013\u2014\u00b7\u2022]\s+|\s*:\s+", title):
         part = " ".join(part.split())
-        if label and 2 <= len(part) <= 80 and re.sub(r"[^a-z0-9]", "", part.lower()) == label:
+        if label and 2 <= len(part) <= 80 and re.sub(r"[^a-z0-9]", "", part.lower()) in (label, bare):
             return part
     return None
 
 
 def registrable_domain(host: str) -> str:
-    host = host.lower().strip(".")
+    host = host.lower().rsplit("@", 1)[-1]
+    if host.count(":") == 1:  # "www.example.com:443"; several colons are an IPv6 address
+        host = host.split(":")[0]
+    host = host.strip(".")
     if host.startswith("www."):
         host = host[4:]
     parts = host.split(".")
