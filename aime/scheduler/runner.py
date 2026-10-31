@@ -503,6 +503,15 @@ def _clock_stops_work(ctx: AppContext, previous: dict | None, trigger: str, chec
         return None
 
 
+def _compare_clock_with_servers(ctx: AppContext) -> None:
+    """Alert only. Judging it must never stop the tick."""
+    try:
+        with ctx.db.session() as s:
+            clock_check.check_servers(s, ctx.settings)
+    except Exception:  # keep the scheduler alive no matter what
+        log.exception("Could not compare the clock with the web servers")
+
+
 def tick(ctx: AppContext, trigger: str = "scheduler", now: datetime | None = None) -> dict:
     window = maintenance.active(ctx.settings.data_dir)
     if window:  # a check-in, but no evidence of the clock: the next tick is judged against the last one that worked
@@ -538,6 +547,7 @@ def tick(ctx: AppContext, trigger: str = "scheduler", now: datetime | None = Non
                     result = {"job": spec.name, "status": "failed", "error": redact(f"{type(exc).__name__}: {exc}")}
                 result["reason"] = reason
                 ran.append(result)
+        _compare_clock_with_servers(ctx)
         write_heartbeat(ctx.settings, {"trigger": trigger, "pid": os.getpid(), "state": "idle", "recovered": recovered,
                                        "ran": [{"job": r["job"], "status": r["status"]} for r in ran],
                                        "priority": process_priority.current()})

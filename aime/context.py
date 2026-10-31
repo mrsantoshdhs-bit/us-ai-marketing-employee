@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 import httpcore
 import httpx
 
-from aime import __version__
+from aime import __version__, clock_check
 from aime.config import Settings
 from aime.db import Database
 from aime.logging_setup import setup_logging
@@ -87,6 +87,13 @@ class _PublicOnlyBackend(httpcore.SyncBackend):
         raise error
 
 
+def _note_server_clock(response: httpx.Response) -> None:
+    """What the server says the time is, for aime.clock_check. A server on this PC shares its clock, so it proves nothing."""
+    host = response.request.url.host
+    if not inside_host(host):
+        clock_check.note_server_date(host, response.headers.get("date"), response.headers.get("age"))
+
+
 def _public_only_transport() -> httpx.HTTPTransport:
     transport = httpx.HTTPTransport()
     transport._pool = httpcore.ConnectionPool(ssl_context=httpx.create_ssl_context(), network_backend=_PublicOnlyBackend())
@@ -108,14 +115,16 @@ class AppContext:
         headers = {"User-Agent": USER_AGENT}
         headers.update(kwargs.pop("headers", {}) or {})
         transport = self.http_transport
+        hooks = {"response": [_note_server_clock]}
         if public_only:
-            kwargs["event_hooks"] = {"request": [_refuse_inside_request]}
+            hooks["request"] = [_refuse_inside_request]
             transport = transport or _public_only_transport()
         return httpx.Client(
             timeout=kwargs.pop("timeout", self.settings.http_timeout),
             headers=headers,
             transport=transport,
             follow_redirects=kwargs.pop("follow_redirects", True),
+            event_hooks=hooks,
             **kwargs,
         )
 
