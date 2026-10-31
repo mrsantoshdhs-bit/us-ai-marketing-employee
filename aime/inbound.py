@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aime.crm_ops import fingerprint
+from aime.db import take_write_lock
 from aime.intake import IntakeBatch, file_sha256, mark, seen
 from aime.knowledge.services import SERVICES
 from aime.models import InboundInquiry
@@ -47,6 +48,8 @@ class InboundPayload(BaseModel):
     def _split_services(cls, v):
         if isinstance(v, str):
             v = [x for x in re.split(r"[;,|]", v) if x.strip()]
+        if v is not None and not isinstance(v, (list, tuple)):
+            raise ValueError("services_interested must be a list or a text")  # a TypeError here would be a server error
         out = []
         by_name = {s.name.lower(): s.id for s in SERVICES.values()}
         for item in v or []:
@@ -97,8 +100,11 @@ def record_inquiry(session: Session, payload: dict, channel: str) -> tuple[Inbou
     """Store a raw inquiry once (deduplicated by email+company+message). Returns (row, created)."""
     p = InboundPayload.model_validate(payload)
     fp = fingerprint("external", p.external_id) if p.external_id else fingerprint(p.email, p.company, p.message)
-    existing = session.execute(select(InboundInquiry).where(InboundInquiry.fingerprint == fp)).scalars().first()
-    if existing:
+    query = select(InboundInquiry).where(InboundInquiry.fingerprint == fp)
+    if existing := session.execute(query).scalars().first():  # no lock for a known one: a sync re-reads many of them
+        return existing, False
+    take_write_lock(session)  # the same inquiry sent twice at once: the second one finds the first, not its unique key
+    if existing := session.execute(query).scalars().first():
         return existing, False
     row = InboundInquiry(channel=channel, payload=p.model_dump(), fingerprint=fp, is_sample=p.is_sample)
     session.add(row)

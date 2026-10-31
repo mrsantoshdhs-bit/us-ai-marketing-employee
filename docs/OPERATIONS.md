@@ -169,7 +169,9 @@ Nothing is sent while `OUTBOUND_EMAIL_ENABLED=false`.
   postal address, a usable recipient, spelling, grammar, clichés. Held or failed drafts need "I reviewed the
   quality findings" to approve; editing re-runs the checks ("Save changes").
 - **Approval** records your name; the first approval makes you the lead's owner. Rejecting the first email
-  stops outreach to that lead. At send time each email is re-checked: if the contact, address, grade,
+  stops outreach to that lead. Rejecting or cancelling an email takes a role that approves, or a custom role with
+  "Reject or cancel an email" (`reject_outbound`). Stop outreach on a person's own lead stays open to them, for when a
+  prospect says stop. At send time each email is re-checked: if the contact, address, grade,
   suppression or policy changed, it is cancelled with the reason.
 - **Lead outreach stage** (lead page): drafted, approved, contacted, then replied / stopped. "They replied"
   stops the sequence.

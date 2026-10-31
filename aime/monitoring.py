@@ -45,7 +45,8 @@ def agent_stats(session: Session, days: int = 7) -> list[dict]:
             "retries": sum(max(0, (r.attempts or 1) - 1) for r in runs),
             "last_run": runs[-1].started_at,
             "last_error": failed[-1].error if failed else None,
-            "llm_calls": sum(r.llm_calls or 0 for r in runs), "llm_tokens": sum(r.llm_tokens or 0 for r in runs),
+            "llm_calls": sum(r.llm_calls or 0 for r in runs), "llm_failures": sum(r.llm_failures or 0 for r in runs),
+            "llm_tokens": sum(r.llm_tokens or 0 for r in runs),
             "llm_ms": sum(r.llm_ms or 0 for r in runs), "llm_cost_usd": round(sum(r.llm_cost_usd or 0 for r in runs), 4),
         })
     return out
@@ -88,7 +89,8 @@ def alert_once(session: Session, level: str, source: str, message: str, settings
             return False
     else:
         same = [a for a in session.execute(select(Alert).where(Alert.source == source, (Alert.acknowledged.is_(False))
-                                                               | (Alert.created_at >= since))).scalars()
+                                                               | (Alert.created_at >= since)
+                                                               | (Alert.acknowledged_at >= since))).scalars()
                 if alert_key(a) == key]
         for a in same:
             if not a.acknowledged:

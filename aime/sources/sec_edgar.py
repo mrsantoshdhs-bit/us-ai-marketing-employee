@@ -142,7 +142,10 @@ class SECEdgarSource(Source):
         resp = client.get(SUBMISSIONS.format(cik=row["cik"]))
         if resp.status_code != 200:
             return None
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:  # one unreadable answer costs one company, not the source's whole run
+            return None
         name = _usable_name(data.get("name")) or row.get("name")
         if not name:
             return None  # never store a company without a real name

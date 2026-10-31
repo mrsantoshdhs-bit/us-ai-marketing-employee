@@ -9,10 +9,12 @@ original Message-ID extracted.
 from __future__ import annotations
 
 import email
+import hashlib
 import imaplib
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from email.errors import HeaderParseError
 from email.header import decode_header, make_header
 from email.message import Message
 from email.utils import getaddresses, parseaddr, parsedate_to_datetime
@@ -25,8 +27,19 @@ BOUNCE_SENDERS = re.compile(r"^(mailer-daemon|postmaster|mail-daemon|mailerdaemo
 BOUNCE_SUBJECT = re.compile(r"(delivery status notification \(failure\)|undeliver(able|ed)|mail delivery (failed|subsystem)|"
                             r"returned mail|delivery failure|failure notice|could not be delivered)", re.I)
 AUTO_SUBJECT = re.compile(r"^(auto(matic)?[- ]?reply|out of (the )?office|autoreply|away from|on vacation|ooo\b)", re.I)
-QUOTE_START = re.compile(r"^(on .{4,200} wrote:|-{2,} ?original message ?-{2,}|from: .+|sent from my \w+|"
-                         r"_{5,}|>.*)$", re.I)
+# A quote looks different in every mail program and language: "On ... wrote:", "El ... escribió:", "Am ... schrieb ...:",
+# or a copy of the earlier message's header lines ("De: ...", "Enviado: ...", "Von: ...").
+_WROTE = r"(?:wrote|escribi[oó]|escreveu|a [eé]crit|schrieb|ha scritto|schreef|skrev)"
+_QUOTED_BY = (rf"(?:on|el|em|le|am|il|op|den)\s.{{4,200}}\b{_WROTE}\b.{{0,100}}\s?:|"
+              rf".{{0,200}}[@\d].{{0,200}}\b{_WROTE}\b.{{0,100}}\s?:")
+_COPY_LINE = (r"-{2,} ?(?:original message|forwarded message|mensaje original|mensaje reenviado|mensagem original|"
+              r"mensagem encaminhada|message d'origine|message transf[eé]r[eé]|urspr[uü]ngliche nachricht|"
+              r"weitergeleitete nachricht|messaggio originale|messaggio inoltrato|oorspronkelijk bericht|"
+              r"doorgestuurd bericht) ?-{2,}")
+_HEADER_COPY = (rf"{_COPY_LINE}|from: .+|(?:de|von|da|van)\s?:\s.{{0,300}}@.{{0,300}}|"
+                r"(?:enviado|gesendet|envoy[eé]|inviato|verzonden)\s?:\s.+|_{5,}")
+QUOTE_START = re.compile(rf"^(?:{_QUOTED_BY}|{_HEADER_COPY}|sent from my \w+|>.*)$", re.I)
+HEADER_COPY = re.compile(rf"^(?:{_HEADER_COPY})$", re.I)  # from here on it is all the earlier message
 
 
 @dataclass
@@ -47,25 +60,61 @@ class ParsedEmail:
     auth_results: str | None = None  # the topmost Authentication-Results header: added by the receiving server
 
 
+def _header(msg: Message, name: str, default: str = "") -> str:
+    """A header as plain text: one with undecodable bytes arrives as a Header object, not a str."""
+    return str(msg.get(name, default) or default)
+
+
+def _decoded(value: str) -> str:
+    """An RFC 2047 header as text. Anyone can send an unknown charset or broken base64: what is there is kept as it is."""
+    try:
+        return str(make_header(decode_header(value)))
+    except (HeaderParseError, LookupError, ValueError):
+        return value
+
+
+def _part_text(part: Message) -> str:
+    """A text part as str. An unknown charset is read as UTF-8, so the sender's words are still seen."""
+    raw = part.get_payload(decode=True)
+    if raw is None:
+        return ""
+    try:
+        return raw.decode(part.get_content_charset() or "utf-8", errors="replace")
+    except (LookupError, ValueError):
+        return raw.decode("utf-8", errors="replace")
+
+
+BLOCKQUOTE = re.compile(r"(?is)<blockquote\b[^>]*>((?:(?!<blockquote\b).)*?)</blockquote>")
+
+
+def _strip_tags(html: str) -> str:
+    return re.sub(r"<[^>]+>", " ", re.sub(r"(?i)<br\s*/?>|</p>|</div>", "\n", html))
+
+
+def _html_text(html: str) -> str:
+    """The text of an HTML part. A <blockquote> becomes ">" lines, so a quote is recognised in any language."""
+    html = re.sub(r"(?is)<(script|style).*?</\1>", " ", html)
+    if "<blockquote" in html.lower():
+        for _ in range(20):  # innermost first
+            html, found = BLOCKQUOTE.subn(lambda m: "\n" + "\n".join(
+                "> " + line.strip() for line in _strip_tags(m.group(1)).split("\n")) + "\n", html)
+            if not found:
+                break
+    return unescape(_strip_tags(html))
+
+
 def _text_of(msg: Message) -> str:
     plain, html = [], []
     for part in msg.walk():
-        if part.get_content_maintype() == "multipart" or part.get("Content-Disposition", "").startswith("attachment"):
+        if part.get_content_maintype() == "multipart" or _header(part, "Content-Disposition").startswith("attachment"):
             continue
         ctype = part.get_content_type()
         if ctype not in ("text/plain", "text/html"):
             continue
-        try:
-            text = part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", errors="replace")
-        except (AttributeError, LookupError):
-            continue
-        (plain if ctype == "text/plain" else html).append(text)
+        (plain if ctype == "text/plain" else html).append(_part_text(part))
     if plain:
         return "\n".join(plain)
-    joined = "\n".join(html)
-    joined = re.sub(r"(?is)<(script|style).*?</\1>", " ", joined)
-    joined = re.sub(r"(?i)<br\s*/?>|</p>|</div>", "\n", joined)
-    return unescape(re.sub(r"<[^>]+>", " ", joined))
+    return _html_text("\n".join(html))
 
 
 # Where a plain-text bounce starts copying the original message (our own footer and addresses are in it).
@@ -84,12 +133,9 @@ def _report_text(part: Message) -> str:
         return ""
     if part.is_multipart():
         return "\n".join(_report_text(p) for p in part.get_payload())
-    if part.get_content_type() != "text/plain" or part.get("Content-Disposition", "").startswith("attachment"):
+    if part.get_content_type() != "text/plain" or _header(part, "Content-Disposition").startswith("attachment"):
         return ""
-    try:
-        return part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", errors="replace")
-    except (AttributeError, LookupError):
-        return ""
+    return _part_text(part)
 
 
 def _dsn_info(msg: Message, own: frozenset[str] = frozenset()) -> tuple[list[str], str | None]:
@@ -103,18 +149,18 @@ def _dsn_info(msg: Message, own: frozenset[str] = frozenset()) -> tuple[list[str
             for block in part.get_payload() if part.is_multipart() else [part]:
                 if not hasattr(block, "get_all"):
                     continue
-                action = (block.get("Action") or "").strip().lower()
-                status = (block.get("Status") or "").strip()
+                action = _header(block, "Action").strip().lower()
+                status = _header(block, "Status").strip()
                 if action != "failed" and not status.startswith("5"):
                     continue  # delayed, delivered, relayed, or the per-message block
                 for key in ("Final-Recipient", "Original-Recipient"):
                     for value in block.get_all(key, []):
-                        addr = value.split(";", 1)[-1].strip().strip("<>").lower()
+                        addr = str(value).split(";", 1)[-1].strip().strip("<>").lower()
                         if "@" in addr and addr not in recipients and addr not in own:
                             recipients.append(addr)
         elif ctype in ("message/rfc822", "text/rfc822-headers") and original is None:
             inner = part.get_payload(0) if part.is_multipart() else email.message_from_string(part.get_payload())
-            original = (inner.get("Message-ID") or "").strip() or None
+            original = _header(inner, "Message-ID").strip() or None
     if not structured:  # a plain-text bounce: read only the report, before any copy of our message
         text = _report_text(msg)
         cut = COPY_START.search(text)
@@ -127,52 +173,107 @@ def _dsn_info(msg: Message, own: frozenset[str] = frozenset()) -> tuple[list[str
 def parse_message(raw: bytes, own: frozenset[str] | set[str] = frozenset()) -> ParsedEmail:
     """`own`: our own addresses (sender, mailbox, unsubscribe address), never taken as a bounced recipient."""
     msg = email.message_from_bytes(raw)
-    name, addr = parseaddr(msg.get("From", ""))
+    name, addr = parseaddr(_header(msg, "From"))
     to = [a for _, a in getaddresses(msg.get_all("To", []))]
     try:
-        received = parsedate_to_datetime(msg.get("Date")).astimezone(timezone.utc).replace(tzinfo=None)
-    except (TypeError, ValueError):
+        received = parsedate_to_datetime(_header(msg, "Date")).astimezone(timezone.utc).replace(tzinfo=None)
+    except (TypeError, ValueError, OverflowError):
         received = utcnow()
-    subject = " ".join(str(make_header(decode_header(msg.get("Subject", "")))).split())  # unfold long headers
-    auto = (msg.get("Auto-Submitted", "no").lower() not in ("no", "") or msg.get("X-Autoreply") is not None
-            or msg.get("Precedence", "").lower() in ("auto_reply", "bulk", "junk") or bool(AUTO_SUBJECT.search(subject)))
+    subject = " ".join(_decoded(_header(msg, "Subject")).split())  # unfold long headers
+    auto = (_header(msg, "Auto-Submitted", "no").lower() not in ("no", "") or msg.get("X-Autoreply") is not None
+            or _header(msg, "Precedence").lower() in ("auto_reply", "bulk", "junk") or bool(AUTO_SUBJECT.search(subject)))
     is_bounce = bool(BOUNCE_SENDERS.search(addr or "")) or msg.get_content_type() == "multipart/report" \
         or bool(BOUNCE_SUBJECT.search(subject) and (auto or BOUNCE_SENDERS.search(addr or "")))
-    bounced, original = _dsn_info(msg, frozenset(a.lower() for a in own)) if is_bounce else ([], None)
+    try:
+        bounced, original = _dsn_info(msg, frozenset(a.lower() for a in own)) if is_bounce else ([], None)
+    except (AttributeError, LookupError, TypeError, ValueError):  # a malformed report: a person reads it
+        bounced, original = [], None
+    body = _text_of(msg)[:20000]
+    in_reply_to = _header(msg, "In-Reply-To").strip() or None
+    from_email = (addr or "").lower()
+    # Without a Message-ID a second delivery of the same email would be a new email: the same content gets the same id.
+    message_id = _header(msg, "Message-ID").strip() or _stand_in_id(from_email, _header(msg, "Date"), subject, in_reply_to, body)
     return ParsedEmail(
-        message_id=(msg.get("Message-ID") or "").strip() or None, in_reply_to=(msg.get("In-Reply-To") or "").strip() or None,
-        references=" ".join((msg.get("References") or "").split()), from_email=(addr or "").lower(),
-        from_name=name or None, to_email=(to[0].lower() if to else None), subject=subject[:300], received_at=received,
-        body_text=_text_of(msg)[:20000], auto_submitted=auto, is_bounce=is_bounce, bounced_addresses=bounced,
-        bounced_message_id=original, auth_results=(str(msg.get("Authentication-Results") or "").strip()[:2000] or None))
+        message_id=message_id, in_reply_to=in_reply_to,
+        references=" ".join(_header(msg, "References").split()), from_email=from_email,
+        from_name=" ".join(_decoded(name or "").split()) or None, to_email=(to[0].lower() if to else None),
+        subject=subject[:300], received_at=received,
+        body_text=body, auto_submitted=auto, is_bounce=is_bounce, bounced_addresses=bounced,
+        bounced_message_id=original, auth_results=(_header(msg, "Authentication-Results").strip()[:2000] or None))
+
+
+def _stand_in_id(*fields: str | None) -> str:
+    digest = hashlib.sha256("\0".join(f or "" for f in fields).encode("utf-8", "replace")).hexdigest()[:32]
+    return f"<no-id-{digest}@aime.invalid>"
+
+
+NEW_TEXT_LIMIT = 5000
+QUOTE_LINE = re.compile(rf"^(?:>.*|{_QUOTED_BY}|{_COPY_LINE}|sent from my \w+.*|_{{5,}}|-{{3}})$", re.I)
+OUR_FOOTER = re.compile(r"(to stop receiving emails from us|receiving emails from us|reply with \"?unsubscribe\"?|"
+                        r"\"?unsubscribe\"? or write to|we emailed you because|you are receiving this because)", re.I)
+
+
+def _split_reply(body: str) -> tuple[str, list[str]]:
+    """(what they wrote above the quote, every line from the quote or their signature on). Our own compliance footer
+    ends the reply too: quoted in a form nothing here recognises, it must still never be read as their words."""
+    lines = body.replace("\r\n", "\n").split("\n")
+    above: list[str] = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        footer = OUR_FOOTER.search(line)
+        if footer:
+            above.append(line[:footer.start()])
+            return "\n".join(above).strip(), lines[i + 1:]
+        if QUOTE_START.match(stripped) or stripped == "--":
+            if stripped.lower().startswith("sent from my") and not any(x.strip() for x in above):
+                continue  # a device signature above the reply, not the end of it
+            return "\n".join(above).strip(), lines[i:]
+        above.append(line)
+    return "\n".join(above).strip(), []
+
+
+def _own_lines(lines: list[str]) -> str:
+    """The sender's words among these lines: quoted lines, quote headers, signatures and our own footer are dropped, and
+    a copied header block ("From:", "De:", ...) ends them, because all below it is the earlier message."""
+    keep, signature = [], False
+    for line in lines:
+        stripped = line.strip()
+        if HEADER_COPY.match(stripped):
+            break
+        if stripped == "--":
+            signature = True
+        elif QUOTE_LINE.match(stripped):
+            signature = False
+        elif not signature and not OUR_FOOTER.search(line):
+            keep.append(line)
+    return "\n".join(keep).strip()
 
 
 def new_text(body: str) -> str:
     """The reply itself: everything before the quoted earlier message or the signature delimiter."""
-    lines = []
-    for line in body.replace("\r\n", "\n").split("\n"):
-        stripped = line.strip()
-        if QUOTE_START.match(stripped) or stripped == "--":
-            if stripped.lower().startswith("sent from my") and not any(x.strip() for x in lines):
-                continue  # a device signature above the reply, not the end of it
-            break
-        lines.append(line)
-    return "\n".join(lines).strip()[:5000]
-
-
-QUOTE_LINE = re.compile(r"^(>.*|on .{4,200} wrote:|-{2,} ?original message ?-{2,}|sent from my \w+.*|_{5,}|-{3})$",
-                        re.I)
-OUR_FOOTER = re.compile(r"(to stop receiving emails from us|reply with \"?unsubscribe\"?|we emailed you because|"
-                        r"you are receiving this because)", re.I)
+    return _split_reply(body)[0][:NEW_TEXT_LIMIT]
 
 
 def own_text(body: str) -> str:
     """The sender's own words when nothing was written above the quote (a reply below or inside the quote, or
-    after "Sent from my iPhone"): quoted lines, quote headers and our own compliance footer are dropped, so
-    our "reply unsubscribe" line is never read as theirs."""
-    keep = [line for line in body.replace("\r\n", "\n").split("\n")
-            if not QUOTE_LINE.match(line.strip()) and not OUR_FOOTER.search(line)]
-    return "\n".join(keep).strip()[:5000]
+    after "Sent from my iPhone"), so our "reply unsubscribe" line is never read as theirs."""
+    return _own_lines(body.replace("\r\n", "\n").split("\n"))[:NEW_TEXT_LIMIT]
+
+
+def below_header_copy(body: str) -> str:
+    """The sender's words below a copied header block, when nothing was written above it. The earlier email is in there
+    too, so this is only read for an opt-out, never for anything to act on."""
+    lines = body.replace("\r\n", "\n").split("\n")
+    last = max((i for i, line in enumerate(lines) if HEADER_COPY.match(line.strip())), default=None)
+    return "" if last is None else _own_lines(lines[last + 1:])[:NEW_TEXT_LIMIT]
+
+
+def rest_of_reply(body: str) -> str:
+    """The sender's own words that new_text leaves out: past its limit, or written below the quote. An opt-out there
+    is still an opt-out."""
+    above, below = _split_reply(body)
+    past_limit = above[NEW_TEXT_LIMIT - 100:] if len(above) > NEW_TEXT_LIMIT else ""  # a phrase may sit across the cut
+    return "\n".join(x for x in (past_limit, _own_lines(below)) if x)
 
 
 FETCH_TRIES = 3  # a message that cannot be fetched is tried again on this many runs, then skipped

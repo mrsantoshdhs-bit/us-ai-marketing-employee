@@ -260,8 +260,12 @@ def test_the_scheduler_status_follows_the_evidence(make_ctx):
     assert board(ctx)["Running while signed out"][0] == "BLOCKED"
     beat(ctx, minutes_ago=90, session="interactive")
     assert board(ctx)["Scheduled jobs"][0] == "FAILED"
+    maintenance.start(ctx.settings.data_dir, 1, "test")
     beat(ctx, state="maintenance")
     assert board(ctx)["Scheduled jobs"][0] == "PAUSED"
+    maintenance.stop(ctx.settings.data_dir)
+    beat(ctx, minutes_ago=90, state="maintenance")  # the window is over and nothing has run since: not "paused"
+    assert board(ctx)["Scheduled jobs"][0] == "FAILED"
     beat(ctx)
     with ctx.db.session() as s:
         am.change_state(s, "stop", "admin")

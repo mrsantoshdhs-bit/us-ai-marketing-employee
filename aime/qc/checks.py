@@ -40,6 +40,19 @@ A_EXCEPTIONS = {"one", "once", "unique", "unit", "united", "universal", "univers
                 "user", "users", "usual", "usually", "utility", "european", "eu", "us", "u", "ubiquitous", "uniform"}
 _URL = re.compile(r"https?://\S+|www\.\S+", re.I)
 _HASHTAG = re.compile(r"#\w+")
+# Figures written in words are figures too. "one", "two" and "three" alone are ordinary English ("one process", "two
+# systems"), so those count only inside a statistic ("three in ten", "two out of three", "three times faster").
+_LOW = r"one|two|three"
+_HIGH = (r"four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
+         r"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion")
+_NUMBER_WORD = re.compile(rf"\b(?:{_HIGH})\b"
+                          rf"|\b(?:{_LOW})\s+(?:percent|per\s+cent)\b"
+                          rf"|\b(?:{_LOW})\s+(?:out\s+of|in|of\s+every)\s+(?:{_LOW})\b"
+                          rf"|\b(?:{_LOW})\s+times\b|\b(?:twice|double|triple)\s+(?:as|the)\b"
+                          r"|\bhalf\s+of\b|\b(?:a|one|two)\s+thirds?\s+of\b|\b(?:a|one|three)\s+quarters?\s+of\b"
+                          r"|\b(?:dozens|hundreds|thousands|millions|billions)\s+of\b", re.I)
+# What Pillow raises on a damaged file: broken PNG chunks surface as SyntaxError.
+_BAD_IMAGE = (OSError, ValueError, SyntaxError, Image.DecompressionBombError)
 
 
 def _prose(title: str, body: str) -> str:
@@ -55,8 +68,11 @@ def check_gate(body: str, settings) -> CheckResult:
 def check_claims(title: str, body: str) -> CheckResult:
     text = _prose(title, body)
     found = []
+    words = _NUMBER_WORD.search(text)
     if re.search(r"\d", text):
         found.append("contains a number")
+    elif words:
+        found.append(f"contains a number in words ('{words.group(0)}')")
     named = sorted({n for n in THIRD_PARTIES if re.search(rf"\b{re.escape(n)}\b", text)})
     if named:
         found.append(f"names {', '.join(named)}")
@@ -209,8 +225,11 @@ def check_image(image_path: Path | None, image_info: dict) -> CheckResult:
         return CheckResult("image", "uncertain", "no image file")
     if image_path.stat().st_size > 5 * 1024 * 1024:
         return CheckResult("image", "fail", "image larger than 5 MB")
-    with Image.open(image_path) as img:
-        size = img.size
+    try:
+        with Image.open(image_path) as img:
+            size = img.size
+    except _BAD_IMAGE as exc:
+        return CheckResult("image", "fail", f"damaged image file ({type(exc).__name__})")
     if size not in ((1080, 1350), (1080, 1080), (1200, 627)):
         return CheckResult("image", "fail", f"unexpected size {size[0]}x{size[1]}")
     if image_info.get("renderer") == "browser":
@@ -237,7 +256,10 @@ def run_quality_checks(session: Session, settings, *, title: str, body: str, has
                        image_path: Path | None, image_info: dict, exclude_id: int | None = None) -> dict:
     image_info = dict(image_info or {})
     if image_path and image_path.exists() and not image_info.get("phash"):
-        image_info["phash"] = image_hash(image_path)
+        try:
+            image_info["phash"] = image_hash(image_path)
+        except _BAD_IMAGE:  # reported by check_image; the post can still be edited and saved
+            image_info["phash"] = None
     results = [
         check_gate(body, settings),
         check_claims(title, body),

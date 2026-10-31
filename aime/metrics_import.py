@@ -4,6 +4,9 @@ Member-post analytics are not generally available through LinkedIn's self-serve 
 supported free path is: export analytics from LinkedIn, drop the CSV in data/imports/linkedin_metrics/.
 Recognized columns (case-insensitive): post url / url / post link, impressions, reactions / likes,
 comments, reposts / shares, clicks.
+
+An export holds each post's running totals, so a later export replaces an earlier one, it does not add to it: every
+import is kept as a row, and a post's figures are those of its newest row (`latest_metric_ids`).
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from sqlalchemy import or_, select
+from sqlalchemy import Select, func, or_, select
 from sqlalchemy.orm import Session
 
 from aime.intake import IntakeBatch, file_sha256, mark, seen
@@ -27,11 +30,21 @@ ALIASES = {
 }
 
 
+MAX_FIGURE = 2 ** 63 - 1  # the largest integer the database can store
+
+
 def _num(v: str | None) -> int:
+    """A figure from the file; anything that is not a sensible count (text, inf, 1e999, a negative) counts as 0."""
     try:
-        return int(float(str(v).replace(",", "").strip() or 0))
-    except ValueError:
+        n = int(float(str(v).replace(",", "").strip() or 0))
+    except (ValueError, OverflowError):
         return 0
+    return n if 0 <= n <= MAX_FIGURE else 0
+
+
+def latest_metric_ids() -> Select:
+    """The row that holds each post's current figures (exports hold running totals, see the module docstring)."""
+    return select(func.max(ContentMetric.id)).where(ContentMetric.content_id.is_not(None)).group_by(ContentMetric.content_id)
 
 
 def import_metrics_dir(session: Session, folder: Path) -> tuple[int, IntakeBatch]:

@@ -12,6 +12,7 @@ Rules:
 
 from __future__ import annotations
 
+import re
 import smtplib
 import socket
 from datetime import datetime, time, timedelta
@@ -25,13 +26,14 @@ from aime.agents.base import BaseAgent, RetryPolicy
 from aime import automation
 from aime.agents.contracts import BlockedItem
 from aime.agents.qualification import LeadQualificationAgent
-from aime.crm_ops import is_suppressed, log_activity
+from aime.crm_ops import is_suppressed, log_activity, suppress
 from aime.email_templates import draft_reply
 from aime.integrations.email_smtp import EmailNotReady, EmailSender, compliance_problem, new_message_id
 from aime.knowledge.services import service_name
-from aime.models import Activity, Alert, FollowUp, InboundEmail, InboundInquiry, Lead, Opportunity, Signal
+from aime.models import Activity, Alert, Contact, FollowUp, InboundEmail, InboundInquiry, Lead, Opportunity, Signal
+from aime.monitoring import alert_once, resolve_alerts
 from aime.outreach import (STOP_STATUSES, draft_outreach, draft_reengage, eligible, gather_evidence, record_delivery,
-                           set_status)
+                           set_status, stop_sequence)
 from aime.pipeline import pipeline_checks
 from aime.outreach import policy as outreach_policy
 from aime.qc.email_checks import run_email_checks
@@ -43,6 +45,10 @@ CONSENTED = ("inquiry", "opt_in")
 OPEN_FOLLOWUP = ("pending", "awaiting_approval", "approved", "sending", "uncertain")
 COUNTS_AS_SENT = ("sent", "sending", "uncertain")  # for the daily limits: an uncertain email may have gone out
 SEND_BUSY = "Another run is sending emails right now; this one goes out on the next run"
+# A refusal that says the address itself does not exist (RFC 3463 5.1.x, not those about our own sender address).
+DEAD_ADDRESS = re.compile(r"\b5\.1\.(0|1|2|3|6|10)\b|no such|user unknown|unknown user|does not exist|address not found|"
+                          r"no mailbox|mailbox not found|recipient not found|invalid recipient", re.I)
+SIGN_IN_ALERT = "mail:sign_in"
 
 
 class SalesInput(BaseModel):
@@ -115,6 +121,24 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         cfg = self.settings.section("followup")
         out = SalesOutput()
         self._recover_stale_sends(session, now)
+        # Research, inbound and followups each run this agent under their own job lock: two runs drafting at once would
+        # both find "no email yet" and write two first-touch emails for one person. The other run drafts on its next turn.
+        from aime.scheduler.runner import FileLock  # here, not at import time: the runner imports the agents
+
+        lock = FileLock(self.settings.locks_dir / "drafts.lock", stale_seconds=3600)
+        if lock.acquire():
+            try:
+                self._draft(session, inp, now, cfg, out)
+                session.commit()  # before the lock opens: the next run's "no email yet" check must see these
+            finally:
+                lock.release()
+        else:
+            self.log.info("Another run is drafting right now: this one only sends")
+        self._send_approved(session, now, cfg, out)
+        out.pipeline = pipeline_checks(session, self.settings, now, self.name)
+        return out
+
+    def _draft(self, session: Session, inp: SalesInput, now: datetime, cfg: dict, out: SalesOutput) -> None:
         stmt = select(Lead).where(Lead.status == "qualified").order_by(Lead.score.desc(), Lead.id)
         if inp.lead_ids:
             stmt = stmt.where(Lead.id.in_(inp.lead_ids))
@@ -141,9 +165,6 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 self._ensure_sequence(session, lead, now, cfg, out)
         self._reengage(session, now, out, budget, inp.lead_ids)
         self._progress_sequences(session, now, cfg, out)
-        self._send_approved(session, now, cfg, out)
-        out.pipeline = pipeline_checks(session, self.settings, now, self.name)
-        return out
 
     # ------------------------------------------------------------------
     def _ensure_opportunity(self, session: Session, lead: Lead, out: SalesOutput) -> None:
@@ -308,6 +329,11 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 FollowUp.lead_id == lead_id, FollowUp.channel == "email", FollowUp.status.in_(OPEN_FOLLOWUP))).first()
             if has_open:
                 continue
+            same_kind = FollowUp.kind == "outreach" if outreach else FollowUp.kind.is_(None)
+            if session.execute(select(FollowUp.id).where(
+                    FollowUp.lead_id == lead_id, FollowUp.channel == "email", same_kind, FollowUp.step > last.step,
+                    FollowUp.status == "rejected")).first():
+                continue  # a person said no to the next step: a rejection decides the email, it is not drafted again
             gap = timedelta(days=intervals[last.step] - intervals[last.step - 1])
             if last.sent_at and now >= last.sent_at + gap:
                 # The next step answers the last one we sent, so it stays in the same conversation.
@@ -392,6 +418,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         ready, reason = self.sender.status()
         in_window = self._in_send_window(now, cfg)
         limits = self._outreach_limits(session, now, cfg)
+        sign_in_failed = False
         for f in approved:
             contact = f.contact
             lead = f.lead
@@ -493,13 +520,23 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             try:
                 msg_id = self.sender.send(f.to_email or contact.email, f.subject, f.body or "", in_reply_to=f.in_reply_to,
                                           message_id=f.message_id, references=self._references(session, f))
-            except (EmailNotReady, smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused,
+            except smtplib.SMTPRecipientsRefused as exc:
+                self._recipient_refused(session, f, exc, out)
+                session.commit()
+                continue
+            except (EmailNotReady, smtplib.SMTPSenderRefused,
                     smtplib.SMTPConnectError, smtplib.SMTPAuthenticationError, ConnectionRefusedError,
                     socket.gaierror) as exc:
                 # Rejected or never connected: nothing was delivered, safe to try again later.
                 f.status, f.send_started_at = "approved", None
                 f.blocked_reason = redact(f"Send failed (not delivered): {exc}")[:300]
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+                if isinstance(exc, smtplib.SMTPAuthenticationError) or (isinstance(exc, EmailNotReady) and "oauth" in str(exc).lower()):
+                    # Every other email would fail the same way, and repeated refused sign-ins can lock the mailbox.
+                    sign_in_failed, ready, reason = True, False, f.blocked_reason
+                    alert_once(session, "error", self.name, "The sales mailbox refused the sign-in, so approved emails are "
+                               f"waiting and nothing is being sent: {f.blocked_reason}"[:500], self.settings,
+                               key=SIGN_IN_ALERT)
                 session.commit()
                 continue
             except ValueError as exc:
@@ -531,6 +568,34 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             log_activity(session, f"Email sent: {f.subject}", self.name, type_="email_sent", body=f.body,
                          company_id=f.company_id, lead_id=f.lead_id)
             session.commit()
+        if out.emails_sent and not sign_in_failed:
+            resolve_alerts(session, (SIGN_IN_ALERT,), set())
+
+    def _recipient_refused(self, session: Session, f: FollowUp, exc: smtplib.SMTPRecipientsRefused, out: SalesOutput) -> None:
+        """The mail server said no at RCPT TO. Temporary (4xx): tried again later. Permanent (5xx): asking again every run
+        cannot help. An address that does not exist is handled as a bounce; any other refusal goes back to a person."""
+        to = f.to_email or (f.contact.email if f.contact else "") or ""
+        answers = [(code, message.decode("utf-8", "replace") if isinstance(message, bytes) else str(message))
+                   for code, message in exc.recipients.values()]
+        said = redact("; ".join(f"{code} {message}" for code, message in answers))
+        f.send_started_at = None
+        if not answers or any(code < 500 for code, _ in answers):
+            f.status, f.blocked_reason = "approved", f"Send failed (not delivered): {said}"[:300]
+            out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+            return
+        if DEAD_ADDRESS.search(said) and not self.sender.recipient_for(to)[1]:  # not the test address standing in for it
+            f.status, f.delivery_status = "cancelled", "bounced"
+            f.blocked_reason = f"Not sent: the mail server says this address does not exist ({said})"[:300]
+            for c in session.execute(select(Contact).where(func.lower(Contact.email) == to.lower())).scalars():
+                c.email_status = "bounced"
+            suppress(session, to, "Bounced (refused by the mail server)")
+            if f.lead and f.lead.outreach_status:
+                stop_sequence(session, f.lead, "bounced", "Email refused: the address does not exist", self.name)
+            out.cancelled += 1
+        else:
+            automation.return_to_person(f, f"the mail server refused it ({said})")
+            out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+        session.add(Alert(level="warning", source=self.name, message=f"Follow-up #{f.id}: {f.blocked_reason}"[:500]))
 
     def _outreach_limits(self, session: Session, now: datetime, cfg: dict) -> dict:
         """Outreach already sent today (in the send-window time zone), overall and per recipient domain.

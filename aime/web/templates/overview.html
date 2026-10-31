@@ -30,7 +30,7 @@
     <div class="card">
       {% for a in alerts %}
         <div style="margin-bottom:6px">{{ state_pill(a.level|upper) }} <span class="small">{{ a.created_at|local }}</span> {{ a.message }}
-          <form class="inline" method="post" action="/alerts/{{ a.id }}/ack"><button class="secondary">Acknowledge</button></form></div>
+          {% if can_edit %}<form class="inline" method="post" action="/alerts/{{ a.id }}/ack"><button class="secondary">Acknowledge</button></form>{% endif %}</div>
       {% else %}<span class="muted">No alerts.</span>{% endfor %}
     </div>
   </div>

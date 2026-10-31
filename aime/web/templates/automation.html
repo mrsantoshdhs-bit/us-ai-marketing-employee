@@ -15,7 +15,7 @@
   <div class="card-head"><h3>Controls</h3><span class="meta">pause, stop and emergency stop are open to everyone signed in; start and resume need an administrator</span></div>
   <div class="row-actions">
     {% for action, label, cls in [('start', 'Start', ''), ('resume', 'Resume', ''), ('pause', 'Pause sending', 'secondary'), ('stop', 'Stop', 'secondary'), ('emergency_stop', 'Emergency stop', 'danger solid')] %}
-    {%- set allowed = state in transitions[action][0] and (is_admin or action not in admin_actions) -%}
+    {%- set allowed = state in transitions[action][0] and (is_admin if action in admin_actions else can_edit) -%}
     <form class="inline" method="post" action="/automation/state/{{ action }}"><button class="{{ cls }}" {{ 'disabled' if not allowed }}>{{ label }}</button></form>
     {% endfor %}
   </div>

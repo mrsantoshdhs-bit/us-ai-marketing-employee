@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy import or_, select
 
 from aime.crm_ops import log_activity
+from aime.db import take_write_lock
 from aime.models import Activity, Assignment, Attachment, Opportunity, Quote, StageChange, User
 from aime.timeutil import utcnow
 
@@ -27,6 +28,8 @@ ALLOWED = {".pdf": "application/pdf", ".doc": "application/msword",
            ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
            ".csv": "text/csv", ".txt": "text/plain", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 QUOTE_ACTIONS = {"send": "sent", "accept": "accepted", "reject": "rejected", "expire": "expired"}
+# what each action can follow: a decision is final, so a stale tab or a second click cannot take it back or repeat it
+QUOTE_FROM = {"send": ("draft",), "accept": ("draft", "sent"), "reject": ("draft", "sent"), "expire": ("draft", "sent")}
 
 
 def safe_name(name: str) -> str:
@@ -100,20 +103,26 @@ def register(app, C, render, back, who) -> None:
         if action not in QUOTE_ACTIONS:
             raise HTTPException(400)
         with C().db.session() as s:
+            take_write_lock(s)
             opp = _opp(s, opp_id)
             q = s.get(Quote, quote_id)
             if q is None or q.opportunity_id != opp.id:
                 raise HTTPException(404)
+            if q.status not in QUOTE_FROM[action]:
+                return back(f"/opportunities/{opp_id}", f"Quote #{q.id} is already {q.status}: nothing changed")
             q.status = QUOTE_ACTIONS[action]
             q.decided_at = utcnow() if action in ("accept", "reject", "expire") else q.decided_at
             note = f"Quote #{q.id} {q.status}: {q.currency} {q.amount:,.2f}"
             if action == "send" and opp.stage in ("new", "discovery") and "proposal" in stage_names(C().settings):
                 move(s, opp, "proposal", who(request), f"quote #{q.id} sent", settings=C().settings)
-            if action == "accept" and not opp.est_value:
-                opp.est_value = q.amount  # the value a person agreed, not an estimate
+            told = note
+            if action == "accept" and q.currency == "USD":
+                opp.est_value = q.amount  # the value a person agreed replaces an earlier estimate
+            elif action == "accept":  # deal values and revenue are in USD: never a euro amount with a dollar sign
+                told = f"{note}. The deal's value is in USD, so it did not change: enter the agreed value in USD on the deal"
             log_activity(s, note, who(request), type_="quote", company_id=opp.company_id, lead_id=opp.lead_id,
                          opportunity_id=opp.id)
-        return back(f"/opportunities/{opp_id}", note)
+        return back(f"/opportunities/{opp_id}", told)
 
     @app.post("/opportunities/{opp_id}/attachments")
     async def upload(request: Request, opp_id: int, file: Annotated[UploadFile, File()]):

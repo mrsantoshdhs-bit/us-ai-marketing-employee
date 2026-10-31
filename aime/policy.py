@@ -44,6 +44,13 @@ def policy_config(settings: Settings) -> dict:
     }
 
 
+def _term_pattern(term: str) -> str:
+    """A hold term and its plural ("discount, discounts", "case study, case studies")."""
+    if term.endswith("y"):
+        return rf"\b{re.escape(term[:-1])}(?:y|ies)\b"
+    return rf"\b{re.escape(term)}(?:s|es)?\b"
+
+
 def _rule(name: str, ok: bool, detail: str) -> dict:
     return {"rule": name, "ok": ok, "detail": detail}
 
@@ -72,7 +79,7 @@ def evaluate_post(item: ContentItem, cfg: dict, settings: Settings, now: datetim
                        f"service {item.service}" + ("" if not allowed or item.service in allowed else " not allowed")))
 
     text = f"{item.title}\n{item.body}".lower()
-    hits = [t for t in cfg["hold_terms"] if re.search(rf"\b{re.escape(t)}\b", text)]
+    hits = [t for t in cfg["hold_terms"] if re.search(_term_pattern(t), text)]
     rules.append(_rule("sensitive_terms", not hits, "mentions " + ", ".join(hits) if hits else "none found"))
 
     age = (now - item.created_at).days if item.created_at else 0
