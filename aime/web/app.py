@@ -836,7 +836,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 InboundEmail.received_at >= now - timedelta(days=7))).scalars() if r.id not in asked]
             ready, why = booking.ready(s, C().settings)
         return render(request, "meetings.html", upcoming=[m for m in rows if m.status == "scheduled" and m.ends_at >= now][::-1],
-                      past=[m for m in rows if not (m.status == "scheduled" and m.ends_at >= now)],
+                      ended=[m for m in rows if m.status == "scheduled" and m.ends_at < now],
+                      past=[m for m in rows if m.status != "scheduled"],
                       proposals=proposals, requests=requests, booking_ready=ready, booking_why=why,
                       slot_label=booking.label, slots_of=lambda p: [datetime.fromisoformat(x) for x in p.slots or []])
 
