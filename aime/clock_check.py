@@ -12,9 +12,9 @@ right (a long holiday, or a clock that used to be wrong and left records in the 
 outside the database, so restoring a backup does not undo it.
 
 A wrong clock under those limits passes the stop, so what web servers say is compared too: the Date header of the requests
-research and the website checks make anyway (aime.context; no request is made for it). Several servers that disagree with
-this PC by the same amount raise one warning naming the clock. Alert only: it stops nothing, and one wrong server, or a page
-kept by a cache, is not enough. The mail server's times are not used: a message's arrival time says nothing about a clock
+research and the website checks make anyway (aime.context; no request is made for it). When most of the sites heard in a run
+disagree with this PC by the same amount, one warning names the clock. Alert only: it stops nothing, and one wrong server, or a
+page kept by a cache, is not enough. The mail server's times are not used: a message's arrival time says nothing about a clock
 that runs ahead.
 """
 
@@ -45,24 +45,32 @@ SERVERS_ALERT_KEY = "clock:servers"  # not under ALERT_KEY: closing the stop's a
 SERVER_LIMIT = timedelta(hours=1)
 SERVER_SPREAD = timedelta(minutes=10)  # a wrong clock is off by the same amount from every server; stale pages are not
 SERVERS_NEEDED = 2
+SERVERS_HEARD = 4  # a warning needs this many sites heard in one run: two kept pages among two requests prove nothing
+SERVER_KEPT_AGE = timedelta(minutes=5)  # a page a cache has kept this long says little about the time
 MAX_SERVERS = 200
 CONFIRM_QUIET = timedelta(hours=24)  # after `aime confirm-clock` a person has looked: servers do not reopen it for a day
 _servers: dict[str, timedelta] = {}  # this process's requests: this PC's clock minus what the server said, per site
 _servers_lock = threading.Lock()
 
 
-def note_server_date(host: str, date_header: str | None, age_header: str | None = None) -> None:
-    """A server's Date header against this PC's clock. Never raises: it runs inside every request. Age is how long a cache
-    has kept the page, whose Date is then that much older."""
+def note_server_date(host: str, date_header: str | None, age_header: str | None = None, last_modified: str | None = None,
+                     cache_status: str | None = None) -> None:
+    """A server's Date header against this PC's clock. Never raises: it runs inside every request, and these are a stranger's
+    headers. A page that looks kept by a cache is left out, as its Date may be old: a long Age, a cache saying it had the page,
+    or a Date right beside its own Last-Modified. A short Age is taken off."""
     try:
         said = to_naive_utc(parsedate_to_datetime(date_header))
         age = timedelta(seconds=int(age_header)) if age_header and age_header.strip().isdigit() else timedelta()
-        site = registrable_domain(host)
-    except Exception:  # noqa: BLE001 - a stranger's header: whatever it holds, the request goes on
+        if age > SERVER_KEPT_AGE or "hit" in (cache_status or "").lower():
+            return
+        if last_modified and abs(said - to_naive_utc(parsedate_to_datetime(last_modified))) <= SERVER_KEPT_AGE:
+            return
+        site, gap = registrable_domain(host), utcnow() - said - age
+    except Exception:  # noqa: BLE001 - whatever it holds, the request goes on
         return
     with _servers_lock:
         if site in _servers or len(_servers) < MAX_SERVERS:
-            _servers[site] = utcnow() - said - age
+            _servers[site] = gap
 
 
 def _agreeing(gaps: list[timedelta]) -> list[timedelta]:
@@ -76,8 +84,9 @@ def _agreeing(gaps: list[timedelta]) -> list[timedelta]:
 
 
 def check_servers(session, settings) -> None:
-    """Judge what this process's requests heard, then forget it. A warning needs at least two sites off by more than an hour
-    by the same amount, and more of them than sites that agree with this PC; it closes when two or more sites agree with it."""
+    """Judge what this process's requests heard, then forget it. The majority of the sites heard decides. A warning needs
+    SERVERS_HEARD sites, most of them off by more than an hour and by the same amount; it closes when two or more sites, and
+    most of those heard, agree with this PC: one stale site does not hold it open."""
     from aime.monitoring import alert_once, resolve_alerts
 
     with _servers_lock:
@@ -88,13 +97,13 @@ def check_servers(session, settings) -> None:
     confirmed = _parse(_confirmation(settings.data_dir).get("at"))
     if confirmed is not None and timedelta() <= utcnow() - confirmed <= CONFIRM_QUIET:
         resolve_alerts(session, (SERVERS_ALERT_KEY,), set())
-    elif len(wrong) >= SERVERS_NEEDED and len(wrong) > right:
+    elif len(gaps) >= SERVERS_HEARD and len(wrong) >= SERVERS_NEEDED and len(wrong) * 2 > len(gaps):
         gap = wrong[len(wrong) // 2]
         hours = abs(gap).total_seconds() / 3600
         alert_once(session, "warning", "scheduler", f"The PC's clock looks wrong: it is about {hours:.1f} hours "
-                   f"{'ahead of' if gap > timedelta() else 'behind'} the time {len(wrong)} web servers gave. Work goes on, but dates "
-                   f"on a wrong clock can move leads and emails. {ADVICE}", settings, key=SERVERS_ALERT_KEY)
-    elif right >= SERVERS_NEEDED and not wrong:
+                   f"{'ahead of' if gap > timedelta() else 'behind'} the time {len(wrong)} of {len(gaps)} web servers gave. Work goes on, "
+                   f"but dates on a wrong clock can move leads and emails. {ADVICE}", settings, key=SERVERS_ALERT_KEY)
+    elif right >= SERVERS_NEEDED and right * 2 > len(gaps):
         resolve_alerts(session, (SERVERS_ALERT_KEY,), set())
 
 

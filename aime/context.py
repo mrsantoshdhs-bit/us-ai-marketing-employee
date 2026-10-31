@@ -91,7 +91,9 @@ def _note_server_clock(response: httpx.Response) -> None:
     """What the server says the time is, for aime.clock_check. A server on this PC shares its clock, so it proves nothing."""
     host = response.request.url.host
     if not inside_host(host):
-        clock_check.note_server_date(host, response.headers.get("date"), response.headers.get("age"))
+        headers = response.headers
+        clock_check.note_server_date(host, headers.get("date"), headers.get("age"), headers.get("last-modified"),
+                                     " ".join(headers.get(h, "") for h in ("x-cache", "cf-cache-status", "x-cache-status", "x-proxy-cache")))
 
 
 def _public_only_transport() -> httpx.HTTPTransport:

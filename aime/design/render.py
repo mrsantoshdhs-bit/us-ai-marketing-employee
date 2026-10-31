@@ -20,6 +20,8 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
+import time
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,8 +56,10 @@ BROWSER_CANDIDATES = [
 # folder or a render's own temp folder: each new one of those (a test run, a copy) would sign in once more, and that is what
 # locked the account. %TEMP% can be changed by other groups on some PCs, %LOCALAPPDATA% only by this user and administrators.
 OLD_OS_PASSWORD_STATE = Path(tempfile.gettempdir()) / "aime-browser-os-password.json"
-OS_PASSWORD_STATE = (Path(os.environ["LOCALAPPDATA"]) / "aime" / "browser-os-password.json" if os.environ.get("LOCALAPPDATA")
-                     else OLD_OS_PASSWORD_STATE)
+# A task with logon type Password runs with this user's profile loaded, so it finds the same folder; should a session lack the
+# variable, the profile folder gives the same place. An answer missing in some session costs one sign-in failure, not a lockout.
+_APP_DATA = os.environ.get("LOCALAPPDATA") or (str(Path.home() / "AppData" / "Local") if os.name == "nt" else "")
+OS_PASSWORD_STATE = Path(_APP_DATA) / "aime" / "browser-os-password.json" if _APP_DATA else OLD_OS_PASSWORD_STATE
 # Seconds for one browser start. A first start took 16-76 s on this PC with other work running: 60 s was too tight.
 BROWSER_TIMEOUT = 120
 
@@ -155,22 +159,47 @@ def _only_the_answer(saved: dict) -> dict:
     return {k: v for k, v in saved.items() if k.startswith("os_password_") and isinstance(v, (bool, int, str))}
 
 
+def _read_answer(path: Path) -> dict:
+    """The saved answer, or nothing. A file being replaced this instant can refuse a reader on Windows: one miss would be one
+    failed Windows sign-in, so it is asked again. Missing or damaged: nothing."""
+    for attempt in range(5):
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            return _only_the_answer(saved) if isinstance(saved, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except ValueError:
+            return {}
+        except OSError:
+            if attempt < 4:
+                time.sleep(0.05)
+    return {}
+
+
 def _save_answer(answer: dict) -> None:
+    """Whole or not at all, and only when it changed: a reader never finds half a file. A render that cannot save now loses
+    nothing: the answer on file stays, and the browser saves it again next time."""
+    if _read_answer(OS_PASSWORD_STATE) == answer:
+        return
     OS_PASSWORD_STATE.parent.mkdir(parents=True, exist_ok=True)
-    OS_PASSWORD_STATE.write_text(json.dumps(answer), encoding="utf-8")
+    partial = OS_PASSWORD_STATE.with_name(f"{OS_PASSWORD_STATE.name}.{os.getpid()}.{threading.get_ident()}.partial")
+    try:
+        partial.write_text(json.dumps(answer), encoding="utf-8")
+        os.replace(partial, OS_PASSWORD_STATE)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def _bring_over_old_answer() -> None:
-    """Once, on the first render after the file moved: the answer already known, so that the move costs no sign-in. The old
-    file stays, for the older version a rollback brings back; nothing reads it after this."""
-    if OS_PASSWORD_STATE == OLD_OS_PASSWORD_STATE or OS_PASSWORD_STATE.exists():
+    """On the first render after the file moved, or if the new file holds no answer: the answer already known, so that this
+    costs no sign-in. The old file stays, for the older version a rollback brings back; nothing else reads it."""
+    if OS_PASSWORD_STATE == OLD_OS_PASSWORD_STATE or _read_answer(OS_PASSWORD_STATE):
         return
     try:
-        old = json.loads(OLD_OS_PASSWORD_STATE.read_text(encoding="utf-8"))
-        answer = _only_the_answer(old) if isinstance(old, dict) else {}
+        answer = _read_answer(OLD_OS_PASSWORD_STATE)
         if answer:
             _save_answer(answer)
-    except (OSError, ValueError):
+    except OSError:
         pass
 
 
@@ -179,11 +208,7 @@ _bring_over_old_answer()
 
 def seed_profile(profile: Path) -> None:
     """Give a new profile the browser's saved answer about the Windows password, so it does not sign in to find out."""
-    try:
-        answer = json.loads(OS_PASSWORD_STATE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-    answer = _only_the_answer(answer) if isinstance(answer, dict) else {}
+    answer = _read_answer(OS_PASSWORD_STATE)
     if answer:
         profile.mkdir(parents=True, exist_ok=True)
         (profile / "Local State").write_text(json.dumps({"password_manager": answer}), encoding="utf-8")

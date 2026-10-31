@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from aime.dedupe import clean_company_name, domain_from_email, find_duplicate, normalize_name
 from aime.matching import detect_competitor, match_services
-from aime.models import Activity, Company, Contact, FollowUp, Lead, Opportunity, Signal, Suppression
+from aime.models import Activity, Company, Contact, FollowUp, InboundEmail, Lead, Opportunity, Signal, Suppression
 from aime.sources.base import CompanyCandidate
 from aime.timeutil import utcnow
 
@@ -194,7 +194,7 @@ def erase_person(session: Session, email: str, actor: str) -> dict[str, int]:
     details, the inquiries and emails they sent us, our emails to them and the activity lines naming them are erased.
     The address stays only on the suppression list, so nothing is ever sent to it again. Company records stay."""
     from aime.automation import audit
-    from aime.models import InboundEmail, InboundInquiry, SkippedMail
+    from aime.models import InboundInquiry, SkippedMail
 
     email = (email or "").strip().lower()
     if "@" not in email:
@@ -279,6 +279,8 @@ def merge_companies(session: Session, keeper: Company, dup: Company, actor: str)
         lead.company_id = keeper.id
     for opp in session.execute(select(Opportunity).where(Opportunity.company_id == dup.id)).scalars():
         opp.company_id = keeper.id
+    for mail in session.execute(select(InboundEmail).where(InboundEmail.company_id == dup.id)).scalars():
+        mail.company_id = keeper.id  # what they wrote, an opt-out above all, stays with the company
     for attr in ("website", "domain", "state", "city", "industry", "employee_range", "description", "phone"):
         if not getattr(keeper, attr) and getattr(dup, attr):
             setattr(keeper, attr, getattr(dup, attr))

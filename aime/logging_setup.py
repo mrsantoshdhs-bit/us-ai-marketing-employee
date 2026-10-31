@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import os
@@ -44,18 +45,31 @@ JSONL_MAX_BYTES, JSONL_KEEP = 10_000_000, 5
 
 
 def rotate(path: Path, max_bytes: int = JSONL_MAX_BYTES, keep: int = JSONL_KEEP) -> bool:
-    """Past max_bytes: path -> path.1 -> ... -> path.<keep>; the oldest goes. Logs only, never business data."""
+    """Past max_bytes: path -> path.1 -> ... -> path.<keep>; the oldest goes. Logs only, never business data. The current file
+    moves aside first: while a reader holds it nothing moves, so a held file costs no older copy. If an older copy is held, the
+    file that moved aside waits and goes first next time."""
+    moving = path.with_name(f"{path.name}.rotating")
     try:
+        if moving.exists():
+            _shift_older_copies(path, moving, keep)
         if not path.exists() or path.stat().st_size < max_bytes:
             return False
-        for i in range(keep - 1, 0, -1):
-            older = path.with_name(f"{path.name}.{i}")
-            if older.exists():
-                older.replace(path.with_name(f"{path.name}.{i + 1}"))
-        path.replace(path.with_name(f"{path.name}.1"))
-        return True
+        path.replace(moving)
     except OSError:
         return False  # another process holds it: try again next time
+    try:
+        _shift_older_copies(path, moving, keep)
+    except OSError:
+        pass
+    return True
+
+
+def _shift_older_copies(path: Path, moving: Path, keep: int) -> None:
+    for i in range(keep - 1, 0, -1):
+        older = path.with_name(f"{path.name}.{i}")
+        if older.exists():
+            older.replace(path.with_name(f"{path.name}.{i + 1}"))
+    moving.replace(path.with_name(f"{path.name}.1"))
 
 
 def append_jsonl(path: Path, record: dict[str, Any]) -> None:
@@ -73,6 +87,8 @@ class AppendingLog:
     nothing holds the file between writes: on Windows it can then be rotated while the dashboard runs, and `aime scrub-logs`
     can put a cleaned copy in its place. A write that fails is dropped: logging must never stop the dashboard."""
 
+    encoding = "utf-8"
+
     def __init__(self, path: Path, max_bytes: int = DASHBOARD_LOG_MAX_BYTES, keep: int = JSONL_KEEP):
         self.path, self.max_bytes, self.keep = path, max_bytes, keep
         self._lock = threading.Lock()
@@ -88,6 +104,9 @@ class AppendingLog:
                 rotate(self.path, self.max_bytes, self.keep)
         return len(text)
 
+    def writable(self) -> bool:
+        return True
+
     def flush(self) -> None:
         pass
 
@@ -99,7 +118,8 @@ class AppendingLog:
 
 
 # An access line's request: uvicorn writes `"GET /path?query HTTP/1.1" 200 OK`.
-_REQUEST_WITH_QUERY = re.compile(rb'("(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS) [^"? \r\n]*)\?[^"\r\n]*?( HTTP/\d(?:\.\d)?")')
+# A query can hold anything a client sent, a quotation mark too, so it runs to the line's last version mark.
+_REQUEST_WITH_QUERY = re.compile(rb'("(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS) [^? \r\n]*)\?[^\r\n]*( HTTP/\d(?:\.\d)?")')
 SCRUB_TRIES, SCRUB_PAUSE = 5, 0.2
 
 
@@ -111,8 +131,14 @@ def scrub_access_log(path: Path, sleep=time.sleep) -> dict[str, int | str]:
     While something appends: what arrived during the work is copied at the end, just before the replace. A process that
     holds the file open (a dashboard started by an older version) makes Windows refuse the replace: after a few tries the log
     is left as it was and the result says "in use". On Linux a holder cannot be seen, so stop it first there. What remains is
-    a line written in the instant between the last copy and the replace. Returns counts only, never a line's content."""
+    a line written in the instant between the last copy and the replace. A temp file left by a run that was killed goes at the
+    start of the next one. Returns counts only, never a line's content."""
     result: dict[str, int | str] = {"lines": 0, "changed": 0, "state": "clean"}
+    for left in path.parent.glob(f"{glob.escape(path.name)}.scrub.*.tmp"):
+        try:
+            left.unlink(missing_ok=True)
+        except OSError:  # a run still working holds it
+            pass
     if not path.exists():
         result["state"] = "no file"
         return result
