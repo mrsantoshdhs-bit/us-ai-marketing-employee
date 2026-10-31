@@ -93,6 +93,7 @@ def seed(ctx, age_days: int, n: int = 1, grade_b_at_current_score: bool = True) 
         if grade_b_at_current_score:
             ctx.settings.business["qualification"]["grade_b"] = lead.score
             ctx.settings.business["qualification"]["grade_a"] = lead.score + 30
+        lead.status = "qualified"  # it entered while its post was fresh: a post this old no longer takes a new lead in
     assert LeadQualificationAgent(ctx).run({"lead_ids": [lead_id]}).ok
     with ctx.db.session() as s:
         lead = s.get(Lead, lead_id)
