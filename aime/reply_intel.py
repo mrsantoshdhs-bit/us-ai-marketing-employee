@@ -1027,6 +1027,10 @@ def _nothing_new(row: InboundEmail, f: FollowUp | None, lead: Lead, person: bool
         return False
     if lead.outreach_status in ("unsubscribed", "bounced") or not (f is not None or row.sender_verified or person):
         return False
+    # Below a "--" line is a signature to every other rule, and a disclaimer there says "not" and "delete". An opt-out there still counts here.
+    signed = _flat(own_text(re.sub(r"(?m)^\s*--\s*$", "", row.body_text or "")))
+    if dict(PATTERNS)["unsubscribe"].search(signed) or ELSEWHERE_OPT_OUT.search(signed):
+        return False
     said = _flat(f"{row.new_text or own_text(row.body_text or '')}\n{rest_of_reply(row.body_text or '')}")
     return not (MAY_MEAN_NO.search(said) or REMOVAL_WORDS.search(said) or UPSET.search(said) or LEGAL_MENTION.search(said))
 

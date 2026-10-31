@@ -686,6 +686,15 @@ def test_a_line_that_may_mean_no_stops_everything_as_before(make_ctx, text):
     assert lead_of(ctx).outreach_status != "interested"
 
 
+def test_an_opt_out_under_a_signature_line_keeps_nothing_and_a_disclaimer_there_changes_nothing(make_ctx):
+    ctx, sent, lead_id = interested(make_ctx)
+    second(ctx, sent, "Thanks\n--\nDavid\nI want to be removed from your list")
+    assert [s for _i, s in answer_of(ctx, lead_id)] == ["cancelled"]
+    ctx, sent, lead_id = interested(make_ctx)
+    second(ctx, sent, "My colleague will join us.\n--\nDavid\nIf you are not the intended recipient please delete this email.")
+    assert [s for _i, s in answer_of(ctx, lead_id)] == ["awaiting_approval"]
+
+
 def test_a_stranger_writing_with_their_address_and_no_thread_keeps_nothing(make_ctx):
     """A From line proves nothing: outside our thread and unsigned, the reply stops everything as it always did."""
     ctx, sent, lead_id = interested(make_ctx)
