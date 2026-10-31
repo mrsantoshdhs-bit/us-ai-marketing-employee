@@ -45,13 +45,13 @@ CONSENTED = ("inquiry", "opt_in")
 OPEN_FOLLOWUP = ("pending", "awaiting_approval", "approved", "sending", "uncertain")
 COUNTS_AS_SENT = ("sent", "sending", "uncertain")  # for the daily limits: an uncertain email may have gone out
 SEND_BUSY = "Another run is sending emails right now; this one goes out on the next run"
+# What certainly delivered nothing: the server refused it, it never connected, or the message could not be built.
+NOT_DELIVERED = (smtplib.SMTPRecipientsRefused, EmailNotReady, smtplib.SMTPSenderRefused, smtplib.SMTPConnectError,
+                 smtplib.SMTPAuthenticationError, ConnectionRefusedError, socket.gaierror, ValueError)
 # A refusal that says the address itself does not exist (RFC 3463 5.1.x, not those about our own sender address).
 DEAD_ADDRESS = re.compile(r"\b5\.1\.(0|1|2|3|6|10)\b|no such|user unknown|unknown user|does not exist|address not found|"
                           r"no mailbox|mailbox not found|recipient not found|invalid recipient", re.I)
 SIGN_IN_ALERT = "mail:sign_in"
-# What certainly delivered nothing: the server refused it, it never connected, or the message could not be built.
-NOT_DELIVERED = (smtplib.SMTPRecipientsRefused, EmailNotReady, smtplib.SMTPSenderRefused, smtplib.SMTPConnectError,
-                 smtplib.SMTPAuthenticationError, ConnectionRefusedError, socket.gaierror, ValueError)
 
 
 class SalesInput(BaseModel):
