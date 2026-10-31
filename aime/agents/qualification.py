@@ -128,7 +128,7 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
             lead.last_scored_at = now
             out.scored += 1
             lasting = lasting_grade(facts, thresholds) if result.grade in ("A", "B") else result.grade
-            if lasting not in ("A", "B") and result.grade in ("A", "B") and prev_status in ("new", "nurture"):
+            if lasting not in ("A", "B") and result.grade in ("A", "B") and prev_status in ("new", "nurture") and not result.disqualify_reason:
                 lead.score_breakdown = [*result.reasons, f"Not moved to qualified: grade {result.grade} today, but grade {lasting} "
                                         "within a month, as its newest hiring post counts for less"]
             grades[result.grade] += 1

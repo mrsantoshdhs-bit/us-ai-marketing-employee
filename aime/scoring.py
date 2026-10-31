@@ -327,7 +327,9 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
 def lasting_grade(f: LeadFacts, thresholds: dict | None = None) -> str:
     """The grade this evidence still earns a month from now. A lead enters qualified only if it holds its grade that long: for a
     post over 30 days old that means past the 60-day step down, so nothing goes in today to come out tomorrow with a draft made
-    and cancelled on the way, and a fresh post still has a month for its emails."""
+    and cancelled on the way, and a fresh post still has a month for its emails. Someone who asked us is not held back by this."""
+    if f.source in FIRST_PARTY_SIGNALS or any(s.signal_type in FIRST_PARTY_SIGNALS for s in f.signals):
+        return score_lead(f, thresholds).grade
     return score_lead(replace(f, now=(f.now or utcnow()) + timedelta(days=HOLD_DAYS)), thresholds).grade
 
 

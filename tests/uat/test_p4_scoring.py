@@ -14,7 +14,7 @@ from aime.agents.qualification import LeadQualificationAgent
 from aime.matching import competitor_evidence, competitor_in_post, match_services
 from aime.models import Activity, Alert, Company, FollowUp, Lead, ResearchSnapshot, Signal, Suppression
 from aime.people import decision_maker_title
-from aime.scoring import LeadFacts, SignalFact, read_company, score_lead
+from aime.scoring import LeadFacts, SignalFact, lasting_grade, read_company, score_lead
 from aime.web.app import create_app
 
 
@@ -99,6 +99,21 @@ def test_a_lead_is_not_qualified_for_one_day_only(make_ctx, clock):
     LeadQualificationAgent(ctx).run({"rescore_all": True})
     second = _status(ctx, lead_id)
     assert first[0] == second[0], f"qualified and dropped again in 24 hours: {first} then {second}"
+
+
+def test_a_fresh_post_still_takes_a_lead_in_and_someone_who_asked_us_is_not_held_back():
+    now = tu.utcnow()
+    base = dict(industry="saas", target_industries=["saas"], state="TX", country="US", has_website=False, employee_range=None, verified=False,
+                is_competitor=False, suppressed=False, contact_consent=None, now=now)
+    fresh = LeadFacts(source="research", signals=[SignalFact("hiring", ["bpa"], 1.0, now - timedelta(days=5), True)], **base)
+    stale = LeadFacts(source="research", signals=[SignalFact("hiring", ["bpa"], 1.0, now - timedelta(days=60), True)], **base)
+    asked = LeadFacts(source="inbound", signals=[SignalFact("inbound", ["bpa"], 1.0, now - timedelta(days=40), False)], **base)
+    limits = {"grade_b": score_lead(fresh).total, "grade_a": 100}
+    assert score_lead(fresh, limits).grade == lasting_grade(fresh, limits) == "B"
+    limits = {"grade_b": score_lead(stale).total, "grade_a": 100}
+    assert score_lead(stale, limits).grade == "B" and lasting_grade(stale, limits) == "C"
+    limits = {"grade_b": score_lead(asked).total, "grade_a": 100}
+    assert score_lead(asked, limits).grade == lasting_grade(asked, limits) == "B"
 
 
 def test_a_persons_status_on_a_flagged_lead_stays_or_is_refused(make_ctx):
