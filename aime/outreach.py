@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from aime.config import Settings
@@ -30,6 +30,8 @@ TOPICS = {
     "saas_dev": "your product roadmap", "custom_software": "internal tools", "ai_consulting": "AI adoption",
 }
 MAX_SUBJECT_CHARS = 70
+TEST_SENT = "test_sent"  # the stage of a lead whose email went only to a test address (OUTBOUND_TEST_RECIPIENTS)
+RUNNING_STAGES = ("contacted", TEST_SENT)  # a sequence is under way
 OPEN = ("pending", "awaiting_approval", "approved", "sending", "uncertain")
 STOP_STATUSES = ("replied", "interested", "meeting", "not_interested", "no_response", "unsubscribed", "bounced",
                  "stopped")
@@ -246,7 +248,7 @@ def eligible(session: Session, settings: Settings, lead: Lead, for_send: bool = 
     if lead.status != "qualified" and not (reengage and lead.status == "nurture"):
         return False, f"lead is {lead.status}"
     # The one check-in goes to someone already emailed, months later: by design their evidence has aged, and the grade with it.
-    if (lead.grade or "D") > pol["min_grade"] and not (reengage and lead.outreach_status in ("no_response", "reengage")):
+    if not reengage and (lead.grade or "D") > pol["min_grade"]:
         return False, f"grade {lead.grade} is below {pol['min_grade']}"
     if company.is_competitor:
         return False, "possible competitor"
@@ -277,6 +279,11 @@ def delivered_to_prospect(f: FollowUp) -> bool:
     return not f.delivered_to or not f.to_email or f.delivered_to.lower() == f.to_email.lower()
 
 
+# Emails that really went to the prospect, for counting. In test mode delivered_to is our own address.
+REACHED_PROSPECT = or_(FollowUp.delivered_to.is_(None), FollowUp.to_email.is_(None),
+                       func.lower(FollowUp.delivered_to) == func.lower(FollowUp.to_email))
+
+
 def record_delivery(session: Session, f: FollowUp, sent_at, delivered_to: str | None, actor: str) -> None:
     """What a delivered email changes, whether the send succeeded or a person confirmed it ("mark sent"): the
     follow-up, the lead's last activity, and the outreach stage that lets the next step be drafted."""
@@ -284,11 +291,10 @@ def record_delivery(session: Session, f: FollowUp, sent_at, delivered_to: str | 
     f.delivered_to = delivered_to or f.delivered_to
     f.delivery_status = f.delivery_status if f.delivery_status in ("bounced", "replied") else "sent"
     lead = f.lead
-    if not delivered_to_prospect(f):
-        return  # test mode: it went to our own address, so the prospect has heard nothing from us
     lead.last_activity_at = sent_at
-    if f.kind == "outreach" and lead.outreach_status in (None, "drafted", "approved", "reengage"):
-        set_status(session, lead, "contacted", actor)
+    if f.kind == "outreach" and lead.outreach_status in (None, "drafted", "approved", "reengage", TEST_SENT):
+        # Test mode: it went to our own address, so the prospect has heard nothing from us. A rehearsal still walks the sequence.
+        set_status(session, lead, "contacted" if delivered_to_prospect(f) else TEST_SENT, actor)
 
 
 def stop_sequence(session: Session, lead: Lead, status: str, reason: str, actor: str) -> int:
