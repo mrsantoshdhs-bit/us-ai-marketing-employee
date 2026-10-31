@@ -60,7 +60,7 @@ def run_email_checks(subject: str, body: str, evidence: list[dict], contact, sup
         subj_problems.append("pretends to be a reply or forward")
     # A name in capitals is how that company writes itself, not shouting; anything else in capitals still is.
     own_name = getattr(getattr(contact, "company", None), "name", None)
-    without_name = subject.replace(own_name, " ") if own_name else subject
+    without_name = subject.replace(own_name.rstrip(" .,"), " ") if own_name else subject
     if re.search(r"\b[A-Z]{4,}\b", without_name) or "!" in subject:
         subj_problems.append("shouting (capitals or exclamation marks)")
     results.append(CheckResult("subject line", "fail" if subj_problems else "pass", "; ".join(subj_problems)))

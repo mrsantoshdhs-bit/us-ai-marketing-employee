@@ -59,19 +59,20 @@ def policy(settings: Settings) -> dict:
 
 # A full stop that ends an abbreviation or an initial does not end the sentence: "U.S.", "e.g.", "Inc.".
 _NOT_THE_END = re.compile(r"(?:\b[A-Za-z]\.|\b(?:etc|vs|inc|ltd|llc|corp|co|dr|mr|mrs|ms|st|jr|sr|no|approx|prev)\.)$", re.I)
-_NOT_PROSE = re.compile(r"[|$€£\"•→]|-->|https?://|www\.|\S+@\S|\[email|\b\w+\.(?:com|io|ai|org|net|co)\b|\d+\s?[kK]\b|^[-*\d(]"
+_NOT_PROSE = re.compile(r"[|$€£\"•→]|--|https?://|www\.|\S+@\S|\[email|\b\w+\.(?:com|io|ai|org|net|co)\b|\d+\s?[kK]\b|^[-*\d(]"
                         r"|^[\w/&+ -]{1,30}:\s", re.I)
 # What a person would not quote back: how to get the job, what it pays, who may apply, the technology list.
 _JOB_TALK = re.compile(r"\b(?:salary|salaries|compensation|visa|sponsor\w*|citizen\w*|clearance|equity|bonus|benefits?|pto|401k|apply|applicants?|"
                        r"resumes?|cv|interview\w*|hiring|hire|recruit\w*|candidates?|jobs?|roles?|positions?|openings?|full[- ]time|part[- ]time|"
                        r"onsite|on-site|hybrid|remote|in[- ]office|relocat\w*|time ?zones?|yrs|years? of|experience|you|you'?ll|you'?re|you'?ve|"
-                       r"your|looking for|join|must|nice to have|stack|languages?|engineers?|developers?|teammates?|colleagues?|"
+                       r"your|looking for|join|must|nice to have|stack|languages?|engineers?|developers?|teammates?|colleagues?|comfortable|"
+                       r"expect to|manager|ownership|"
                        r"we use|i|i'?m|i'?ve)\b", re.I)
 # What a website says that is not about the company's work: a person's career, a customer's words, a button.
 _NOT_ABOUT_THE_WORK = re.compile(r"\b(?:previously|prior to|formerly|holds? a|joined|alumni|prev\.|ph\.?d|co-?founder|founder|ceo|cto|served as|"
-                                 r"career|graduated|made in|powered by|built with|copyright|all rights|cookies?|privacy|sign up|sign in|log in|"
+                                 r"career|graduated|brings|shoutout|really neat|made in|powered by|built with|copyright|all rights|cookies?|privacy|sign up|sign in|log in|"
                                  r"learn more|read more|click|book a|thank you|welcome to|introducing|contact us|subscribe)\b", re.I)
-MIN_QUOTE_WORDS, MAX_LIST_COMMAS, MAX_QUOTE_CHARS = 5, 3, 170
+MIN_QUOTE_WORDS, MAX_QUOTE_CHARS = 5, 170
 
 
 def _sentences(text: str) -> list[str]:
@@ -92,7 +93,7 @@ def _reads_as_prose(sentence: str, ended: bool = True) -> bool:
     """A sentence someone wrote, not a post's header, a price, a link or a list. `ended`: it must end like a sentence (a
     company's own one-line description may not)."""
     words = sentence.split()
-    return (len(words) >= MIN_QUOTE_WORDS and sentence.count(",") <= MAX_LIST_COMMAS and sentence[0].isupper()
+    return (len(words) >= MIN_QUOTE_WORDS and sentence.count(",") * 3 < len(words) and sentence[0].isupper()
             and not (ended and sentence[-1] not in ".!?") and not _NOT_PROSE.search(sentence))
 
 
@@ -129,21 +130,21 @@ def website_quote(text: str, keywords: list[str] | None = None, max_len: int = M
 
 
 def gather_evidence(session: Session, lead: Lead) -> list[Evidence]:
-    """What the company says about its own work comes first: its website on a topic we serve, its description, then its
+    """What the company says about its own work comes first: its description, its website on a topic we serve, then its
     job post, which is written for engineers. Only sentences fit to quote count; none at all means a review task."""
     out: list[Evidence] = []
     snap = session.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == lead.company_id)
                            .order_by(ResearchSnapshot.id.desc())).scalars().first()
     if snap:
+        quote = website_quote(snap.description) if snap.description else ""
+        if len(quote) >= 25:
+            out.append(Evidence(quote, snap.description_url, "description", snap.description))
         for need in snap.needs or []:
             if need.get("service") == lead.primary_service and need.get("quote"):
                 quote = website_quote(need["quote"], list(need.get("keywords") or []))
                 if len(quote) >= 25:
                     out.append(Evidence(quote, need.get("url"), "website", need["quote"]))
                 break
-        quote = website_quote(snap.description) if snap.description else ""
-        if len(quote) >= 25:
-            out.append(Evidence(quote, snap.description_url, "description", snap.description))
     for s in session.execute(select(Signal).where(Signal.company_id == lead.company_id, Signal.signal_type == "hiring")
                              .order_by(Signal.strength.desc(), Signal.observed_at.desc())).scalars():
         if s.text and s.source_url:

@@ -138,14 +138,15 @@ def test_a_company_outside_the_us_is_disqualified_on_its_own_words():
 
 # ------------------------------------------------------------------ competitors
 @pytest.mark.parametrize("words", ["Agentic pricing management for B2B. Experts and AI agents do the work.", "Give AI agents instant sandboxes.",
-                                   "Infrastructure for your code and agents.", "Give every team agents they can trust; every agent has an identity.",
+                                   "Infrastructure for your code and agents.", "Give every team agents they can trust.",
                                    "Finds accounts and automates personalized outreach."])
 def test_same_offer_vendors_are_recognised_in_their_own_words(words):
     assert competitor_evidence(words)
 
 
 @pytest.mark.parametrize("words", ["We sell accounting software.", "Affordable primary care designed around you.", "Wholesale specialty insurance brokerage.",
-                                   "The connected workspace where AI agents and teams organize docs.", "Dry cleaning delivered to your door."])
+                                   "The connected workspace where AI agents and teams organize docs.", "Dry cleaning delivered to your door.",
+                                   "A CRM for real estate agents and brokers.", "Every agent on your team gets the leads for agents nearby."])
 def test_ordinary_companies_are_not_competitors(words):
     assert not competitor_evidence(words)
 
@@ -259,7 +260,7 @@ def test_website_evidence_comes_first_when_it_is_fit_to_quote(make_ctx):
     lead_id = seeded(ctx, "Scheduling tools for dental clinics.", [{"service": "bpa", "keywords": ["data entry"], "url": "https://acme.example/x",
                                                                      "quote": "Our tools remove manual data entry from the front desk."}])
     with ctx.db.session() as s:
-        assert [e.kind for e in gather_evidence(s, s.get(Lead, lead_id))] == ["website", "description", "hiring"]
+        assert [e.kind for e in gather_evidence(s, s.get(Lead, lead_id))] == ["description", "website", "hiring"]
 
 
 def test_a_job_post_is_quoted_only_when_nothing_on_the_website_will_do(make_ctx):

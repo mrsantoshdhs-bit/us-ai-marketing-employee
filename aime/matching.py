@@ -37,7 +37,8 @@ OWN_SITE_COMPETITOR_PATTERNS = [
     r"\bcustom ai (?:development|solutions|systems|agents)\b",
     r"\bagentic (?:\w+ ){0,2}(?:management|platform|enterprise|workflows?|operations|compliance|systems?)\b",
     r"\bai agents? (?:do|run|handle|work)\b",
-    r"\b(?:give|for|every|your) (?:your |code and |developers and )*(?:ai )?agents?\b(?! and teams)",
+    r"\b(?:give|for) (?:your |developers and )*ai agents\b",
+    r"\bfor your code and agents\b|\bagents they can trust\b|\bagent identit(?:y|ies)\b|\bmcp (?:gateway|registry)\b",
     r"\bautomates? (?:personali[sz]ed |your )?(?:outreach|sales|follow-?ups?)\b",
     *COMPETITOR_PATTERNS,
 ]
