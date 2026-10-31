@@ -19,6 +19,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from aime.models import Activity, Alert, Assignment, Lead, Opportunity, Team, User
+from aime.timeutil import utcnow
 
 STRATEGIES = ("workload", "round_robin", "skill")
 OPEN = ("won", "lost")
@@ -143,11 +144,20 @@ def reassign(session: Session, *, to_owner: str | None, actor: str, reason: str,
                        method="manual", reason=f"with its lead: {reason}", actor=actor)
         target, lead_id, company_id = f"lead #{lead.id}", lead.id, lead.company_id
     note = f"Assigned {target} from {old or 'unassigned'} to {to_owner or 'unassigned'}" + (f": {reason}" if reason else "")
+    # On record in Activity and Assignment. No alert: the person who did it knows, and alerts are not what the new
+    # owner reads.
     log_activity(session, note[:300], actor, type_="assignment", company_id=company_id, lead_id=lead_id,
                  opportunity_id=opp.id if opp is not None else None)
-    if to_owner and to_owner != actor:
-        session.add(Alert(level="info", source="handover", message=f"{note} (by {actor})"[:500]))
     return note
+
+
+def close_manual_notices(session: Session) -> int:
+    """Close the alerts that hand reassignments used to leave open (their record stays in Activity and Assignment)."""
+    rows = session.execute(select(Alert).where(Alert.source == "handover", Alert.acknowledged.is_(False),
+                                               Alert.message.like("Assigned %(by %)"))).scalars().all()
+    for a in rows:
+        a.acknowledged, a.resolved_at = True, utcnow()
+    return len(rows)
 
 
 def manager_of(session: Session, username: str) -> str | None:

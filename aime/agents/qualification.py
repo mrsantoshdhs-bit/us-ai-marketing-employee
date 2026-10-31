@@ -13,8 +13,18 @@ from aime.agents.base import BaseAgent
 from aime.crm_ops import is_suppressed, log_activity
 from aime.matching import seeks_external_help
 from aime.models import Activity, Company, Contact, FollowUp, InboundInquiry, Lead, Signal
+from aime.outreach import set_status
+from aime.pipeline import clear_stage
 from aime.scoring import LeadFacts, SignalFact, categorize, score_lead
 from aime.timeutil import utcnow
+
+# Who writes the activity log besides people. People are recorded by user name, whatever the name is, so a name that is
+# not here counts as a person: an agent left off this list keeps a lead qualified, it never drops one.
+NOT_A_PERSON = {"marketing_manager", "research", "company_research", "linkedin_content", "publishing", "qualification",
+                "sales_workflow", "inbox_monitor", "crm", "analytics", "publish_policy", "command line", "content audit",
+                "owner-approved refresh", "system", ""}
+# A person or the prospect ended outreach to this lead: a score does not reopen it. (Re-engagement looks at nurture.)
+CLOSED_STAGES = ("not_interested", "no_response", "reengage")
 
 
 class QualifyInput(BaseModel):
@@ -121,6 +131,11 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                     for f in session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.status.in_(
                             ("pending", "awaiting_approval", "approved")))).scalars():
                         f.status, f.blocked_reason = "cancelled", f"Lead disqualified: {result.disqualify_reason}"[:300]
+                    clear_stage(session, lead, self.name, "the lead was disqualified")
+                    if lead.outreach_status == "contacted":
+                        set_status(session, lead, "stopped", self.name, "the lead was disqualified")
+            elif prev_status == "nurture" and self._sequence_parked_by_score(session, lead):
+                lead.status = "qualified"  # a person emailed this lead: an aged job post does not end the sequence
             elif (result.grade in ("A", "B") and prev_status in ("new", "nurture")
                   and self._may_requalify(session, lead, company, signals, prev_status)):
                 lead.status = "qualified"
@@ -148,6 +163,8 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
         recorded after that move (a new signal or a new research read); the same score is not enough."""
         if prev_status != "nurture":
             return True
+        if lead.outreach_status in CLOSED_STAGES:
+            return False
         last = session.execute(select(Activity).where(Activity.lead_id == lead.id, Activity.type == "status_change")
                                .order_by(Activity.created_at.desc(), Activity.id.desc())).scalars().first()
         if last is None or last.actor == self.name or not ("→ nurture" in last.subject or "moved to nurture" in last.subject):
@@ -156,7 +173,19 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
         return (any(s.created_at and s.created_at > moved for s in signals)
                 or (company.researched_at is not None and company.researched_at > moved))
 
+    def _sequence_parked_by_score(self, session: Session, lead: Lead) -> bool:
+        """Its sequence is running, and only this agent's own downgrade moved it to nurture (before that was prevented)."""
+        if lead.outreach_status != "contacted":
+            return False
+        last = session.execute(select(Activity).where(Activity.lead_id == lead.id, Activity.type == "status_change")
+                               .order_by(Activity.created_at.desc(), Activity.id.desc())).scalars().first()
+        return last is not None and last.actor == self.name and "→ nurture" in (last.subject or "")
+
     @staticmethod
     def _human_touched(session: Session, lead: Lead) -> bool:
-        return session.execute(select(Activity.id).where(
-            Activity.lead_id == lead.id, Activity.actor == "human")).first() is not None
+        """A person worked on this lead, or an email a person approved may have reached it."""
+        if session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
+                                                     FollowUp.status.in_(("sent", "sending", "uncertain")))).first():
+            return True
+        actors = session.execute(select(Activity.actor).where(Activity.lead_id == lead.id).distinct()).scalars()
+        return any((actor or "") not in NOT_A_PERSON for actor in actors)

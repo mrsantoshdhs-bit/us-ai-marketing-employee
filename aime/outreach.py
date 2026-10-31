@@ -159,9 +159,11 @@ def draft_reengage(settings: Settings, lead: Lead, contact) -> tuple[str, str]:
 
 
 def eligible(session: Session, settings: Settings, lead: Lead, for_send: bool = False,
-             reengage: bool = False) -> tuple[bool, str]:
+             reengage: bool = False, running: bool = False) -> tuple[bool, str]:
     """Can this lead's primary contact receive B2B outreach? Returns (ok, reason when not). `reengage`: the one
-    re-engagement email, which also reaches a lead parked in nurture after an unanswered sequence."""
+    re-engagement email, which also reaches a lead parked in nurture after an unanswered sequence. `running`: a later
+    step of a sequence a person started. Neither depends on the grade: it decided the first email, and it falls by
+    itself as evidence ages. Every other check still applies."""
     pol = policy(settings)
     contact = lead.contact
     company: Company = lead.company
@@ -169,7 +171,7 @@ def eligible(session: Session, settings: Settings, lead: Lead, for_send: bool = 
         return False, "B2B outreach is turned off ([outreach] b2b_enabled)"
     if lead.status != "qualified" and not (reengage and lead.status == "nurture"):
         return False, f"lead is {lead.status}"
-    if (lead.grade or "D") > pol["min_grade"]:
+    if not (running or reengage) and (lead.grade or "D") > pol["min_grade"]:
         return False, f"grade {lead.grade} is below {pol['min_grade']}"
     if company.is_competitor:
         return False, "possible competitor"
