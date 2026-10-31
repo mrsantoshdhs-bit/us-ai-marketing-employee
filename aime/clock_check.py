@@ -58,7 +58,7 @@ def note_server_date(host: str, date_header: str | None, age_header: str | None 
         said = to_naive_utc(parsedate_to_datetime(date_header))
         age = timedelta(seconds=int(age_header)) if age_header and age_header.strip().isdigit() else timedelta()
         site = registrable_domain(host)
-    except (TypeError, ValueError, IndexError, OverflowError):
+    except Exception:  # noqa: BLE001 - a stranger's header: whatever it holds, the request goes on
         return
     with _servers_lock:
         if site in _servers or len(_servers) < MAX_SERVERS:

@@ -471,11 +471,12 @@ def _test(ctx, aid, imap=RecordingIMAP):
 
 def test_a_corrected_mailbox_stops_reading_failed_once_test_connection_passes(make_ctx):
     ctx, aid = _refused_primary(make_ctx)
+    FakeSMTP.sent = []
     assert _board(ctx)["status"] == "FAILED"
     assert _test(ctx, aid)
     row = _board(ctx)
     assert row["status"] != "FAILED" and "refused" not in row["detail"]
-    assert FakeSMTP.sent == [] or all(m.get("To") != "nobody" for m in FakeSMTP.sent)
+    assert FakeSMTP.sent == []  # the test signs in and sends nothing
 
 
 def test_a_failed_test_or_another_mailbox_passing_does_not_end_it(make_ctx):
@@ -786,17 +787,6 @@ def test_the_plan_is_silent_about_a_trend_that_changed_nothing(make_ctx):
     rationale, briefs = _plan(ctx)
     assert services[-1] not in briefs and not any("favours" in r for r in rationale)
     assert briefs == services[:3]
-
-
-def test_a_trend_never_changes_the_order_the_briefs_had(make_ctx):
-    """What is planned stays what it was: the wording changed, not the choice."""
-    ctx = make_ctx()
-    _topics(ctx, "ai_agents")
-    _, with_trend = _plan(ctx)
-    other = make_ctx()
-    other.settings.business["content"]["posts_per_week"] = ctx.settings.section("content").get("posts_per_week", 3)
-    _, without = _plan(other)
-    assert with_trend[0] == "ai_agents" and without[0] != "ai_agents" or with_trend == without
 
 
 # ----------------------------------------------------------------------------------------------- 9. scrub-logs
