@@ -41,6 +41,10 @@ OWN_SITE_COMPETITOR_PATTERNS = [
     r"\bdone[- ]for[- ]you,? by ai\b",
     r"\b(?:technology|tech|it) services (?:&|and) (?:it )?consulting\b",
     r"\boutstaffing (?:partner|company|firm|provider)\b",
+    r"\bai automation agency\b|\bai consultancy\b|\bsoftware consultancy\b",
+    r"\bai(?: agents?)? development (?:company|firm|agency|services)\b",
+    r"\bcustom software development (?:for (?!our\b|your\b)|services\b|company\b)",
+    r"\b(?:it|ai) consulting services\b",
     *COMPETITOR_PATTERNS,
 ]
 _OWN_SITE_COMPETITOR_RE = re.compile("|".join(OWN_SITE_COMPETITOR_PATTERNS), re.IGNORECASE)

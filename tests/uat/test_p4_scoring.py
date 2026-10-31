@@ -466,3 +466,23 @@ def test_a_flag_shown_only_by_the_homepage_title_stays(make_ctx):
         snap.pages = [{"url": "https://flagged.example/", "kind": "home", "status": 200, "title": "Flagged | Custom AI development"}]
     _review(ctx)
     assert _state(ctx, a, ca)[:2] == (True, "disqualified")
+
+
+@pytest.mark.parametrize("own_words", [
+    "The leading AI automation agency.", "We are an AI consultancy.", "An AI development company.", "AI development services for banks.",
+    "An AI agent development company.", "A software consultancy in Boston.", "Custom software development for hospitals and clinics.",
+    "IT consulting services.", "AI consulting services for retailers.", "IT Services and IT Consulting",
+])
+def test_plain_firm_descriptions_on_its_own_site_count(own_words):
+    assert competitor_evidence(own_words) is not None
+
+
+@pytest.mark.parametrize("post", ["We are hiring for AI consulting services work.", "Custom software development for hospitals is what our client wanted."])
+def test_those_descriptions_do_not_decide_from_a_post(post):
+    assert competitor_in_post(post) is None
+
+
+def test_we_build_ai_agents_for_someone_stays_unflagged():
+    """Decided 31 Oct: alone it could be a product or a service, and a person approves every email."""
+    assert competitor_evidence("We build AI agents for insurers.") is None
+    assert competitor_in_post("We build AI agents for insurers.") is None
