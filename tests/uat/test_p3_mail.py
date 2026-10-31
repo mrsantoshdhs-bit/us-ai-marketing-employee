@@ -6,6 +6,7 @@ for the header comparison; without it that test is skipped."""
 
 from __future__ import annotations
 
+import base64
 import email
 import importlib.util
 import imaplib
@@ -13,7 +14,9 @@ import os
 import re
 import socket
 import threading
+import time
 from datetime import datetime, timezone
+from email.header import Header
 from types import SimpleNamespace
 
 import pytest
@@ -27,8 +30,8 @@ from aime.db import kv_get
 from aime.inbox import (DROP_TRIES, HEAD_FIELDS, HEAD_LIMIT, HEADERS_PER_RUN, JUNK_BODIES_PER_RUN, JUNK_HEADS_PER_RUN, LARGE_MESSAGE,
                         LARGE_READ, Mailbox, _only_the_body_can_tell, parse_message)
 from aime.meetings import parse_calendly
-from aime.models import Alert, Contact, FollowUp, InboundEmail, Lead, SkippedMail, User
-from aime.reply_intel import CALENDLY_NOTICE
+from aime.models import Alert, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity, SkippedMail, Suppression, User
+from aime.reply_intel import CALENDLY_NOTICE, lead_on_hold
 from aime.visibility import record_condition, scope_for
 from aime.web.auth import COOKIE, hash_password, make_cookie, session_secret
 from tests.test_inbound_sales import FakeSMTP
@@ -37,7 +40,7 @@ from tests.test_outreach import lead_of
 from tests.test_time_and_alerts import IN_WINDOW, add_lead, add_mail, mail_world, status_of
 from tests.uat import p2_mail_corpus as K
 from tests.uat.test_p2_mail import DAVID, vars_for
-from tests.uat.test_uat_email import meetings_of, notice, signed_ctx, suppressed_values, web
+from tests.uat.test_uat_email import ORIGIN, meetings_of, notice, signed_ctx, suppressed_values, web
 
 STYLES = ("dovecot", "gmail")
 
@@ -63,6 +66,12 @@ def body_structure(part) -> str:
     return f'("{part.get_content_maintype().upper()}" "{part.get_content_subtype().upper()}" NIL NIL NIL "7BIT" 1 1)'
 
 
+def text_of(raw: bytes) -> str:
+    """What a server looks through for SEARCH BODY: the decoded text."""
+    parts = [p.get_payload(decode=True) or b"" for p in email.message_from_bytes(raw).walk() if not p.is_multipart()]
+    return b" ".join(parts).decode("utf-8", "replace").lower()
+
+
 class Server(threading.Thread):
     """A small IMAP server on this PC. It answers LIST, EXAMINE, UID SEARCH and UID FETCH the way the real ones do, and writes
     down every command, so a test can say what was asked for and that nothing could change the mailbox."""
@@ -76,6 +85,8 @@ class Server(threading.Thread):
         self.fail_folder: set[str] = set()
         self.endless_structure: set[int] = set()
         self.odd_file_name: set[int] = set()  # BODYSTRUCTURE of these brings a literal of its own, ahead of the email data
+        self.drop_head: set[int] = set()  # asking for the header lines of these takes the connection down
+        self.quirk: str | None = None  # how the answer to a request for header lines is odd
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(5)
@@ -129,7 +140,9 @@ class Server(threading.Thread):
         elif verb.startswith("UID SEARCH"):
             found = re.search(r"UID (\d+):", rest)
             low = int(found.group(1)) if found else 0
-            out = ("* SEARCH " + " ".join(str(u) for u in sorted(self.current) if u >= low) + "\r\n").encode()
+            words = re.search(r'BODY "([^"]*)"', rest, re.I)
+            hits = [u for u in sorted(self.current) if u >= low and (not words or words.group(1).lower() in text_of(self.current[u]))]
+            out = ("* SEARCH " + " ".join(str(u) for u in hits) + "\r\n").encode()
         elif verb.startswith("UID FETCH"):
             _, _, uid, items = rest.split(" ", 3)
             answered = self._fetch(conn, int(uid), items)
@@ -152,6 +165,13 @@ class Server(threading.Thread):
     def _fetch(self, conn, uid, items):
         raw = self.current[uid]
         wants_head = "HEADER.FIELDS" in items
+        seq = sorted(self.current).index(uid) + 1
+        if items == "(UID)":
+            return f"* {seq} FETCH (UID {uid})\r\n".encode()
+        if wants_head and uid in self.drop_head:
+            return False
+        if wants_head and self.quirk:
+            return self._odd_answer(seq, uid, raw, items)
         if not wants_head and uid in self.stall:
             return None
         if not wants_head and uid in self.drop:
@@ -170,11 +190,41 @@ class Server(threading.Thread):
         size = f" RFC822.SIZE {len(raw)}" if "RFC822.SIZE" in items else ""
         if structure and uid in self.odd_file_name:
             structure = ' BODYSTRUCTURE ("TEXT" "PLAIN" ("NAME" {7}\r\nodd"nam) NIL NIL "7BIT" 1 1)'
-        seq = sorted(self.current).index(uid) + 1
         literal = f"{item} {{{len(data)}}}\r\n".encode() + data
         if self.style == "gmail":  # the UID first and BODYSTRUCTURE after the data, as Gmail answers
             return f"* {seq} FETCH (X-GM-THRID 1 X-GM-MSGID 2 UID {uid}{size} ".encode() + literal + f"{structure} FLAGS (\\Seen))\r\n".encode()
         return f"* {seq} FETCH (UID {uid}{size}{structure} ".encode() + literal + b")\r\n"
+
+    def _odd_answer(self, seq, uid, raw, items):
+        """Answers a real server might give, or a broken one. None of them may make an email pass unread."""
+        fields = tuple(re.search(r"HEADER\.FIELDS \(([^)]*)\)", items).group(1).split())
+        head = head_lines(raw, fields)
+        name = re.search(r"BODY\.PEEK(\[[^\]]*\])", items).group(1)
+        name = f"BODY{name}<0>"
+        structure = body_structure(email.message_from_bytes(raw))
+        size = f"RFC822.SIZE {len(raw)}"
+        literal = lambda data: f"{{{len(data)}}}\r\n".encode() + data  # noqa: E731
+        if self.quirk == "leading blank line":
+            return f"* {seq} FETCH (UID {uid} {size} BODYSTRUCTURE {structure} {name} ".encode() + literal(b"\r\n" + head) + b")\r\n"
+        if self.quirk == "only some fields":
+            some = b"\r\n".join(line for line in head.split(b"\r\n") if line.lower().startswith(b"subject")) + b"\r\n\r\n"
+            return f"* {seq} FETCH (UID {uid} {size} BODYSTRUCTURE {structure} {name} ".encode() + literal(some) + b")\r\n"
+        if self.quirk == "only the sender":
+            some = b"\r\n".join(line for line in head.split(b"\r\n") if line.lower().startswith(b"from")) + b"\r\n\r\n"
+            return f"* {seq} FETCH (UID {uid} {size} BODYSTRUCTURE {structure} {name} ".encode() + literal(some) + b")\r\n"
+        if self.quirk == "quoted string, literal in the structure":
+            quoted = head.replace(b"\r\n", b" ").replace(b'"', b'\\"')
+            return (f'* {seq} FETCH (UID {uid} {size} BODYSTRUCTURE ("TEXT" "PLAIN" ("NAME" {{7}}\r\nodd"nam) NIL NIL "7BIT" 1 1) {name} "'.encode()
+                    + quoted + b'")\r\n')
+        if self.quirk == "another email's answer first":
+            other = head_lines(self.current[1], fields)
+            return (f"* 1 FETCH (UID 1 {name} ".encode() + literal(other)
+                    + f")\r\n* {seq} FETCH (UID {uid} {size} BODYSTRUCTURE {structure} {name} ".encode() + literal(head) + b")\r\n")
+        if self.quirk == "structure cut short":
+            return f'* {seq} FETCH (UID {uid} {size} BODYSTRUCTURE ("MIXED") {name} '.encode() + literal(head) + b")\r\n"
+        if self.quirk == "structure not closed":
+            return f'* {seq} FETCH (UID {uid} {size} {name} '.encode() + literal(head) + b' BODYSTRUCTURE (("TEXT" "PLAIN")\r\n'
+        raise AssertionError(self.quirk)
 
     def body_fetches(self, uid=None) -> list[str]:
         asked = [c for c in self.commands if c.upper().startswith("UID FETCH") and "HEADER.FIELDS" not in c.upper()]
@@ -186,7 +236,7 @@ class Server(threading.Thread):
             assert verb in ("CAPABILITY", "LOGIN", "LIST", "EXAMINE", "UID", "LOGOUT"), c
             if verb == "UID":
                 assert c.split()[1].upper() in ("SEARCH", "FETCH"), c
-                assert "PEEK" in c.upper() or c.split()[1].upper() == "SEARCH", c
+                assert "PEEK" in c.upper() or c.split()[1].upper() == "SEARCH" or c.endswith("(UID)"), c
 
 
 @pytest.fixture
@@ -393,6 +443,8 @@ def full_check_keeps(session, raw, own) -> bool:
 
 def skipped_on_headers(session, agent, raw, own, structure) -> bool:
     head = re.split(rb"\r?\n\r?\n", head_lines(raw), maxsplit=1)[0]
+    if ia.FOOTER_WORDS in text_of(raw):  # the server finds these for us
+        return False
     return not _only_the_body_can_tell(head, structure) and not agent._wanted(session, own)(head)
 
 
@@ -414,6 +466,8 @@ def corpus(v):
         yield name, K.thr(v, text + K.q_gmail(v), tag="lang")
     # The same footer quoted in a reply under a subject of no meaning to us, a Calendly notice nobody expects, and mail with list headers.
     yield "footer", K.msg("A <a@free-mail.example>", "Re: something else", "Stop this." + K.q_gmail(v), tag="ft")
+    yield "footer under a person's own subject", K.msg("A <a@free-mail.example>", "A question of mine", "Stop this." + K.q_gmail(v), tag="fo")
+    yield "failed delivery by its subject", K.msg("A <a@relay.example>", "Undeliverable: hello", "It could not be delivered.", tag="ud")
     yield "calendly", K.msg("A <a@free-mail.example>", "New Event: X - 10:00am", "See https://calendly.com/app", tag="cl")
     yield "newsletter", newsletter(1)
     yield "plain news", news(2)
@@ -433,7 +487,7 @@ def assert_never_skips_what_the_full_check_keeps(ctx, agent, messages, v):
                 except Exception:  # noqa: BLE001 -- kept as unreadable by the real path
                     keeps = True
                 kept += keeps
-                structure = body_structure(email.message_from_bytes(form)).encode()
+                structure = b"BODYSTRUCTURE " + body_structure(email.message_from_bytes(form)).encode()
                 for known in (structure, None):
                     if skipped_on_headers(s, agent, form, own, known):
                         skipped += 1
@@ -832,7 +886,6 @@ def test_a_reply_with_no_lead_reaches_a_sales_manager_who_can_act_on_it(make_ctx
     from fastapi.testclient import TestClient
 
     from aime.web.app import create_app
-    from tests.uat.test_uat_email import ORIGIN
 
     c = TestClient(create_app(ctx))
     with ctx.db.session() as s:
@@ -949,3 +1002,352 @@ def test_no_contact_or_lead_is_changed_by_passing_mail_on_its_headers(make_ctx, 
     with ctx.db.session() as s:
         assert s.execute(select(Lead.outreach_status)).scalars().all() == lead_before
         assert s.execute(select(func.count(Contact.id))).scalar_one() == contacts
+
+
+# ============================================================ review: forged mail in junk
+def forged_opt_out(v):
+    return K.msg(v.to, "please stop", "Please remove me from your list.", tag="f", extra=("Authentication-Results: mx.example; spf=fail; dkim=none; dmarc=fail",))
+
+
+def forged_footer_spam(v):
+    return K.msg(v.to, "Big offer for you", "Cheap watches at great prices.\n\nTo unsubscribe click here.", tag="f")
+
+
+def forged_company(v):
+    return K.msg(f"sales@{v.dom}", "remove us", "Please remove us from your list, do not contact us again.", tag="f")
+
+
+def forged_interest(v):
+    return K.msg(v.to, "Your offer", "Yes I am interested, let's talk. Send pricing.", tag="f")
+
+
+def guessed_subject(v):
+    return K.msg("Promo <promo@cheap-stuff.example>", f"Re: {v.subj}", "Buy our SEO services today! Reply unsubscribe to stop.", tag="f")
+
+
+def sub_domain_spam(v):
+    return K.msg(f"offers@mail.{v.dom}", "Offer", "Buy now", tag="f")
+
+
+def forged_notice(v):
+    return K.msg("notifications@calendly.com", "New Event: Pat Doe - 10:00am Mon, Nov 2, 2026 - 30 Minute Meeting",
+                 f"Invitee:\nPat Doe\n\nInvitee Email:\n{v.to}\n\nEvent Date/Time:\n10:00am - Monday, November 2, 2026 (Eastern Time)\nhttps://calendly.com/x", tag="f")
+
+
+def forged_report(v):
+    return K.BOUNCES["postfix_dsn_no_id"](v)
+
+
+FORGED = {"opt-out from the contact's address": forged_opt_out, "spam with a footer": forged_footer_spam, "remove us from the company's domain": forged_company,
+          "interest": forged_interest, "a guessed subject": guessed_subject, "a sub-domain": sub_domain_spam, "a Calendly notice": forged_notice,
+          "a report quoting nothing of ours": forged_report}
+
+
+def effects(ctx):
+    """All that can hurt a prospect, or be undone by no one."""
+    with ctx.db.session() as s:
+        lead = s.execute(select(Lead)).scalars().first()
+        return {"stage": lead.outreach_status, "consent": lead.contact.consent_status, "suppressed": sorted(x.value for x in s.execute(select(Suppression)).scalars()),
+                "deals": s.execute(select(func.count(Opportunity.id))).scalar_one(), "meetings": s.execute(select(func.count(Meeting.id))).scalar_one(),
+                "drafts": s.execute(select(func.count(FollowUp.id)).where(FollowUp.kind == "response")).scalar_one(), "email": lead.contact.email_status}
+
+
+@pytest.mark.parametrize("name", sorted(FORGED))
+def test_forged_mail_in_junk_changes_nothing_and_holds_the_lead_for_a_person(make_ctx, server, name):
+    ctx, _, _, v = scene(make_ctx)
+    before = effects(ctx)
+    srv = server({"INBOX": {}, "Junk": {1: FORGED[name](v)}})
+    assert read(ctx, srv).ok
+    assert effects(ctx) == before, "nothing is done on the word of an email that may be forged"
+    r = latest_reply(ctx)
+    assert r.in_junk and r.status == "needs_review" and r.intent is None and r.suggested_followup_id is None
+    assert r.category == ("calendly" if name == "a Calendly notice" else "other")
+    assert "forged" in r.action_note and "forged" in r.recommended_status
+    forged_alerts = [a for a in alerts(ctx) if "junk folder" in a and "forged" in a]
+    assert len(forged_alerts) == 1
+    with ctx.db.session() as s:
+        held = lead_on_hold(s, lead_of(ctx).id)
+    # A report holds nothing, as anyone can send one, and a notice comes from no lead's address.
+    assert held is (name not in ("a report quoting nothing of ours", "a Calendly notice"))
+
+
+@pytest.mark.parametrize("name", ["opt-out from the contact's address", "remove us from the company's domain", "interest"])
+def test_the_same_mail_in_the_inbox_acts_as_before(make_ctx, server, name):
+    """Side by side with the test above: only junk is treated as possibly forged."""
+    ctx, _, _, v = scene(make_ctx)
+    before = effects(ctx)
+    assert read(ctx, server({"INBOX": {1: FORGED[name](v)}, "Junk": {}})).ok
+    assert effects(ctx) != before
+    assert not latest_reply(ctx).in_junk
+
+
+def test_a_held_email_cannot_send_and_mark_reviewed_lets_the_lead_go_on(make_ctx, monkeypatch, clock, server):
+    from aime import workflows
+
+    srv = server({"INBOX": {}, "Junk": {}})
+    ctx = mail_world(make_ctx, monkeypatch, imap=srv.factory)
+    clock(IN_WINDOW)
+    lead = add_lead(ctx, stage="approved")
+    fid = add_mail(ctx, lead)
+    with ctx.db.session() as s:
+        addr = s.get(Lead, lead).contact.email
+    srv.folders["Junk"][1] = K.msg(addr, "stop", "Please remove me from your list.", tag="f")
+    assert not workflows.job_inbox(ctx).failed
+    workflows.job_followups(ctx)
+    state, why = status_of(ctx, fid)
+    assert FakeSMTP.sent == [] and state == "approved" and "Held" in why
+    assert addr not in suppressed_values(ctx)
+    rid = latest_reply(ctx).id
+    assert web(ctx).post(f"/inbox/{rid}/reviewed", headers=ORIGIN, data={"category": "other"}, follow_redirects=False).status_code == 303
+    assert not workflows.job_inbox(ctx).failed
+    assert not [a for a in alerts(ctx) if "forged" in a], "closed once a person has decided"
+    workflows.job_followups(ctx)
+    assert status_of(ctx, fid)[0] == "sent"
+
+
+def test_a_person_who_reclassifies_it_as_an_opt_out_applies_it_in_full(make_ctx, server):
+    ctx, _, _, v = scene(make_ctx)
+    assert read(ctx, server({"INBOX": {}, "Junk": {1: forged_opt_out(v)}})).ok
+    rid = latest_reply(ctx).id
+    assert web(ctx).post(f"/inbox/{rid}/reclassify", headers=ORIGIN, data={"category": "unsubscribe"}, follow_redirects=False).status_code == 303
+    after = effects(ctx)
+    assert v.to in after["suppressed"] and after["stage"] == "unsubscribed" and after["consent"] == "opted_out"
+    with ctx.db.session() as s:
+        assert not lead_on_hold(s, lead_of(ctx).id)
+
+
+def test_a_sender_a_person_has_looked_at_does_not_hold_the_lead_again_unless_in_thread(make_ctx, server):
+    ctx, _, _, v = scene(make_ctx)
+    srv = server({"INBOX": {}, "Junk": {1: forged_footer_spam(v)}})
+    assert read(ctx, srv).ok
+    assert web(ctx).post(f"/inbox/{latest_reply(ctx).id}/reviewed", headers=ORIGIN, data={}, follow_redirects=False).status_code == 303
+    srv.folders["Junk"][2] = forged_footer_spam(v)
+    assert read(ctx, srv).ok
+    with ctx.db.session() as s:
+        assert not lead_on_hold(s, lead_of(ctx).id), "the same sender's next spam holds nothing"
+    assert latest_reply(ctx).status == "needs_review", "and it can still be read"
+    srv.folders["Junk"][3] = K.thr(v, K.OPT)
+    assert read(ctx, srv).ok
+    assert v.to in suppressed_values(ctx), "in our thread it acts"
+
+
+def test_in_thread_mail_in_junk_acts_at_once(make_ctx, server):
+    ctx, _, sent, v = scene(make_ctx)
+    assert read(ctx, server({"INBOX": {}, "Junk": {1: K.thr(v, K.OPT)}})).ok
+    r = latest_reply(ctx)
+    assert r.followup_id == sent.id and r.category == "unsubscribe" and v.to in suppressed_values(ctx)
+
+
+def test_a_verified_signature_counts_as_proof_in_junk(make_ctx, server, monkeypatch):
+    ctx, _, _, v = scene(make_ctx)
+    monkeypatch.setattr("aime.dkim_verify.auth_results", lambda raw, resolver=None: f"aime.dkim; dkim=pass header.d={v.dom}")
+    assert read(ctx, server({"INBOX": {}, "Junk": {1: forged_opt_out(v)}})).ok
+    assert latest_reply(ctx).sender_verified and v.to in suppressed_values(ctx)
+
+
+def test_a_report_in_junk_quoting_our_id_acts(make_ctx, server):
+    ctx, _, sent, v = scene(make_ctx)
+    assert read(ctx, server({"INBOX": {}, "Junk": {1: K.BOUNCES["postfix_dsn"](v)}})).ok
+    assert latest_reply(ctx).category == "bounce" and v.to in suppressed_values(ctx) and lead_of(ctx).outreach_status == "bounced"
+
+
+def test_when_handling_fails_nothing_is_done_on_the_word_of_a_forged_email_either(make_ctx, server, monkeypatch):
+    import aime.reply_intel as ri
+
+    ctx, _, _, v = scene(make_ctx)
+    before = effects(ctx)
+
+    def boom(*a, **k):
+        raise RuntimeError("no")
+    monkeypatch.setattr(ri, "_hold_unproven_in_junk", boom)
+    assert read(ctx, server({"INBOX": {}, "Junk": {1: forged_opt_out(v)}})).ok
+    assert effects(ctx) == before and latest_reply(ctx).status == "needs_review"
+
+
+# ============================================================ review: odd answers to the header fetch, through the real imaplib
+QUIRKS = ["leading blank line", "only some fields", "only the sender", "quoted string, literal in the structure", "another email's answer first",
+          "structure cut short", "structure not closed"]
+
+
+def known_contact_opt_out(v):
+    return K.msg(v.to, "hi there", "Please remove me from your list.", tag="opt")
+
+
+def report_in_a_wrapper(v):
+    ctype, body = K.mp("mixed", [('text/plain; charset="UTF-8"', "fyi"), ('multipart/report; report-type=delivery-status; boundary="B"',
+                                 f"--B\r\nContent-Type: message/delivery-status\r\n\r\nFinal-Recipient: rfc822; {v.to}\r\nAction: failed\r\nStatus: 5.1.1\r\n\r\n--B--\r\n")], "O")
+    return K.msg("Gateway <gw@relay.example>", "fyi", body, ctype=ctype, tag="nest")
+
+
+@pytest.mark.parametrize("quirk", QUIRKS)
+def test_no_odd_answer_lets_a_known_contacts_opt_out_or_a_hidden_report_pass_unread(make_ctx, server, quirk):
+    ctx, _, _, v = scene(make_ctx)
+    srv = server({"INBOX": {1: news(1), 2: news(2), 3: known_contact_opt_out(v), 4: news(4), 5: report_in_a_wrapper(v)}})
+    srv.quirk = quirk
+    res = read(ctx, srv)
+    assert res.ok and res.output.read_to_end and position(ctx) == 5
+    stored = {r.from_email for r in rows(ctx)}
+    assert v.to in stored, "the opt-out was passed as unrelated"
+    assert v.to in suppressed_values(ctx)
+    assert "gw@relay.example" in stored, "the report was passed as unrelated"
+
+
+# ============================================================ review: a real answer in junk is not lost
+def test_an_opt_out_in_junk_the_server_will_not_give_is_kept_and_its_alert_stays(make_ctx, server):
+    ctx, _, _, v = scene(make_ctx)
+
+    class Refuses(Server):
+        def _fetch(self, conn, uid, items):
+            if "HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)" in items:
+                return super()._fetch(conn, uid, items)
+            if "HEADER.FIELDS" not in items:
+                return b""  # an empty answer: OK, and no email
+            return super()._fetch(conn, uid, items)
+
+    srv = Refuses({"INBOX": {}, "Junk": {1: K.thr(v, K.OPT), 2: news(2)}})
+    try:
+        for _ in range(3):
+            assert read(ctx, srv).ok
+        assert len(rows(ctx)) == 1 and position(ctx, "inbox.state.junk") == 2
+        r = latest_reply(ctx)
+        assert r.in_junk and r.status == "needs_review" and r.from_email == v.to
+        with ctx.db.session() as s:
+            assert lead_on_hold(s, lead_of(ctx).id), "its emails wait: it cannot be proven, and it may be an opt-out"
+        for _ in range(2):
+            assert read(ctx, srv).ok
+        assert sum("could not be read" in a for a in alerts(ctx)) == 1, "the alert does not close itself"
+    finally:
+        srv.stop()
+
+
+def test_an_email_in_junk_that_breaks_the_parser_is_kept_like_one_in_the_inbox(make_ctx, server, monkeypatch):
+    ctx, _, _, v = scene(make_ctx)
+    srv = server({"INBOX": {}, "Junk": {1: K.thr(v, K.OPT, mid="<breaks@x.example>"), 2: news(2)}})
+    real = ia.parse_message
+
+    def fussy(raw, own=frozenset()):
+        if b"<breaks@x.example>" in raw:
+            raise RecursionError("deep")
+        return real(raw, own)
+    monkeypatch.setattr(ia, "parse_message", fussy)
+    assert read(ctx, srv).ok
+    assert position(ctx, "inbox.state.junk") == 2 and latest_reply(ctx).in_junk and latest_reply(ctx).status == "needs_review"
+    assert sum("could not be read" in a for a in alerts(ctx)) == 1
+
+
+# ============================================================ review: more ways an answer looks
+@pytest.mark.parametrize("prefix", ["Re[2]:", "RE(3):", "回复:", "回复：", "答复:", "Odp:", "R:", "Rif:", "YNT:", "Antw:", "Sv:", "Vs:", "Rv:", "Re: Fwd: Odp:"])
+def test_every_prefix_on_our_own_subject_is_kept(make_ctx, server, prefix):
+    ctx, _, _, v = scene(make_ctx)
+    subject = f"{prefix} {v.subj}"
+    subject = subject if subject.isascii() else Header(subject, "utf-8").encode()  # as mail programs send it
+    srv = server({"INBOX": {1: K.msg("Pat <pat@free-mail.example>", subject, "Who are you?", tag="p")}})
+    assert read(ctx, srv).output.stored == 1 and skipped_count(ctx) == 0
+
+
+@pytest.mark.parametrize("subject", ["回复: nothing of ours", "Odp: nothing of ours", "A question of mine"])
+def test_our_quoted_footer_keeps_an_email_whatever_its_subject(make_ctx, server, subject):
+    ctx, _, _, v = scene(make_ctx)
+    raw = K.msg("Pat <pat@free-mail.example>", subject, "Please stop." + K.q_gmail(v), tag="f")
+    srv = server({"INBOX": {1: raw, 2: news(2)}})
+    assert read(ctx, srv).output.stored == 1 and srv.body_fetches(1) and not srv.body_fetches(2)
+    assert latest_reply(ctx).status == "needs_review"
+
+
+def test_a_server_that_cannot_search_the_text_leaves_the_header_lines_to_decide_and_is_not_asked_again(make_ctx, server):
+    ctx, _, _, v = scene(make_ctx)
+
+    class NoSearch(Server):
+        def _answer(self, conn, line):
+            if " BODY " in line and "SEARCH" in line.upper():
+                conn.sendall(f"{line.split(' ', 1)[0]} BAD no\r\n".encode())
+                self.commands.append(line.split(" ", 1)[1])
+                return False
+            return super()._answer(conn, line)
+
+    srv = NoSearch({"INBOX": {1: news(1), 2: K.thr(v, K.OPT)}})
+    try:
+        assert read(ctx, srv).ok and v.to in suppressed_values(ctx)
+        srv.folders["INBOX"][3] = news(3)
+        assert read(ctx, srv).ok and skipped_count(ctx) == 2
+        assert sum(" BODY " in c and "SEARCH" in c.upper() for c in srv.commands) == 1
+    finally:
+        srv.stop()
+
+
+def test_our_id_at_either_end_of_a_very_long_references_line_is_read():
+    filler = " ".join(f"<r{i}@x.example>" for i in range(3000))
+    assert len(filler) > 20000
+    for line in (f"<ours@us.example> {filler}", f"{filler} <ours@us.example>"):
+        assert "<ours@us.example>" in parse_message(K.msg("P <p@x.example>", "Hi", "x", refs=line)).references.split()
+
+
+@pytest.mark.parametrize("frm,subject", [("<>", "Mail delivery failed: returning message to sender"), ("Postman <post@relay.example>", "Undeliverable: hello"),
+                                         ("<>", "Your message")])
+def test_a_text_only_failure_notice_without_an_automatic_mark_reaches_a_person(make_ctx, server, frm, subject):
+    ctx, _, _, v = scene(make_ctx)
+    assert read(ctx, server({"INBOX": {1: K.msg(frm, subject, f"Could not deliver to {v.to}.", tag="b")}})).output.stored == 1
+    assert latest_reply(ctx).status == "needs_review" and v.to not in suppressed_values(ctx), "nothing is suppressed on it"
+
+
+def test_the_longer_prefix_patterns_stay_linear():
+    from aime.reply_intel import _bare_subject
+
+    for hostile in ("re[1]:" * 700, "R: " * 1400, "回复:" * 1300, "[x]" * 1300, "re" * 2000 + ":"):
+        started = time.perf_counter()
+        _bare_subject(hostile)
+        ia.REPLY_SUBJECT.match(hostile)
+        assert time.perf_counter() - started < 0.2
+
+
+# ============================================================ review: the small ones
+def test_base64_cut_one_past_a_whole_group_is_still_read_as_text():
+    words = base64.b64encode(b"Please remove me from your list. " * 30).decode()
+    for cut in range(0, 4):
+        text = words[:400 + cut]
+        raw = K.msg("P <p@x.example>", "Hi", text, cte="base64", tag="b")
+        assert parse_message(raw).body_text.startswith("Please remove me"), cut
+
+
+def test_the_junk_read_stops_at_its_deadline_and_goes_on_next_run(make_ctx, server, monkeypatch):
+    import aime.inbox as inbox
+
+    ctx, _, _, v = scene(make_ctx)
+    srv = server({"INBOX": {}, "Junk": {1: K.thr(v, K.OPT)}})
+    monkeypatch.setattr(inbox, "JUNK_SECONDS", 0)
+    assert read(ctx, srv).output.read_to_end and v.to not in suppressed_values(ctx)
+    monkeypatch.setattr(inbox, "JUNK_SECONDS", 60)
+    assert read(ctx, srv).ok and v.to in suppressed_values(ctx)
+
+
+def test_a_folder_name_with_a_line_break_never_reaches_the_server(make_ctx):
+    ctx = make_ctx(**MAIL)
+    box = Mailbox(ctx.settings)
+    bad = b'Spam\r\nA999 DELETE "INBOX"'
+    assert box.junk_folder(SimpleNamespace(list=lambda: ("OK", [(b'(\\Junk) "/" {25}', bad), b""]))) is None
+    assert box.junk_folder(SimpleNamespace(list=lambda: ("OK", [b'(\\Junk) "/" "Sp\tam"']))) is None
+
+
+def test_an_email_whose_header_lines_always_drop_the_connection_is_passed_with_an_alert(make_ctx, server):
+    ctx, _, _, v = scene(make_ctx)
+    srv = server({"INBOX": {1: news(1), 2: K.thr(v, K.OPT)}})
+    srv.drop_head.add(1)
+    agent = InboxAgent(ctx, mailbox=Mailbox(ctx.settings, imap_factory=srv.factory))
+    runs = 0
+    while v.to not in suppressed_values(ctx):
+        runs += 1
+        assert runs <= DROP_TRIES, "the position never moved"
+        agent.run({})
+    assert any("UID 1" in a and "could not be fetched" in a for a in alerts(ctx))
+    assert position(ctx) == 2
+
+
+def test_the_sent_subjects_are_read_once_per_run(make_ctx, server, monkeypatch):
+    import aime.reply_intel as ri
+
+    ctx, _, _, v = scene(make_ctx)
+    calls = []
+    real = ri._sent_subjects
+    monkeypatch.setattr(ri, "_sent_subjects", lambda s: (calls.append(1), real(s))[1])
+    assert read(ctx, server({"INBOX": {i: news(i) for i in range(1, 40)}})).ok
+    assert len(calls) == 1

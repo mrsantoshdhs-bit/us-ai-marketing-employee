@@ -280,6 +280,22 @@ and what was done.
   `[TEST for <intended recipient>]`. `aime simulate-reply --lead <id> --text "..."` processes a reply
   that is labelled SIMULATED everywhere.
 
+## Reading the mailbox: the header pass, junk and Reply-To
+
+- **Header pass.** Each run first reads the header lines and size of up to 500 new emails. What they show to be no sales mail goes on
+  the list "Mail read as not sales" (Replies page) without its body being fetched, so unrelated mail neither delays a reply nor holds
+  sending. When in doubt the body is fetched, and only those emails count against the 50 per run. Sending waits only for a failed read,
+  more than 50 possibly related emails, or more than 500 new emails: the rest come in on the next runs.
+- **Large email.** Over 10 MB only the first 4 MB is read: what it says counts, it goes to review, and a note says so.
+- **Junk.** The junk folder is read too, read-only, about 100 emails or 60 seconds per run, with its own position. Mail that is no sales
+  mail leaves no trace there. Our own thread (our Message-ID) or the sender's verified signature proves an email: it acts at once, as in
+  the inbox. Anything else may be forged. **Nothing is suppressed, stopped, opened or drafted**; the lead's emails wait, an alert says so,
+  and the email is on Replies with the pill "Found in junk". **Mark reviewed** releases the lead, and that sender's later junk mail does
+  not hold it again unless it is in our thread. **Reclassify** applies what you choose, in full. A failure of the folder itself raises
+  one warning and holds nothing; an email kept unread has an alert that stays until dismissed.
+- **Reply-To.** Where someone asks answers to go is shown on Replies and beside the draft. Drafts still go to the sender and nothing
+  goes to the other address by itself: a person decides. A draft to a no-reply sender says so.
+
 ## How fast replies leave
 
 `replies_per_run` under `[followup]` in `config/business.toml` (10): approved replies to people who wrote to us leave at

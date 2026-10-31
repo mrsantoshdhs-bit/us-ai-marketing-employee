@@ -15,10 +15,12 @@ is read in one pass, so the time taken grows with the size of the email and no f
 
 from __future__ import annotations
 
+import base64
 import email
 import hashlib
 import imaplib
 import re
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -96,9 +98,23 @@ def _decoded(value: str) -> str:
         return value
 
 
+_NOT_BASE64 = re.compile(rb"[^A-Za-z0-9+/]")
+
+
+def _part_bytes(part: Message) -> bytes | None:
+    """A part's bytes. A read cut short can leave base64 one character past a whole group, and the mail library then hands back
+    the base64 itself as if it were the text."""
+    payload = part.get_payload()
+    if isinstance(payload, str) and _header(part, "Content-Transfer-Encoding").strip().lower() == "base64":
+        letters = _NOT_BASE64.sub(b"", payload.encode("ascii", "ignore"))
+        if len(letters) % 4 == 1:
+            return base64.b64decode(letters[:-1])
+    return part.get_payload(decode=True)
+
+
 def _part_text(part: Message) -> str:
     """A text part as str. An unknown charset is read as UTF-8, so the sender's words are still seen."""
-    raw = part.get_payload(decode=True)
+    raw = _part_bytes(part)
     if raw is None:
         return ""
     raw = raw[:PART_LIMIT]
@@ -277,7 +293,7 @@ def _delivery_notice(msg: Message, sender: str, subject: str, auto: bool,
     if "message/disposition-notification" in types or (
             is_report and "disposition-notification" in _header(msg, "Content-Type")[:HEADER_LIMIT].lower()):
         return "receipt", [], None, None
-    system = bool(BOUNCE_SENDERS.search(sender))
+    system = bool(BOUNCE_SENDERS.search(sender)) or _header(msg, "From")[:HEADER_LIMIT].strip() == "<>"  # the null sender of a report
     if not is_report and not system and not (BOUNCE_SUBJECT.search(subject) and auto):
         return None, [], None, None
     recipients, original, why, delayed, delivered = [], None, [], False, False
@@ -332,8 +348,10 @@ def is_address(value: str | None) -> bool:
 
 
 def _thread_ids(value: str) -> list[str]:
-    """Every id in an In-Reply-To or References line, also in the older forms: a comment beside it, two ids, or no spaces."""
-    value = value[:THREAD_LIMIT]
+    """Every id in an In-Reply-To or References line, also in the older forms: a comment beside it, two ids, or no spaces. A line
+    longer than the limit is read from both ends: the newest ids are the last ones, and ours may be the first."""
+    if len(value) > THREAD_LIMIT:
+        value = f"{value[:THREAD_LIMIT // 2]} {value[-(THREAD_LIMIT // 2):]}"
     return THREAD_ID.findall(value) or value.split()[:1]
 
 
@@ -480,6 +498,7 @@ RUN_BYTES = 64_000_000  # bytes of email bodies held in memory by one run; the r
 JUNK_HEADS_PER_RUN = 100  # the junk folder may hold thousands, and no tick waits for them
 JUNK_BODIES_PER_RUN = 10
 JUNK_BYTES = 16_000_000
+JUNK_SECONDS = 60  # a slow server or a full folder does not hold up the tick: the rest is read next run
 JUNK_NAMES = ("junk", "spam", "inbox.junk", "inbox.spam", "junk e-mail", "junk email", "[gmail]/spam")
 LARGE_MARK = "only its start was read"  # in the note of an email cut short: a person opens it
 
@@ -492,32 +511,79 @@ _BODY_ITEM = re.compile(rb"BODY\[[^\]]*\](?:<\d+>)?\s*\{\d+\}\s*$", re.I)
 _SIZE_ITEM = re.compile(rb"RFC822\.SIZE\s+(\d+)", re.I)
 _REPORT_PART = re.compile(rb"DELIVERY-STATUS", re.I)
 _BLANK_LINE = re.compile(rb"\r?\n\r?\n")
+_UID_ITEM = re.compile(rb"\bUID\s+(\d+)", re.I)
+_STRUCTURE_TOKEN = re.compile(rb'"(?:[^"\\]|\\.)*"|[()]', re.S)
+_CONTROL = re.compile(rb"[\x00-\x1f\x7f]")
 _LIST_LINE = re.compile(rb'^\(([^)]*)\)\s+(?:"(?:[^"\\]|\\.)*"|NIL)\s*(.*)$', re.I | re.S)
 
 
-def _literal(parts) -> bytes | None:
-    """The email data in a FETCH answer. BODYSTRUCTURE can bring a literal of its own (an odd file name), so the one that
-    follows a BODY[...] item is taken; a server that answers in another form has its first."""
-    found = [p for p in parts or [] if isinstance(p, tuple) and len(p) > 1]
-    for prefix, data in found:
-        if isinstance(prefix, bytes) and _BODY_ITEM.search(prefix):
-            return data
-    return found[0][1] if found else None
+def _about_this_email(parts, uid: int) -> list[tuple[bool, list]]:
+    """The answers in a FETCH reply that may be about this email, each as (it names its UID, its pieces). A server may put another
+    email's answer in the same reply, so one naming another UID is left out. One answer ends at its closing line."""
+    answers, current = [], []
+    for piece in parts or []:
+        if isinstance(piece, tuple) and len(piece) > 1 and isinstance(piece[0], bytes):
+            current.append(piece)
+        elif isinstance(piece, bytes):
+            answers.append([*current, piece])
+            current = []
+    if current:
+        answers.append(current)
+    kept = []
+    for answer in answers:
+        named = _UID_ITEM.findall(b" ".join(p[0] if isinstance(p, tuple) else p for p in answer))
+        if not named or str(uid).encode() in named:
+            kept.append((bool(named), answer))
+    return kept
 
 
-def _around_literals(parts) -> bytes:
+def _around_literals(parts, uid: int) -> bytes:
     """A FETCH answer without the email data: what the server says itself, which nothing a sender writes can pass for."""
-    return b" ".join(p[0] if isinstance(p, tuple) else p for p in parts or []
-                     if isinstance(p, bytes) or (isinstance(p, tuple) and isinstance(p[0], bytes)))
+    return b" ".join(p[0] if isinstance(p, tuple) else p for _, answer in _about_this_email(parts, uid) for p in answer)
+
+
+def _literal(parts, uid: int) -> bytes | None:
+    """The email data in a FETCH answer: the literal that follows this email's BODY[...] item. BODYSTRUCTURE can bring a literal of
+    its own (an odd file name), which is never taken for the email. Two BODY items and no UID to tell them apart: nothing is taken."""
+    kept = _about_this_email(parts, uid)
+    literals = [(named, p) for named, answer in kept for p in answer if isinstance(p, tuple)]
+    bodies = [(named, p) for named, p in literals if _BODY_ITEM.search(p[0])]
+    if by_uid := [p for named, p in bodies if named]:
+        return by_uid[0][1]
+    if bodies:
+        return bodies[0][1][1] if len(bodies) == 1 else None
+    if not literals or b"BODYSTRUCTURE" in _around_literals(parts, uid).upper():
+        return None
+    return literals[0][1][1]  # a server that answers in another form
+
+
+def _structure_is_whole(said: bytes, parts_listed: bool) -> bool:
+    """Every bracket BODYSTRUCTURE opens is closed, and a multipart lists its parts. One cut short says nothing about what it left out."""
+    start = said.find(b"(", said.upper().find(b"BODYSTRUCTURE"))
+    if start < 0 or (parts_listed and not said[start + 1:start + 40].lstrip().startswith(b"(")):
+        return False
+    depth = 0
+    for token in _STRUCTURE_TOKEN.finditer(said, start):
+        depth += {b"(": 1, b")": -1}.get(token.group(0), 0)
+        if depth == 0:
+            return True
+    return False
 
 
 def _only_the_body_can_tell(head: bytes, structure: bytes | None) -> bool:
-    """A report can lie deep inside a multipart (a gateway's wrapper) or an attached email, where the header lines do not show it.
-    The server's BODYSTRUCTURE does; without it, or with header lines cut short or missing, the body is fetched."""
+    """When the header lines cannot be trusted to say what this email is, its body is fetched. Cut short or missing; no usable sender
+    or nothing but a sender (a server that gives only some of the lines asked for, or a leading empty line); or a report that can lie
+    deep inside a multipart (a gateway's wrapper) or an attached email, where only a whole BODYSTRUCTURE shows it."""
     if not head.strip() or len(head) >= HEAD_LIMIT:
         return True
-    maintype = email.message_from_bytes(_MIME_LINE.sub(lambda m: m.group(0)[:HEADER_LIMIT], head + b"\r\n\r\n")).get_content_maintype()
-    return maintype in ("multipart", "message") and (structure is None or bool(_REPORT_PART.search(structure)))
+    msg = email.message_from_bytes(_MIME_LINE.sub(lambda m: m.group(0)[:HEADER_LIMIT], head + b"\r\n\r\n"))
+    sender = (parseaddr(_header(msg, "From")[:HEADER_LIMIT])[1] or "").lower()
+    if not (is_address(sender) or BOUNCE_SENDERS.search(sender)) or (msg.get("Date") is None and msg.get("Message-ID") is None):
+        return True
+    maintype = msg.get_content_maintype()
+    if maintype not in ("multipart", "message"):
+        return False
+    return structure is None or not _structure_is_whole(structure, maintype == "multipart") or bool(_REPORT_PART.search(structure))
 
 
 def _quoted(folder: str) -> str:
@@ -535,7 +601,8 @@ def _listed_folders(data) -> list[tuple[set[bytes], str]]:
         name = literal if isinstance(literal, bytes) else found.group(2).strip()
         if literal is None and name[:1] == b'"' and name[-1:] == b'"' and len(name) > 1:
             name = re.sub(rb"\\(.)", rb"\1", name[1:-1])
-        if name and name.isascii():  # a name is mailbox-encoded, so plain ASCII; anything else could not be asked for anyway
+        # A name is mailbox-encoded, so plain ASCII; anything else could not be asked for, and a line break would be a second command.
+        if name and name.isascii() and not _CONTROL.search(name):
             out.append(({f.lower() for f in found.group(1).split()}, name.decode("ascii")))
     return out
 
@@ -603,10 +670,14 @@ class Mailbox:
 
     def read_junk(self, conn, folder: str, state: dict | None, wanted: Callable[[bytes], bool] | None) -> tuple[list[tuple[str, bytes]], dict]:
         return self.read_folder(conn, folder, state, wanted, batch=JUNK_BODIES_PER_RUN, heads=JUNK_HEADS_PER_RUN,
-                                run_bytes=JUNK_BYTES, label="junk:")
+                                run_bytes=JUNK_BYTES, label="junk:", seconds=JUNK_SECONDS)
 
     def read_folder(self, conn, folder: str, state: dict | None, wanted: Callable[[bytes], bool] | None = None, batch: int | None = None,
-                    heads: int = HEADERS_PER_RUN, run_bytes: int = RUN_BYTES, label: str = "") -> tuple[list[tuple[str, bytes]], dict]:
+                    heads: int = HEADERS_PER_RUN, run_bytes: int = RUN_BYTES, label: str = "", seconds: float | None = None,
+                    quoting: str | None = None) -> tuple[list[tuple[str, bytes]], dict]:
+        """`seconds`: when to stop for this run. `quoting`: words whose presence in a body means that body is wanted whatever the
+        header lines say. The server looks for them, in one command."""
+        deadline = None if seconds is None else time.monotonic() + seconds
         typ, data = conn.select(_quoted(folder), readonly=True)  # EXAMINE: never changes the mailbox
         if typ != "OK":
             raise RuntimeError(f"cannot open mailbox folder {folder}")
@@ -626,8 +697,40 @@ class Mailbox:
         out, unrelated, large, skipped_headers = [], {}, {}, {}
         failed = dict(state.get("failed") or {})
         bodies, held = 0, 0
-        for uid in found[:heads]:
+        window = found[:heads]
+        quotes_us: set[int] = set()
+        if quoting and window and not state.get("no_body_search"):
+            try:
+                typ, data = conn.uid("SEARCH", None, "UID", f"{window[0]}:{window[-1]}", "BODY", f'"{quoting}"')
+                quotes_us = {int(u) for u in (data[0] or b"").split()} if typ == "OK" else set()
+            except (imaplib.IMAP4.abort, OSError):  # too much for this server: this read has failed, and it is not asked again
+                state["no_body_search"] = True
+                state["connection_lost"] = window[0]
+                complete, window = False, []
+            except imaplib.IMAP4.error:  # refused: the header lines decide
+                state["no_body_search"] = True
+        for uid in window:
+            if deadline is not None and time.monotonic() >= deadline:
+                complete = False
+                break
+            drops = int((state.get("dropped") or {}).get(str(uid), 0))
             body_drops = int((state.get("dropped_on_body") or {}).get(str(uid), 0))
+            if drops - body_drops >= DROP_TRIES:
+                try:  # asks nothing of the email itself: if even this drops, the connection is down and no email is to blame
+                    conn.uid("FETCH", str(uid), "(UID)")
+                except (imaplib.IMAP4.abort, OSError):
+                    self._connection_lost(state, uid)
+                    complete = False
+                    break
+                except imaplib.IMAP4.error:
+                    pass
+                state["skipped_uids"] = (list(state.get("skipped_uids") or []) + [uid])[-20:]
+                if lines := self._header_lines(conn, uid):
+                    skipped_headers[str(uid)] = lines
+                failed.pop(str(uid), None)
+                self._connection_held(state)
+                state["last_uid"] = uid
+                continue
             # An email of thousands of parts can have a BODYSTRUCTURE too long for imaplib's line limit: after a drop it is left out.
             items = f"({HEAD_PLAIN})" if str(uid) in (state.get("dropped") or {}) else HEAD_ITEMS
             try:
@@ -638,7 +741,8 @@ class Mailbox:
                 break
             except (imaplib.IMAP4.error, MemoryError):  # about this email: its body is asked for, and counted if that fails too
                 head, size, structure = None, None, None
-            if head is not None and wanted is not None and not _only_the_body_can_tell(head, structure) and not wanted(head):
+            if (head is not None and wanted is not None and uid not in quotes_us and not _only_the_body_can_tell(head, structure)
+                    and not wanted(head)):
                 unrelated[str(uid)] = head
                 failed.pop(str(uid), None)
                 self._connection_held(state)
@@ -666,7 +770,7 @@ class Mailbox:
             except (imaplib.IMAP4.error, MemoryError) as exc:  # about this email (BAD, or too big): counted like a refusal
                 typ, parts = "NO", None
                 broken = isinstance(exc, MemoryError)  # what the connection holds next is unknown
-            raw = _literal(parts)
+            raw = _literal(parts, uid)
             if typ == "OK" and raw:
                 out.append((f"{label}{validity}:{uid}", raw))
                 bodies += 1
@@ -715,11 +819,11 @@ class Mailbox:
         typ, parts = conn.uid("FETCH", str(uid), items)
         if typ != "OK":
             return None, None, None
-        said = _around_literals(parts)
+        said = _around_literals(parts, uid)
         sizes = _SIZE_ITEM.findall(said)  # the largest: an attached email's subject inside BODYSTRUCTURE can only raise it
         size = max(int(n) for n in sizes) if sizes else None
         structure = said if b"BODYSTRUCTURE" in said.upper() else None
-        raw = _literal(parts)
+        raw = _literal(parts, uid)
         if not raw:
             return None, size, structure
         cut = _BLANK_LINE.split(raw, maxsplit=1)
@@ -732,7 +836,7 @@ class Mailbox:
             typ, parts = conn.uid("FETCH", str(uid), "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)])")
         except (imaplib.IMAP4.error, OSError, MemoryError):
             return None
-        raw = next((p[1] for p in parts or [] if isinstance(p, tuple) and len(p) > 1), None)
+        raw = _literal(parts, uid)
         return raw[:HEADER_LIMIT] if typ == "OK" and raw else None
 
     @staticmethod
