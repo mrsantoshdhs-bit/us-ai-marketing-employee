@@ -762,6 +762,81 @@ def test_interest_beside_no_budget_stays_on_the_review_list(make_ctx, text):
     assert r.status == "needs_review" and r.confidence != "high", (r.category, r.confidence, r.status)
 
 
+def test_approving_waits_until_a_person_has_read_the_later_reply(make_ctx):
+    ctx, sent, lead_id = interested(make_ctx)
+    r = second(ctx, sent, "My colleague will join us.")
+    fid = answer_of(ctx, lead_id)[0][0]
+    assert followup(ctx, fid).blocked_reason == "They wrote again after this draft: read it on Replies"
+    web = TestClient(create_app(ctx), headers=ORIGIN, follow_redirects=False)
+    for page in ("/followups", "/approvals"):
+        text = web.get(page).text
+        assert "My colleague will join us." in text and "They wrote again after this draft" in text, page
+    d = followup(ctx, fid)
+    web.post(f"/followups/{fid}/approve", data={"subject": d.subject, "body": d.body})
+    assert followup(ctx, fid).status == "awaiting_approval" and followup(ctx, fid).approved_by is None
+    web.post(f"/followups/{fid}/reconfirm")
+    assert followup(ctx, fid).status == "awaiting_approval"
+    web.post(f"/inbox/{r.id}/reviewed")
+    assert followup(ctx, fid).blocked_reason is None
+    assert "They wrote again" not in web.get("/followups").text
+    web.post(f"/followups/{fid}/approve", data={"subject": d.subject, "body": d.body})
+    assert followup(ctx, fid).status == "approved"
+
+
+def test_a_person_reclassifying_it_to_other_releases_the_answer_too(make_ctx):
+    ctx, sent, lead_id = interested(make_ctx)
+    r = second(ctx, sent, "My colleague will join us.")
+    TestClient(create_app(ctx), headers=ORIGIN).post(f"/inbox/{r.id}/reclassify", data={"category": "other"})
+    assert followup(ctx, answer_of(ctx, lead_id)[0][0]).blocked_reason is None
+
+
+def test_the_send_path_holds_an_answer_with_a_later_reply_unread(make_ctx):
+    from aime.integrations.email_smtp import EmailSender
+
+    ctx, sent, lead_id = interested(make_ctx)
+    r = second(ctx, sent, "My colleague will join us.")
+    fid = answer_of(ctx, lead_id)[0][0]
+    with ctx.db.session() as s:  # however it came to be approved: the send looks for itself
+        f = s.get(FollowUp, fid)
+        f.status, f.approved_by, f.approved_at = "approved", "sam", utcnow()
+    sender = EmailSender(ctx.settings, smtp_factory=FakeSMTP)
+    before = len(FakeSMTP.sent)
+    run(ctx, sender, TUESDAY_11AM_ET + timedelta(hours=1))
+    assert len(FakeSMTP.sent) == before and followup(ctx, fid).status == "approved"
+    TestClient(create_app(ctx), headers=ORIGIN).post(f"/inbox/{r.id}/reviewed")
+    run(ctx, sender, TUESDAY_11AM_ET + timedelta(hours=2))
+    assert len(FakeSMTP.sent) == before + 1 and followup(ctx, fid).status == "sent"
+
+
+def test_a_campaign_does_not_approve_an_answer_with_a_later_reply_unread(make_ctx, monkeypatch):
+    from aime import automation as am
+
+    ctx, sent, lead_id = interested(make_ctx)
+    with ctx.db.session() as s:
+        f = s.get(FollowUp, answer_of(ctx, lead_id)[0][0])
+        f.body = f"{f.body} https://calendly.com/uat/30min"
+        a = NS(id=1, name="c", daily_limit=9, total_limit=9, recipients=[f.to_email.lower()], kinds=[am.email_kind(f)])
+        monkeypatch.setattr(am, "active_authorizations", lambda *_a, **_k: [a])
+        monkeypatch.setattr(am, "committed_counts", lambda *_a, **_k: (0, 0))
+        assert am.campaign_for(s, f, "automatic", utcnow(), {})[0] is a  # without a later reply it would go
+    second(ctx, sent, "My colleague will join us.")
+    with ctx.db.session() as s:
+        f = s.get(FollowUp, answer_of(ctx, lead_id)[0][0])
+        assert "wrote again" in am.campaign_for(s, f, "automatic", utcnow(), {})[1]
+
+
+@pytest.mark.parametrize("status, words", [("sent", "it is sent"), ("rejected", "it is rejected"), ("cancelled", "it is cancelled")])
+def test_the_kept_answers_note_tells_the_truth_once_it_has_moved_on(make_ctx, status, words):
+    ctx, sent, lead_id = interested(make_ctx)
+    second(ctx, sent, "My colleague will join us.")
+    web = TestClient(create_app(ctx), headers=ORIGIN)
+    assert "still waits for your approval" in web.get("/inbox?show=all").text
+    with ctx.db.session() as s:
+        s.get(FollowUp, answer_of(ctx, lead_id)[0][0]).status = status
+    page = web.get("/inbox?show=all").text
+    assert "still waits for your approval" not in page and f"the answer to their earlier email no longer waits: {words}" in page
+
+
 def test_a_stranger_writing_with_their_address_and_no_thread_keeps_nothing(make_ctx):
     """A From line proves nothing: outside our thread and unsigned, the reply stops everything as it always did."""
     ctx, sent, lead_id = interested(make_ctx)

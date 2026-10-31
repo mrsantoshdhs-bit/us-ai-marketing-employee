@@ -40,7 +40,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from aime.crm_ops import log_activity, suppress
+from aime.crm_ops import WROTE_AGAIN, later_reply_waiting, log_activity, suppress
 from aime.dedupe import company_to_address
 from aime.inbox import AUTO_SUBJECT, BOUNCE_SENDERS, LARGE_MARK, below_header_copy, is_address, own_text, rest_of_reply
 from aime.llm.base import LLMError
@@ -1007,6 +1007,8 @@ def _tie_to_lead(row: InboundEmail, lead: Lead) -> None:
 
 
 SUGGESTED_WAITS = "suggested reply waiting for your approval"
+KEPT_ANSWER = "the answer to their earlier email (#{}) still waits for your approval: read this one first"
+_KEPT_ANSWER = re.compile(r"the answer to their earlier email \(#(\d+)\) still waits for your approval: read this one first")
 NO_CLEAR_SIGNAL = "no clear signal"
 # Stages a line that says nothing new does not lower: what they said before still stands.
 STAGES_THAT_STAND = ("interested", "meeting")
@@ -1178,7 +1180,10 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         if cancelled:
             notes.append(f"{cancelled} queued follow-up(s) cancelled")
         if answers:
-            notes.append("the answer to their earlier email still waits for your approval: read this one with it")
+            for draft in drafts:
+                if draft.id in answers:
+                    draft.blocked_reason = WROTE_AGAIN
+            notes.append(KEPT_ANSWER.format(answers[-1]))
         lead.last_activity_at = utcnow()
         if row.category == "interested" and automatic_simulation:
             msg = f"SIMULATED: Interested reply from {row.from_email} ({lead.company.name})"
@@ -1255,11 +1260,30 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
                  actor, type_="reply", body=(row.new_text or "")[:2000], company_id=row.company_id, lead_id=row.lead_id)
 
 
-def note_now(note: str | None, draft_status: str | None) -> str | None:
+def kept_answer_id(note: str | None) -> int | None:
+    found = _KEPT_ANSWER.search(note or "")
+    return int(found.group(1)) if found else None
+
+
+def note_now(note: str | None, draft_status: str | None, kept_status: str | None = None) -> str | None:
     """A reply's note as it reads today: the note was written once, and its draft may have moved on since."""
-    if not note or SUGGESTED_WAITS not in note or draft_status in (None, "awaiting_approval"):
+    if not note:
         return note
-    return note.replace(SUGGESTED_WAITS, f"the suggested reply no longer waits: it is {draft_status.replace('_', ' ')}")
+    if SUGGESTED_WAITS in note and draft_status not in (None, "awaiting_approval"):
+        note = note.replace(SUGGESTED_WAITS, f"the suggested reply no longer waits: it is {draft_status.replace('_', ' ')}")
+    if _KEPT_ANSWER.search(note) and kept_status not in (None, "awaiting_approval"):
+        note = _KEPT_ANSWER.sub(f"the answer to their earlier email no longer waits: it is {kept_status.replace('_', ' ')}", note)
+    return note
+
+
+def release_answers(session: Session, row: InboundEmail) -> None:
+    """A person has read this reply: an answer that waited only for that can be approved again."""
+    if not row.lead_id:
+        return
+    for draft in session.execute(select(FollowUp).where(FollowUp.lead_id == row.lead_id, FollowUp.kind == "response", FollowUp.status == "awaiting_approval",
+                                                        FollowUp.blocked_reason == WROTE_AGAIN)).scalars():
+        if not later_reply_waiting(session, draft):
+            draft.blocked_reason = "Write your answer before approving" if QUESTION_PLACEHOLDER in (draft.body or "") else None
 
 
 def _hold_for_a_person(session: Session, row: InboundEmail, read: tuple | None, exc: Exception, actor: str) -> None:

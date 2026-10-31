@@ -33,7 +33,7 @@ from aime import clock_check, maintenance, send_journal
 from aime.agents import AGENTS
 from aime.agents.sales_workflow import SIGN_IN_ALERT
 from aime.context import AppContext, get_context
-from aime.crm_ops import CONTACT_NOT_SUPPRESSED, is_suppressed, log_activity, suppress
+from aime.crm_ops import CONTACT_NOT_SUPPRESSED, WROTE_AGAIN, is_suppressed, later_reply_waiting, log_activity, suppress
 from aime.db import kv_get, kv_set, take_write_lock
 from aime.inbound import InboundPayload, record_inquiry
 from aime.integrations.email_smtp import POSTAL_PLACEHOLDER, EmailSender, compliance_problem
@@ -61,6 +61,7 @@ from aime.qc.checks import run_quality_checks
 from aime.qc.email_checks import run_email_checks
 from aime.reply_intel import INTENT_LABELS, QUESTION_PLACEHOLDER
 from aime.reply_intel import act as act_on_reply
+from aime.reply_intel import kept_answer_id, release_answers
 from aime.reply_intel import note_now as reply_note_now
 from aime.meetings import check_double_bookings, record_meeting, reopen_after_cancel
 from aime.scheduler.runner import ABANDON_AFTER, due_jobs, load_job_specs, next_run, run_job
@@ -285,6 +286,15 @@ def previous_sign_in(s, user_id: int) -> datetime | None:
         return datetime.fromisoformat(kept)
     user = s.get(User, user_id)
     return user.last_login_at if user else None
+
+
+def later_replies(s, drafts) -> dict[int, dict]:
+    """What each waiting answer's person wrote after it, for the approval pages: plain values, read after the session has closed."""
+    found = {}
+    for f in drafts:
+        if f.status == "awaiting_approval" and (reply := later_reply_waiting(s, f)):
+            found[f.id] = {"text": (reply.new_text or reply.body_text or "")[:1500], "at": reply.received_at}
+    return found
 
 
 def create_app(ctx: AppContext | None = None) -> FastAPI:
@@ -534,9 +544,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     s.execute(stmt.order_by(InboundEmail.received_at.desc()).limit(200)).scalars().all())
             for r in rows:
                 _ = r.lead.company if r.lead else None
+            kept = {r.id: kept_answer_id(r.action_note) for r in rows}
             drafts = dict(s.execute(select(FollowUp.id, FollowUp.status).where(
-                FollowUp.id.in_([r.suggested_followup_id for r in rows if r.suggested_followup_id] or [0]))).all())
-            notes = {r.id: reply_note_now(r.action_note, drafts.get(r.suggested_followup_id)) for r in rows}
+                FollowUp.id.in_([i for i in (*(r.suggested_followup_id for r in rows), *kept.values()) if i] or [0]))).all())
+            notes = {r.id: reply_note_now(r.action_note, drafts.get(r.suggested_followup_id), drafts.get(kept[r.id])) for r in rows}
             counts = dict(s.execute(select(InboundEmail.category, func.count(InboundEmail.id))
                                     .where(record_condition(scope(request), InboundEmail.lead_id))
                                     .group_by(InboundEmail.category)).all())
@@ -558,6 +569,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             row = s.get(InboundEmail, eid) or _404()
             if action == "reviewed":
                 row.status = "reviewed"
+                release_answers(s, row)
                 msg = "Marked reviewed"
             elif action == "apply_calendly" and row.category == "calendly" and row.status == "needs_review":
                 from aime.meetings import handle_calendly_email
@@ -577,6 +589,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 row.reasons = list(row.reasons or []) + [f"set to {category} by {who(request)}"]
                 act_on_reply(s, C().settings, row, who(request))
                 row.status = "reviewed" if row.status == "needs_review" else row.status
+                release_answers(s, row)
                 log_activity(s, f"Reply #{row.id} reclassified from {previous} to {category}", who(request),
                              type_="override", company_id=row.company_id, lead_id=row.lead_id)
                 msg = f"Reclassified as {category.replace('_', ' ')}; {row.action_note or ''}"
@@ -1146,9 +1159,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             earlier = {f.id: [{"subject": e.subject, "body": e.body, "sent_at": e.sent_at, "to": e.to_email}
                               for e in sent_earlier(s, f.lead_id, f.in_reply_to)]
                        for f in first if f.status == "awaiting_approval" and f.in_reply_to}
+            later = later_replies(s, first)
         return render(request, "followups.html", rows=rows, show=show, email_ready=ready, email_reason=reason, sent_total=total,
                       hidden=total - len(rest), page_size=FOLLOWUPS_PAGE, reconfirm=reconfirm, simulated=simulated,
-                      reply_to=reply_to, earlier=earlier)
+                      reply_to=reply_to, earlier=earlier, later=later)
 
     @app.post("/followups/{fid}/{action}")
     def followup_action(request: Request, fid: int, action: str, subject: str = Form(""), body: str = Form(""),
@@ -1185,6 +1199,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     qc_status = ((f.quality or {}).get("qc") or {}).get("status")
                 if action == "save":
                     msg = "Saved" + (f"; quality checks: {qc_status}" if qc_status else "")
+                elif later_reply_waiting(s, f):  # the answer was written without it
+                    return back(f"/followups#f{f.id}", f"Cannot approve: {WROTE_AGAIN}, and mark it reviewed first")
                 elif QUESTION_PLACEHOLDER in (f.body or ""):
                     return back(f"/followups#f{f.id}", "Write your answer in place of the placeholder before approving")
                 elif suppressed:  # checked on every approval, edited or not
@@ -1216,6 +1232,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                             log_activity(s, f"Outreach email #{f.id} approved despite {qc_status} quality checks",
                                          who(request), type_="override", company_id=f.company_id, lead_id=f.lead_id)
                     msg = "Approved. It will be sent by the follow-ups job if outbound email is enabled."
+            elif action == "reconfirm" and later_reply_waiting(s, f):
+                return back(f"/followups#f{f.id}", f"Cannot confirm: {WROTE_AGAIN}, and mark it reviewed first")
             elif action == "reconfirm" and f.channel == "email" and am.needs_reconfirmation(s, f):
                 am.reconfirm(s, f, who(request))  # approved before sending was switched on: a person confirms it again
                 msg = "Confirmed again: it goes out on the next follow-ups run"
@@ -1622,7 +1640,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             reconfirm = [f for f in reconfirm if am.needs_reconfirmation(s, f)]
             for f in reconfirm:
                 _ = f.lead.company
-        return render(request, "approvals.html", emails=emails, posts=posts, reconfirm=reconfirm)
+            later = later_replies(s, emails)
+        return render(request, "approvals.html", emails=emails, posts=posts, reconfirm=reconfirm, later=later)
 
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request):

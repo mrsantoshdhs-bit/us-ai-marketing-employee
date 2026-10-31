@@ -27,7 +27,7 @@ from aime import automation, send_journal
 from aime.agents.contracts import BlockedItem
 from aime.agents.qualification import LeadQualificationAgent
 from aime.calendar_slots import holiday_on
-from aime.crm_ops import is_suppressed, log_activity, suppress
+from aime.crm_ops import WROTE_AGAIN, is_suppressed, later_reply_waiting, log_activity, suppress
 from aime.email_templates import draft_reply
 from aime.integrations.email_smtp import EmailNotReady, EmailSender, compliance_problem, new_message_id
 from aime.knowledge.content_bank import BRAND_LINES
@@ -577,6 +577,10 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 if why:
                     f.status, f.blocked_reason = "cancelled", f"Not sent: {why}"[:300]
                     out.cancelled += 1
+                    continue
+                if later_reply_waiting(session, f):  # held, not cancelled: it goes out once a person has read what came after it
+                    f.blocked_reason = WROTE_AGAIN
+                    out.blocked.append(BlockedItem(id=f.id, reason=WROTE_AGAIN))
                     continue
             elif f.kind == "outreach":
                 if automation.is_given_test_contact(contact):  # an address the owner gave for testing, never published
