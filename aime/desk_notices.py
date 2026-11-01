@@ -3,7 +3,8 @@
 The tick runs in the background session even while the owner is signed in, and nothing shown there reaches a screen.
 The dashboard runs on the signed-in desktop: once a minute it looks for new warning and error alerts and new interested
 replies, and shows them through aime.notify. It remembers in the key-value store the last alert and reply it looked at,
-so a restart repeats nothing and the first start shows nothing old. It sends no mail and changes no alert.
+so a restart repeats nothing and the first start shows nothing old. It never looks past a reply the inbox job has stored
+but not read yet, so a reply read after a look still gets its notice. It sends no mail and changes no alert.
 Started only by `aime serve`, never by the web app itself, so TestClient and the tests never run it.
 """
 
@@ -40,12 +41,21 @@ def _new_notices(session, seen: dict, top: dict) -> list[tuple[str | None, str]]
     return notices
 
 
+def _newest(session) -> dict:
+    """The last alert and reply there is to look at. The newest id is read first: a reply stored in between is still held back."""
+    top = {"alert": session.execute(select(func.max(Alert.id))).scalar_one() or 0,
+           "reply": session.execute(select(func.max(InboundEmail.id))).scalar_one() or 0}
+    unread = session.execute(select(func.min(InboundEmail.id)).where(InboundEmail.status == "new")).scalar_one()
+    if unread is not None:  # stored first, read at the end of the job or by the next run: no category to judge yet
+        top["reply"] = min(top["reply"], unread - 1)
+    return top
+
+
 def poll_once(ctx) -> int:
     """Show what is new since the last look. Returns how many notices there were."""
     settings = ctx.settings
     with ctx.db.session() as s:
-        top = {"alert": s.execute(select(func.max(Alert.id))).scalar_one() or 0,
-               "reply": s.execute(select(func.max(InboundEmail.id))).scalar_one() or 0}
+        top = _newest(s)
         seen = kv_get(s, SEEN)
         if seen is None:  # the first start: everything so far is old
             kv_set(s, SEEN, top)

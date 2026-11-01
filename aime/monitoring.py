@@ -60,10 +60,12 @@ NO_NETWORK = re.compile(r"gaierror|getaddrinfo|name or service not known|name re
 
 
 def network_cause(session: Session, job: str) -> str:
-    """Plain words for a job's latest failure when it was the network, otherwise nothing. Fixed words: no error text."""
-    errors = [session.execute(select(model.error).where(model.job == job, model.status == "failed", model.error.is_not(None))
-                              .order_by(model.id.desc()).limit(1)).scalar() for model in (AgentRun, JobRun)]
-    return ": no internet or DNS at the last try" if any(e and NO_NETWORK.search(e) for e in errors) else ""
+    """Plain words for a job's latest failure when it was the network, otherwise nothing. Fixed words: no error text.
+
+    Only its last unsuccessful run is judged, which holds its steps' errors too: an older failure says nothing about this one."""
+    error = session.execute(select(JobRun.error).where(JobRun.job == job, JobRun.status.in_(("failed", "partial", "abandoned")))
+                            .order_by(JobRun.id.desc()).limit(1)).scalar()
+    return ": no internet or DNS at the last try" if error and NO_NETWORK.search(error) else ""
 
 
 # Alerts raised before keys existed (until 27 Oct 2026): their key is read from the message.

@@ -18,6 +18,7 @@ from aime import desk_notices, notify
 from aime.cli import cmd_serve
 from aime.models import AgentRun, Alert, AuditEvent, Company, InboundEmail, JobRun, JobState, Lead, User
 from aime.monitoring import check_health
+from aime.reply_intel import process_pending
 from aime.web.app import create_app
 from aime.web.auth import MAX_FAILED, SIGN_IN_FAILED, authenticate, hash_password
 
@@ -39,13 +40,13 @@ def test_on_a_full_disk_the_one_notification_names_the_disk(tmp_path, monkeypatc
 
 
 # ---------------------------------------------------------------- the network named as the cause
-def failing_job_alert(ctx, error: str | None, model=AgentRun) -> str:
+def failing_job_alert(ctx, *runs: tuple[str, str | None]) -> str:
+    """The job's runs, oldest first, as (status, error)."""
     with ctx.db.session() as s:
         s.add(JobState(job="content", consecutive_failures=2, enabled=True))
-        if error and model is AgentRun:
-            s.add(AgentRun(run_id="r1", agent="content", job="content", status="failed", error=error))
-        elif error:
-            s.add(JobRun(job="content", trigger="scheduler", status="failed", error=error))
+        for status, error in runs:
+            s.add(JobRun(job="content", trigger="scheduler", status=status, error=error))
+            s.flush()
     with ctx.db.session() as s:
         check_health(s, ctx.settings)
     with ctx.db.session() as s:
@@ -53,21 +54,42 @@ def failing_job_alert(ctx, error: str | None, model=AgentRun) -> str:
 
 
 def test_a_job_failing_for_want_of_a_network_says_so(ctx):
-    said = failing_job_alert(ctx, "[Errno 11001] getaddrinfo failed for imap.example with password hunter2")
+    said = failing_job_alert(ctx, ("failed", "inbox: [Errno 11001] getaddrinfo failed for imap.example with password hunter2"))
     assert said == "Job 'content' failed 2 times in a row: no internet or DNS at the last try"
 
 
-def test_the_cause_is_read_from_the_job_run_as_well(ctx):
-    said = failing_job_alert(ctx, "socket.gaierror: name resolution failed", model=JobRun)
+def test_a_part_failed_run_counts_as_the_last_try(ctx):
+    said = failing_job_alert(ctx, ("failed", "ValueError: no such template"), ("partial", "content: socket.gaierror: name resolution failed"))
     assert said.endswith("no internet or DNS at the last try")
 
 
 def test_a_job_failing_for_any_other_reason_keeps_its_words(ctx):
-    assert failing_job_alert(ctx, "ValueError: no such template") == "Job 'content' failed 2 times in a row"
+    said = failing_job_alert(ctx, ("failed", "ValueError: no such template"))
+    assert said == "Job 'content' failed 2 times in a row"
 
 
 def test_a_job_with_no_error_recorded_keeps_its_words(ctx):
-    assert failing_job_alert(ctx, None) == "Job 'content' failed 2 times in a row"
+    assert failing_job_alert(ctx, ("failed", None)) == "Job 'content' failed 2 times in a row"
+
+
+def test_an_old_network_failure_is_not_blamed_for_a_newer_one_with_another_cause(ctx):
+    """A job-level exception is on its run only: last week's DNS failure stays the newest failed agent run."""
+    with ctx.db.session() as s:
+        s.add(AgentRun(run_id="r1", agent="content", job="content", status="failed", error="socket.gaierror: getaddrinfo failed"))
+    disk = "sqlite3.OperationalError: disk I/O error"
+    said = failing_job_alert(ctx, ("failed", "socket.gaierror: getaddrinfo failed"), ("failed", disk), ("failed", disk))
+    assert said == "Job 'content' failed 2 times in a row"
+
+
+def test_an_old_network_failure_is_not_blamed_for_a_newer_part_failed_or_abandoned_run(make_ctx):
+    network = ("failed", "socket.gaierror: getaddrinfo failed")
+    assert "no internet" not in failing_job_alert(make_ctx(), network, ("partial", "content: ValueError: no such template"))
+    assert "no internet" not in failing_job_alert(make_ctx(), network, ("abandoned", "Process ended before the job finished"))
+
+
+def test_a_run_still_going_is_not_the_last_try(ctx):
+    network = ("failed", "socket.gaierror: getaddrinfo failed")
+    assert failing_job_alert(ctx, network, ("running", None)).endswith("no internet or DNS at the last try")
 
 
 # ---------------------------------------------------------------- desktop notices
@@ -96,7 +118,20 @@ def add_reply(ctx, category="interested", company=None, **fields):
             lead_id = lead.id
         n = s.query(InboundEmail).count()
         s.add(InboundEmail(message_id=f"<{n}@mail.example>", from_email=f"person{n}@mail.example", subject="Re: hello",
-                           category=category, lead_id=lead_id, **fields))
+                           category=category, lead_id=lead_id, status="actioned", **fields))
+
+
+def store_unread_reply(ctx, words="Yes, I am interested, let's talk next week."):
+    """What the inbox job's first step leaves: stored, not yet read."""
+    with ctx.db.session() as s:
+        n = s.query(InboundEmail).count()
+        s.add(InboundEmail(message_id=f"<{n}@mail.example>", from_email=f"person{n}@mail.example", subject="Re: hello",
+                           status="new", body_text=words, new_text=words))
+
+
+def read_the_stored_replies(ctx):
+    with ctx.db.session() as s:
+        process_pending(s, ctx.settings, "test")
 
 
 def test_the_first_start_shows_nothing_old(ctx, monkeypatch):
@@ -114,6 +149,38 @@ def test_a_person_at_the_desk_is_told_of_an_interested_reply_the_tick_could_not_
     add_reply(ctx, company="Acme Software")
     assert desk_notices.poll_once(ctx) == 1
     assert shown == [("sales", "Interested reply from person0@mail.example (Acme Software)")]
+
+
+def test_a_reply_read_after_a_look_still_gets_its_notice_once(ctx, monkeypatch):
+    shown = fake_toasts(monkeypatch)
+    desk_notices.poll_once(ctx)
+    store_unread_reply(ctx)
+    assert desk_notices.poll_once(ctx) == 0  # the dashboard's minute falls between storing and reading
+    read_the_stored_replies(ctx)
+    assert desk_notices.poll_once(ctx) == 1 and desk_notices.poll_once(ctx) == 0
+    assert shown == [("sales", "Interested reply from person0@mail.example")]
+
+
+def test_a_reply_stored_before_the_first_start_and_read_after_it_gets_its_notice(ctx, monkeypatch):
+    shown = fake_toasts(monkeypatch)
+    store_unread_reply(ctx)
+    assert desk_notices.poll_once(ctx) == 0
+    read_the_stored_replies(ctx)
+    assert desk_notices.poll_once(ctx) == 1 and len(shown) == 1
+
+
+def test_an_unread_reply_holds_back_later_replies_but_loses_and_repeats_none_and_no_alert_waits(ctx, monkeypatch):
+    shown = fake_toasts(monkeypatch)
+    desk_notices.poll_once(ctx)
+    store_unread_reply(ctx)
+    add_reply(ctx)
+    add_alert(ctx)
+    desk_notices.poll_once(ctx)
+    assert shown == [("error", "a error alert")]
+    read_the_stored_replies(ctx)
+    desk_notices.poll_once(ctx)
+    desk_notices.poll_once(ctx)
+    assert sorted(w for _, w in shown[1:]) == ["Interested reply from person0@mail.example", "Interested reply from person1@mail.example"]
 
 
 def test_new_warnings_and_errors_are_shown_once_and_a_restart_repeats_none(ctx, monkeypatch):

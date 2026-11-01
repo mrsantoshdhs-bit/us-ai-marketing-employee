@@ -192,14 +192,14 @@ Alerts are always stored and shown on the dashboard; notifications are an extra 
 stopped, they wait on the dashboard. The hourly Watchdog also notifies, about stopped ticks, a stopped dashboard and a
 nearly full disk. Nothing tells anyone off this PC: no outside service is used.
 
+Alerts about a condition (a `doctor` check, the local model, a failing or stale job) are kept as one alert
+per condition with the latest details, and close themselves once the condition clears. Dismissing one keeps
+it quiet for 24 hours. One-off notices (a slow job, a rejected import file) stay until you dismiss them.
+
 ## Sign-in lockouts
 
 Five wrong passwords lock an account for 15 minutes, and the sign-in page says the same words as for any wrong password.
 Each lockout is in the **audit log** as `sign in locked`, with the username and never a password. Session length is unchanged.
-
-Alerts about a condition (a `doctor` check, the local model, a failing or stale job) are kept as one alert
-per condition with the latest details, and close themselves once the condition clears. Dismissing one keeps
-it quiet for 24 hours. One-off notices (a slow job, a rejected import file) stay until you dismiss them.
 
 ## Company research and decision-makers
 
