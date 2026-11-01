@@ -30,7 +30,7 @@ def test_the_stage_history_records_opening_a_no_and_a_reopening(make_ctx):
     answer(ctx, 2, ANN, "Actually we changed our minds. Can we talk Thursday?")
     steps = history(ctx, oid)
     assert [(a, b) for a, b, _, _ in steps] == [(None, "new"), ("new", "lost"), ("lost", "discovery")]
-    assert steps[1][3] == "Not interested" and "reopened by an interested reply" in steps[2][3]
+    assert steps[1][3] == "Not interested" and "reopened; it was lost" in steps[2][3]
     assert opp_of(ctx, ANN).origin == "ai"
 
 

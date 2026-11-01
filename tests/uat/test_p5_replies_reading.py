@@ -256,7 +256,6 @@ def test_an_opt_out_without_a_date_of_its_own_stays_one(text):
     assert read(text)[0] == "unsubscribe", read(text)
 
 
-@pytest.mark.xfail(reason="suggest() belongs to the replies-acting group: drop this mark when the objection branch gives no draft for a dated no", strict=False)
 def test_a_date_leaves_no_draft_that_writes_to_them_now(make_ctx):
     ctx, r = answer(make_ctx, "Don't email me until April.")
     assert r.suggested_followup_id is None
