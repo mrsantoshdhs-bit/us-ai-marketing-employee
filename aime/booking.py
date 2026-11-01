@@ -22,7 +22,6 @@ from sqlalchemy.orm import Session
 from aime import automation as am
 from aime.crm_ops import log_activity
 from aime.models import Alert, Contact, FollowUp, InboundEmail, Lead, Meeting, MeetingProposal, Opportunity
-from aime.outreach import set_status
 from aime.reply_intel import _signature, reply_footer
 from aime.timeutil import as_aware_utc, to_naive_utc, utcnow
 
@@ -346,21 +345,23 @@ def book(session: Session, settings, calendar, p: MeetingProposal, index: int, a
                            source="calendar", status="scheduled", event_id=event_id, provider=calendar.name)
         session.add(existing)
         session.flush()
-    from aime.meetings import _advance_opportunity, close_open_emails
+    from aime.meetings import OPTED_OUT_HOLD, book_on_lead, close_open_emails
 
-    existing.opportunity_id = _advance_opportunity(session, lead, existing, actor).id
-    set_status(session, lead, "meeting", actor, f"{start:%Y-%m-%d %H:%M} UTC (booked from proposal #{p.id})")
+    hold = book_on_lead(session, settings, lead, contact, existing, actor, f"{start:%Y-%m-%d %H:%M} UTC (booked from proposal #{p.id})")
     close_open_emails(session, lead, f"Meeting booked for {label(start, p.prospect_tz)}: not needed")
     p.status, p.chosen_slot, p.meeting_id, p.approved_by = "booked", start, existing.id, actor
-    _draft(session, settings, lead, p.prospect_email, f"Confirmed: our call on {label(start, p.prospect_tz)}",
-           f"Thank you, our call is confirmed for {label(start, p.prospect_tz)} ({p.minutes} minutes).",
-           None, p.contact_id, purpose="meeting_confirmation")
+    if hold != OPTED_OUT_HOLD:  # someone who opted out is not written to, even to confirm: a person decides
+        _draft(session, settings, lead, p.prospect_email, f"Confirmed: our call on {label(start, p.prospect_tz)}",
+               f"Thank you, our call is confirmed for {label(start, p.prospect_tz)} ({p.minutes} minutes).",
+               None, p.contact_id, purpose="meeting_confirmation")
     from aime.handover import handover
-    opp = session.get(Opportunity, existing.opportunity_id)
+    opp = session.get(Opportunity, existing.opportunity_id) if hold is None and existing.opportunity_id else None
     if opp is not None:
         handover(session, settings, opp, f"meeting booked for {label(start, p.prospect_tz)} ({p.prospect_email})", actor)
-    log_activity(session, f"Meeting booked for {label(start, p.prospect_tz)} by {actor}; the confirmation waits for "
-                 "your approval", actor, type_="meeting", company_id=lead.company_id, lead_id=lead.id,
+    log_activity(session, f"Meeting booked for {label(start, p.prospect_tz)} by {actor}"
+                 + (f", but {hold}: the lead and its deal stay as they are until a person decides" if hold else "")
+                 + ("; no confirmation was drafted" if hold == OPTED_OUT_HOLD else "; the confirmation waits for your approval"),
+                 actor, type_="meeting", company_id=lead.company_id, lead_id=lead.id,
                  opportunity_id=existing.opportunity_id)
     am.audit(session, actor, "meeting_booked", f"meeting #{existing.id}", f"proposal #{p.id}, slot {index + 1}, "
              f"{start:%Y-%m-%d %H:%M} UTC, calendar event created")
@@ -424,9 +425,10 @@ def reminders(session: Session, settings, now: datetime | None = None) -> int:
         Meeting.starts_at > now, Meeting.starts_at <= now + timedelta(hours=c["remind"]))).scalars().all()
     for m in due:
         who = m.invitee_name or m.invitee_email
+        # a Calendly notice or a hand-logged meeting names the host's zone: only a proposal knows the zone they are in
+        theirs = f" ({label(m.starts_at, m.timezone or 'UTC')} for them)" if m.source == "calendar" else ""
         session.add(Alert(level="info", source="meetings",
-                          message=f"Meeting with {who} at {label(m.starts_at, c['owner_tz'])} "
-                                  f"({label(m.starts_at, m.timezone or 'UTC')} for them): prepare"))
+                          message=f"Meeting with {who} at {label(m.starts_at, c['owner_tz'])}{theirs}: prepare"))
         lead = session.get(Lead, m.lead_id) if m.lead_id else None
         if c["remind_prospect"] and lead is not None:
             _draft(session, settings, lead, m.invitee_email, f"Reminder: our call on {label(m.starts_at, m.timezone or 'UTC')}",

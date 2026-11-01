@@ -191,7 +191,7 @@ def test_a_booking_updates_the_crm_and_tells_the_sales_manager(make_ctx, monkeyp
         assert (m.status, m.starts_at, m.ends_at, m.timezone) == ("scheduled", datetime(2026, 10, 29, 4, 30),
                                                                   datetime(2026, 10, 29, 5, 0), "Asia/Kolkata")
         opp = s.get(Opportunity, m.opportunity_id)
-        assert (opp.stage, opp.probability) == ("discovery", 30) and "Meeting 2026-10-29 04:30 UTC" in opp.next_step
+        assert (opp.stage, opp.probability) == ("discovery", 30) and "Meeting Thu Oct 29, 10:00 AM IST (04:30 UTC)" in opp.next_step
         stale = s.get(FollowUp, link_reply)  # a second booking link would only confuse them
         assert stale.status == "cancelled" and stale.blocked_reason.startswith("Meeting booked for")
         rows = s.execute(select(InboundEmail).where(InboundEmail.category == "calendly")).scalars().all()
@@ -229,7 +229,7 @@ def test_double_bookings_reschedules_and_cancellations(make_ctx, monkeypatch):
     with ctx.db.session() as s:
         assert not open_double(s)
         first = s.execute(select(Meeting).order_by(Meeting.id)).scalars().first()
-        assert first.status == "scheduled" and "Meeting 2026-10-29 04:30 UTC" in s.get(Opportunity, first.opportunity_id).next_step
+        assert first.status == "scheduled" and "Meeting Thu Oct 29, 10:00 AM IST (04:30 UTC)" in s.get(Opportunity, first.opportunity_id).next_step
     assert lead_of(ctx).outreach_status == "meeting"  # one meeting is still booked
     # a reschedule reported as a new event and a cancellation of the old time, the new event first
     fri2 = ("2:00pm", "Friday, October 30, 2026", "Fri, Oct 30, 2026")

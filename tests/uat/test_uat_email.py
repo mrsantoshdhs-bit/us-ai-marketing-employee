@@ -1444,7 +1444,7 @@ def test_ok_signed_notice_books_on_the_right_lead_and_deal(make_ctx, monkeypatch
     assert followup(ctx, step2.id).status == "cancelled"
     with ctx.db.session() as s:
         opp = s.get(Opportunity, m.opportunity_id)
-        assert opp.lead_id == lead.id and opp.probability >= 30 and "2026-11-03 15:00" in opp.next_step
+        assert opp.lead_id == lead.id and opp.probability >= 30 and "Tue Nov 03, 10:00 AM EST (15:00 UTC)" in opp.next_step
         assert s.execute(select(Alert).where(Alert.message.contains("Meeting booked with David Chen"))).scalars().first()
 
 
@@ -1495,7 +1495,7 @@ def test_ok_reschedule_moves_the_meeting_and_the_late_cancel_of_the_old_time_cha
     assert m.starts_at == datetime(2026, 11, 6, 19, 0) and m.rescheduled_from == datetime(2026, 11, 3, 15, 0)
     assert m.status == "scheduled" and lead_of(ctx).outreach_status == "meeting"
     with ctx.db.session() as s:
-        assert "2026-11-06 19:00" in s.get(Opportunity, m.opportunity_id).next_step
+        assert "Fri Nov 06, 2:00 PM EST (19:00 UTC)" in s.get(Opportunity, m.opportunity_id).next_step
     deliver(ctx, notice("Canceled"))  # Calendly's cancellation of the former time
     [m] = meetings_of(ctx)
     assert m.status == "scheduled" and m.starts_at == datetime(2026, 11, 6, 19, 0)
