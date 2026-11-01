@@ -698,21 +698,27 @@ def test_an_opt_out_from_someone_with_no_contact_row_counts(make_ctx):
     assert lid
 
 
-def test_a_person_on_the_do_not_contact_list_found_later_counts_and_a_bounce_entry_does_not(make_ctx):
+def test_an_address_on_the_do_not_contact_list_counts_with_or_without_a_contact_and_a_bounce_entry_does_not(make_ctx):
     ctx = make_ctx()
     with ctx.db.session() as s:
         co = Company(name="Harbor Goods", normalized_name="harbor goods", source="test", domain="harbor.example", state="TX", country="US")
-        s.add(co)
+        other = Company(name="Other Goods", normalized_name="other goods", source="test", domain="other.example", state="TX", country="US")
+        s.add_all([co, other])
         s.flush()
-        s.add(Suppression(value="pat@harbor.example", kind="email", reason="Asked by phone"))
         s.add(Suppression(value="dead@harbor.example", kind="email", reason="Bounced (delivery failure report)"))
-        s.flush()
         s.add(Contact(company_id=co.id, email="dead@harbor.example", source="website", consent_status="none"))
+        s.add(Suppression(value="pat@elsewhere.example", kind="email", reason="Asked by phone"))
         s.flush()
         assert not company_opted_out(s, co)
-        s.add(Contact(company_id=co.id, email="Pat+news@harbor.example", source="website", consent_status="none"))
+        s.add(Contact(company_id=co.id, email="Pat+news@elsewhere.example", source="website", consent_status="none"))  # found after it was listed
         s.flush()
         assert company_opted_out(s, co)
+        s.add(Suppression(value="lee@other.example", kind="email", reason="Asked by phone"))  # nobody on file for it
+        s.flush()
+        assert company_opted_out(s, other)
+        s.execute(select(Suppression).where(Suppression.value == "lee@other.example")).scalars().one().lifted_at = utcnow()
+        s.flush()
+        assert not company_opted_out(s, other)
 
 
 def opted_out_contact_with_a_bounce_entry(ctx, **contact):
