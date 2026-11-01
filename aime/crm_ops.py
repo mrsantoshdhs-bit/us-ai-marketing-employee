@@ -206,9 +206,10 @@ def _entries_covering(email: str | None = None, domain: str | None = None):
     if email:
         values.append(canonical_address(email))
         if "@" in email:
-            values += _host_and_parents(email.rsplit("@", 1)[-1])
+            host = email.rsplit("@", 1)[-1]
+            values += [host.lower(), *_host_and_parents(host)]  # the spelling as written too: an entry may keep a stray dot
     if domain:
-        values += _host_and_parents(domain)
+        values += [domain.lower(), *_host_and_parents(domain)]
     return select(Suppression).where(canonical_sql(Suppression.value).in_(values)) if values else None
 
 
@@ -287,10 +288,13 @@ def suppress(session: Session, value: str, reason: str, bounce: bool = False) ->
             row.reason = reason  # never lifted: see lift_suppression
         return
     if bounce:
-        for c in session.execute(select(Contact).where(func.lower(Contact.email) == value)).scalars():
+        contacts = session.execute(select(Contact).where(func.lower(Contact.email) == value)).scalars().all()
+        for c in contacts:
             c.email_status = "bounced"
-        for f in session.execute(select(FollowUp).where(func.lower(FollowUp.to_email) == value, FollowUp.channel == "email",
-                                                        FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
+        # A row with no to_email goes to its contact, so it is queued for this very address; a colleague's row names its own.
+        for f in session.execute(select(FollowUp).where(
+                or_(func.lower(FollowUp.to_email) == value, and_(FollowUp.to_email.is_(None), FollowUp.contact_id.in_([c.id for c in contacts]))),
+                FollowUp.channel == "email", FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
             f.status, f.blocked_reason = "cancelled", "The address bounced"
         return
     # Stop anything queued for that address/domain.

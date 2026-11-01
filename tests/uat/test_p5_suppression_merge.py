@@ -143,6 +143,15 @@ def test_the_gate_and_the_dashboard_agree_and_only_ever_refuse_more(make_ctx):
                 assert gate or not _as_of_release_75(s, address), (value, address)
 
 
+def test_an_entry_with_a_trailing_dot_still_blocks_the_same_spelling(make_ctx):
+    ctx = make_ctx()
+    with ctx.db.session() as s:
+        s.add(Contact(email="pat@acme.example.", source="website"))
+        s.add(Suppression(value="acme.example.", kind="domain", reason="test"))
+        s.flush()
+        assert _as_of_release_75(s, "pat@acme.example.") and is_suppressed(s, "pat@acme.example.")
+
+
 @pytest.mark.parametrize("value, address", [("co.uk", "pat@foo.co.uk"), ("github.io", "pat@shop.github.io"), ("example", "pat@acme.example"), ("uk", "pat@foo.co.uk"),
                                             ("acme.example", "pat@notacme.example"), ("acme.example", "pat@acme.example.evil.example"), ("pat@acme.example", "patrick@acme.example")])
 def test_a_bare_suffix_or_a_lookalike_is_never_matched(make_ctx, value, address):
@@ -190,13 +199,15 @@ def test_a_bounce_blocks_the_address_at_every_gate_without_recording_an_opt_out(
                        due_at=TUESDAY_11AM_ET, to_email="colleague@dead.example", subject="Re: a question", body="Hello."))
         s.add(FollowUp(lead_id=other.id, company_id=other.company_id, contact_id=other.contact_id, channel="email", step=1, status="approved", kind="outreach",
                        due_at=TUESDAY_11AM_ET, to_email="pat@dead.example", subject="Hello", body="Hello."))
+        s.add(FollowUp(lead_id=other.id, company_id=other.company_id, contact_id=other.contact_id, channel="email", step=2, status="awaiting_approval", kind="response",
+                       due_at=TUESDAY_11AM_ET, subject="Re: a question", body="Hello."))  # no to_email: it goes to the contact, so to this very address
     _bounced(ctx, lead_id)
     with ctx.db.session() as s:
         lead = s.get(Lead, lead_id)
         assert lead.contact.consent_status == "none" and lead.contact.email_status == "bounced"
         assert s.execute(select(Suppression.reason).where(Suppression.value == "pat@dead.example")).scalar_one().startswith("Bounced")
         assert is_suppressed(s, "pat@dead.example") and not eligible(s, ctx.settings, lead)[0]
-        assert {f.to_email: f.status for f in s.execute(select(FollowUp)).scalars()} == {"colleague@dead.example": "awaiting_approval", "pat@dead.example": "cancelled"}
+        assert {f.to_email: f.status for f in s.execute(select(FollowUp)).scalars()} == {"colleague@dead.example": "awaiting_approval", "pat@dead.example": "cancelled", None: "cancelled"}
     assert not usable(ctx, "pat@dead.example")
     work(ctx)
     assert FakeSMTP.sent == []
