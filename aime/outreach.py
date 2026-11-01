@@ -364,6 +364,7 @@ def cancel_queued(session: Session, lead: Lead, reason: str, keep: tuple[int, ..
 
 
 ASKED_NOT_TO = "asked not to be contacted"  # how a stop that someone asked for is worded (aime.reply_intel)
+_AN_ADDRESS = re.compile(r"[^\s(]+@[^\s)]+")
 STOPPABLE_STAGES = ("drafted", "approved", "contacted")  # a page that was open while a reply came in cannot turn those into "stopped"
 
 
@@ -420,9 +421,13 @@ def reopen_refusal(session: Session, lead: Lead) -> str | None:
         cut = lift_time(session, m.from_email) if m.from_email else None
         return cut is not None and m.received_at < cut
 
-    if any(m.category == "unsubscribe" and not lifted_since(m) for m in mail) or session.execute(select(Activity.id).where(
-            Activity.lead_id.in_(leads), func.lower(Activity.subject).contains(ASKED_NOT_TO),
-            *([Activity.created_at >= lifted] if lifted else [])).limit(1)).first():
+    def stop_lifted_since(a) -> bool:  # the stop names who asked when it was not the lead's own contact (aime.reply_intel)
+        named = _AN_ADDRESS.search(a.subject)
+        cut = lift_time(session, named.group()) if named else lifted
+        return cut is not None and a.created_at < cut
+
+    if any(m.category == "unsubscribe" and not lifted_since(m) for m in mail) or any(not stop_lifted_since(a) for a in session.execute(
+            select(Activity.subject, Activity.created_at).where(Activity.lead_id.in_(leads), func.lower(Activity.subject).contains(ASKED_NOT_TO)))):
         return "someone at this company asked not to be contacted"
     if any(m.category == "not_interested" for m in mail):
         return "someone at this company said they are not interested"

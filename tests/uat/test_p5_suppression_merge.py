@@ -14,12 +14,13 @@ from aime.agents.qualification import LeadQualificationAgent
 from aime.agents.sales_workflow import SalesWorkflowAgent
 from aime.contact_validation import recheck_emails
 from aime.doctor import run_checks
-from aime.crm_ops import CONTACT_NOT_SUPPRESSED, canonical_address, erase_person, is_suppressed, lift_suppression, merge_companies, suppress, upsert_company
+from aime.crm_ops import CONTACT_NOT_SUPPRESSED, canonical_address, erase_person, is_suppressed, lift_suppression, log_activity, merge_companies, suppress, upsert_company
 from aime.integrations.email_smtp import EmailSender
+from aime.meetings import reopen_after_cancel
 from aime.migrations import migrate, pending_columns
-from aime.models import Activity, Alert, AuditEvent, Company, Contact, FollowUp, InboundEmail, Lead, Opportunity, ResearchSnapshot, Signal, Suppression
-from aime.outreach import eligible, reopen_refusal, reopen_stopped
-from aime.reply_intel import close_opportunities
+from aime.models import Activity, Alert, AuditEvent, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity, ResearchSnapshot, Signal, Suppression
+from aime.outreach import eligible, reopen_refusal, reopen_stopped, stop_sequence
+from aime.pipeline import ASKS_FOR_APPROVAL, REPLY_SENT, settle_next_steps
 from aime.sources.base import CompanyCandidate
 from aime.timeutil import utcnow
 from aime.web.app import create_app
@@ -338,22 +339,234 @@ def test_a_flagged_contacted_duplicate_stays_merged_and_gets_no_next_step(make_c
         assert not s.execute(select(FollowUp).where(FollowUp.lead_id == emailed.id, FollowUp.step > 1)).first()
 
 
-def test_a_deal_follows_the_lead_that_goes_on_so_a_no_closes_it(make_ctx):
-    ctx = make_ctx()
-    dup_lead = add_lead(ctx, "dup", "pat@dup.example", "dup.example")
+def _keeper_with_contact(s, sent=False, words="Keeper builds reliable tools for modern operations teams."):
+    k = Company(name="Keeper Co", normalized_name="keeper co", source="test", domain="keeper.example", state="TX", country="US", website="https://keeper.example", website_status="verified")
+    s.add(k)
+    s.flush()
+    c = Contact(company_id=k.id, email="pat@keeper.example", source="website", email_source_url="https://keeper.example/c", email_status="role_address", role_category="inbox", consent_status="none")
+    s.add(c)
+    s.flush()
+    if words:
+        s.add(ResearchSnapshot(company_id=k.id, status="done", description=words, description_url="https://keeper.example/"))
+    lead = Lead(company_id=k.id, contact_id=c.id, source="research", status="qualified", score=70, grade="B", primary_service="ai_agents")
+    s.add(lead)
+    s.flush()
+    if sent:
+        s.add(FollowUp(lead_id=lead.id, company_id=k.id, contact_id=c.id, channel="email", step=1, kind="outreach", due_at=utcnow(), sent_at=utcnow(), to_email=c.email, subject="Hi", body="Hi",
+                       status="sent", message_id="<keeper-first@us.example>"))
+        lead.outreach_status = "contacted"
+        s.flush()
+    return k, lead
+
+
+def _deal_then_merge_with_an_emailed_keeper(make_ctx, stage="discovery"):
+    """Both leads were emailed, so the duplicate's lead is merged, and its thread goes on arriving there."""
+    ctx, sender, sent = contacted(make_ctx)
+    merged = lead_of(ctx)
     with ctx.db.session() as s:
-        dup = s.get(Lead, dup_lead).company
-        s.add(Opportunity(lead_id=dup_lead, company_id=dup.id, name="A deal", stage="discovery", probability=20))
-        keeper, own = _keeper(s)
-        s.add(FollowUp(lead_id=own.id, company_id=keeper.id, channel="email", step=1, kind="outreach", status="awaiting_approval", due_at=utcnow(), to_email="pat@keeper.example", subject="Hi", body="Hi"))
+        s.add(Opportunity(lead_id=merged.id, company_id=merged.company_id, name="A deal", stage=stage, probability=20))
+        keeper, own = _keeper_with_contact(s, sent=True)
+        own_id = own.id
+        merge_companies(s, keeper, s.get(Company, merged.company_id), "crm")
+    with ctx.db.session() as s:
+        assert s.get(Lead, merged.id).status == "merged" and s.execute(select(Opportunity)).scalar_one().lead_id == own_id
+    return ctx, sender, sent, merged.id, own_id
+
+
+def _reply(ctx, sent, words):
+    FakeIMAP.messages = {1: mail(DAVID, f"Re: {sent.subject}", words, in_reply_to=sent.message_id)}
+    run_inbox(ctx)
+
+
+def _deals(ctx):
+    with ctx.db.session() as s:
+        return [(o.lead_id, o.stage, o.next_step) for o in s.execute(select(Opportunity).order_by(Opportunity.id)).scalars()]
+
+
+def test_an_interested_reply_in_a_merged_leads_thread_opens_no_second_deal(make_ctx):
+    ctx, _, sent, merged_id, own_id = _deal_then_merge_with_an_emailed_keeper(make_ctx)
+    _reply(ctx, sent, "Yes, sounds good. Let's set up a call next week.")
+    with ctx.db.session() as s:
+        assert s.get(Lead, merged_id).outreach_status == "interested"
+    assert [(lead, stage) for lead, stage, _ in _deals(ctx)] == [(own_id, "discovery")]
+
+
+def test_a_no_in_a_merged_leads_thread_still_reaches_the_deal(make_ctx):
+    ctx, _, sent, _, own_id = _deal_then_merge_with_an_emailed_keeper(make_ctx)
+    _reply(ctx, sent, "Not interested, thanks.")
+    assert _deals(ctx) == [(own_id, "discovery", "They replied: not interested. Close it as lost or keep it open")]
+
+
+def test_an_opt_out_in_a_merged_leads_thread_still_closes_the_deal(make_ctx):
+    ctx, _, sent, _, own_id = _deal_then_merge_with_an_emailed_keeper(make_ctx)
+    _reply(ctx, sent, "Please remove me from your list.")
+    assert [(lead, stage) for lead, stage, _ in _deals(ctx)] == [(own_id, "lost")]
+    with ctx.db.session() as s:
+        assert is_suppressed(s, DAVID)
+        closed = s.execute(select(Activity).where(Activity.subject.like("Opportunity stage discovery%lost%"))).scalar_one()
+        assert closed.lead_id == own_id
+
+
+def test_a_deal_a_person_took_further_stays_with_them_after_an_opt_out_in_a_merged_thread(make_ctx):
+    ctx, _, sent, _, own_id = _deal_then_merge_with_an_emailed_keeper(make_ctx, stage="proposal")
+    _reply(ctx, sent, "Please remove me from your list.")
+    (lead, stage, next_step), = _deals(ctx)
+    assert (lead, stage) == (own_id, "proposal") and next_step.startswith("They replied")
+
+
+def test_a_no_in_the_thread_of_the_lead_that_went_on_closes_the_moved_deal(make_ctx):
+    ctx, _, _, _, own_id = _deal_then_merge_with_an_emailed_keeper(make_ctx)
+    FakeIMAP.messages = {1: mail("pat@keeper.example", "Re: Hi", "Please remove me from your list.", in_reply_to="<keeper-first@us.example>")}
+    run_inbox(ctx)
+    assert [(lead, stage) for lead, stage, _ in _deals(ctx)] == [(own_id, "lost")]
+
+
+def test_a_merged_leads_first_interested_reply_opens_the_deal_on_the_lead_that_went_on(make_ctx):
+    ctx, sender, sent = contacted(make_ctx)
+    merged_id = lead_of(ctx).id
+    with ctx.db.session() as s:
+        keeper, own = _keeper_with_contact(s, sent=True)
+        own_id = own.id
+        merge_companies(s, keeper, s.get(Lead, merged_id).company, "crm")
+    _reply(ctx, sent, "Yes, sounds good. Let's set up a call next week.")
+    assert [(lead, stage) for lead, stage, _ in _deals(ctx)] == [(own_id, "discovery")]
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": (TUESDAY_11AM_ET + timedelta(days=1)).isoformat(), "send": False})
+    assert len(_deals(ctx)) == 1
+
+
+def test_a_deal_left_on_a_lead_merged_by_an_older_build_is_still_found(make_ctx):
+    ctx, _, sent, merged_id, _ = _deal_then_merge_with_an_emailed_keeper(make_ctx)
+    with ctx.db.session() as s:
+        s.execute(select(Opportunity)).scalar_one().lead_id = merged_id
+    _reply(ctx, sent, "Please remove me from your list.")
+    assert [(lead, stage) for lead, stage, _ in _deals(ctx)] == [(merged_id, "lost")]
+
+
+def test_the_deals_next_step_reads_the_answer_waiting_on_the_merged_lead(make_ctx):
+    ctx, _, sent, merged_id, own_id = _deal_then_merge_with_an_emailed_keeper(make_ctx)
+    with ctx.db.session() as s:
+        s.get(Lead, own_id).outreach_status = None  # its own mail has no say: this is about the answer to the merged thread
+        s.execute(select(Opportunity)).scalar_one().next_step = ASKS_FOR_APPROVAL[0]
+        s.add(FollowUp(lead_id=merged_id, company_id=s.get(Lead, merged_id).company_id, channel="email", kind="response", step=1, status="awaiting_approval", due_at=utcnow(), to_email=DAVID, subject="Re", body="Hi"))
+    for lead_id in (None, merged_id, own_id):
+        with ctx.db.session() as s:
+            settle_next_steps(s, lead_id)
+        assert _deals(ctx)[0][2] == ASKS_FOR_APPROVAL[0]
+    with ctx.db.session() as s:
+        s.execute(select(FollowUp).where(FollowUp.kind == "response")).scalar_one().status = "sent"
+    with ctx.db.session() as s:
+        settle_next_steps(s, merged_id)
+    assert _deals(ctx)[0][2] == REPLY_SENT
+
+
+def test_a_meeting_cancelled_on_a_merged_lead_still_updates_its_deal(make_ctx):
+    ctx, _, _, merged_id, _ = _deal_then_merge_with_an_emailed_keeper(make_ctx)
+    with ctx.db.session() as s:
+        lead = s.get(Lead, merged_id)
+        when = utcnow() + timedelta(days=3)
+        meeting = Meeting(lead_id=merged_id, company_id=lead.company_id, invitee_email=DAVID, starts_at=when, ends_at=when + timedelta(minutes=30), source="manual", status="cancelled")
+        s.add(meeting)
+        s.flush()
+        reopen_after_cancel(s, meeting, "owner")
+    assert "was cancelled" in _deals(ctx)[0][2]
+
+
+def _dead_duplicate_then_merge(make_ctx):
+    ctx, sender, sent = contacted(make_ctx)
+    dup = lead_of(ctx)
+    FakeIMAP.messages = {1: bounce_for(DAVID, sent.message_id)}
+    run_inbox(ctx)
+    assert lead_of(ctx).outreach_status == "bounced"
+    with ctx.db.session() as s:
+        keeper, own = _keeper_with_contact(s)
+        s.add(FollowUp(lead_id=own.id, company_id=keeper.id, channel="task", step=0, status="pending", subject="Review Keeper Co", body="Look", due_at=utcnow()))
         s.flush()
         own_id = own.id
-        merge_companies(s, keeper, dup, "crm")
+        merge_companies(s, keeper, s.get(Company, dup.company_id), "crm")
+    return ctx, sender, dup.id, own_id
+
+
+def test_a_bounced_duplicate_does_not_take_over_from_a_good_untouched_lead(make_ctx):
+    ctx, sender, dup_id, own_id = _dead_duplicate_then_merge(make_ctx)
     with ctx.db.session() as s:
-        opp = s.execute(select(Opportunity)).scalar_one()
-        assert opp.lead_id == own_id and s.get(Lead, dup_lead).status == "merged"
-        close_opportunities(s, s.get(Lead, own_id), "Not interested", "inbox", sure=True)
-        assert opp.stage == "lost"
+        assert s.get(Lead, dup_id).status == "merged" and s.get(Lead, own_id).status == "qualified"
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": (TUESDAY_11AM_ET + timedelta(days=1)).isoformat(), "send": False})
+    with ctx.db.session() as s:
+        drafted_now = s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "awaiting_approval")).scalars().all()
+        assert [(f.lead_id, f.step, f.to_email) for f in drafted_now] == [(own_id, 1, "pat@keeper.example")]
+        assert is_suppressed(s, DAVID)  # the dead address stays blocked all the same
+
+
+def _say(ctx, how, sent):
+    if how == "stopped":
+        with ctx.db.session() as s:
+            stop_sequence(s, s.get(Lead, lead_of(ctx).id), "stopped", "Stopped by owner", "owner")
+    else:
+        _reply(ctx, sent, {"unsubscribed": "Please remove me from your list.", "not_interested": "Not interested, thanks."}[how])
+
+
+@pytest.mark.parametrize("stage", ["unsubscribed", "not_interested", "stopped"])
+def test_a_closed_duplicate_goes_on_and_a_person_is_told_nothing_goes_to_the_keepers_contact(make_ctx, stage):
+    ctx, sender, sent = contacted(make_ctx)
+    dup = lead_of(ctx)
+    _say(ctx, stage, sent)
+    assert lead_of(ctx).outreach_status == stage
+    with ctx.db.session() as s:
+        keeper, own = _keeper_with_contact(s)
+        own_id = own.id
+        merge_companies(s, keeper, s.get(Company, dup.company_id), "crm")
+    told = [a for a in alerts(ctx) if f"lead #{own_id} was closed in favour of lead #{dup.id}" in a]
+    assert len(told) == 1 and stage.replace("_", " ") in told[0]
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": (TUESDAY_11AM_ET + timedelta(days=1)).isoformat(), "send": False})
+    with ctx.db.session() as s:
+        assert s.get(Lead, own_id).status == "merged"
+        assert not s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "awaiting_approval")).first()
+
+
+def test_a_running_duplicate_going_on_raises_no_alert(make_ctx):
+    ctx, _, _ = contacted(make_ctx)
+    dup = lead_of(ctx)
+    with ctx.db.session() as s:
+        keeper, own = _keeper_with_contact(s)
+        own_id = own.id
+        merge_companies(s, keeper, s.get(Company, dup.company_id), "crm")
+    with ctx.db.session() as s:
+        assert s.get(Lead, own_id).status == "merged"
+    assert not [a for a in alerts(ctx) if "was closed in favour" in a]
+
+
+@pytest.mark.parametrize("where", ["site", "post", "title"])
+def test_a_keeper_that_reads_as_a_seller_is_not_passed_over_by_the_emailed_lead(make_ctx, where):
+    ctx, sender, _ = contacted(make_ctx)
+    dup = lead_of(ctx)
+    with ctx.db.session() as s:
+        keeper, own = _keeper_with_contact(s, words=WORDS if where == "site" else None)
+        if where == "post":
+            s.add(Signal(company_id=keeper.id, signal_type="hiring", text=POST, source="hn_hiring", source_url="https://n.example/k", fingerprint="k", observed_at=utcnow()))
+        elif where == "title":
+            keeper.website_title = WORDS
+        own_id = own.id
+        merge_companies(s, keeper, s.get(Company, dup.company_id), "crm")
+    assert CRMManagementAgent(ctx).run({"operations": ["competitors"]}).ok
+    assert LeadQualificationAgent(ctx).run({"rescore_all": True}).ok
+    with ctx.db.session() as s:
+        assert s.get(Lead, dup.id).status == "merged" and s.get(Lead, own_id).status == "disqualified"
+        assert s.get(Lead, own_id).company.is_competitor
+    SalesWorkflowAgent(ctx, sender=sender).run({"now": (TUESDAY_11AM_ET + timedelta(days=9)).isoformat(), "send": False})
+    with ctx.db.session() as s:
+        assert not s.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "awaiting_approval")).first()
+
+
+def test_a_keeper_a_person_cleared_is_not_read_as_a_seller_at_the_merge(make_ctx):
+    ctx, _, _ = contacted(make_ctx)
+    dup = lead_of(ctx)
+    with ctx.db.session() as s:
+        keeper, own = _keeper_with_contact(s, words=WORDS)
+        keeper.competitor_cleared_by = "owner"
+        own_id = own.id
+        merge_companies(s, keeper, s.get(Company, dup.company_id), "crm")
+    with ctx.db.session() as s:
+        assert s.get(Lead, own_id).status == "merged" and s.get(Lead, dup.id).status == "qualified"
 
 
 # ------------------------------------------------------------------ C. merges: a person's clear and the flag
@@ -643,6 +856,118 @@ def test_an_old_opt_out_from_someone_whose_entry_was_not_lifted_still_refuses(ma
                            received_at=utcnow() - timedelta(days=9), subject="Stop", body_text="Stop", new_text="Stop"))
     assert lift(ctx, DAVID) is None
     assert "asked not to be contacted" in refusal(ctx)
+
+
+def _colleague_stopped_the_lead(make_ctx):
+    """A colleague writes outside the thread: the lead stops, and only the colleague's address goes on the list."""
+    ctx, _, _ = contacted(make_ctx)
+    colleague = f"colleague@{SITE}"
+    FakeIMAP.messages = {1: mail(colleague, "Remove us", "Please remove me from your list. Unsubscribe.")}
+    run_inbox(ctx)
+    lead = lead_of(ctx)
+    assert lead.outreach_status == "stopped"
+    with ctx.db.session() as s:
+        for row in s.execute(select(InboundEmail)).scalars():
+            row.status, row.received_at = "actioned", utcnow() - timedelta(days=9)  # a person read it
+        for a in s.execute(select(Activity).where(Activity.lead_id == lead.id)).scalars():
+            a.created_at = utcnow() - timedelta(days=9)
+    return ctx, colleague
+
+
+def test_lifting_a_colleagues_opt_out_lets_a_person_reopen_the_lead_it_stopped(make_ctx):
+    ctx, colleague = _colleague_stopped_the_lead(make_ctx)
+    assert "do-not-contact" in refusal(ctx)
+    assert lift(ctx, colleague) is None
+    assert refusal(ctx) is None
+    assert open_emails(ctx) == 0
+
+
+def test_a_new_stop_named_after_the_colleagues_lift_refuses_again(make_ctx):
+    ctx, colleague = _colleague_stopped_the_lead(make_ctx)
+    assert lift(ctx, colleague) is None
+    with ctx.db.session() as s:
+        log_activity(s, f"Outreach: stopped ({colleague} at this company asked not to be contacted)", "inbox", type_="outreach", lead_id=lead_of(ctx).id, company_id=lead_of(ctx).company_id)
+    assert "asked not to be contacted" in refusal(ctx)
+
+
+def test_one_colleagues_lift_does_not_clear_what_someone_else_said(make_ctx):
+    ctx, colleague = _colleague_stopped_the_lead(make_ctx)
+    lead = lead_of(ctx)
+    with ctx.db.session() as s:
+        said = log_activity(s, f"Outreach: stopped (other@{SITE} at this company asked not to be contacted)", "inbox", type_="outreach", lead_id=lead.id, company_id=lead.company_id)
+        said.created_at = utcnow() - timedelta(days=9)
+        unnamed = log_activity(s, "Outreach: unsubscribed (Asked not to be contacted)", "inbox", type_="outreach", lead_id=lead.id, company_id=lead.company_id)
+        unnamed.created_at = utcnow() - timedelta(days=9)
+    assert lift(ctx, colleague) is None
+    assert "asked not to be contacted" in refusal(ctx)
+    with ctx.db.session() as s:
+        s.delete(s.execute(select(Activity).where(Activity.subject.like("%other@%"))).scalar_one())
+    assert "asked not to be contacted" in refusal(ctx)  # who said it is not on record, and the lead's own address was never lifted
+
+
+@pytest.mark.parametrize("listed, on_file", [("pat+news@firm-t.example", "pat@firm-t.example"), ("pat@firm-t.example", "pat+news@firm-t.example")])
+def test_lifting_a_tag_entry_clears_the_contact_it_marked(make_ctx, listed, on_file):
+    ctx = make_ctx(**SENDING)
+    lead_id = add_lead(ctx, "tag", on_file, "firm-t.example")
+    with ctx.db.session() as s:
+        suppress(s, listed, "Unsubscribe request by email")
+        assert s.get(Lead, lead_id).contact.consent_status == "opted_out"
+    assert lift(ctx, listed) is None
+    with ctx.db.session() as s:
+        lead = s.get(Lead, lead_id)
+        assert lead.contact.consent_status == "none" and not is_suppressed(s, on_file) and eligible(s, ctx.settings, lead)[0]
+
+
+def test_lifting_one_spelling_keeps_the_contact_opted_out_until_the_last_is_lifted(make_ctx):
+    ctx = make_ctx(**SENDING)
+    lead_id = add_lead(ctx, "tag", "pat@firm-t.example", "firm-t.example")
+    with ctx.db.session() as s:
+        suppress(s, "pat+news@firm-t.example", "asked")
+        suppress(s, "pat@firm-t.example", "asked")
+    assert lift(ctx, "pat+news@firm-t.example") is None
+    with ctx.db.session() as s:
+        lead = s.get(Lead, lead_id)
+        assert lead.contact.consent_status == "opted_out" and is_suppressed(s, "pat@firm-t.example") and not eligible(s, ctx.settings, lead)[0]
+    assert lift(ctx, "pat@firm-t.example") is None
+    with ctx.db.session() as s:
+        assert s.get(Lead, lead_id).contact.consent_status == "none" and not is_suppressed(s, "pat@firm-t.example")
+
+
+def test_lifting_a_tag_entry_touches_no_colleague_and_no_lookalike(make_ctx):
+    ctx = make_ctx(**SENDING)
+    lead_id = add_lead(ctx, "tag", "pat@firm-t.example", "firm-t.example")
+    with ctx.db.session() as s:
+        company_id = s.get(Lead, lead_id).company_id
+        for address in ("sam@firm-t.example", "pat@other-t.example"):
+            s.add(Contact(company_id=company_id, email=address, source="website", consent_status="none"))
+        s.flush()
+        suppress(s, "pat+news@firm-t.example", "asked")
+        suppress(s, "sam@firm-t.example", "asked")
+        suppress(s, "pat@other-t.example", "asked")
+    assert lift(ctx, "pat+news@firm-t.example") is None
+    with ctx.db.session() as s:
+        consent = {c.email: c.consent_status for c in s.execute(select(Contact)).scalars()}
+    assert consent == {"pat@firm-t.example": "none", "sam@firm-t.example": "opted_out", "pat@other-t.example": "opted_out"}
+
+
+def test_a_tag_entrys_lift_does_not_make_earlier_mail_look_sent_without_consent(make_ctx):
+    ctx = make_ctx()
+    with ctx.db.session() as s:
+        co = Company(name="Asker", normalized_name="asker", source="inbound", domain="asker.example")
+        s.add(co)
+        s.flush()
+        c = Contact(company_id=co.id, email="pat@asker.example", source="inbound", consent_status="inquiry")
+        s.add(c)
+        s.flush()
+        lead = Lead(company_id=co.id, contact_id=c.id, source="inbound", status="qualified")
+        s.add(lead)
+        s.flush()
+        s.add(FollowUp(lead_id=lead.id, company_id=co.id, contact_id=c.id, channel="email", step=1, status="sent", due_at=utcnow(), sent_at=utcnow() - timedelta(days=5),
+                       to_email=c.email, subject="Thanks", body="Thanks."))
+        suppress(s, "pat+news@asker.example", "Unsubscribe request by email")
+    assert lift(ctx, "pat+news@asker.example") is None
+    check = next(c for c in run_checks(ctx) if c["name"].startswith("Emails only to consenting"))
+    assert check["ok"], check
 
 
 def test_a_bounce_lift_behaves_as_an_opt_out_lift(make_ctx):

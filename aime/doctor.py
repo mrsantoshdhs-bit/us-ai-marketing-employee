@@ -13,6 +13,7 @@ from aime import clock_check, maintenance, send_journal
 from aime.backup import (OFFSITE_KEY_CHANGED, OFFSITE_PROBLEM, copy_opens, free_space_problem, integrity_check, newest_good_backup,
                          offsite_copy_problem, offsite_problem_words, offsite_status, offsite_sync, verify_backup)
 from aime.context import AppContext
+from aime.crm_ops import canonical_sql
 from aime.db import kv_get
 from aime.integrations.linkedin import configured_author_urn
 from aime.models import (Company, Contact, ContentItem, FollowUp, InboundInquiry, Lead, OAuthToken,
@@ -151,7 +152,7 @@ def _record_checks(ctx: AppContext, add) -> None:
         # Replies to people who contacted us need their inquiry or opt-in. A response answers an email the
         # prospect sent us (kind "response"), so it must name that email. An opt-out forbids what is sent after it.
         # The owner's lift puts consent back to neutral: what went out before it had the consent of its day.
-        before_a_lift = exists(select(Suppression.id).where(Suppression.value == func.lower(Contact.email), Suppression.lifted_at > FollowUp.sent_at))
+        before_a_lift = exists(select(Suppression.id).where(canonical_sql(Suppression.value) == canonical_sql(Contact.email), Suppression.lifted_at > FollowUp.sent_at))
         no_consent = sent_to(FollowUp.kind.is_(None), Contact.consent_status.not_in(("inquiry", "opt_in", "opted_out")), ~before_a_lift)
         unanswered = n(FollowUp, FollowUp.status == "sent", FollowUp.kind == "response", FollowUp.in_reply_to.is_(None))
         after_opt_out = sent_to(Contact.consent_status == "opted_out",

@@ -9,8 +9,8 @@ from sqlalchemy import and_, case, exists, func, literal, or_, select
 from sqlalchemy.orm import Session
 
 from aime.dedupe import _MULTI_PART_TLDS, HOSTED_PLATFORMS, clean_company_name, domain_from_email, find_duplicate, normalize_name, registrable_domain
-from aime.matching import detect_competitor, match_services
-from aime.models import Activity, Alert, AuditEvent, Company, Contact, FollowUp, InboundEmail, Lead, Opportunity, Signal, Suppression
+from aime.matching import competitor_evidence, competitor_in_post, detect_competitor, match_services
+from aime.models import Activity, Alert, AuditEvent, Company, Contact, FollowUp, InboundEmail, Lead, Opportunity, ResearchSnapshot, Signal, Suppression
 from aime.sources.base import CompanyCandidate
 from aime.timeutil import utcnow
 
@@ -23,6 +23,12 @@ def primary_lead(session: Session, company_id: int) -> Lead | None:
     leads = session.execute(select(Lead).where(Lead.company_id == company_id).order_by(Lead.id.desc())).scalars().all()
     open_leads = sorted((x for x in leads if x.status in OPEN_LEAD_STATUSES), key=lambda x: (x.source != "research", -x.id))
     return (open_leads or [x for x in leads if x.status != "merged"] or leads or [None])[0]
+
+
+def lead_that_went_on(session: Session, lead: Lead) -> Lead:
+    """Where a merged lead's work went: replies and bookings still find the merged lead, by its thread and its contact, while
+    its deal moved to the lead that goes on (merge_companies). Any other lead is its own."""
+    return primary_lead(session, lead.company_id) if lead.status == "merged" else lead
 
 
 def fingerprint(*parts: str | None) -> str:
@@ -153,7 +159,7 @@ def canonical_address(address: str) -> str:
     return f"{local[:plus] if plus > 0 else local}{at}{host}"
 
 
-def _canonical_sql(column):
+def canonical_sql(column):
     """canonical_address in SQL, for a stored value."""
     low = func.lower(column)
     plus, at = func.instr(low, "+"), func.instr(low, "@")
@@ -181,7 +187,7 @@ def _entries_covering(email: str | None = None, domain: str | None = None):
             values += _host_and_parents(email.rsplit("@", 1)[-1])
     if domain:
         values += _host_and_parents(domain)
-    return select(Suppression).where(_canonical_sql(Suppression.value).in_(values)) if values else None
+    return select(Suppression).where(canonical_sql(Suppression.value).in_(values)) if values else None
 
 
 def is_suppressed(session: Session, email: str | None = None, domain: str | None = None) -> bool:
@@ -210,13 +216,13 @@ def _under_a_listed_domain(host, table):
 
 
 _ON_THE_LIST = select(Suppression.value).where(Suppression.lifted_at.is_(None)).correlate(None)
-_CANONICAL_ON_THE_LIST = select(_canonical_sql(Suppression.value)).where(Suppression.lifted_at.is_(None)).correlate(None)
+_CANONICAL_ON_THE_LIST = select(canonical_sql(Suppression.value)).where(Suppression.lifted_at.is_(None)).correlate(None)
 _CONTACT_HOST = func.lower(func.substr(Contact.email, func.instr(Contact.email, "@") + 1))
 _COMPANY_DOMAIN = func.lower(Company.domain)
 # is_suppressed for a query over contacts: the address with or without a +tag, its domain or a parent of it, or its company's domain is on the do-not-contact list.
 # suppress() marks the contacts on file at that moment; one found later, or at another domain than its company's, is caught here.
 CONTACT_NOT_SUPPRESSED = and_(
-    _canonical_sql(Contact.email).not_in(_CANONICAL_ON_THE_LIST),
+    canonical_sql(Contact.email).not_in(_CANONICAL_ON_THE_LIST),
     _CONTACT_HOST.not_in(_ON_THE_LIST),
     ~_under_a_listed_domain(_CONTACT_HOST, Contact),
     or_(Contact.company_id.is_(None),
@@ -227,7 +233,7 @@ CONTACT_NOT_SUPPRESSED = and_(
 def _contacts_under(session: Session, value: str) -> list[Contact]:
     """The contacts a new entry speaks for, by the rules of is_suppressed."""
     if "@" in value:
-        return session.execute(select(Contact).where(_canonical_sql(Contact.email) == canonical_address(value))).scalars().all()
+        return session.execute(select(Contact).where(canonical_sql(Contact.email) == canonical_address(value))).scalars().all()
     pattern = value.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")  # the value, not a pattern
     at_it = [Contact.email == value, Contact.email.like(f"%@{pattern}", escape="\\")]
     if "." in value and value not in BARE_SUFFIXES:
@@ -285,8 +291,8 @@ def _records_an_erasure(session: Session, row: Suppression) -> bool:
 
 def lift_suppression(session: Session, suppression_or_value: Suppression | str, actor: str, reason: str) -> str | None:
     """The owner takes an entry off the do-not-contact list. Returns why not, with nothing changed, or None. The row stays, with
-    who, when and why, so a build that does not read those keeps blocking. Contacts at exactly this address go back to neutral; a
-    domain's contacts stay as they are, since any of them may have said no themselves. It drafts nothing, sends nothing and
+    who, when and why, so a build that does not read those keeps blocking. Contacts at this address, with or without a +tag as suppress()
+    marks them, go back to neutral once no spelling of it is listed; a domain's contacts stay as they are, since any of them may have said no themselves. It drafts nothing, sends nothing and
     reopens nothing: the lead stays closed until a person reopens it (outreach.reopen_stopped). Who may do this is the route's job."""
     from aime.automation import audit
 
@@ -303,7 +309,10 @@ def lift_suppression(session: Session, suppression_or_value: Suppression | str, 
     if row.lifted_at is not None:
         return "this entry was lifted already"
     row.lifted_at, row.lifted_by, row.lift_reason = utcnow(), actor[:80], reason[:300]
-    contacts = session.execute(select(Contact).where(func.lower(Contact.email) == row.value.lower())).scalars().all()
+    person = canonical_address(row.value)
+    contacts = session.execute(select(Contact).where(canonical_sql(Contact.email) == person)).scalars().all()
+    if session.execute(select(Suppression.id).where(canonical_sql(Suppression.value) == person, Suppression.id != row.id, Suppression.lifted_at.is_(None))).first():
+        contacts = []  # another spelling of this address is still on the list, and its own lift clears them
     for c in contacts:
         if c.consent_status == "opted_out":
             c.consent_status, c.consent_at = "none", None
@@ -414,6 +423,19 @@ def _was_worked(session: Session, lead: Lead) -> bool:
         FollowUp.lead_id == lead.id, FollowUp.channel == "email", FollowUp.status.in_(("sent", "sending", "uncertain")))).first() is not None
 
 
+def _reads_as_a_seller(session: Session, company: Company) -> bool:
+    """What the next competitors run would read on this company and flag it for (CRMManagementAgent._flag_competitors)."""
+    from aime.agents.crm import _own_words
+
+    if company.is_competitor or company.competitor_cleared_by:
+        return False
+    snap = session.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == company.id).order_by(ResearchSnapshot.id.desc())).scalars().first()
+    if snap and snap.description:
+        return bool(competitor_evidence(_own_words(snap, company)))
+    posts = session.execute(select(Signal.text).where(Signal.company_id == company.id, Signal.signal_type == "hiring")).scalars()
+    return any(map(competitor_in_post, posts)) or bool(competitor_evidence(company.website_title))
+
+
 def _untouched(session: Session, lead: Lead) -> bool:
     return lead.outreach_status is None and not session.execute(select(FollowUp.id).where(
         FollowUp.lead_id == lead.id, FollowUp.channel == "email", FollowUp.status != "cancelled")).first() and not session.execute(
@@ -424,7 +446,7 @@ def _merge_lead(session: Session, gone: Lead, survivor: Lead) -> None:
     gone.status = "merged"
     gone.disqualify_reason = f"Merged into lead #{survivor.id}"
     for opp in session.execute(select(Opportunity).where(Opportunity.lead_id == gone.id)).scalars():
-        opp.lead_id = survivor.id  # the open lead is where a later "no" closes it, and where no second deal is opened
+        opp.lead_id = survivor.id  # the open lead's page shows it and opens no second deal; a reply on this lead finds it by lead_that_went_on
 
 
 def _carry_competitor_word(session: Session, keeper: Company, dup: Company, keeper_domain: str | None, actor: str) -> None:
@@ -474,10 +496,17 @@ def merge_companies(session: Session, keeper: Company, dup: Company, actor: str)
     keeper_research = session.execute(select(Lead).where(
         Lead.company_id == keeper.id, Lead.source == "research", Lead.status.in_(OPEN_LEAD_STATUSES))).scalars().first()
     dup_leads = session.execute(select(Lead).where(Lead.company_id == dup.id)).scalars().all()
-    if keeper_research is not None and not dup.is_competitor and _untouched(session, keeper_research):
-        # The lead someone was already emailed on goes on: the untouched one would write them a second first email.
-        worked = next((x for x in dup_leads if x.source == "research" and x.status in OPEN_LEAD_STATUSES and _was_worked(session, x)), None)
+    if keeper_research is not None and not dup.is_competitor and _untouched(session, keeper_research) and not _reads_as_a_seller(session, keeper):
+        # The lead someone was already emailed on goes on: the untouched one would write them a second first email. Not a lead
+        # whose address is dead, as nobody got that email and the keeper's contact may be alive, and not over a keeper the next
+        # competitors run would flag: on an emailed lead it leaves the flag off, and the sequence would go on past that check.
+        worked = next((x for x in dup_leads if x.source == "research" and x.status in OPEN_LEAD_STATUSES and x.outreach_status != "bounced"
+                       and _was_worked(session, x)), None)
         if worked is not None:
+            if worked.outreach_status in ("not_interested", "no_response", "unsubscribed", "stopped"):
+                session.add(Alert(level="warning", source=actor[:60], message=(
+                    f"{keeper.name} (#{keeper.id}), after merging duplicate #{dup.id}: lead #{keeper_research.id} was closed in favour of lead #{worked.id}, which was "
+                    f"already emailed and whose stage is {worked.outreach_status.replace('_', ' ')}. So nothing goes to the contact of the closed lead: please decide.")[:500]))
             _merge_lead(session, keeper_research, worked)
             for task in session.execute(select(FollowUp).where(FollowUp.lead_id == keeper_research.id, FollowUp.channel == "task",
                                                                FollowUp.status == "pending", FollowUp.subject.startswith("Review "))).scalars():

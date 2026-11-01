@@ -40,7 +40,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from aime.crm_ops import WROTE_AGAIN, later_reply_waiting, log_activity, suppress
+from aime.crm_ops import WROTE_AGAIN, later_reply_waiting, lead_that_went_on, log_activity, suppress
 from aime.dedupe import company_to_address
 from aime.inbox import AUTO_SUBJECT, BOUNCE_SENDERS, LARGE_MARK, below_header_copy, is_address, own_text, rest_of_reply
 from aime.llm.base import LLMError
@@ -939,7 +939,9 @@ def _check_back_task(session: Session, row: InboundEmail, lead: Lead, contact: C
 
 
 def ensure_opportunity(session: Session, lead: Lead, actor: str) -> Opportunity:
-    opp = session.execute(select(Opportunity).where(Opportunity.lead_id == lead.id).order_by(Opportunity.id)).scalars().first()
+    went_on = lead_that_went_on(session, lead)
+    opp = session.execute(select(Opportunity).where(Opportunity.lead_id.in_((lead.id, went_on.id))).order_by(Opportunity.id)).scalars().first()
+    lead = went_on
     if opp is None:
         from aime.knowledge.services import service_name
         opp = Opportunity(lead_id=lead.id, company_id=lead.company_id, stage="discovery", probability=20,
@@ -969,14 +971,14 @@ def close_opportunities(session: Session, lead: Lead, reason: str, actor: str, s
     """End the lead's open deals after a clear "no": early ones are closed as lost with the reason; a later-stage
     deal, or any deal when the reading is uncertain, stays open with a next step asking a person to decide."""
     notes = []
-    for opp in session.execute(select(Opportunity).where(Opportunity.lead_id == lead.id,
+    for opp in session.execute(select(Opportunity).where(Opportunity.lead_id.in_((lead.id, lead_that_went_on(session, lead).id)),
                                                          Opportunity.stage.not_in(("won", "lost")))).scalars():
         if sure and opp.stage in AUTO_CLOSE_STAGES:
             old = opp.stage
             move(session, opp, "lost", actor, reason)
             opp.lost_reason, opp.next_step = reason[:200], None
             log_activity(session, f"Opportunity stage {old} → lost ({reason})", actor, type_="opportunity",
-                         company_id=opp.company_id, lead_id=lead.id, opportunity_id=opp.id)
+                         company_id=opp.company_id, lead_id=opp.lead_id, opportunity_id=opp.id)
             notes.append(f"opportunity closed as lost ({reason})")
         else:
             opp.next_step = f"They replied: {reason.lower()}. Close it as lost or keep it open"[:300]

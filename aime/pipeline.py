@@ -16,10 +16,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session
 
-from aime.crm_ops import log_activity
+from aime.crm_ops import lead_that_went_on, log_activity
 from aime.models import Activity, FollowUp, Lead, Meeting, Opportunity
 from aime.monitoring import alert_once, resolve_alerts
 from aime.outreach import OPEN, policy, set_status
@@ -89,9 +89,12 @@ def settle_next_steps(session: Session, lead_id: int | None = None) -> None:
     stalled check below must not read it as such."""
     stmt = select(Opportunity).where(Opportunity.stage.not_in(("won", "lost")), Opportunity.lead_id.is_not(None),
                                      Opportunity.next_step.in_((*ASKS_FOR_APPROVAL, REPLY_WAITING, REPLY_SENT, NO_REPLY)))
-    for opp in session.execute(stmt.where(Opportunity.lead_id == lead_id) if lead_id else stmt).scalars().all():
-        emails = session.execute(select(FollowUp.status).where(
-            FollowUp.lead_id == opp.lead_id, FollowUp.channel == "email",
+    if lead_id:
+        stmt = stmt.where(Opportunity.lead_id.in_((lead_id, lead_that_went_on(session, session.get(Lead, lead_id)).id)))
+    for opp in session.execute(stmt).scalars().all():
+        emails = session.execute(select(FollowUp.status).where(  # a merged lead's replies still wait on it, and its deal is here
+            FollowUp.lead_id.in_(select(Lead.id).where(or_(Lead.id == opp.lead_id, and_(Lead.company_id == opp.company_id, Lead.status == "merged")))),
+            FollowUp.channel == "email",
             or_(FollowUp.kind.is_(None), FollowUp.kind == "response")).order_by(FollowUp.id.desc())).scalars().all()
         if set(emails) & set(OPEN):
             true_now = opp.next_step if opp.next_step in ASKS_FOR_APPROVAL else REPLY_WAITING

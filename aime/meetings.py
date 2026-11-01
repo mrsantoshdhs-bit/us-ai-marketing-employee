@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from aime.crm_ops import log_activity
+from aime.crm_ops import lead_that_went_on, log_activity
 from aime.dedupe import registrable_domain
 from aime.models import Alert, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity
 from aime.notify import notify_event
@@ -337,7 +337,7 @@ def reopen_after_cancel(session: Session, meeting: Meeting, actor: str) -> None:
     other = next_meeting(session, lead.id, exclude=meeting.id, upcoming=False)
     if other is None and lead.outreach_status == "meeting":
         set_status(session, lead, "interested", actor, "meeting cancelled")
-    for opp in session.execute(select(Opportunity).where(Opportunity.lead_id == lead.id,
+    for opp in session.execute(select(Opportunity).where(Opportunity.lead_id.in_((lead.id, lead_that_went_on(session, lead).id)),
                                                          Opportunity.stage.not_in(("won", "lost")))).scalars():
         opp.next_step = (f"Meeting {other.starts_at:%Y-%m-%d %H:%M} UTC: prepare, then record the outcome" if other
                          else f"Meeting on {meeting.starts_at:%Y-%m-%d} was cancelled: follow up to rebook")
