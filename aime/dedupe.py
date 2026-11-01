@@ -144,7 +144,9 @@ def domain_from_email(email: str | None) -> str | None:
 
 
 def is_job_board(domain: str | None) -> bool:
-    return bool(domain) and (domain in JOB_BOARD_DOMAINS)
+    """A listed board or a subdomain of one: notion.site is a hosted platform too, so registrable_domain keeps the subdomain."""
+    parts = (domain or "").split(".")
+    return any(".".join(parts[i:]) in JOB_BOARD_DOMAINS for i in range(len(parts) - 1))
 
 
 DESCRIPTOR_WORDS = {

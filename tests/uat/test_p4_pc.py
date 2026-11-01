@@ -194,7 +194,8 @@ def test_a_site_that_never_answers_while_others_do_becomes_unreachable_only_afte
 
 
 def test_a_real_answer_still_counts_at_once(make_ctx):
-    for code, body, status in ((404, "", "unreachable"), (410, "", "unreachable"), (200, "buy this domain", "parked"),
+    # A 404 on a verified site no longer does: one moved page must not cost a lead its points for a month (tests/uat/test_p5_website_truth.py).
+    for code, body, status in ((410, "", "unreachable"), (200, "buy this domain", "parked"),
                                (301, "https://elsewhere.example/", "mismatch")):
         ctx = make_ctx(handler=web({"acme.example": (code, body), "elsewhere.example": (200, "<title>Unrelated</title>")}))
         company = sites_due(ctx, "acme.example")[0]
