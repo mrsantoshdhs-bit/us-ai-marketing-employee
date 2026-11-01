@@ -140,8 +140,8 @@ class Server(threading.Thread):
         elif verb.startswith("UID SEARCH"):
             found = re.search(r"UID (\d+):", rest)
             low = int(found.group(1)) if found else 0
-            words = re.search(r'BODY "([^"]*)"', rest, re.I)
-            hits = [u for u in sorted(self.current) if u >= low and (not words or words.group(1).lower() in text_of(self.current[u]))]
+            words = re.findall(r'BODY "([^"]*)"', rest, re.I)  # several only under OR
+            hits = [u for u in sorted(self.current) if u >= low and (not words or any(w.lower() in text_of(self.current[u]) for w in words))]
             out = ("* SEARCH " + " ".join(str(u) for u in hits) + "\r\n").encode()
         elif verb.startswith("UID FETCH"):
             _, _, uid, items = rest.split(" ", 3)
@@ -629,7 +629,7 @@ def test_junk_is_read_a_little_each_run_and_its_size_slows_no_tick(make_ctx, ser
     spam[total] = K.thr(v, K.OPT)
     srv = server({"INBOX": {1: news(1)}, "Junk": spam})
     first = read(ctx, srv).output
-    assert first.read_to_end, "junk never holds sending"
+    assert not first.read_to_end, "an opt-out may be behind what this run read: sending waits"
     assert len(srv.body_fetches()) == JUNK_BODIES_PER_RUN, "bodies in junk are bounded per run"
     heads = [c for c in srv.commands if "HEADER.FIELDS" in c.upper()]
     assert len(heads) <= JUNK_HEADS_PER_RUN + 1
@@ -1279,7 +1279,8 @@ def test_a_server_that_cannot_search_the_text_leaves_the_header_lines_to_decide_
         assert read(ctx, srv).ok and v.to in suppressed_values(ctx)
         srv.folders["INBOX"][3] = news(3)
         assert read(ctx, srv).ok and skipped_count(ctx) == 2
-        assert sum(" BODY " in c and "SEARCH" in c.upper() for c in srv.commands) == 1
+        searches = [c for c in srv.commands if " BODY " in c and "SEARCH" in c.upper()]
+        assert len(searches) == 2 and sum("@" in c for c in searches) == 1, "the search for words and the one for addresses, each asked once"
     finally:
         srv.stop()
 
@@ -1324,9 +1325,10 @@ def test_the_junk_read_stops_at_its_deadline_and_goes_on_next_run(make_ctx, serv
     ctx, _, _, v = scene(make_ctx)
     srv = server({"INBOX": {}, "Junk": {1: K.thr(v, K.OPT)}})
     monkeypatch.setattr(inbox, "JUNK_SECONDS", 0)
-    assert read(ctx, srv).output.read_to_end and v.to not in suppressed_values(ctx)
+    assert not read(ctx, srv).output.read_to_end and v.to not in suppressed_values(ctx), "stopped short: sending waits"
     monkeypatch.setattr(inbox, "JUNK_SECONDS", 60)
-    assert read(ctx, srv).ok and v.to in suppressed_values(ctx)
+    last = read(ctx, srv)
+    assert last.ok and last.output.read_to_end and v.to in suppressed_values(ctx)
 
 
 def test_a_folder_name_with_a_line_break_never_reaches_the_server(make_ctx):

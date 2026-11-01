@@ -21,7 +21,7 @@ import hashlib
 import imaplib
 import re
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -524,6 +524,7 @@ JUNK_BODIES_PER_RUN = 10
 JUNK_BYTES = 16_000_000
 JUNK_SECONDS = 60  # a slow server or a full folder does not hold up the tick: the rest is read next run
 JUNK_NAMES = ("junk", "spam", "inbox.junk", "inbox.spam", "junk e-mail", "junk email", "[gmail]/spam")
+ADDRESS_SEARCH_DROPS = 3  # the connection dropped this many times running on the search for addresses: too much for this server
 LARGE_MARK = "only its start was read"  # in the note of an email cut short: a person opens it
 
 
@@ -539,6 +540,11 @@ _UID_ITEM = re.compile(rb"\bUID\s+(\d+)", re.I)
 _STRUCTURE_TOKEN = re.compile(rb'"(?:[^"\\]|\\.)*"|[()]', re.S)
 _CONTROL = re.compile(rb"[\x00-\x1f\x7f]")
 _LIST_LINE = re.compile(rb'^\(([^)]*)\)\s+(?:"(?:[^"\\]|\\.)*"|NIL)\s*(.*)$', re.I | re.S)
+_SEARCHABLE = re.compile(r"[!-~]+")  # what can go between the quotes of a command as it is; a backslash cannot, and is left out too
+# What a server says when the password itself is refused. A login that fails for any other reason, or only for now, is tried again as before.
+_SIGN_IN_REFUSED = re.compile(r"authenticationfailed|authorizationfailed|invalid credentials|authentication failed|authenticate failed|"
+                              r"log ?in failed|incorrect (?:password|username)|application-specific password|log ?in via your web", re.I)
+_SIGN_IN_FOR_NOW = re.compile(r"unavailable|temporar|try again", re.I)
 
 
 def _about_this_email(parts, uid: int) -> list[tuple[bool, list]]:
@@ -631,6 +637,10 @@ def _listed_folders(data) -> list[tuple[set[bytes], str]]:
     return out
 
 
+class MailSignInRefused(Exception):
+    """The server refused the user and password. Asking again in the same breath cannot help, and repeated refusals can lock the mailbox."""
+
+
 class Mailbox:
     """Read-only IMAP access. `fetch_new(state)` returns ([(uid_key, raw bytes)], new_state). With MAIL_AUTH=oauth
     it signs in with XOAUTH2 using `token()`, an access token from aime/integrations/oauth.py.
@@ -638,8 +648,9 @@ class Mailbox:
     new_state also says how the read went, for the caller to take out before it saves the rest: "complete" (False: more mail
     is waiting, so nobody may act as if the mailbox had been read), "connection_lost" (the UID being fetched when the
     connection dropped), "skipped_headers" (the header lines of emails given up on, so they can be named), "unrelated"
-    (the header lines of emails passed without their body, which the caller records in the same step as the position it saves)
-    and "large" (the size of each email read only as far as its start).
+    (the header lines of emails passed without their body, which the caller records in the same step as the position it saves),
+    "large" (the size of each email read only as far as its start) and, when there are any, "named" (the UIDs the search for `addresses`
+    found).
 
     `wanted(header lines)` says whether an email's body is needed. Without it every body is fetched."""
 
@@ -655,15 +666,22 @@ class Mailbox:
         user, password = s.imap_credentials
         conn = self.imap_factory(s.imap_host, s.imap_port, ssl_context=tls_context(), timeout=MAIL_TIMEOUT)
         try:
-            if s.mail_auth == "oauth":
-                from aime.integrations.oauth import xoauth2
+            try:
+                if s.mail_auth == "oauth":
+                    from aime.integrations.oauth import xoauth2
 
-                if token is None:
-                    raise RuntimeError("MAIL_AUTH=oauth needs the account connected on the Integrations page")
-                bearer = token()
-                conn.authenticate("XOAUTH2", lambda _challenge: xoauth2(user, bearer).encode())
-            else:
-                conn.login(user, password)
+                    if token is None:
+                        raise RuntimeError("MAIL_AUTH=oauth needs the account connected on the Integrations page")
+                    bearer = token()
+                    conn.authenticate("XOAUTH2", lambda _challenge: xoauth2(user, bearer).encode())
+                else:
+                    conn.login(user, password)
+            except imaplib.IMAP4.abort:  # the connection, not the password
+                raise
+            except imaplib.IMAP4.error as exc:
+                if _SIGN_IN_REFUSED.search(str(exc)) and not _SIGN_IN_FOR_NOW.search(str(exc)):
+                    raise MailSignInRefused(f"the mailbox refused the sign-in: {exc}") from exc
+                raise
             yield conn
         finally:
             try:
@@ -698,9 +716,10 @@ class Mailbox:
 
     def read_folder(self, conn, folder: str, state: dict | None, wanted: Callable[[bytes], bool] | None = None, batch: int | None = None,
                     heads: int = HEADERS_PER_RUN, run_bytes: int = RUN_BYTES, label: str = "", seconds: float | None = None,
-                    quoting: str | None = None) -> tuple[list[tuple[str, bytes]], dict]:
+                    quoting: str | None = None, addresses: Iterable[str] = ()) -> tuple[list[tuple[str, bytes]], dict]:
         """`seconds`: when to stop for this run. `quoting`: words whose presence in a body means that body is wanted whatever the
-        header lines say. The server looks for them, in one command."""
+        header lines say. The server looks for them, in one command. `addresses`: the same for these, in a command of their own: what
+        becomes of that one is no reason to stop asking for the words."""
         deadline = None if seconds is None else time.monotonic() + seconds
         typ, data = conn.select(_quoted(folder), readonly=True)  # EXAMINE: never changes the mailbox
         if typ != "OK":
@@ -733,6 +752,24 @@ class Mailbox:
                 complete, window = False, []
             except imaplib.IMAP4.error:  # refused: the header lines decide
                 state["no_body_search"] = True
+        named: set[int] = set()
+        query = self._address_query(addresses)
+        if query and window and not state.get("no_address_search"):
+            try:
+                typ, data = conn.uid("SEARCH", None, "UID", f"{window[0]}:{window[-1]}", *query)
+                state.pop("address_search_drops", None)
+                if typ == "OK":
+                    named = {int(u) for u in (data[0] or b"").split()}
+                else:  # NO comes back as an answer, not an error: refused all the same
+                    state["no_address_search"] = True
+            except (imaplib.IMAP4.abort, OSError):  # this read has failed; only a connection that drops each time says it is too much to ask
+                state["address_search_drops"] = int(state.get("address_search_drops", 0)) + 1
+                if state["address_search_drops"] >= ADDRESS_SEARCH_DROPS:
+                    state["no_address_search"] = True
+                state["connection_lost"] = window[0]
+                complete, window = False, []
+            except imaplib.IMAP4.error:  # refused: the header lines decide
+                state["no_address_search"] = True
         for uid in window:
             if deadline is not None and time.monotonic() >= deadline:
                 complete = False
@@ -767,8 +804,8 @@ class Mailbox:
                 break
             except (imaplib.IMAP4.error, MemoryError):  # about this email: its body is asked for, and counted if that fails too
                 head, size, structure = None, None, None
-            if (head is not None and wanted is not None and uid not in quotes_us and not _only_the_body_can_tell(head, structure)
-                    and not wanted(head)):
+            if (head is not None and wanted is not None and uid not in quotes_us and uid not in named
+                    and not _only_the_body_can_tell(head, structure) and not wanted(head)):
                 unrelated[str(uid)] = head
                 failed.pop(str(uid), None)
                 self._connection_held(state)
@@ -825,7 +862,18 @@ class Mailbox:
         state["unrelated"] = unrelated
         state["large"] = large
         state["read_at"] = utcnow().isoformat(timespec="seconds")
+        if named:
+            state["named"] = sorted(named)
         return out, state
+
+    @staticmethod
+    def _address_query(addresses: Iterable[str]) -> list[str]:
+        """OR BODY "a" OR BODY "b" BODY "c": IMAP's OR joins two terms. The values go into the command as they are, so only a plain address does."""
+        plain = list(dict.fromkeys(a for a in addresses if is_address(a) and _SEARCHABLE.fullmatch(a) and "\\" not in a))
+        query: list[str] = []
+        for address in plain[:-1]:
+            query += ["OR", "BODY", f'"{address}"']
+        return query + ["BODY", f'"{plain[-1]}"'] if plain else []
 
     @staticmethod
     def _connection_lost(state: dict, uid: int) -> None:
