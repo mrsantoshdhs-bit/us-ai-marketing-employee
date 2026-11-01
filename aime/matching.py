@@ -13,13 +13,18 @@ from aime.knowledge.services import SERVICES
 # its own product stays a prospect, even when that product uses AI agents.
 _SAYS_IT_IS = r"(?:\bwe are|\bwe['\u2019]re|(?<!customer )(?<!client )(?<!partner )(?<!vendor )\bis) an? (?:[\w&]+[ ,-]+){0,3}?"
 COMPETITOR_PATTERNS = [
-    r"software (?:development|engineering) (?:agency|firm|company|services)",
-    r"dev(?:elopment)? shop",
+    # What sits around these says whether the sentence is about this company: "not a dev shop", "experience at a software development company".
+    r"(?<!\bnot a )(?<!\bat a )(?<!\bfrom a )(?<!\bfor )(?<!\bevery )(?<!\bwith )\bsoftware (?:development|engineering) (?:agency|firm|company|services)\b"
+    r"(?! (?:stock|team|vendors))",
+    r"(?<!\bnot a )(?<!\bor a )(?<!\bno )\bdev(?:elopment)? shops?\b(?! floor)",
     r"we build (?:software|apps|products) for (?:our )?clients",
     r"(?:digital|software|ai) (?:consultancy|agency) (?:that|helping|building)",
     r"outsourc(?:ing|ed) (?:software|development)",
     r"staff augmentation",
-    r"nearshore|offshore development",
+    r"\bnearshore (?:software|development|engineer\w*|developers?|talent|staffing|outsourcing|teams? for)\b"
+    r"|\boffshore (?:software )?development (?:center|centre|company|firm|services)\b",
+    _SAYS_IT_IS + r"(?:nearshore\b|offshore development\b)",
+    r"\b(?:we (?:offer|provide)|your trusted|a leading) (?:nearshore\b|offshore development\b)",
     r"\b(?:applied[- ]ai|ai|ai transformation|digital transformation|automation) (?:advisory|consulting|consultancy|"
     r"implementation|transformation) (?:firm|company|agency|studio|partner)\b",
     r"\bai transformation firm\b",
@@ -34,9 +39,10 @@ _COMPETITOR_RE = re.compile("|".join(COMPETITOR_PATTERNS), re.IGNORECASE)
 # instead, so these apply only to the company's own description.
 OWN_SITE_COMPETITOR_PATTERNS = [
     r"\b(?:custom )?(?:crm|software|app) development (?:agency|company|firm|services)\b",
-    r"\b(?:hire|access|connect with|join) (?:thousands of )?(?:elite |top(?:-tier)? |vetted |remote )*"
-    r"(?:developers|engineers|software talent)\b",
-    r"\bfractional (?:cto|cio|caio|chief)\b",
+    r"\b(?:hire|join) (?:thousands of )?(?:elite |top(?:-tier)? |vetted |remote )*(?:developers|engineers|software talent)\b",
+    # "Connect with engineers in your company" is a chat app: these say talent for sale only with a word that sells it.
+    r"\b(?:access|connect with) (?:thousands of )?(?:elite |top(?:-tier)? |vetted |remote )+(?:developers|engineers|software talent)\b",
+    r"\bfractional (?:cto|cio|caio|chief (?:technology|information|ai|digital))\b",
     r"\bcustom ai (?:development|solutions|systems|agents?)\b",
     r"\bdone[- ]for[- ]you,? by ai\b",
     r"\b(?:technology|tech|it) services (?:&|and) (?:it )?consulting\b",
@@ -45,6 +51,7 @@ OWN_SITE_COMPETITOR_PATTERNS = [
     r"\bai(?: agents?)? development (?:company|firm|agency|services)\b",
     r"\bcustom software development (?:for (?!our\b|your\b)|services\b|company\b)",
     r"\b(?:it|ai) consulting services\b",
+    r"\bai agency\b|\bit services (?:company|firm|provider)\b|\bsystems? integrators?\b",
     *COMPETITOR_PATTERNS,
 ]
 _OWN_SITE_COMPETITOR_RE = re.compile("|".join(OWN_SITE_COMPETITOR_PATTERNS), re.IGNORECASE)
