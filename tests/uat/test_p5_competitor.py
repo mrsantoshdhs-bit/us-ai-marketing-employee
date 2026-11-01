@@ -340,3 +340,57 @@ def test_a_firm_saying_so_still_flags_in_a_post_and_on_its_site(sentence):
 @pytest.mark.parametrize("sentence", ["You will work with systems integrators.", "We are an AI agency.", "Partner with an IT services firm."])
 def test_the_new_self_descriptions_are_for_a_companys_own_words_not_a_post(sentence):
     assert competitor_in_post(sentence) is None
+
+
+def site_saying(ctx_maker, words):
+    page = HOME.replace(WORDS, words)
+    return ctx_maker(handler=lambda r: httpx.Response(404) if r.url.path == "/robots.txt" else httpx.Response(200, text=page, headers={"content-type": "text/html; charset=utf-8"}))
+
+
+@pytest.mark.parametrize("sentence", [
+    "Our inventory platform for retailers is deployed by leading systems integrators across the United States.",
+    "We partner with leading systems integrators.", "Our platform is sold through system integrators.", "We work with an AI agency.",
+    "Why it services company fleets.", "Deployed by a leading systems integrator.", "Trusted by a leading IT services provider, and by banks.",
+    "Our customer is a systems integrator.",
+])
+def test_a_company_that_only_mentions_these_firms_is_not_one(sentence):
+    assert competitor_evidence(sentence) is None
+
+
+def test_a_product_company_that_mentions_integrators_stays_a_prospect(make_ctx):
+    ctx = site_saying(make_ctx, "Our inventory platform for retailers is deployed by leading systems integrators across the United States.")
+    cid, [lid] = lead_on_file(ctx, "mentions")
+    read_site_and_score(ctx, cid)
+    assert not flagged(ctx, cid) and row(ctx, lid)[0] != "disqualified"
+
+
+@pytest.mark.parametrize("sentence", [
+    "Your nearshore partner in Latin America for growing United States companies.", "Top nearshore company in Mexico.", "Premier nearshore firm.",
+    "Nearshore agency for US startups.", "Nearshore IT services.", "Nearshore services for product teams.", "Offshore development partner for startups.",
+])
+def test_plain_selling_wording_flags_in_a_post_and_on_a_site(sentence):
+    assert competitor_in_post(sentence) and competitor_evidence(sentence)
+
+
+@pytest.mark.parametrize("sentence", [
+    "Offshore development team in India for growing companies.", "Nearshore teams.", "Your partner for software engineering services across the United States.",
+    "We help startups with software engineering services.",
+])
+def test_plain_selling_wording_flags_on_a_site_only(sentence):
+    assert competitor_evidence(sentence) and competitor_in_post(sentence) is None
+
+
+def test_a_seller_in_plain_words_does_not_reach_a_draft(make_ctx):
+    ctx = site_saying(make_ctx, "Your nearshore partner in Latin America for growing United States companies and their engineering needs.")
+    cid, [lid] = lead_on_file(ctx, "plainseller")
+    read_site_and_score(ctx, cid)
+    assert flagged(ctx, cid) and row(ctx, lid)[0] == "disqualified"
+
+
+@pytest.mark.parametrize("sentence", [
+    "We work with a nearshore partner in Mexico.", "You will coordinate with our nearshore partner.", "We are not a nearshore company.",
+    "Experience at an offshore development partner helps.", "Tools for managing nearshore teams.", "A chat app for offshore development teams.",
+    "Time tracking for every software engineering company.", "Our offshore development team is in Vietnam.",
+])
+def test_a_company_that_uses_or_serves_such_a_firm_is_not_one(sentence):
+    assert competitor_evidence(sentence) is None
