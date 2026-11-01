@@ -10,13 +10,13 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DatabaseError
 
 from aime import clock_check, maintenance, send_journal
-from aime.backup import (OFFSITE_KEY_CHANGED, OFFSITE_PROBLEM, copy_opens, free_space_problem, integrity_check, newest_good_backup,
+from aime.backup import (OFFSITE_KEY_CHANGED, OFFSITE_PROBLEM, copy_opens, document_problem, free_space_problem, integrity_check, newest_good_backup,
                          offsite_copy_problem, offsite_problem_words, offsite_status, offsite_sync, verify_backup)
 from aime.context import AppContext
 from aime.crm_ops import canonical_sql
 from aime.db import kv_get
 from aime.integrations.linkedin import configured_author_urn
-from aime.models import (Company, Contact, ContentItem, FollowUp, InboundInquiry, Lead, OAuthToken,
+from aime.models import (Attachment, Company, Contact, ContentItem, FollowUp, InboundInquiry, Lead, OAuthToken,
                          PublishAttempt, Suppression, User)
 from aime.monitoring import read_heartbeat
 from aime.redact import redact
@@ -24,6 +24,7 @@ from aime.secure_store import is_protected
 from aime.timeutil import utcnow
 
 BACKUP_MAX_AGE_HOURS = 30  # the backup job runs daily; allow for a late or retried run
+OFFSITE_DRILL_MAX_AGE_DAYS = 14  # it runs weekly; two missed in a row is a finding
 
 
 def run_checks(ctx: AppContext) -> list[dict]:
@@ -102,7 +103,9 @@ def _sent_record_check(ctx: AppContext, add) -> None:
     """A backup copied over by hand: found here before the next send run finds it."""
     try:
         with ctx.db.session() as s:
-            behind = send_journal.restore_evidence(s, send_journal.read(ctx.settings.data_dir))
+            view = send_journal.read(ctx.settings.data_dir)
+            behind = send_journal.restore_evidence(s, view)
+            lost = send_journal.not_covered(s, view)
     except OSError as exc:
         add("Database knows what was sent", False, f"The record of sent emails cannot be read just now ({type(exc).__name__}): "
             "nothing is sent while that lasts. Check that no other program holds the file.", "warning")
@@ -111,6 +114,9 @@ def _sent_record_check(ctx: AppContext, add) -> None:
         f"{len(behind)} email(s) went out that this database does not know, so it is older than the record of sent emails. "
         f"They will not be sent again, and sending is held at the next run: read Follow-ups, then {send_journal.CONFIRM}.",
         own_alert=True)
+    add("Record of sent emails covers every sent email", not lost, "it does" if not lost else
+        f"The record of sent emails has lost {len(lost)} email(s) the database knows went out, so a later restore would not know "
+        "them. Something outside this program cut the file; the next start writes them back.")
 
 
 def _record_checks(ctx: AppContext, add) -> None:
@@ -187,6 +193,8 @@ def _setup_checks(ctx: AppContext, add) -> None:
     with ctx.db.session() as s:
         last, off = kv_get(s, "backup.last_verified"), kv_get(s, "backup.last_offsite")
         off_problem, key_changed = kv_get(s, OFFSITE_PROBLEM), kv_get(s, OFFSITE_KEY_CHANGED)
+        off_drill = kv_get(s, "backup.last_offsite_drill")
+        documents = s.execute(select(Attachment.stored_as, Attachment.size, Attachment.filename, Attachment.created_at)).all()
         users = s.execute(select(func.count(User.id)).where(User.active.is_(True))).scalar_one()
         admins = s.execute(select(func.count(User.id)).where(User.active.is_(True), User.role.in_(("admin", "super_admin")))).scalar_one()
     if not ctx.settings.dashboard_auth:
@@ -230,9 +238,16 @@ def _setup_checks(ctx: AppContext, add) -> None:
         add("Older off-machine copies open", False, f"The copy {key_changed['file']} and those before it do not open with the backup "
             "passphrase in use now: it was changed, or that copy is damaged. Keep the old passphrase until those copies have aged "
             "out, about 30 days.", "warning")
+    if off_ready and off_drill:
+        days = (utcnow() - datetime.fromisoformat(off_drill)).days
+        add("Off-machine copy restored recently", days <= OFFSITE_DRILL_MAX_AGE_DAYS,
+            f"the weekly restore check of the newest copy last passed {days} day(s) ago", "warning")
+    if documents:
+        trouble = document_problem(ctx.settings, documents, utcnow())
+        add("Deal documents are safe", trouble is None, trouble or f"{len(documents)} present", "warning")
     if ctx.settings.backup_offsite_dir:
         leaves, why = offsite_sync(ctx.settings.backup_offsite_dir)
-        add("Off-machine folder leaves this PC", leaves is True, why, "warning")
+        add("Off-machine folder is one that syncs", leaves is True, why, "warning")
 
     st = ctx.settings
     from aime import mail_accounts

@@ -134,7 +134,7 @@ servers, not yet against your real Gmail or Calendly.
   - `BACKUP_PASSPHRASE` is empty.
   - No OneDrive account is signed in (neither the Personal nor the Business account has a user folder), so
     `OneDrive\AIME-Backups` in your user folder is just a local folder.
-  - With #29, doctor reports this as "Off-machine folder leaves this PC".
+  - With #29, doctor reports this as "Off-machine folder is one that syncs".
 - **Disaster recovery:**
   - Restore a local backup: `docs/DEPLOYMENT.md`.
   - Restore an encrypted copy: `restore-drill --source <file> --extract-to <new folder>`, then put that

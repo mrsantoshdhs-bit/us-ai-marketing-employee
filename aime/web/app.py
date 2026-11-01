@@ -1364,8 +1364,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 msg = "Task completed"
             elif action == "mark_sent" and f.status == "uncertain":
                 to = f.to_email or (f.contact.email if f.contact else None)
-                record_delivery(s, f, f.send_started_at or utcnow(),
-                                EmailSender(C().settings).recipient_for(to)[0] if to else None, who(request))
+                try:
+                    record_delivery(s, f, f.send_started_at or utcnow(), EmailSender(C().settings).recipient_for(to)[0] if to else None,
+                                    who(request), journal_dir=C().settings.data_dir)
+                except OSError as exc:
+                    return back("/followups", "Not marked: the record of sent emails cannot be written just now "
+                                f"({type(exc).__name__}). Nothing changed; try again in a moment.")
                 msg = "Marked as sent (confirmed in your Sent folder)"
             elif action == "requeue" and f.status == "uncertain":
                 try:

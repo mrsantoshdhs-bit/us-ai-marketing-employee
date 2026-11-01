@@ -9,6 +9,8 @@ Events, the last one for an email counts:
 - claim: the email is being handed to the mail server, so it may have been delivered from here on.
 - released: it certainly was not delivered (the server refused it, or a person checked the Sent folder and requeued it).
 - confirmed: a person looked after a hold; what was claimed before this is no longer evidence of a new restore.
+- new_pc: this journal did not come with the database. What was approved before this moment may have gone from the old PC
+  after its copy was made: each such email gets a claim marked "unknown" and goes to a person, at this and any later restore.
 
 No address is stored, only a short hash: the journal outlives an erasure request, and must not hold the person's address.
 
@@ -28,6 +30,7 @@ import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 
 from sqlalchemy import func, select
@@ -45,6 +48,10 @@ ACCOUNTED_FOR = ("sending", "sent", "uncertain")  # where a claimed email can be
 NOT_YET_SENT = ("pending", "awaiting_approval", "approved")  # a claimed email here: this database is older than the claim
 ALREADY_SENT = ("The record of sent emails says this email already went to the mail server on {at} UTC. "
                 "It was not sent again: check your Sent folder, then mark sent or requeue")
+UNKNOWN_SENT = "approved in this copy; whether the old PC sent it after the copy is unknown: check the Sent folder, then mark sent or requeue"
+UNKNOWN_DRAFT = "a draft in this copy; whether the old PC sent it after the copy is unknown: check the Sent folder before approving it"
+SEND_IN_HAND = timedelta(minutes=15)  # a "sending" row this young may not have written its claim yet
+REAL_EVENTS = ("claim", "released", "confirmed")  # a journal with none of these has seen nothing: it is as good as absent
 LOCK_WAIT = 5.0  # seconds; an append takes milliseconds
 IN_LIST = 500  # row numbers asked for at a time: SQLite takes only so many in one statement
 CONFIRM = "run `python -m aime confirm-sending`"
@@ -127,12 +134,40 @@ def record_confirmed(data_dir: Path, who: str, integrity: str | None = None) -> 
     _append(data_dir, {"event": "confirmed", "who": who, "integrity": integrity, "at": utcnow().isoformat(timespec="seconds")})
 
 
+def record_new_pc(data_dir: Path) -> str:
+    """From now on this journal knows what goes out. Returns the moment, for what_was_approved_before."""
+    at = utcnow().isoformat(timespec="seconds")
+    _append(data_dir, {"event": "new_pc", "at": at})
+    return at
+
+
+def record_unknown(data_dir: Path, rows: list[tuple[int, str | None, str | None]]) -> None:
+    """(follow-up, address, message id) of emails that may have gone out from a PC this journal never heard from."""
+    if rows:
+        _append(data_dir, *[{**_record("claim", i, to, mid), "unknown": True} for i, to, mid in rows])
+
+
+def looks_new(data_dir: Path) -> bool:
+    """Absent, or nothing but a "started" line: this journal has never seen an email, so it did not come with the database."""
+    path = journal_path(data_dir)
+    if not path.exists():
+        return True
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            if json.loads(line).get("event") in REAL_EVENTS:
+                return False
+        except (ValueError, AttributeError):
+            continue
+    return True
+
+
 @dataclass
 class View:
     claims: dict[tuple[int, str | None], dict] = field(default_factory=dict)  # (follow-up, address hash): the last claim
     by_message_id: dict[str, dict] = field(default_factory=dict)
     since_confirmed: dict[tuple[int, str | None], dict] = field(default_factory=dict)  # claims made since a person last looked
     accepted_damage: str | None = None  # the integrity result a person last looked at
+    new_pc_at: str | None = None  # the last time this journal started on a PC without the old one's record
 
 
 def read(data_dir: Path) -> View:
@@ -158,6 +193,8 @@ def read(data_dir: Path) -> View:
                 view.by_message_id.pop(gone["message_id"], None)
         elif event == "confirmed":
             view.since_confirmed, view.accepted_damage = {}, rec.get("integrity")
+        elif event == "new_pc":
+            view.new_pc_at = rec.get("at")
     return view
 
 
@@ -168,8 +205,20 @@ def _address(f: FollowUp) -> str | None:
 def claim_for(view: View, f: FollowUp) -> dict | None:
     """The journal's record of this email going out, if the last word on it is that it did. A record with no address
     is from a row erased on request: its number is all that is left to match on."""
-    return (view.claims.get((f.id, _mark(_address(f)))) or view.claims.get((f.id, None))
-            or (view.by_message_id.get(f.message_id) if f.message_id else None))
+    return claim_of(view, f.id, _address(f), f.message_id)
+
+
+def claim_of(view: View, followup_id: int, address: str | None, message_id: str | None) -> dict | None:
+    return (view.claims.get((followup_id, _mark(address))) or view.claims.get((followup_id, None))
+            or (view.by_message_id.get(message_id) if message_id else None))
+
+
+def approved_before(view: View, at: str, rows) -> list[tuple[int, str | None, str | None]]:
+    """Of (id, address, message id, approved at) rows: those approved before `at` that nothing in the journal names yet."""
+    def stamp(when) -> str:
+        return when.isoformat() if hasattr(when, "isoformat") else str(when or "").replace(" ", "T")
+
+    return [(i, to, mid) for i, to, mid, when in rows if stamp(when) < at and not claim_of(view, i, to, mid)]
 
 
 # ---------------------------------------------------------------------------------------- the hold
@@ -250,8 +299,9 @@ def _requeued_since(session: Session, rec: dict) -> bool:
 
 
 def mark_for_a_person(session: Session, f: FollowUp, rec: dict, source: str) -> None:
-    """Not sent again. An approved email goes to a person; a draft says so, for whoever opens it next."""
-    f.blocked_reason = ALREADY_SENT.format(at=rec["at"][:16].replace("T", " "))[:300]
+    """Not sent again. An approved email goes to a person; a draft says so, for whoever opens it next. A claim marked
+    unknown never says the email went: nobody here knows."""
+    f.blocked_reason = UNKNOWN_SENT if rec.get("unknown") else ALREADY_SENT.format(at=rec["at"][:16].replace("T", " "))[:300]
     if f.status == "approved":
         f.status = "uncertain"
         session.add(Alert(level="error", source=source, message=f"Follow-up #{f.id}: {f.blocked_reason}"[:500]))
@@ -267,6 +317,29 @@ def review_rows(session: Session, view: View, source: str) -> list[int]:
             mark_for_a_person(session, f, rec, source)
             marked.append(f.id)
     return marked
+
+
+def note_drafts(session: Session, view: View, at: str) -> int:
+    """A draft of the copy may have been approved and sent by the old PC afterwards. It stays a draft, with a note for whoever
+    opens it. Returns how many."""
+    noted = 0
+    for f in session.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status.in_(("pending", "awaiting_approval")))).scalars():
+        if f.created_at.isoformat() < at and not claim_for(view, f):
+            f.blocked_reason = UNKNOWN_DRAFT
+            noted += 1
+    return noted
+
+
+def not_covered(session: Session, view: View) -> list:
+    """Emails that may have gone out with no claim in the journal: it has lost lines. Those a new-PC restore sent to a person
+    stay out of this: their status protects them, and they were never known to have gone."""
+    claimed = {i for i, _ in view.claims}
+    young = utcnow() - SEND_IN_HAND
+    return [row for row in session.execute(select(FollowUp.id, FollowUp.to_email, FollowUp.message_id, FollowUp.sent_at, FollowUp.send_started_at,
+                                                  FollowUp.status, FollowUp.blocked_reason)
+                                           .where(FollowUp.channel == "email", FollowUp.status.in_(ACCOUNTED_FOR))).all()
+            if row.id not in claimed and row.blocked_reason != UNKNOWN_SENT
+            and not (row.status == "sending" and row.send_started_at and row.send_started_at > young)]
 
 
 def why_held(ctx, session: Session, check_integrity: bool, source: str = "sales_workflow") -> str | None:
@@ -310,16 +383,18 @@ def why_held(ctx, session: Session, check_integrity: bool, source: str = "sales_
 # ---------------------------------------------------------------------------------------- start-up
 def start(db, settings) -> None:
     """On every start. The first time, the journal is started from what the database says was sent, so emails sent
-    before this code existed are protected too. A journal that was started and is now gone means this database came
-    without it (a new PC, a copied folder), so what went out since its backup is unknown: sending is held."""
+    before this code existed are protected too. A journal that was started and is now gone or empty means this database
+    came without it (a new PC, a copied folder), so what went out since its backup is unknown: sending is held, and every
+    approved email goes to a person. One that has lost lines gets back what the database knows."""
     from aime.db import kv_get, kv_set
 
     path = journal_path(settings.data_dir)
     try:
         with db.session() as s:
             started = kv_get(s, STARTED_KEY)  # read before looking for the file: another process writes the file first
-            exists = path.exists()
+            exists = path.exists() and path.stat().st_size > 0
             if started and exists:
+                _put_back_lost_claims(s, settings)
                 return
             if not exists:
                 if started:
@@ -329,6 +404,32 @@ def start(db, settings) -> None:
                                  .where(FollowUp.channel == "email", FollowUp.status.in_(ACCOUNTED_FOR))).all()
                 _append(settings.data_dir, {"event": "started", "at": utcnow().isoformat(timespec="seconds")},
                         *[_record("claim", i, to, mid, sent or started) for i, to, mid, sent, started in rows])
+                if started:
+                    _came_without_its_journal(s, settings)
             kv_set(s, STARTED_KEY, True)
     except (OSError, SQLAlchemyError):  # the send gate reports what matters; this must never stop a start
         log.exception("Could not start the record of sent emails")
+
+
+def _came_without_its_journal(session: Session, settings) -> None:
+    from aime.models import Contact
+
+    at = record_new_pc(settings.data_dir)
+    approved = session.execute(select(FollowUp.id, func.coalesce(FollowUp.to_email, Contact.email), FollowUp.message_id)
+                               .outerjoin(Contact, Contact.id == FollowUp.contact_id)
+                               .where(FollowUp.channel == "email", FollowUp.status == "approved")).all()
+    record_unknown(settings.data_dir, [tuple(row) for row in approved])
+    view = read(settings.data_dir)
+    review_rows(session, view, "recovery")
+    note_drafts(session, view, at)
+
+
+def _put_back_lost_claims(session: Session, settings) -> None:
+    """Only ever adds claims. A person hears of it: something outside this program cut the file."""
+    from aime.monitoring import alert_once
+
+    lost = not_covered(session, read(settings.data_dir))
+    if lost:
+        _append(settings.data_dir, *[_record("claim", r.id, r.to_email, r.message_id, r.sent_at or r.send_started_at) for r in lost])
+        alert_once(session, "error", "recovery", f"The record of sent emails ({journal_path(settings.data_dir).name}) had lost "
+                   f"{len(lost)} email(s) the database knows went out. They were written back. Check what else touched that file.", settings)

@@ -87,14 +87,21 @@ alert). If no slot is free it is never published late: it returns to "awaiting a
   verifies is never removed.
 - **Off-machine copy (optional):** set `BACKUP_OFFSITE_DIR` (e.g. `C:\Users\<you>\OneDrive\AIME-Backups`)
   and `BACKUP_PASSPHRASE` (12+ characters) in `.env`. Each day an encrypted bundle (database, publish and sent
-  journals, post images, config, SHA-256 manifest; never `.env`) is written there and test-decrypted;
+  journals, post images, report files, config, SHA-256 manifest; never `.env`) is written there and test-decrypted;
   the last 30 copies are kept. **Store the passphrase in your password manager: without it the copies
   cannot be read.**
+- **Deal documents** reach the same folder, encrypted the same way: one file each in its `attachments` subfolder, written
+  once and never removed, so customer documents are in OneDrive too. One a program holds is skipped with an alert and tried
+  the next day; it never fails the copy of the database. `restore` brings back those missing, checks each against the
+  database, and prints any it could not. A document stays under the passphrase of the day it was written: keep an old
+  passphrase for as long as you keep its documents.
 - Manual: `backup --label before-change` (add `--offsite` for an encrypted copy too);
   `backup-verify <file>` checks any backup.
 - An encrypted copy only counts as off-machine when the folder really leaves the PC. `doctor` checks that a
-  signed-in OneDrive account syncs `BACKUP_OFFSITE_DIR` ("Off-machine folder leaves this PC"); on 27 Oct
-  OneDrive was installed but not signed in, so the folder was local only.
+  signed-in OneDrive account syncs `BACKUP_OFFSITE_DIR` ("Off-machine folder is one that syncs"); on 27 Oct
+  OneDrive was installed but not signed in, so the folder was local only. It cannot see an upload: a paused or full OneDrive
+  looks the same, so open onedrive.com now and then and see that the newest copy is there.
+- `doctor` warns when the weekly restore check of the newest off-machine copy last passed over 14 days ago.
 - `doctor` warns while the off-machine copy is not configured (folder or passphrase missing), and when under 2 GB
   of disk is free. `doctor` also opens the newest verified backup each time, and names the next good copy if it has gone bad.
 - **Restore drill:** `restore-drill` (latest local backup) or `restore-drill --source <file.aimebak>`
@@ -132,7 +139,11 @@ trouble began; `backup-verify <file>` checks any other. Every restore loses what
 
 **A new PC** needs: the code (`git clone`) and its `.venv`, your `.env` from the password manager, an encrypted copy
 and `BACKUP_PASSPHRASE`, and the tasks (`scheduler install`, `install-watchdog`, `install-dashboard`). An encrypted copy
-holds the sent record of its own day only, so what went out after it is unknown: check the Sent folder before confirming.
+holds the sent record of its own day only, so what went out after it is unknown. On a PC without the old record (none, or
+one that has seen no email), every email approved in the copy goes to Follow-ups as "outcome unknown", and `restore` prints
+their numbers: check the Sent folder, then mark each sent or requeue. A copied database with no `restore` is treated the same
+at its first start. Drafts stay drafts with the same warning. An email both written and sent after the copy leaves no row at
+all: only the Sent folder shows it, so look there before confirming.
 A backup more than 14 days old, with no check-in on this PC yet, also stops the first check-in for the clock:
 `python -m aime confirm-clock`, once you have seen the clock is right.
 

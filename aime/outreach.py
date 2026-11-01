@@ -16,6 +16,7 @@ from datetime import datetime
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
+from aime import send_journal
 from aime.automation import audit
 from aime.config import Settings
 from aime.contact_validation import STATUS_OK
@@ -330,9 +331,13 @@ REACHED_PROSPECT = or_(FollowUp.delivered_to.is_(None), FollowUp.to_email.is_(No
                        func.lower(FollowUp.delivered_to) == func.lower(FollowUp.to_email))
 
 
-def record_delivery(session: Session, f: FollowUp, sent_at, delivered_to: str | None, actor: str) -> None:
+def record_delivery(session: Session, f: FollowUp, sent_at, delivered_to: str | None, actor: str, journal_dir=None) -> None:
     """What a delivered email changes, whether the send succeeded or a person confirmed it ("mark sent"): the
-    follow-up, the lead's last activity, and the outreach stage that lets the next step be drafted."""
+    follow-up, the lead's last activity, and the outreach stage that lets the next step be drafted. A person's word goes
+    into the record of sent emails too (journal_dir), so a later restore cannot bring this email back as approved; a send
+    wrote its claim before it went. Raises OSError with nothing changed if that record cannot be written."""
+    if journal_dir is not None:
+        send_journal.record_claim(journal_dir, f.id, f.to_email or (f.contact.email if f.contact else None), f.message_id)
     f.status, f.sent_at, f.blocked_reason = "sent", sent_at, None
     f.delivered_to = delivered_to or f.delivered_to
     f.delivery_status = f.delivery_status if f.delivery_status in ("bounced", "replied") else "sent"
