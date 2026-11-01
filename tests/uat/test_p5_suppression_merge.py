@@ -927,22 +927,19 @@ def refusal(ctx):
 
 
 def test_a_lift_opens_the_gates_for_that_address_only(make_ctx):
+    """At two companies: another person's opt-out at the same company still stops its first emails (the owner's decision of 1 Nov 2026)."""
     ctx = make_ctx(**SENDING)
-    one = add_lead(ctx, "one", "one@firm-a.example", "firm-a.example")
+    add_lead(ctx, "one", "one@firm-a.example", "firm-a.example")
+    add_lead(ctx, "two", "two@firm-b.example", "firm-b.example")
     with ctx.db.session() as s:
-        company_id = s.get(Lead, one).company_id
-        c = Contact(company_id=company_id, email="two@firm-a.example", source="website", email_source_url="https://firm.example/c", email_status="role_address", role_category="inbox", consent_status="none")
-        s.add(c)
-        s.flush()
-        s.add(Lead(company_id=company_id, contact_id=c.id, source="research", status="qualified", score=70, grade="B", primary_service="ai_agents"))
         suppress(s, "one@firm-a.example", "Unsubscribe request by email")
-        suppress(s, "two@firm-a.example", "Unsubscribe request by email")
+        suppress(s, "two@firm-b.example", "Unsubscribe request by email")
     assert lift(ctx, "one@firm-a.example") is None
     with ctx.db.session() as s:
-        assert not is_suppressed(s, "one@firm-a.example") and is_suppressed(s, "two@firm-a.example")
+        assert not is_suppressed(s, "one@firm-a.example") and is_suppressed(s, "two@firm-b.example")
         contacts = {c.email: c.consent_status for c in s.execute(select(Contact)).scalars()}
-    assert contacts == {"one@firm-a.example": "none", "two@firm-a.example": "opted_out"}
-    assert usable(ctx, "one@firm-a.example") and not usable(ctx, "two@firm-a.example")
+    assert contacts == {"one@firm-a.example": "none", "two@firm-b.example": "opted_out"}
+    assert usable(ctx, "one@firm-a.example") and not usable(ctx, "two@firm-b.example")
     work(ctx)
     approve_all(ctx)
     work(ctx)

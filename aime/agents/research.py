@@ -6,17 +6,59 @@ from collections import Counter, defaultdict
 
 import httpx
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent, TransientAgentError
 from aime.agents.contracts import SourceReport
-from aime.crm_ops import add_signal, ensure_lead, log_activity, upsert_company
+from aime.agents.qualification import NOT_A_PERSON
+from aime.contact_validation import STATUS_OK
+from aime.crm_ops import (CONTACT_NOT_SUPPRESSED, OPEN_LEAD_STATUSES, add_signal, ensure_lead, is_suppressed, log_activity,
+                          upsert_company)
 from aime.dedupe import find_duplicate
-from aime.models import Alert
+from aime.matching import competitor_in_post
+from aime.models import Activity, Alert, Company, Contact, Lead, Opportunity, Signal
 from aime.monitoring import alert_once, resolve_alerts
+from aime.outreach import _merged_family, company_opted_out
+from aime.pipeline import _task
 from aime.sources.base import ResearchFocus
 from aime.sources.registry import get_sources
 from aime.validation import validate_candidate
+
+EVIDENCE_ONLY_SOURCES = ("sec_edgar",)  # the owner's decision of 1 Nov 2026: a filing is market evidence and makes no lead
+ON_THE_LIST_REASON = "suppression list"  # how scoring words the close of a lead on the do-not-contact list (aime.scoring)
+
+
+def _leads_on_file(session: Session, company: Company) -> list[Lead]:
+    return session.execute(select(Lead).where(Lead.company_id.in_(_merged_family(session, company)), Lead.status != "merged")
+                           .order_by(Lead.id)).scalars().all()
+
+
+def _closed_by_person(session: Session, lead: Lead) -> bool:
+    """A person set its status last. A close with no record of who did it counts as theirs."""
+    last = session.execute(select(Activity.actor).where(Activity.lead_id == lead.id, Activity.type == "status_change")
+                           .order_by(Activity.created_at.desc(), Activity.id.desc()).limit(1)).first()
+    return last is None or (last[0] or "") not in NOT_A_PERSON
+
+
+def _only_a_dead_address(session: Session, company: Company, leads: list[Lead]) -> bool:
+    """Every lead closed by itself because its address bounced, and someone else at the company can still be written to. A bounce
+    is nobody's no, so the company is not closed. With nobody else, a new lead would only close again the same way."""
+    def bounced(lead: Lead) -> bool:
+        return (ON_THE_LIST_REASON in (lead.disqualify_reason or "") and not _closed_by_person(session, lead)
+                and (lead.outreach_status == "bounced" or (lead.contact is not None and lead.contact.email_status == "bounced")))
+    return all(bounced(x) for x in leads) and session.execute(select(Contact.id).where(
+        Contact.company_id.in_(_merged_family(session, company)), Contact.email_status.in_(STATUS_OK), CONTACT_NOT_SUPPRESSED).limit(1)).first() is not None
+
+
+def _stays_closed(session: Session, company: Company, leads: list[Lead]) -> bool:
+    """A company a person closed, a won customer, or one where someone opted out stays closed until a person reopens it (the owner's
+    decision of 1 Nov 2026), and so does one AIME closed. An open lead is worked as before, and an inquiry is answered through its own path."""
+    if any(x.status in OPEN_LEAD_STATUSES for x in leads):
+        return False
+    if company_opted_out(session, company):
+        return True
+    return bool(leads) and not _only_a_dead_address(session, company, leads)
 
 
 class ResearchInput(BaseModel):
@@ -44,6 +86,7 @@ class ResearchOutput(BaseModel):
     import_files_archived: int = 0
     import_files_rejected: list[str] = Field(default_factory=list)
     import_notices: list[str] = Field(default_factory=list)  # files imported, but with rows left out
+    sec_kept_as_evidence: int = 0  # companies known only from a filing: evidence on file, no lead
 
 
 class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
@@ -110,6 +153,7 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                 rows_left_out[cand.extra["import_file"]][why] += 1
 
         public_created = 0  # the per-run cap applies to public-source discovery, not to your own CSV lists
+        kept_as_evidence: set[int] = set()
         for cand in candidates:
             out.candidates_seen += 1
             if cand.is_us is False:
@@ -134,9 +178,13 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                 # Still attach evidence to companies we already track.
                 existing = find_duplicate(session, cand.name, cand.domain, cand.state, cand.source_record_id,
                                           cand.source)
-                if existing and add_signal(session, existing, cand.signal_type, cand.signal_text, cand.source,
-                                           cand.source_url, cand.observed_at):
+                sig = existing and add_signal(session, existing, cand.signal_type, cand.signal_text, cand.source,
+                                              cand.source_url, cand.observed_at)
+                if sig:
                     out.signals_added += 1
+                    leads = _leads_on_file(session, existing)
+                    if cand.source not in EVIDENCE_ONLY_SOURCES and not existing.is_competitor and _stays_closed(session, existing, leads):
+                        self._keep_closed(session, existing, leads, sig, cand, out)  # read once only: no later run hears of it
                 continue
             company, created = upsert_company(session, cand)
             if created:
@@ -153,10 +201,24 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                              cand.observed_at)
             if sig:
                 out.signals_added += 1
-            if not company.is_competitor:
+            leads = _leads_on_file(session, company)
+            if cand.source in EVIDENCE_ONLY_SOURCES:  # a lead already on file, of any source, stays as it is and keeps being worked
+                if not leads:
+                    kept_as_evidence.add(company.id)
+            elif company.is_competitor:
+                if not leads:  # scoring closes it with a reason, and its lead page offers Not a competitor
+                    lead, _ = ensure_lead(session, company, "research")
+                    out.leads_created += 1
+                    self._record_flag_words(session, company, lead)
+            elif _stays_closed(session, company, leads):
+                self._keep_closed(session, company, leads, sig, cand, out)
+            else:
                 _, lead_created = ensure_lead(session, company, "research")
                 if lead_created:
                     out.leads_created += 1
+        out.sec_kept_as_evidence = len(kept_as_evidence)
+        if kept_as_evidence:
+            self.log.info("%s SEC filer(s) kept as market evidence, with no lead", len(kept_as_evidence))
 
         # Imported files leave data/imports only after their companies are committed.
         for src in file_sources:
@@ -182,3 +244,38 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             raise TransientAgentError("All configured sources failed: "
                                       + "; ".join(f"{r.name}: {r.message}" for r in unread)[:300])
         return out
+
+    def _record_flag_words(self, session: Session, company: Company, lead: Lead) -> None:
+        """What decided a flag set at discovery, where a person reads it. Only words the daily review reads again
+        (crm._review_competitor_flags) are written with its prefix: without them it would lift the flag of a true competitor."""
+        posts = session.execute(select(Signal.text).where(Signal.company_id == company.id, Signal.signal_type == "hiring")).scalars()
+        phrase = next(filter(None, map(competitor_in_post, [*posts, company.description])), None)
+        if phrase:
+            log_activity(session, f'Marked as a possible competitor: it says "{phrase}"', self.name, type_="research",
+                         company_id=company.id, lead_id=lead.id)
+
+    def _keep_closed(self, session: Session, company: Company, leads: list[Lead], sig: Signal | None, cand, out: ResearchOutput) -> None:
+        """The post is kept as evidence and no lead is made. hn_hiring re-reads the same threads every morning, so only a post not
+        seen before (`sig`) is news. A person is told what they can really do: after an opt-out that is nothing, unless the owner lifts it."""
+        said_no = (company_opted_out(session, company) or is_suppressed(session, domain=company.domain)
+                   or any(ON_THE_LIST_REASON in (x.disqualify_reason or "") or x.outreach_status == "unsubscribed" for x in leads))
+        if cand.source == "csv_import":  # the person's own row: not left_out, because its evidence was kept and finish_intake may reject the file
+            out.import_notices.append(f"{company.name}: " + ("it stays closed, after an opt-out or a do-not-contact entry" if said_no
+                                                             else "already closed, reopen it on its lead page"))
+        if sig is None:
+            return
+        won = [x for x in leads if x.status == "converted"]
+        by_person = [x for x in leads if x.status != "converted" and _closed_by_person(session, x)]
+        lead = (won or by_person or leads or [None])[-1]
+        log_activity(session, f"New listing from {cand.source} while this company is closed: nothing was reopened", self.name, type_="research",
+                     body=cand.source_url, company_id=company.id, lead_id=lead.id if lead else None)
+        if lead is None or not (said_no or won or by_person):  # AIME's own close, such as outside the US: on the record only
+            return
+        told = f"A new listing appeared for closed lead #{lead.id} ({company.name}). Nothing was reopened: " + (
+            "it stays closed, because it was closed by an opt-out or the do-not-contact list." if said_no else "a person decides.")
+        alert_once(session, "info", self.name, told, self.settings, key=f"listing_on_closed:{lead.id}")
+        if won:
+            deal = session.execute(select(Opportunity).where(Opportunity.lead_id == lead.id, Opportunity.stage == "won")
+                                   .order_by(Opportunity.id.desc())).scalars().first()
+            _task(session, lead.id, company.id, f"New listing from customer {company.name}",
+                  f"{told}\nDeal owner: {(deal.owner if deal else None) or 'none: assign one'}.\nListing: {cand.source_url or 'n/a'}\nNothing has been sent.")
