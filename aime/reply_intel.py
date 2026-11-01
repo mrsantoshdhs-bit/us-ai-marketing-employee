@@ -327,7 +327,7 @@ def recommended_for(row: InboundEmail) -> str | None:
         if passed_on(row.new_text or own_text(row.body_text or "")):
             return "Wait to hear from the person they passed it to"
         if named_addresses(row):
-            return "A person decides whether to write to the address they gave: nothing goes there by itself"
+            return "Nothing goes to the address they gave by itself: write to them from the mailbox yourself, then log it here"
     return row.recommended_status
 
 
@@ -459,7 +459,7 @@ SENTIMENT = {"interested": "positive", "referral": "positive", "calendly": "posi
              "not_interested": "negative", "unsubscribe": "negative"}
 RECOMMENDED = {
     "interested": "Opportunity: answer and offer a meeting",
-    "referral": "Contact the person they referred us to",
+    "referral": "Write to them from the mailbox yourself, then log it here",
     "question": "Answer the question; keep the lead active",
     "objection": "A person answers the objection",
     "not_interested": "Close as not interested; nurture later",
@@ -1673,7 +1673,7 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
                 draft.purpose = "ask_times"  # the same request for times in other words: a booking ends it (meetings.close_open_emails)
             notes.append(SUGGESTED_WAITS)
             if row.category == "referral" and (named := named_addresses(row)):
-                notes.append(f"they gave {', '.join(named[:3])}. Nothing goes there by itself: a person decides")
+                notes.append(f"they gave {', '.join(named[:3])}. Nothing goes there by itself: write to them from the mailbox yourself, then log it here")
             if row.reply_to and NO_REPLY.match(row.from_email or ""):
                 notes.append(f"this draft goes to a no-reply address, where nobody may read it. They ask for answers to go to "
                              f"{row.reply_to}. Nothing goes there by itself: a person decides")

@@ -442,6 +442,22 @@ def _read_notice(settings, row: InboundEmail) -> dict | None:
         return None
 
 
+def older_waiting_notice(session: Session, settings, row: InboundEmail) -> InboundEmail | None:
+    """An older notice about the same invitee that still waits for a person, whoever may see it, or None. Notices must apply in the order
+    Calendly sent them, and Replies lists the newest first. One that cannot be read blocks nothing."""
+    info = _read_notice(settings, row)
+    invitee = (info or {}).get("invitee_email")
+    if not invitee:
+        return None
+    here = (row.received_at or datetime.min, row.id)
+    for other in session.execute(select(InboundEmail).where(InboundEmail.category == "calendly", InboundEmail.status == "needs_review",
+                                                            InboundEmail.id != row.id).order_by(InboundEmail.received_at, InboundEmail.id)).scalars():
+        said = _read_notice(settings, other)
+        if said and said.get("invitee_email") and canonical_address(said["invitee_email"]) == canonical_address(invitee) and (other.received_at or datetime.min, other.id) < here:
+            return other
+    return None
+
+
 def _notices(session: Session, settings, invitee: str, row: InboundEmail) -> list[tuple[InboundEmail, dict]]:
     """The other Calendly notices already read about this invitee, as they read."""
     found = []

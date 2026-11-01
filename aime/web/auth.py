@@ -203,7 +203,7 @@ def current_username(request: Request) -> str:
 ADMIN_ONLY_PREFIXES = ("/jobs/", "/agents/", "/integrations/linkedin/connect", "/integrations/linkedin/disconnect",
                        "/integrations/oauth/",
                        "/inbound/process", "/automation/mode", "/automation/authorizations",
-                       "/automation/state/start", "/automation/state/resume")  # pausing and stopping: anyone signed in
+                       "/automation/state/start", "/automation/state/resume", "/suppressions/")  # pausing and stopping: anyone signed in
 
 
 # Mailbox configuration (servers, passwords, which mailbox sends): `configure_system` (Super Admin), viewing too.

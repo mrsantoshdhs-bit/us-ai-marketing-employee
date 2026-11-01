@@ -4,6 +4,9 @@
     <button>Held</button><button class="secondary" formaction="/meetings/{{ m.id }}/no_show">No-show</button>
     <button class="danger" formaction="/meetings/{{ m.id }}/cancel">Cancelled</button>
   </form>{% endmacro %}
+{% macro link_form(m) %}<form class="filters" method="post" action="/meetings/{{ m.id }}/link" style="margin-top:6px">
+    <input name="lead_id" type="number" min="1" placeholder="Lead # (from the lead's page address)" required>
+    <button class="secondary">Link to lead</button></form>{% endmacro %}
 {% block title %}Meetings · AI Sales Employee{% endblock %}
 {% block content %}
 <h1>Meetings</h1>
@@ -12,6 +15,7 @@
   Times are US Eastern. After a meeting, mark it held or no-show; the opportunity's next step updates and the
   "record the outcome" task closes. Simulated bookings (testing only) are marked SIMULATED.
 </div>
+{% if notices_waiting %}<div class="flash small"><a href="/inbox">{{ notices_waiting }} Calendly notice{{ ' waits' if notices_waiting == 1 else 's wait' }} on Replies</a>, not applied: waiting for a person to check {{ 'it' if notices_waiting == 1 else 'them' }} in Calendly.</div>{% endif %}
 <h2 id="proposals">Meeting times offered</h2>
 <div class="card small">{% if booking_ready %}Free times come from your calendar. The email offering them waits for your approval; when the prospect answers, book the time they chose: it is checked against the calendar again, then one event is created.{% else %}Booking from your calendar is off: {{ booking_why|plain }}. The booking link in replies works as before.{% endif %}</div>
 {% for p in proposals %}
@@ -36,9 +40,7 @@
   {% if can_approve and m.event_id %}<form class="filters" method="post" action="/meetings/{{ m.id }}/move" style="margin-top:6px">
     <label class="small">New time ({{ m.timezone }}) <input name="start_local" type="datetime-local" required></label>
     <button class="secondary">Move in the calendar</button></form>{% endif %}
-  {% if can_edit and not m.lead %}<form class="filters" method="post" action="/meetings/{{ m.id }}/link" style="margin-top:6px">
-    <input name="lead_id" type="number" min="1" placeholder="Lead # (from the lead's page address)" required>
-    <button class="secondary">Link to lead</button></form>{% endif %}
+  {% if can_edit and not m.lead %}{{ link_form(m) }}{% endif %}
   {% if can_edit %}{{ outcome_form(m) }}{% endif %}
 </div>
 {% else %}<div class="card muted">No upcoming meetings.</div>{% endfor %}
@@ -49,6 +51,7 @@
   · {{ m.invitee_name or '' }} &lt;{{ m.invitee_email }}&gt;
   {% if m.lead %} · <a href="/leads/{{ m.lead_id }}">{{ m.lead.company.name }}</a>{% else %} · <span class="pill warn">not matched to a lead</span>{% endif %}
   <span class="muted small">({{ m.source|replace('_', ' ') }})</span>
+  {% if can_edit and not m.lead %}{{ link_form(m) }}{% endif %}
   {% if can_edit %}{{ outcome_form(m) }}{% else %}<div class="small muted">Its outcome has not been recorded yet.</div>{% endif %}
 </div>
 {% endfor %}{% endif %}

@@ -10,6 +10,7 @@
   <span class="state-chip {{ duty_tone }}"><i></i>{{ duty_label }}</span>
 </div>
 
+{% if gap %}<div class="card small">Nothing ran from {{ gap[0]|local }} to {{ gap[1]|local }}. The PC may have been asleep, off or signed out.</div>{% endif %}
 <section class="mgr-tiles" aria-label="Today at a glance">
   <a class="mgr-tile{{ ' hot' if needs }}" href="#needs"><b>{{ needs_total }}</b><span>need you</span></a>
   <a class="mgr-tile" href="#qualified"><b>{{ qualified|length }}</b><span>leads qualified today</span></a>

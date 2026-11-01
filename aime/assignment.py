@@ -208,12 +208,10 @@ def manager_of(session: Session, username: str) -> str | None:
     user = session.execute(select(User).where(User.username == username)).scalars().first()
     if user is None:
         return None
-    if user.manager:
-        return user.manager
-    if user.team_id:
-        team = session.get(Team, user.team_id)
-        if team and team.manager and team.manager != username:
-            return team.manager
+    team = session.get(Team, user.team_id) if user.team_id else None
+    for name in (user.manager, team.manager if team and team.manager != username else None):  # someone deactivated reads no alert
+        if name and session.execute(select(User.id).where(User.username == name, User.active.is_(True))).first():
+            return name
     return None
 
 

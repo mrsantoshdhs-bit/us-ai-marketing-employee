@@ -348,6 +348,8 @@ def lead_tier(lead) -> str:
     is the strongest buying signal), then the score's grade, with inbound A/B leads hot."""
     if lead is None or lead.status == "disqualified":
         return "UNQUALIFIED"
+    if lead.status == "converted":  # a customer now: the stage stays as history, and there is nothing left to chase
+        return "COLD"
     if lead.outreach_status in ("interested", "meeting"):
         return "HOT"
     if lead.grade == "A" or (lead.grade == "B" and lead.source == "inbound"):
@@ -359,6 +361,8 @@ def tier_reason(lead) -> str:
     tier = lead_tier(lead)
     if lead is None or lead.status == "disqualified":
         return "disqualified"
+    if lead.status == "converted":
+        return "converted: already a customer"
     if lead.outreach_status in ("interested", "meeting"):
         return f"{lead.outreach_status}: the prospect engaged"
     return f"grade {lead.grade or '-'} (score {lead.score or 0})" + (" from an inbound inquiry" if tier == "HOT" and lead.source == "inbound" else "")
