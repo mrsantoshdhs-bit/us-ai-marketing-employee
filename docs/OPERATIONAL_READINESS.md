@@ -137,8 +137,9 @@ servers, not yet against your real Gmail or Calendly.
   - With #29, doctor reports this as "Off-machine folder is one that syncs".
 - **Disaster recovery:**
   - Restore a local backup: `docs/DEPLOYMENT.md`.
-  - Restore an encrypted copy: `restore-drill --source <file> --extract-to <new folder>`, then put that
-    `aime.db` in `data/`.
+  - Restore an encrypted copy: `python -m aime restore --from <file> --confirm`, which also brings back documents and holds emails.
+    Do not copy an extracted `aime.db` into `data/`, and never with its `sent_journal.jsonl`: a record that came with
+    its database cannot show that the old PC sent anything after the copy.
   - Keep the `.env` values in your password manager.
 
 ## 7. Gmail / Google Workspace

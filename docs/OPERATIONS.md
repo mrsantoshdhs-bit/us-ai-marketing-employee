@@ -141,8 +141,9 @@ trouble began; `backup-verify <file>` checks any other. Every restore loses what
 and `BACKUP_PASSPHRASE`, and the tasks (`scheduler install`, `install-watchdog`, `install-dashboard`). An encrypted copy
 holds the sent record of its own day only, so what went out after it is unknown. On a PC without the old record (none, or
 one that has seen no email), every email approved in the copy goes to Follow-ups as "outcome unknown", and `restore` prints
-their numbers: check the Sent folder, then mark each sent or requeue. A copied database with no `restore` is treated the same
-at its first start. Drafts stay drafts with the same warning. An email both written and sent after the copy leaves no row at
+their numbers: check the Sent folder, then mark each sent or requeue. A database copied by hand with no `restore` is treated
+the same at its next start, also after `doctor` or a task has run here. Do not copy `sent_journal.jsonl` over with it: a record
+that came with its database cannot show what went out after the copy, so nothing holds. Drafts stay drafts with the same warning. An email both written and sent after the copy leaves no row at
 all: only the Sent folder shows it, so look there before confirming.
 A backup more than 14 days old, with no check-in on this PC yet, also stops the first check-in for the clock:
 `python -m aime confirm-clock`, once you have seen the clock is right.

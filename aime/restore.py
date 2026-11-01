@@ -175,6 +175,20 @@ def _approved_in(path: Path) -> list[tuple]:
         con.close()
 
 
+def _gone_in(path: Path) -> list[tuple]:
+    """(id, address, message id, sent at) of every email a closed database says went out. Those it says only may have gone
+    (a new PC's earlier restore) are left out: nobody knows that they did."""
+    con = sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro&immutable=1", uri=True)
+    try:
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'followups'").fetchone():
+            return []
+        return [r[:4] for r in con.execute("SELECT id, to_email, message_id, sent_at, status FROM followups WHERE channel = 'email' "
+                                           "AND COALESCE(blocked_reason, '') != ?", (send_journal.UNKNOWN_SENT,))
+                if r[4] in send_journal.ACCOUNTED_FOR]
+    finally:
+        con.close()
+
+
 def _carry_the_moment(incoming: Path, at: str) -> None:
     """The database and the copies it makes from now on say which journal they lived with. An old copy with no such table has
     nowhere to say it; start() gives it the key."""
@@ -199,6 +213,7 @@ def _hold_back_what_may_have_gone(settings, incoming: Path, new_pc: bool) -> tup
         at = send_journal.record_new_pc(settings.data_dir)
         _carry_the_moment(incoming, at)
         send_journal.record_unknown(settings.data_dir, send_journal.approved_before(view, None, _approved_in(incoming)))
+        send_journal.record_known(settings.data_dir, [r for r in _gone_in(incoming) if not send_journal.claim_of(view, *r[:3])])
         return True, None
     if view.new_pc_at:
         send_journal.record_unknown(settings.data_dir, send_journal.approved_before(view, view.new_pc_at, _approved_in(incoming)))

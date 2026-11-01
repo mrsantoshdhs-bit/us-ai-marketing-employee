@@ -757,7 +757,7 @@ def build_parser() -> argparse.ArgumentParser:
     bv.add_argument("file")
     rd = sub.add_parser("restore-drill", help="Restore a backup into a temp folder and check it (never touches data/)")
     rd.add_argument("--source", help="Backup .db, bundle .zip or encrypted .aimebak (default: latest local backup)")
-    rd.add_argument("--extract-to", help="New folder (outside data/) to receive the checked files for a manual restore")
+    rd.add_argument("--extract-to", help="New folder (outside data/) to receive the checked files, to look at; `restore` is what puts a copy back")
     sub.add_parser("acceptance-report", help="Read-only: evidence for each of the 19 acceptance tests")
     sr = sub.add_parser("simulate-reply", help="Process a clearly labelled SIMULATED reply from a lead (testing)")
     sr.add_argument("--lead", type=int, required=True)

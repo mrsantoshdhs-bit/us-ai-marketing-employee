@@ -312,6 +312,117 @@ def test_doctor_first_then_restore(pc, tmp_path):
     assert restore_database(new.settings, copy)["unknown_sent"] == [fid]
 
 
+def lost_alerts(ctx):
+    with ctx.db.session() as s:
+        return s.execute(select(Alert).where(Alert.message.like("The record of sent emails%"))).scalars().all()
+
+
+def a_first_command_ran(pc):
+    """As doctor or an installed task would: an empty database, and a journal with one "started" line."""
+    new = pc()
+    run_checks(new)
+    assert send_journal.looks_new(new.settings.data_dir)
+    new.db.dispose()
+    return new
+
+
+def test_a_database_copied_by_hand_after_a_first_command_is_noticed(pc, tmp_path):
+    old = pc()
+    done = approved_email(old, "a")
+    send_run(old)
+    fid = approved_email(old, "b")
+    copy = plain_copy(old, tmp_path)
+    send_run(old)
+    FakeSMTP.sent = []
+    new = a_first_command_ran(pc)
+    shutil.copyfile(copy, make_url(new.settings.database_url).database)
+    ctx = create_context(new.settings)
+    assert send_journal.hold(new.settings.data_dir) and status(ctx, fid) == "uncertain"
+    assert done in {i for i, _ in send_journal.read(new.settings.data_dir).claims} and not lost_alerts(ctx)  # nothing cut the file
+    send_run(ctx)
+    confirm(ctx)
+    send_run(ctx)
+    assert FakeSMTP.sent == [] and status(ctx, fid) == "uncertain"
+    ctx.db.dispose()
+    last = create_context(new.settings)  # looked at once: it does not fire again on every start
+    assert send_journal.hold(new.settings.data_dir) is None
+    last.db.dispose()
+
+
+def test_a_copy_extracted_from_a_bundle_and_placed_by_hand_after_a_first_command_is_noticed(pc, tmp_path):
+    old = pc()
+    fid = approved_email(old)
+    bundle = snapshot(old, tmp_path, "copy.zip")
+    send_run(old)
+    FakeSMTP.sent = []
+    assert restore_drill(old.settings, bundle, tmp_path / "out")["ok"]
+    new = a_first_command_ran(pc)
+    shutil.copyfile(tmp_path / "out" / "aime.db", make_url(new.settings.database_url).database)
+    ctx = create_context(new.settings)
+    assert send_journal.hold(new.settings.data_dir) and status(ctx, fid) == "uncertain"
+    ctx.db.dispose()
+
+
+def test_a_copy_older_than_the_record_itself_placed_by_hand_after_a_first_command_is_noticed(pc, tmp_path):
+    from aime.models import KeyValue
+
+    old = pc()
+    fid = approved_email(old)
+    with old.db.session() as s:
+        for key in (send_journal.STARTED_KEY, send_journal.JOURNAL_KEY):
+            s.delete(s.get(KeyValue, key))
+    copy = plain_copy(old, tmp_path)
+    new = a_first_command_ran(pc)
+    shutil.copyfile(copy, make_url(new.settings.database_url).database)
+    ctx = create_context(new.settings)
+    assert send_journal.hold(new.settings.data_dir) and status(ctx, fid) == "uncertain"
+    ctx.db.dispose()
+
+
+def test_a_copy_put_back_by_hand_beside_its_own_journal_stays_approved(pc, tmp_path):
+    """The same journal, which has seen nothing: there is nothing the copy can have forgotten."""
+    ctx = pc()
+    fid = approved_email(ctx)
+    copy = plain_copy(ctx, tmp_path)
+    ctx.db.dispose()
+    shutil.copyfile(copy, make_url(ctx.settings.database_url).database)
+    again = create_context(ctx.settings)
+    assert send_journal.hold(ctx.settings.data_dir) is None and status(again, fid) == "approved"
+    again.db.dispose()
+
+
+def test_a_journal_from_before_started_ids_with_real_claims_is_left_alone(pc, tmp_path):
+    """As production at upgrade: a database with neither key's value, and a journal that has seen email."""
+    from aime.models import KeyValue
+
+    ctx = pc()
+    approved_email(ctx, "a")
+    send_run(ctx)
+    fid = approved_email(ctx, "b")
+    with ctx.db.session() as s:
+        s.delete(s.get(KeyValue, send_journal.JOURNAL_KEY))
+    ctx.db.dispose()
+    again = create_context(ctx.settings)
+    assert send_journal.hold(ctx.settings.data_dir) is None and status(again, fid) == "approved"
+    again.db.dispose()
+
+
+@pytest.mark.parametrize("kind", ["db", "zip"])
+def test_a_new_pc_restore_of_sent_mail_does_not_say_something_cut_the_record(pc, tmp_path, kind):
+    old = pc()
+    fid = approved_email(old)
+    send_run(old)
+    assert status(old, fid) == "sent"
+    copy = plain_copy(old, tmp_path) if kind == "db" else snapshot(old, tmp_path, "copy.zip")
+    new = bare_pc(pc)
+    restore_database(new.settings, copy)
+    again = create_context(new.settings)
+    assert not lost_alerts(again)
+    view = send_journal.read(new.settings.data_dir)
+    assert not view.claims[next(k for k in view.claims if k[0] == fid)].get("unknown")  # the copy knows this one went
+    again.db.dispose()
+
+
 def test_the_first_ever_start_holds_nothing(pc):
     ctx = pc()
     assert send_journal.hold(ctx.settings.data_dir) is None
