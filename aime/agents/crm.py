@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent
 from aime.agents.qualification import NOT_A_PERSON
+from aime.competitor_guard import give_flagged_companies_a_lead, leave_to_a_person, live_lead_on_company
 from aime.crm_ops import (add_signal, ensure_lead, is_suppressed, log_activity, merge_companies, upsert_company,
                           upsert_contact, us_location_evidence)
 from aime.dedupe import clean_company_name, domain_from_email, domain_from_url, name_from_title, normalize_name
@@ -298,12 +299,17 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         """Companies already on file get the check new ones get: research reads a company's site only every month, and one
         whose site could not be read never gets it. What it says about itself decides; its hiring post only when nothing
         else is on record. A person's "not a competitor" stands, and a lead already emailed keeps its sequence: only a
-        person ends that, so it is left as it is."""
+        person ends that, so it is left as it is, and so is any other lead on its company, since the flag sits on the company."""
+        give_flagged_companies_a_lead(session, self.name)
         flagged = 0
         rows = session.execute(select(Lead, Company).join(Company, Lead.company_id == Company.id).where(
             Lead.status.in_(("new", "qualified", "nurture")), or_(Lead.outreach_status.is_(None), Lead.outreach_status.in_(("drafted", "approved"))),
             Company.merged_into_id.is_(None), Company.is_competitor.is_(False), Company.competitor_cleared_by.is_(None))).all()
+        judged = set()
         for lead, company in rows:
+            if company.id in judged:
+                continue
+            judged.add(company.id)
             snap = session.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == company.id)
                                    .order_by(ResearchSnapshot.id.desc())).scalars().first()
             description = snap.description if snap else None
@@ -312,7 +318,10 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             else:
                 posts = session.execute(select(Signal.text).where(Signal.company_id == company.id, Signal.signal_type == "hiring"))
                 phrase = next((p for p in map(competitor_in_post, posts.scalars()) if p), None) or competitor_evidence(company.website_title)
-            if phrase:
+            live = live_lead_on_company(session, company.id) if phrase else None
+            if live:
+                leave_to_a_person(session, company, live, phrase, self.name, self.settings)
+            elif phrase:
                 company.is_competitor = True
                 flagged += 1
                 log_activity(session, f'Marked as a possible competitor: it says "{phrase}"', self.name, type_="data_quality",

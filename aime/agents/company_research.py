@@ -19,6 +19,7 @@ from aime.agents.base import AgentError, BaseAgent, RetryPolicy
 from aime.agents.contracts import BlockedItem
 from aime.company_research import (WITHDRAWN, build_snapshot, cik_of, is_plausible_website, save_contact,
                                    withdraw_missing)
+from aime.competitor_guard import leave_to_a_person, live_lead_on_company
 from aime.contact_validation import STATUS_OK, MailDomainChecker, assign_published_emails, recheck_emails
 from aime.crm_ops import log_activity, primary_lead
 from aime.matching import competitor_evidence
@@ -178,11 +179,15 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         titles = " ".join(p.title for p in pages if p.ok and p.kind == "home")  # the page title is its own words too
         phrase = competitor_evidence(f"{snapshot.description or ''} {' '.join(snapshot.services_offered or [])} {titles}")
         if phrase and not company.is_competitor and not company.competitor_cleared_by:
-            company.is_competitor = True
-            out.competitors.append(company.id)
-            log_activity(session, f'Marked as a possible competitor: its website says "{phrase}"', self.name,
-                         type_="research", body=snapshot.description, company_id=company.id,
-                         lead_id=lead.id if lead else None)
+            live = live_lead_on_company(session, company.id)
+            if live:
+                leave_to_a_person(session, company, live, phrase, self.name, self.settings)
+            else:
+                company.is_competitor = True
+                out.competitors.append(company.id)
+                log_activity(session, f'Marked as a possible competitor: its website says "{phrase}"', self.name,
+                             type_="research", body=snapshot.description, company_id=company.id,
+                             lead_id=lead.id if lead else None)
         emails = assign_published_emails(session, company, snapshot.emails, self.mail_checker)
         out.person_emails += emails["person_emails"]
         out.inboxes += emails["inboxes"]
