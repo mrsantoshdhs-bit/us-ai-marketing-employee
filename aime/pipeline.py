@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
-from aime.crm_ops import lead_with_the_deals, leads_replying_into, log_activity
+from aime.crm_ops import lead_with_the_deals, leads_replying_into, log_activity, primary_lead
 from aime.models import Activity, FollowUp, InboundEmail, Lead, Meeting, Opportunity
 from aime.monitoring import alert_once, resolve_alerts
 from aime.outreach import OPEN, policy, set_status
@@ -94,9 +94,16 @@ def settle_next_steps(session: Session, lead_id: int | None = None) -> None:
     stmt = select(Opportunity).where(Opportunity.stage.not_in(("won", "lost")), Opportunity.lead_id.is_not(None),
                                      Opportunity.next_step.in_((*ASKS_FOR_APPROVAL, REPLY_WAITING, REPLY_SENT, NO_REPLY, READ_THEIR_REPLY)))
     if lead_id:
-        stmt = stmt.where(Opportunity.lead_id == lead_with_the_deals(session, session.get(Lead, lead_id)).id)
+        lead = session.get(Lead, lead_id)
+        deals_on = {lead_with_the_deals(session, lead).id}
+        if primary_lead(session, lead.company_id).id == lead.id:  # the answer to a reply on a merged lead is written here, and a deal may have stayed there
+            deals_on |= set(session.execute(select(Lead.id).where(Lead.company_id == lead.company_id, Lead.status == "merged")).scalars())
+        stmt = stmt.where(Opportunity.lead_id.in_(deals_on))
     for opp in session.execute(stmt).scalars().all():
         replying = leads_replying_into(session, opp)
+        holder = session.get(Lead, opp.lead_id)
+        if holder is not None and holder.status == "merged":  # its replies and their answers show on the company's open lead (reply_intel._open_lead_instead)
+            replying.append(primary_lead(session, holder.company_id).id)
         emails = session.execute(select(FollowUp.status).where(  # a merged lead's replies still wait on it, and its deal is here
             FollowUp.lead_id.in_(replying), FollowUp.channel == "email",
             or_(FollowUp.kind.is_(None), FollowUp.kind == "response")).order_by(FollowUp.id.desc())).scalars().all()

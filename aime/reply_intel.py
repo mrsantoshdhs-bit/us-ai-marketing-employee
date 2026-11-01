@@ -927,8 +927,9 @@ def _hold_unproven_in_junk(session: Session, settings, row: InboundEmail, contac
 
 def _hold_lead(row: InboundEmail, lead: Lead) -> str:
     row.lead_id, row.company_id, row.holds_sending, row.status = lead.id, lead.company_id, True, "needs_review"
-    return (f"About {lead.company.name}, from an address we do not know and with no thread: its emails wait until a person "
-            "decides. Mark reviewed if it is unrelated, or reclassify it")
+    # An opt-out tied to a lead counts on the company's record after Mark reviewed (outreach.company_opted_out): only reading it another way takes it back.
+    how = "Reclassify it, to other if it is unrelated" if row.category == "unsubscribe" else "Mark reviewed if it is unrelated, or reclassify it"
+    return f"About {lead.company.name}, from an address we do not know and with no thread: its emails wait until a person decides. {how}"
 
 
 SKIPPED_MAIL_DAYS = 30
@@ -1048,7 +1049,11 @@ def offered_day(text: str) -> str | None:
 
 # A plain "thanks, see you then" is the only thing a confirmation answers: anything about changing it, or any other day or time, is for a person.
 _MEETING_CHANGE = re.compile(r"\b(mov(e|ed|es|ing)|re-?schedul\w*|postpon\w*|push\w*|cancel\w*|chang\w*|(can't|cannot|can not) (make|attend)|"
-                             r"(won't|will not) be able|unable|conflicts?|something came up|can we do|works? better|instead|no longer works?)\b", re.I)
+                             r"(won't|will not) be able|unable|conflicts?|something came up|can we do|works? better|instead|no longer works?|"
+                             r"rearrang\w*|skip\w*|sick|ill|earlier|later|another|but|however|actually|unfortunately|sorry|afraid|"
+                             r"not|no|never|\w+n't|may|might|please|could|would|send|need|who|what|when|where|why|how|if)\b", re.I)
+# The one question a confirmation answers: talking on a day, which must then be the booked day. Any other question is for a person to answer.
+_ASKS_THE_DAY = re.compile(r"\bcan we (talk|chat|speak|meet)( on)? (monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*\?", re.I)
 _ANOTHER_WHEN = re.compile(rf"\b(tomorrow|today|tonight|(this|next) (week|month)|morning|afternoon|evening|noon)\b|\b{_MONTH_WORD}\.? \d|\b\d{{1,2}}/\d{{1,2}}\b", re.I)
 _A_DAY = re.compile(r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", re.I)
 _A_TIME = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(?:am|pm|a\.m|p\.m)\b|\b(\d{1,2}):(\d{2})\b|\bat (\d{1,2})\b", re.I)
@@ -1057,7 +1062,7 @@ _A_TIME = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(?:am|pm|a\.m|p\.m)\b|\b(\d{1,
 def _only_confirms(text: str, meeting: Meeting, zone: str) -> bool:
     """Their words say nothing that a confirmation of this meeting would ignore. Every doubt says no, and a person writes the answer."""
     said = _flat(text)
-    if _MEETING_CHANGE.search(said) or _ANOTHER_WHEN.search(said):
+    if _MEETING_CHANGE.search(said) or _ANOTHER_WHEN.search(said) or "?" in _ASKS_THE_DAY.sub("", said):
         return False
     try:
         at = meeting.starts_at.replace(tzinfo=timezone.utc).astimezone(ZoneInfo(zone))
@@ -1326,6 +1331,13 @@ def _open_lead_instead(session: Session, lead: Lead) -> Lead | None:
     return keeper if keeper is not None and keeper.status in OPEN_LEAD_STATUSES else None
 
 
+def _meeting_on(session: Session, *leads: Lead | None) -> Meeting | None:
+    """The next meeting on the first of these leads that has one: a merge leaves a meeting on the merged lead."""
+    from aime.meetings import next_meeting
+
+    return next((m for m in (next_meeting(session, x.id) for x in leads if x is not None) if m), None)
+
+
 def _speaks_for(lead: Lead, *addresses: str | None) -> bool:
     return bool(lead.contact and lead.contact.email) and lead.contact.email.lower() in {a.lower() for a in addresses if a}
 
@@ -1495,7 +1507,7 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         if colleagues:
             _tie_to_lead(row, colleagues[0])
             notes.append(f"{colleagues[0].company.name}: sequence stopped; a person decides whether it speaks for the company")
-        elif unmatched and (tied := lead_from_our_subject(session, row)[0] or held):
+        elif unmatched and (tied := lead_from_our_subject(session, row)[0] or held or (None if person else lead_named_in_body(session, row))):
             if person:  # a person says it is an opt-out about this lead
                 stop_sequence(session, tied, "unsubscribed", "A person confirmed an opt-out from another address", actor)
                 if tied.contact and tied.contact.email:
@@ -1523,7 +1535,7 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             elif lead.status == "merged":
                 row.status = "needs_review"
                 notes.append("this lead was merged and its company has no open lead: a person reads it")
-            _meeting_is_booked(session, settings, row, keeper or lead, notes, person)
+            _meeting_is_booked(session, settings, row, keeper or lead, notes, person, _meeting_on(session, keeper, lead))
     elif row.category == "out_of_office" and row.confidence == "medium" and TICKET_REASON in (row.reasons or []):
         if lead is None and (tied := lead_from_our_subject(session, row)[0]):
             _tie_to_lead(row, tied)
@@ -1555,7 +1567,7 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             row.status = "needs_review"
     if human_reply and lead is not None:
         # Any human reply stops the automated sequence; the stage records what they said. A simulated one only stops it.
-        from aime.meetings import _when_label, held_by_opt_out, next_meeting
+        from aime.meetings import _when_label, held_by_opt_out
 
         replied_on = lead  # its deals are the ones this reply acts on (lead_with_the_deals)
         keeper = _open_lead_instead(session, lead)
@@ -1564,8 +1576,11 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         no_writing = is_suppressed(session, row.from_email) or bool(contact and contact.consent_status == "opted_out")
         stage = "replied" if automatic_simulation or no_writing and row.category == "interested" else OUTREACH_STAGE.get(row.category, "replied")
         standing_answers = ()
+        closed_beside = False  # someone else wrote about a lead that is closed: its stage and its reminders are not theirs to change
+        booked = _meeting_on(session, keeper, lead)
         if keeper is not None:  # nothing queued on the merged lead survives, and the reply shows on the lead a person can see
-            stop_sequence(session, lead, stage, f"{label} received on a merged lead", actor)
+            stays = "meeting" if lead.outreach_status == "meeting" and _meeting_on(session, lead) and row.category != "not_interested" else stage
+            stop_sequence(session, lead, stays, f"{label} received on a merged lead", actor)
             for other in session.execute(select(Lead).where(Lead.company_id == lead.company_id, Lead.status.in_(OPEN_LEAD_STATUSES),
                                                             Lead.id != keeper.id).order_by(Lead.id)).scalars():
                 _stop_beside(session, other, stage if _speaks_for(other, row.from_email) else "stopped", f"{label} received from someone at this company", actor)
@@ -1576,7 +1591,8 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
                 if lead.outreach_status in STAGES_THAT_STAND:  # someone else wrote: this lead's own conversation goes on
                     stage = lead.outreach_status
                     standing_answers = tuple(session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.kind == "response")).scalars())
-        booked = next_meeting(session, lead.id)
+                elif lead.outreach_status in ENDS_CHECK_BACK:
+                    stage, closed_beside = lead.outreach_status, True
         if booked and row.category != "not_interested" and lead.outreach_status == "meeting":  # only a person changes it; the meeting still stands
             stage = "meeting"
         answers = []
@@ -1590,7 +1606,8 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             same_subject = bool(answers) or (f is not None and _bare_subject(f.subject) == subject)
             if same_subject and lead.outreach_status in STAGES_THAT_STAND:
                 stage = lead.outreach_status
-        cancelled = stop_sequence(session, lead, stage, f"{label} received ({row.category.replace('_', ' ')})", actor, keep=(*answers, *standing_answers))
+        why = f"{label} received ({row.category.replace('_', ' ')})"
+        cancelled = cancel_queued(session, lead, why) if closed_beside else stop_sequence(session, lead, stage, why, actor, keep=(*answers, *standing_answers))
         if cancelled:
             notes.append(f"{cancelled} queued follow-up(s) cancelled")
         if answers:
@@ -1613,7 +1630,7 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
                 elif not settings.calendly_url:
                     opp.next_step = BOOK_ASKING_TIMES
             notes.append(f"opportunity {opp.stage}")
-            if (lead.status == "nurture" and row.confidence == "high" and not by_subject and not opted_out and not row.is_simulated
+            if (lead.status == "nurture" and row.confidence == "high" and not by_subject and not opted_out and not closed_beside and not row.is_simulated
                     and not lead_on_hold(session, lead.id) and not held_by_opt_out(session, lead, contact, row.from_email)):
                 lead.status = "qualified"
                 log_activity(session, "Lead nurture → qualified (a clear interested reply)", actor, type_="status_change", company_id=lead.company_id, lead_id=lead.id)
@@ -1627,9 +1644,10 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
                 session.add(Alert(level="info", source="inbox", message=msg[:500]))
                 notify_event(settings, msg)
         elif row.category == "not_interested" and not automatic_simulation:
-            if lead.status == "qualified":
-                lead.status = "nurture"
-            notes.append("lead moved to nurture")
+            if keeper is None or _speaks_for(lead, row.from_email):  # someone else's no does not park the open lead: they did not speak for it
+                if lead.status == "qualified":
+                    lead.status = "nurture"
+                notes.append("lead moved to nurture")
             notes += close_opportunities(session, replied_on, "Not interested", actor, sure=row.confidence == "high")
         if no_writing and not automatic_simulation and row.category != "not_interested":
             for opp in session.execute(select(Opportunity).where(Opportunity.lead_id == lead_with_the_deals(session, replied_on).id,
@@ -1682,6 +1700,9 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         elif opted_out:  # someone else at the company: their own address is free, the lead's stays closed
             row.status = "needs_review"
             notes.append("this lead opted out earlier and its address stays suppressed; this sender is not on the list: a person decides")
+        if closed_beside:
+            row.status = "needs_review"
+            notes.append(f"someone else at the company wrote, and this lead's stage stays {lead.outreach_status.replace('_', ' ')}: a person decides")
         if replied_on.status == "merged" and keeper is None:
             row.status = "needs_review"
             notes.append("this lead was merged and its company has no open lead: a person reads it")

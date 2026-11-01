@@ -18,7 +18,7 @@ from aime.inbound import record_inquiry
 from aime.meetings import next_meeting
 from aime.models import Activity, Alert, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity
 from aime.outreach import reopen_refusal
-from aime.pipeline import ASKS_FOR_APPROVAL, READ_THEIR_REPLY, settle_next_steps
+from aime.pipeline import ASKS_FOR_APPROVAL, NO_REPLY, READ_THEIR_REPLY, REPLY_SENT, REPLY_WAITING, settle_next_steps
 from aime.reply_intel import BOOK_A_MEETING, OPTED_OUT_WROTE_AGAIN, QUESTION_PLACEHOLDER, booking_links_without_notice, lead_on_hold, process_pending
 from aime.timeutil import utcnow
 from aime.web.app import create_app
@@ -343,6 +343,45 @@ def test_a_bounce_on_a_merged_lead_stays_on_the_merged_lead(make_ctx):
         assert s.get(Lead, keeper).outreach_status is None
 
 
+@pytest.mark.parametrize("stage", ["not_interested", "bounced"])
+def test_someone_elses_reply_on_a_merged_lead_leaves_a_closed_open_lead_closed(make_ctx, stage):
+    ctx, _sender, sent, _merged, keeper, first = force_merged(make_ctx)
+    with ctx.db.session() as s:
+        s.get(Lead, keeper).outreach_status = stage
+        task = FollowUp(lead_id=keeper, company_id=s.get(Lead, keeper).company_id, channel="task", kind="task", step=0, status="pending", due_at=utcnow(), subject="Check back in March", body="x")
+        s.add(task)
+        s.flush()
+        task_id = task.id
+    with ctx.db.session() as s:
+        refusal = reopen_refusal(s, s.get(Lead, keeper))
+    assert refusal
+    reply(ctx, sent, "Sounds good, can we talk Thursday?")
+    r = latest_reply(ctx)
+    assert r.status == "needs_review" and "stays" in r.action_note
+    assert status_of(ctx, first) == "cancelled" and status_of(ctx, task_id) == "pending"
+    with ctx.db.session() as s:
+        lead = s.get(Lead, keeper)
+        assert lead.outreach_status == stage and reopen_refusal(s, lead) == refusal
+
+
+def test_a_nurture_open_lead_closed_by_its_own_no_is_not_brought_back_by_someone_else(make_ctx):
+    ctx, _sender, sent, _merged, keeper, _first = force_merged(make_ctx)
+    with ctx.db.session() as s:
+        lead = s.get(Lead, keeper)
+        lead.outreach_status, lead.status = "not_interested", "nurture"
+    reply(ctx, sent, "Sounds good, can we talk Thursday?")
+    with ctx.db.session() as s:
+        assert s.get(Lead, keeper).status == "nurture"
+
+
+def test_someone_elses_no_on_a_merged_lead_does_not_park_the_open_lead(make_ctx):
+    ctx, _sender, sent, _merged, keeper, _first = force_merged(make_ctx)
+    reply(ctx, sent, "Not interested, thanks.")
+    assert "lead moved to nurture" not in latest_reply(ctx).action_note
+    with ctx.db.session() as s:
+        assert s.get(Lead, keeper).status == "qualified"
+
+
 def test_a_merged_lead_with_no_open_lead_beside_it_stays_for_a_person(make_ctx):
     ctx, _s, sent = contacted(make_ctx)
     merged = lead_of(ctx).id
@@ -541,15 +580,69 @@ def paste(to, words):
     return f"{words}\n\n________________________________\nFrom: Sales <sales@us.example>\nSent: Friday, October 30, 2026 1:09 PM\nTo: Pat Lead <{to}>\nSubject: A question\n\nHello"
 
 
-def test_an_outlook_paste_opting_out_from_a_personal_address_cancels_step_2_and_suppresses_only_the_sender(make_ctx):
-    """Stricter than a hold, which Mark reviewed would release: the mail counts on the company's record (outreach.company_opted_out)."""
+OPT_OUT_PASTE = "Please stop writing to my work address and take me off your list."
+
+
+def opt_out_paste_scene(make_ctx):
     ctx, sender, sent = contacted(make_ctx)
-    step = queue_approved_step(ctx, lead_of(ctx).id)
-    reply(ctx, sent, paste(DAVID, "Please stop writing to my work address and take me off your list."), frm=HOME, subject="your email to my work address", thread=False)
+    lead = lead_of(ctx).id
+    step = queue_approved_step(ctx, lead)
+    reply(ctx, sent, paste(DAVID, OPT_OUT_PASTE), frm=HOME, subject="your email to my work address", thread=False)
+    return ctx, sender, lead, step
+
+
+def test_an_outlook_paste_opting_out_holds_the_lead_it_names_and_the_row_says_which(make_ctx):
+    ctx, _s, lead, _step = opt_out_paste_scene(make_ctx)
+    r = latest_reply(ctx)
+    assert (r.category, r.status, r.lead_id, r.holds_sending) == ("unsubscribe", "needs_review", lead, True)
+    assert "emails wait until a person decides" in r.action_note
+
+
+def test_mark_reviewed_on_an_outlook_paste_opt_out_sends_nothing(make_ctx):
+    ctx, sender, _lead, step = opt_out_paste_scene(make_ctx)
+    web(ctx).post(f"/inbox/{latest_reply(ctx).id}/reviewed", headers=ORIGIN, follow_redirects=False)
+    assert latest_reply(ctx).status == "reviewed"
     assert try_to_send(ctx, sender) == []
-    assert status_of(ctx, step) == "cancelled"
+    assert status_of(ctx, step) != "sent"
+
+
+def test_a_person_confirming_an_outlook_paste_opt_out_stops_the_lead_and_closes_the_address(make_ctx):
+    ctx, sender, lead, step = opt_out_paste_scene(make_ctx)
+    web(ctx).post(f"/inbox/{latest_reply(ctx).id}/reclassify", headers=ORIGIN, data={"category": "unsubscribe"}, follow_redirects=False)
+    r = latest_reply(ctx)
+    assert r.lead_id == lead and lead_of(ctx).outreach_status == "unsubscribed"
+    assert try_to_send(ctx, sender) == [] and status_of(ctx, step) == "cancelled"
     with ctx.db.session() as s:
-        assert is_suppressed(s, HOME) and not is_suppressed(s, DAVID)
+        assert is_suppressed(s, DAVID) and is_suppressed(s, HOME)
+
+
+def test_an_outlook_paste_opt_out_holds_when_the_contacts_address_has_changed(make_ctx):
+    """The address we wrote to is on the sent email, whoever the contact is by now."""
+    ctx, sender, sent = contacted(make_ctx)
+    lead = lead_of(ctx).id
+    step = queue_approved_step(ctx, lead)
+    with ctx.db.session() as s:
+        s.get(Lead, lead).contact.email = f"new.address@{SITE}"
+    reply(ctx, sent, paste(DAVID, OPT_OUT_PASTE), frm=HOME, subject="your email to my work address", thread=False)
+    r = latest_reply(ctx)
+    assert r.lead_id == lead and r.holds_sending is True
+    assert try_to_send(ctx, sender) == [] and status_of(ctx, step) != "sent"
+
+
+def test_an_outlook_paste_opting_out_from_a_personal_address_holds_step_2_and_suppresses_only_the_sender(make_ctx):
+    ctx, sender, lead, step = opt_out_paste_scene(make_ctx)
+    assert try_to_send(ctx, sender) == []
+    assert status_of(ctx, step) == "approved"
+    with ctx.db.session() as s:
+        assert is_suppressed(s, HOME) and not is_suppressed(s, DAVID) and lead_on_hold(s, lead)
+    assert lead_of(ctx).outreach_status == "contacted"
+
+
+def test_a_person_reading_an_outlook_paste_as_unrelated_releases_the_lead(make_ctx):
+    ctx, sender, lead, step = opt_out_paste_scene(make_ctx)
+    web(ctx).post(f"/inbox/{latest_reply(ctx).id}/reclassify", headers=ORIGIN, data={"category": "other"}, follow_redirects=False)
+    with ctx.db.session() as s:
+        assert not lead_on_hold(s, lead) and is_suppressed(s, HOME) and not is_suppressed(s, DAVID)
 
 
 def test_an_outlook_paste_from_a_personal_address_holds_step_2_and_nothing_else(make_ctx):
@@ -633,6 +726,45 @@ def test_a_forged_calendly_notice_in_junk_naming_the_address_holds_nothing(make_
 
 
 # ------------------------------------------------------------------ a booked meeting, then an email about it
+@pytest.mark.parametrize("words", ["I am interested but I am not able to join that call.", "Sounds good but it won't work, we need to rearrange the call.",
+                                   "Let's talk, but I'm sick that day.", "Sounds good, but can we make it later?", "Can we talk earlier?",
+                                   "Can we talk? I may not make it to our call.", "Sounds good, let's talk. Actually we need to skip the call.",
+                                   "Sounds good. Could you send the agenda first?", "Interested. Who else will join?"])
+def test_only_plainly_confirming_words_get_the_confirmation(make_ctx, words):
+    ctx, _sender, sent = contacted(make_ctx)
+    lead = lead_of(ctx)
+    book_meeting(ctx, lead.id)
+    reply(ctx, sent, words)
+    r = latest_reply(ctx)
+    assert r.status == "needs_review" and sum("while a meeting is booked" in a for a in alerts(ctx)) == 1
+    drafts = responses(ctx, lead.id)
+    assert all("I look forward to it" not in (d.body or "") and QUESTION_PLACEHOLDER in d.body and d.blocked_reason for d in drafts)
+
+
+@pytest.mark.parametrize("words", ["Can we push the meeting to Monday at 10?", "Sounds interesting, please cancel the call and let me know what works."])
+def test_a_reply_on_a_merged_lead_with_a_meeting_reaches_a_person_and_keeps_its_stage(make_ctx, words):
+    ctx, _sender, sent, merged, keeper, _first = force_merged(make_ctx)
+    book_meeting(ctx, merged)
+    reply(ctx, sent, words)
+    r = latest_reply(ctx)
+    assert r.status == "needs_review" and "meeting is booked" in r.action_note
+    assert sum("while a meeting is booked" in a for a in alerts(ctx)) == 1
+    with ctx.db.session() as s:
+        assert s.get(Lead, merged).outreach_status == "meeting" and next_meeting(s, merged) is not None
+    assert all(QUESTION_PLACEHOLDER in d.body for d in responses(ctx, keeper))
+
+
+def test_an_opt_out_on_a_merged_lead_with_a_meeting_reaches_a_person(make_ctx):
+    ctx, _sender, sent, merged, _keeper, _first = force_merged(make_ctx)
+    book_meeting(ctx, merged)
+    reply(ctx, sent, "Please remove me from your list.")
+    r = latest_reply(ctx)
+    assert r.category == "unsubscribe" and r.status == "needs_review" and "meeting is booked" in r.action_note
+    with ctx.db.session() as s:
+        assert is_suppressed(s, DAVID) and next_meeting(s, merged) is not None
+        assert s.get(Lead, merged).outreach_status == "unsubscribed"
+
+
 def test_an_email_asking_to_move_the_meeting_reaches_a_person_and_is_not_answered_i_look_forward_to_it(make_ctx):
     ctx, _sender, sent = contacted(make_ctx)
     lead = lead_of(ctx)
@@ -782,6 +914,40 @@ def test_an_unread_reply_is_the_next_step_not_no_reply_is_waiting(make_ctx):
             f.status = "cancelled"
         s.flush()
         settle_next_steps(s, lead_of(ctx).id)
+    assert deals(ctx)[0].next_step == READ_THEIR_REPLY
+
+
+def test_a_deal_left_on_a_merged_lead_sees_the_answer_on_the_open_lead(make_ctx):
+    ctx, _sender, sent, merged, keeper, _first = force_merged(make_ctx)
+    with ctx.db.session() as s:
+        lead = s.get(Lead, merged)
+        s.add(Opportunity(company_id=lead.company_id, lead_id=merged, name="Left on the merged lead", stage="new", next_step=NO_REPLY))
+    reply(ctx, sent, "Sounds interesting. Can we talk Thursday?")
+    (draft,) = responses(ctx, keeper)
+    with ctx.db.session() as s:
+        settle_next_steps(s)
+    (deal,) = deals(ctx)
+    assert deal.lead_id == merged and deal.next_step == REPLY_WAITING
+    with ctx.db.session() as s:  # what the follow-ups page does when that draft goes: it names the open lead, and the deal hears
+        s.get(FollowUp, draft.id).status = "sent"
+        s.flush()
+        settle_next_steps(s, keeper)
+    assert deals(ctx)[0].next_step == REPLY_SENT
+
+
+def test_an_unread_reply_on_the_open_lead_is_the_next_step_of_a_deal_left_on_the_merged_lead(make_ctx):
+    ctx, _sender, sent, merged, keeper, _first = force_merged(make_ctx)
+    with ctx.db.session() as s:
+        lead = s.get(Lead, merged)
+        s.add(Opportunity(company_id=lead.company_id, lead_id=merged, name="Left on the merged lead", stage="new", next_step=BOOK_A_MEETING))
+    reply(ctx, sent, "One more thing about our setup, a colleague has views.")
+    r = latest_reply(ctx)
+    assert r.lead_id == keeper and r.status == "needs_review"
+    with ctx.db.session() as s:
+        for f in s.execute(select(FollowUp).where(FollowUp.kind == "response")).scalars():
+            f.status = "cancelled"
+        s.flush()
+        settle_next_steps(s)
     assert deals(ctx)[0].next_step == READ_THEIR_REPLY
 
 
