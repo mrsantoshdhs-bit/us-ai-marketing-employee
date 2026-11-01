@@ -19,10 +19,10 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
-from aime.crm_ops import lead_with_the_deals, leads_replying_into, log_activity
+from aime.crm_ops import is_suppressed, lead_with_the_deals, leads_replying_into, log_activity
 from aime.models import Activity, FollowUp, Lead, Meeting, Opportunity
 from aime.monitoring import alert_once, resolve_alerts
-from aime.outreach import OPEN, policy, set_status
+from aime.outreach import OPEN, REACHED_PROSPECT, RUNNING_STAGES, policy, set_status, stop_sequence
 from aime.timeutil import utcnow
 
 DRAFTS_ALERT = "drafts:waiting"
@@ -103,6 +103,13 @@ def settle_next_steps(session: Session, lead_id: int | None = None) -> None:
             session.execute(update(Opportunity).where(Opportunity.id == opp.id).values(next_step=true_now, updated_at=opp.updated_at))
 
 
+def reached_address(session: Session, lead_id: int, to: str | None) -> bool:
+    """A sent email on this lead went to this address and really reached it: a rehearsal in test mode went to our own."""
+    return bool(to) and session.execute(select(FollowUp.id).where(
+        FollowUp.lead_id == lead_id, FollowUp.channel == "email", FollowUp.status == "sent",
+        func.lower(FollowUp.to_email) == to.lower(), REACHED_PROSPECT).limit(1)).first() is not None
+
+
 def pipeline_checks(session: Session, settings, now: datetime, actor: str) -> dict:
     cfg = settings.section("pipeline")
     stalled_days = int(cfg.get("stalled_days", 10))
@@ -123,6 +130,13 @@ def pipeline_checks(session: Session, settings, now: datetime, actor: str) -> di
                      "Decide: follow up, change the stage, or close as lost."):
                 stats["stalled_tasks"] += 1
 
+    for lead in session.execute(select(Lead).where(Lead.outreach_status.in_(RUNNING_STAGES))).scalars().all():
+        contact = lead.contact
+        if contact and (contact.consent_status == "opted_out" or is_suppressed(session, contact.email, lead.company.domain)):
+            # "stopped", not "unsubscribed": no opt-out was received. An answer to someone who wrote to us has its own gate at send.
+            answers = session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.kind == "response")).scalars().all()
+            stop_sequence(session, lead, "stopped", "on the do-not-contact list", actor, keep=tuple(answers))
+
     max_touches = policy(settings)["max_touches"]
     for lead in session.execute(select(Lead).where(Lead.outreach_status == "contacted")).scalars().all():
         sent = session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.kind == "outreach",
@@ -139,6 +153,8 @@ def pipeline_checks(session: Session, settings, now: datetime, actor: str) -> di
             how = "the last email; a person rejected the next one"
         elif lead.status == "nurture":
             how = "the last email; the lead was parked"
+        elif not settings.test_recipients and not reached_address(session, lead.id, lead.contact.email if lead.contact else None):
+            how = "the last email; the next step has nobody it may go to"  # its task is the sales agent's: nothing more is drafted
         else:
             continue  # the next step is still to come
         set_status(session, lead, "no_response", actor, f"no reply {wait_days} days after {how}")

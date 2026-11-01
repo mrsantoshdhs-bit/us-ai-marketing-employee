@@ -7,7 +7,7 @@ import smtplib
 import ssl
 from collections.abc import Callable
 from email.message import EmailMessage
-from email.utils import formataddr, make_msgid
+from email.utils import formataddr, formatdate, make_msgid
 
 from aime.config import Settings
 
@@ -37,6 +37,10 @@ def tls_context() -> ssl.SSLContext:
 
 class EmailNotReady(Exception):
     pass
+
+
+class MailServerNotReached(EmailNotReady):
+    """Connecting, TLS or anything else before the message was handed over failed, a refused sign-in apart: nothing can have left."""
 
 
 def compliance_problem(settings: Settings, body: str) -> str | None:
@@ -131,6 +135,7 @@ class EmailSender:
         msg["From"] = formataddr((s.sender_name or s.company_name, s.smtp_from))
         msg["To"] = actual
         msg["Subject"] = subject
+        msg["Date"] = formatdate(usegmt=True)  # required (RFC 5322), and smtplib adds none of its own
         msg_id = message_id or new_message_id(s)
         msg["Message-ID"] = msg_id
         unsub = s.unsubscribe_email or s.smtp_from
@@ -149,7 +154,19 @@ class EmailSender:
                 raise EmailNotReady(f"OAuth sign-in unavailable: {exc}") from exc
             if not bearer:
                 raise EmailNotReady("MAIL_AUTH=oauth needs the account connected on the Integrations page")
-        with self.smtp_factory(s.smtp_host, s.smtp_port, timeout=MAIL_TIMEOUT) as smtp:
+        with self._connected(bearer) as smtp:
+            if last_look:
+                last_look()
+            smtp.send_message(msg)
+        return msg_id
+
+    def _connected(self, bearer: str) -> smtplib.SMTP:
+        """Connect, TLS and sign-in. On a failure the connection closes without the QUIT a `with` would send: a server that
+        has just refused STARTTLS answers that too, and its second answer would replace the one that says what went wrong."""
+        s = self.settings
+        smtp = None
+        try:
+            smtp = self.smtp_factory(s.smtp_host, s.smtp_port, timeout=MAIL_TIMEOUT)
             if s.smtp_use_tls:
                 smtp.starttls(context=tls_context())
             if s.mail_auth == "oauth":
@@ -159,7 +176,18 @@ class EmailSender:
                 smtp.auth("XOAUTH2", lambda challenge=None: xoauth2(s.smtp_username, bearer))
             elif s.smtp_username:
                 smtp.login(s.smtp_username, s.smtp_password)
-            if last_look:
-                last_look()
-            smtp.send_message(msg)
-        return msg_id
+        except smtplib.SMTPAuthenticationError:
+            self._close_quietly(smtp)
+            raise
+        except (OSError, smtplib.SMTPException) as exc:
+            self._close_quietly(smtp)
+            raise MailServerNotReached(f"the mail server could not be reached ({type(exc).__name__}: {exc})") from exc
+        return smtp
+
+    @staticmethod
+    def _close_quietly(smtp: smtplib.SMTP | None) -> None:
+        try:
+            if smtp is not None:
+                smtp.close()
+        except Exception:  # noqa: BLE001 - it failed already, and what failed first is what gets reported
+            pass

@@ -14,12 +14,13 @@ from aime.agents import (AnalyticsReportingAgent, AuthorizedPublishingAgent, Com
                          LeadQualificationAgent, LinkedInContentAgent, MarketingManagerAgent, SalesWorkflowAgent,
                          USBusinessResearchAgent)
 from aime.agents.base import AgentResult, agent_enabled
+from aime.agents.sales_workflow import MAILBOX_ALERT
 from aime.backup import (OFFSITE_PROBLEM, PREDEPLOY_KEPT, backup_sqlite_file, checkpoint, integrity_check, prune_backups,
                          record_offsite, try_write_offsite, verify_backup, weekly_offsite_drill, weekly_restore_drill)
 from aime.context import AppContext
 from aime.db import kv_get, kv_set
 from aime.doctor import run_checks
-from aime.models import AgentRun, JobRun, JobState, MarketingPlan
+from aime.models import AgentRun, FollowUp, JobRun, JobState, MarketingPlan
 from aime.monitoring import alert_once, check_health, resolve_alerts
 from aime.policy import evaluate_shadow
 from aime.redact import redact
@@ -28,6 +29,7 @@ from aime.timeutil import utcnow
 
 MAILBOX_READ = "mailbox.last_read"  # when every mailbox was last read to the end; empty once a read failed or stopped short
 MAILBOX_READ_SHORT = "mailbox.read_short"  # that the last read was fine but more mail is waiting
+MAILBOX_HELD = ("Held: reading the sales mailbox", "Held: the sales mailbox", "Held: more mail")  # how mailbox_hold's reasons start
 # The inbox job runs at every check-in and before followups, so a real run finds a read from seconds ago. This much
 # slack is for a followups run started by hand between two check-ins.
 MAILBOX_READ_FRESH = timedelta(minutes=20)
@@ -156,7 +158,7 @@ def mailbox_hold(ctx: AppContext) -> str | None:
         return ("Held: more mail is waiting in the sales mailbox than one read takes in, and a reply or opt-out may be among it; "
                 "it goes out once the mailbox has been read to the end")
     return ("Held: the sales mailbox could not be read just before this run, and a reply or opt-out may be waiting in "
-            "it; it goes out after the next good read")
+            "it; it can go out once a read has worked, inside the send window")
 
 
 def job_followups(ctx: AppContext, job: str = "followups") -> JobOutcome:
@@ -196,6 +198,11 @@ def job_inbox(ctx: AppContext, job: str = "inbox") -> JobOutcome:
         with ctx.db.session() as s:
             kv_set(s, MAILBOX_READ, utcnow().isoformat() if to_end else None)
             kv_set(s, MAILBOX_READ_SHORT, bool(read.ok and not to_end))
+            if to_end:  # what the hold said is over now, not at the next followups run; the hold itself is judged afresh there
+                resolve_alerts(s, (MAILBOX_ALERT,), set())
+                for f in s.execute(select(FollowUp).where(FollowUp.status == "approved", FollowUp.blocked_reason.is_not(None))).scalars():
+                    if f.blocked_reason.startswith(MAILBOX_HELD):
+                        f.blocked_reason = None
     return out
 
 
