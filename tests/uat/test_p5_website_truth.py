@@ -10,9 +10,10 @@ from sqlalchemy import select
 
 import aime.timeutil as tu
 from aime.agents.company_research import CompanyResearchAgent
-from aime.agents.crm import CRMManagementAgent
+from aime.agents.crm import HELD_SINCE_KEY, CRMManagementAgent
 from aime.agents.qualification import LeadQualificationAgent
 from aime.agents.sales_workflow import SalesWorkflowAgent
+from aime.db import kv_get
 from aime.dedupe import is_job_board
 from aime.models import Activity, Alert, Company, FollowUp, Lead, ResearchSnapshot, Signal
 from aime.timeutil import utcnow
@@ -189,6 +190,11 @@ def fresh_witness(ctx, name, domain):
 
 def verify(ctx, **more):
     return CRMManagementAgent(ctx).run({"operations": ["verify_websites"], **more}, job="test")
+
+
+def kv_held(ctx):
+    with ctx.db.session() as s:
+        return kv_get(s, HELD_SINCE_KEY)
 
 
 def outage_alerts(ctx):
@@ -381,6 +387,68 @@ def test_witnesses_that_really_changed_cannot_hold_verdicts_forever(make_ctx):
     finally:
         tu.CLOCK_OFFSET = before
     assert seen == ["verified"] * 4 + ["mismatch"]
+
+
+@pytest.mark.parametrize("handler", [portal_302, portal_inline], ids=lambda h: h.__name__)
+@pytest.mark.parametrize("witnesses", [0, 2], ids=["run-is-its-own-witness", "witnesses-outside-the-run"])
+def test_a_second_sign_in_page_long_after_a_full_recovery_changes_nothing(make_ctx, handler, witnesses):
+    """The first sign-in page's timer ends with the recovery, even when nothing was left waiting: the next one starts its own."""
+    answers = {"mode": "portal"}
+    web = Web()
+    names = {"Zebra Quill": "bright-one.example", "Mango Vortex": "bright-two.example", "Plum Corp": "bright-three.example"}
+    for name, domain in names.items():
+        web.hosts[domain] = {"/robots.txt": robots_ok(), "/": page(shell(name, f"<h1>{name}</h1>"))}
+    for i in range(witnesses):
+        web.hosts[f"known-{i}.example"] = {"/robots.txt": robots_ok(), "/": page(shell(f"Known {i}x", f"<h1>Known {i}x</h1>"))}
+
+    def serve(req):
+        return handler(req) if answers["mode"] == "portal" else web.handle(req)
+    ctx = make_ctx(handler=serve, **MAIL)
+    ids = [(due_company(ctx, name, domain), domain) for name, domain in names.items()]
+    known = [fresh_witness(ctx, f"Known {i}x", f"known-{i}.example") for i in range(witnesses)]
+    before = tu.CLOCK_OFFSET
+    try:
+        verify(ctx)
+        assert kv_held(ctx) and len(outage_alerts(ctx)) == 1
+        answers["mode"] = "back"
+        tu.CLOCK_OFFSET = before + timedelta(hours=2)
+        verify(ctx)
+        assert not kv_held(ctx) and not outage_alerts(ctx)
+        answers["mode"] = "portal"
+        tu.CLOCK_OFFSET = before + timedelta(days=40)
+        with ctx.db.session() as s:
+            for company_id in known:
+                s.get(Company, company_id).website_checked_at = utcnow()
+        held = snapshot(ctx, ids)
+        verify(ctx)
+        assert snapshot(ctx, ids) == held
+        assert len(outage_alerts(ctx)) == 1
+    finally:
+        tu.CLOCK_OFFSET = before
+
+
+def test_a_run_with_no_proof_leaves_a_running_hold_as_it_is(make_ctx):
+    """Silence proves nothing: a hold that is still running is not restarted by a run in which no site answered."""
+    answers = {"mode": "portal"}
+
+    def serve(req):
+        if answers["mode"] == "portal":
+            return portal_302(req)
+        raise httpx.ConnectError("no network", request=req)
+    ctx = make_ctx(handler=serve, **MAIL)
+    for i, name in enumerate(("Zebra Quill", "Mango Vortex", "Plum Corp")):
+        due_company(ctx, name, f"bright-{i}.example")
+    before = tu.CLOCK_OFFSET
+    try:
+        verify(ctx)
+        started = kv_held(ctx)
+        assert started
+        answers["mode"] = "silent"
+        tu.CLOCK_OFFSET = before + timedelta(hours=2)
+        verify(ctx)
+        assert kv_held(ctx) == started
+    finally:
+        tu.CLOCK_OFFSET = before
 
 
 def test_a_real_same_parent_pair_ends_as_mismatch_with_no_alert(make_ctx):
@@ -657,12 +725,47 @@ def test_a_real_page_that_also_says_coming_soon_stays_verified(make_ctx):
     assert check_website(homepage(make_ctx, "crestsupply.example", body), "crestsupply.example", "Crest Supply").status == "verified"
 
 
+REAL_TEXT = " ".join(["Crest Supply sells industrial fasteners and packaging to manufacturers across the Midwest from two warehouses in Ohio."] * 20)
+
+
+@pytest.mark.parametrize("body", [
+    shell("Crest Supply", f"<p>{REAL_TEXT}</p><p>Help: account suspended? Call billing.</p>"),
+    shell("Crest Supply", f"<p>{REAL_TEXT}</p><p>We email you when your domain has expired.</p>"),
+    shell("Crest Supply", f"<p>{REAL_TEXT}</p><p>Compare sponsored listings displayed above the results.</p>"),
+    shell("Crest Supply", "<div id='root'></div><script>window.i18n={e:'Account suspended'}</script>"),
+    shell("Crest Supply", "<div id='root'></div><script>window.i18n={e:'Sponsored listings service'}</script>"),
+    shell("Crest Supply", "<div id='root'></div><script>window.i18n={badge:'Coming soon'}</script>"),
+    shell("Crest Supply", "<div id='root'></div><script src='/app.js'></script>", "<meta name=description content='New catalog coming soon'>"),
+    shell("Crest Supply", "<div id='root'></div><!-- <p>under construction</p> -->"),
+    shell("Crest Supply", "<style>.x:after{content:'website expired'}</style><div id='root'></div>"),
+], ids=["help-text", "email-text", "lander-words-in-long-text", "script-suspended", "script-lander", "script-soon", "meta-soon", "comment-soon", "style-expired"])
+def test_words_in_passing_or_out_of_sight_do_not_cost_a_live_company_its_status(make_ctx, body):
+    result = check_website(homepage(make_ctx, "crestsupply.example", body), "crestsupply.example", "Crest Supply")
+    assert result.status == "verified", result.note
+
+
+@pytest.mark.parametrize("body,status", [
+    (shell("Account Suspended", f"<p>{REAL_TEXT}</p>"), "parked"),
+    (shell("Crest Supply", "<script>" + "var word = 1; " * 500 + "</script><h1>Account  suspended</h1><p>Contact your host.</p>"), "parked"),
+    (shell("crestsupply.example", "<p>This <b>domain</b> has expired.</p>"), "parked"),
+    (shell("Crest Supply", "<h1>This <b>domain has expired</b></h1>"), "parked"),
+    (shell("crestsupply.example", "<p>" + "Related searches here. " * 25 + "The sponsored listings displayed above are served by a third party.</p>"), "parked"),
+    (shell("Crest Supply", "<h1>Coming soon</h1><script>" + "var word = 1; " * 500 + "</script>"), "mismatch"),
+    # the older markers were always read from the whole page, scripts too, and stay so
+    (shell("Crest Supply", f"<p>{REAL_TEXT}</p><script>window.ad='this domain is for sale'</script>"), "parked"),
+], ids=["title", "short-page-past-a-script", "words-split-by-a-tag", "marker-in-a-tag", "lander-with-long-disclaimer", "soon-past-a-script", "older-marker"])
+def test_a_page_that_really_is_gone_is_still_seen(make_ctx, body, status):
+    result = check_website(homepage(make_ctx, "crestsupply.example", body), "crestsupply.example", "Crest Supply")
+    assert result.status == status, result.note
+
+
 def test_a_coming_soon_page_with_a_big_script_is_still_a_coming_soon_page(make_ctx):
     body = shell("Coming Soon", "<script>" + "var word = 1; " * 500 + "</script><h1>Coming soon</h1>")
     assert check_website(homepage(make_ctx, "crestsupply.example", body), "crestsupply.example", "Crest Supply").status == "mismatch"
 
 
-@pytest.mark.parametrize("body", ["coming soon " + "<script" * 40_000, "coming soon " + "<" * 290_000, "coming soon " + "<style>" * 40_000], ids=["script", "angle", "style"])
+@pytest.mark.parametrize("body", ["coming soon " + "<script" * 40_000, "coming soon " + "<" * 290_000, "coming soon " + "<style>" * 40_000, "coming soon " + "<!--" * 70_000],
+                         ids=["script", "angle", "style", "comment"])
 def test_a_page_built_against_the_coming_soon_check_costs_one_pass(make_ctx, body):
     started = time.perf_counter()
     check_website(homepage(make_ctx, "crestsupply.example", body), "crestsupply.example", "Crest Supply")

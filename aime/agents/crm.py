@@ -297,8 +297,9 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
     def _judge_held_verdicts(self, session: Session, held: list[tuple[Company, WebsiteResult]], proven: bool, todo: list[Company]) -> bool | None:
         """No site in this run was proven good: do sites known to be good still prove good? True: they do not, so a sign-in
         page or a lost network answered, and the verdicts wait. False: they do, so the verdicts stand. None: nothing to judge,
-        or the hold has run out; the verdicts stand, with nothing said about the network."""
-        if not held:
+        or the hold has run out; the verdicts stand, with nothing said about the network. Any proof ends a hold, with or
+        without verdicts waiting: its timer left running would make the next sign-in page look long overdue."""
+        if not held and not proven:
             return None
         if proven or not self._witnesses_fail(session, held, todo):
             if kv_get(session, HELD_SINCE_KEY):

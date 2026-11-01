@@ -26,11 +26,15 @@ ROBOTS_MAX_SECONDS = 15
 PARKED_MARKERS = (
     "domain is for sale", "buy this domain", "this domain may be for sale", "domain parking",
     "parked domain", "parked free", "hugedomains", "sedo.com", "dan.com/buy", "afternic",
-    # the site is gone: lapsed or suspended hosting, or a lander of paid links on the old address
-    "this website has expired", "website expired", "this domain has expired", "domain has expired", "account suspended",
-    "account has been suspended", "website has been suspended", "site has been suspended", "sponsored listings service",
-    "sponsored listings displayed above",
 )
+# The site is gone, lapsed or suspended hosting: a real page may use these words in passing, so only its title or a page of little else counts.
+GONE_MARKERS = (
+    "this website has expired", "website expired", "this domain has expired", "domain has expired", "account suspended",
+    "account has been suspended", "website has been suspended", "site has been suspended",
+)
+# A lander of paid links on the old address: its own disclaimer alone runs past the words of a coming-soon page.
+LANDER_MARKERS = ("sponsored listings service", "sponsored listings displayed above")
+LANDER_MAX_WORDS = 120
 # A browser check answered in place of the page: nothing is learned of the site, and its title is the check's own.
 CHALLENGE_TITLES = ("just a moment", "attention required! | cloudflare")
 CHALLENGE_MARKERS = ("checking your browser before accessing", "enable javascript and cookies to continue")
@@ -176,16 +180,34 @@ def site_name(body: str) -> str | None:
     return None
 
 
-def _is_placeholder(low: str) -> bool:
-    """A coming-soon page with almost nothing else on it. Scripts and styles are cut by searching: a hostile page costs one pass."""
-    if not any(marker in low for marker in PLACEHOLDER_MARKERS):
-        return False
-    pieces = re.split(r"<(script|style)\b", low)
+def _visible_text(low: str) -> str:
+    """What a person reads, the title included. Scripts, styles and comments are cut by searching: a hostile page costs one pass."""
+    pieces = re.split(r"<(script\b|style\b|!--)", low)
     text = [pieces[0]]
     for tag, piece in zip(pieces[1::2], pieces[2::2], strict=True):
-        end = piece.find(f"</{tag}")
+        end = piece.find("-->" if tag == "!--" else f"</{tag}")
         text.append(piece[end:] if end >= 0 else "")
-    return len(re.findall(r"[a-z0-9']+", re.sub(r"<[^<>]*>", " ", " ".join(text)))) <= PLACEHOLDER_MAX_WORDS
+    return " ".join(re.sub(r"<[^<>]*>|-->", " ", " ".join(text)).split())
+
+
+def _word_count(text: str) -> int:
+    return len(re.findall(r"[a-z0-9']+", text))
+
+
+def _says_any(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _is_gone(title: str | None, text: str) -> bool:
+    """A lapsed site or a paid lander. What a live company's page mentions, or its scripts carry, does not count."""
+    words = _word_count(text)
+    return (_says_any((title or "").lower(), GONE_MARKERS) or (words <= PLACEHOLDER_MAX_WORDS and _says_any(text, GONE_MARKERS))
+            or (words <= LANDER_MAX_WORDS and _says_any(text, LANDER_MARKERS)))
+
+
+def _is_placeholder(text: str) -> bool:
+    """A coming-soon page with almost nothing else on it."""
+    return _says_any(text, PLACEHOLDER_MARKERS) and _word_count(text) <= PLACEHOLDER_MAX_WORDS
 
 
 def site_answers(ctx, domain: str) -> bool:
@@ -232,9 +254,10 @@ def check_website(ctx, domain: str, company_name: str) -> WebsiteResult:
     low = (body or "").lower()
     if (title or "").lower().startswith(CHALLENGE_TITLES) or any(marker in low for marker in CHALLENGE_MARKERS):
         return answer("blocked", None, "A browser check answered in place of the page: live, but not read", error_answer=True)
-    if any(marker in low for marker in PARKED_MARKERS):
+    text = _visible_text(low)
+    if any(marker in low for marker in PARKED_MARKERS) or _is_gone(title, text):
         return answer("parked", title, "Domain appears parked or for sale")
-    if _is_placeholder(low):
+    if _is_placeholder(text):
         return answer("mismatch", title, "Only a coming-soon page: it does not show the company")
     named = site_name(body or "")
     if final_domain != registrable_domain(domain):
