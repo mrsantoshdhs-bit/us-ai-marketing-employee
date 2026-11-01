@@ -8,6 +8,7 @@ until a person has confirmed (aime.send_journal). It sends nothing, and it never
 
 from __future__ import annotations
 
+import json
 import shutil
 import socket
 import sqlite3
@@ -19,7 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import make_url
 
 from aime import maintenance, send_journal
-from aime.backup import BackupError, backup_sqlite_file, integrity_of_file, newest_good_backup, restore_drill, verify_backup
+from aime.backup import BackupError, backup_sqlite_file, bring_back_documents, integrity_of_file, newest_good_backup, restore_drill, verify_backup
 
 SIDE_FILES = ("-wal", "-shm")
 
@@ -96,17 +97,19 @@ def _source_files(settings, source: Path, work: Path) -> Path:
 
 
 def _role_of(path: Path) -> str | None:
+    return _stored_in(path, "db_role")
+
+
+def _stored_in(path: Path, key: str) -> str | None:
     con = sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro&immutable=1", uri=True)
     try:
-        row = con.execute("SELECT value FROM kv_store WHERE key = 'db_role'").fetchone()
+        row = con.execute("SELECT value FROM kv_store WHERE key = ?", (key,)).fetchone()
     except sqlite3.Error:
         return None
     finally:
         con.close()
     if not row:
         return None
-    import json
-
     try:
         return json.loads(row[0]).get("v")
     except (ValueError, AttributeError):
@@ -140,17 +143,81 @@ def _keep_what_is_there(settings, db: Path) -> str | None:
         raise RestoreRefused(f"No copy of the present database could be kept ({exc}); nothing was changed") from exc
 
 
+def _journals_beside_the_bundle(settings, bundle: Path, new_pc: bool) -> None:
+    """A bundle also holds the journals. What is already here is newer and stays: only what is missing (a new PC) is taken
+    from the bundle. A sent record that has seen nothing, from a command run before this one, counts as missing."""
+    if new_pc and (bundle / "sent_journal.jsonl").exists():
+        shutil.copyfile(bundle / "sent_journal.jsonl", send_journal.journal_path(settings.data_dir))
+    if (bundle / "publish_journal.jsonl").exists() and not (settings.data_dir / "publish_journal.jsonl").exists():
+        shutil.copyfile(bundle / "publish_journal.jsonl", settings.data_dir / "publish_journal.jsonl")
+
+
 def _files_beside_the_bundle(settings, bundle: Path) -> None:
-    """A bundle also holds the journals and post images. What is already here is newer and stays: only what is missing
-    (a new PC) is taken from the bundle."""
-    for name in ("sent_journal.jsonl", "publish_journal.jsonl"):
-        if (bundle / name).exists() and not (settings.data_dir / name).exists():
-            shutil.copyfile(bundle / name, settings.data_dir / name)
-    if (bundle / "assets").is_dir():
-        settings.assets_dir.mkdir(parents=True, exist_ok=True)
-        for image in (bundle / "assets").iterdir():
-            if not (settings.assets_dir / image.name).exists():
-                shutil.copyfile(image, settings.assets_dir / image.name)
+    """Post images and report files, again only what is missing."""
+    for held, here in ((bundle / "assets", settings.assets_dir), (bundle / "reports", settings.reports_dir)):
+        if held.is_dir():
+            here.mkdir(parents=True, exist_ok=True)
+            for item in held.iterdir():
+                if not (here / item.name).exists():
+                    shutil.copyfile(item, here / item.name)
+
+
+def _approved_in(path: Path) -> list[tuple]:
+    """(id, address, message id, approved at) of every approved email in a closed database. A copy with no such table has no
+    such email; a copy this cannot be read from goes no further, the present database not having been replaced."""
+    con = sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro&immutable=1", uri=True)
+    try:
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'followups'").fetchone():
+            return []
+        return con.execute("SELECT f.id, COALESCE(f.to_email, c.email), f.message_id, f.approved_at FROM followups f "
+                           "LEFT JOIN contacts c ON c.id = f.contact_id WHERE f.channel = 'email' AND f.status = 'approved'").fetchall()
+    finally:
+        con.close()
+
+
+def _gone_in(path: Path) -> list[tuple]:
+    """(id, address, message id, sent at) of every email a closed database says went out. Those it says only may have gone
+    (a new PC's earlier restore) are left out: nobody knows that they did."""
+    con = sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro&immutable=1", uri=True)
+    try:
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'followups'").fetchone():
+            return []
+        return [r[:4] for r in con.execute("SELECT id, to_email, message_id, sent_at, status FROM followups WHERE channel = 'email' "
+                                           "AND COALESCE(blocked_reason, '') != ?", (send_journal.UNKNOWN_SENT,))
+                if r[4] in send_journal.ACCOUNTED_FOR]
+    finally:
+        con.close()
+
+
+def _carry_the_moment(incoming: Path, at: str) -> None:
+    """The database and the copies it makes from now on say which journal they lived with. An old copy with no such table has
+    nowhere to say it; start() gives it the key."""
+    con = sqlite3.connect(incoming)
+    try:
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kv_store'").fetchone():
+            with con:
+                con.execute("INSERT OR REPLACE INTO kv_store (key, value, updated_at) VALUES (?, ?, ?)",
+                            (send_journal.NEW_PC_KEY, json.dumps({"v": at}), at.replace("T", " ")))
+    finally:
+        con.close()
+
+
+def _hold_back_what_may_have_gone(settings, incoming: Path, new_pc: bool) -> tuple[bool, str | None]:
+    """Where the copy was made on another PC (nothing here has seen an email, or the copy does not carry this journal's last
+    new_pc moment), nothing can tell whether an email approved in it went out after the copy was made, and its dates prove
+    nothing: every one goes to a person. Written before the database is replaced, so a crash half way loses none of it. A copy
+    made here keeps to that moment: what was approved here since is known and is left alone. Returns whether drafts get the
+    note, and the moment they must be older than (None for all of them)."""
+    view = send_journal.read(settings.data_dir)
+    if new_pc or _stored_in(incoming, send_journal.NEW_PC_KEY) != view.new_pc_at:
+        at = send_journal.record_new_pc(settings.data_dir)
+        _carry_the_moment(incoming, at)
+        send_journal.record_unknown(settings.data_dir, send_journal.approved_before(view, None, _approved_in(incoming)))
+        send_journal.record_known(settings.data_dir, [r for r in _gone_in(incoming) if not send_journal.claim_of(view, *r[:3])])
+        return True, None
+    if view.new_pc_at:
+        send_journal.record_unknown(settings.data_dir, send_journal.approved_before(view, view.new_pc_at, _approved_in(incoming)))
+    return view.new_pc_at is not None, view.new_pc_at
 
 
 def restore_database(settings, source: Path) -> dict:
@@ -158,11 +225,12 @@ def restore_database(settings, source: Path) -> dict:
     from aime.context import create_context
     from aime.crm_ops import log_activity
     from aime.doctor import run_checks
-    from aime.models import FollowUp
+    from aime.models import Attachment, FollowUp
 
     db = _db_path(settings)
     if source.resolve() == db.resolve():
         raise RestoreRefused("That is the live database itself: choose a backup")
+    new_pc = send_journal.looks_new(settings.data_dir)  # before anything here writes to it
     with tempfile.TemporaryDirectory(prefix="aime-restore-") as tmp:
         checked = _source_files(settings, source, Path(tmp))
         role = _role_of(checked)
@@ -200,6 +268,9 @@ def restore_database(settings, source: Path) -> dict:
                 if not hold_was_on:
                     send_journal.clear_hold(settings.data_dir)
                 raise RestoreRefused(f"The copy of {source.name} failed its check ({check}). The present database was not replaced.")
+            if source.suffix in (".aimebak", ".zip"):
+                _journals_beside_the_bundle(settings, Path(tmp) / "bundle", new_pc)
+            note_drafts, drafts_before = _hold_back_what_may_have_gone(settings, incoming, new_pc)
             for side in SIDE_FILES:
                 db.with_name(db.name + side).unlink(missing_ok=True)
             incoming.replace(db)
@@ -208,7 +279,7 @@ def restore_database(settings, source: Path) -> dict:
                 db.with_name(db.name + side).unlink(missing_ok=True)
             if source.suffix in (".aimebak", ".zip"):
                 _files_beside_the_bundle(settings, Path(tmp) / "bundle")
-        except OSError as exc:
+        except (OSError, sqlite3.Error) as exc:
             incoming = db.with_name(db.name + ".restoring")
             try:
                 incoming.unlink(missing_ok=True)
@@ -224,10 +295,17 @@ def restore_database(settings, source: Path) -> dict:
     try:
         with ctx.db.session() as s:
             view = send_journal.read(settings.data_dir)
-            already = send_journal.review_rows(s, view, "restore")
+            marked = send_journal.review_rows(s, view, "restore")
+            unknown = [i for i in marked if send_journal.claim_for(view, s.get(FollowUp, i)).get("unknown")]
+            already = [i for i in marked if i not in unknown]
+            if note_drafts:
+                send_journal.note_drafts(s, view, drafts_before)
+            documents = s.execute(select(Attachment.stored_as, Attachment.sha256, Attachment.filename)).all()
+            back, lost = bring_back_documents(settings, documents, source.parent)
             waiting = s.execute(select(func.count(FollowUp.id)).where(FollowUp.channel == "email", FollowUp.status == "approved")).scalar_one()
             log_activity(s, f"Database restored from {source.name}; sending held until a person confirms", "command line", type_="security")
         checks = [c for c in run_checks(ctx) if not c["ok"] and c["severity"] == "error"]
     finally:
         ctx.db.dispose()
-    return {"source": source.name, "kept": kept, "already_sent": already, "approved_waiting": waiting, "failing": checks}
+    return {"source": source.name, "kept": kept, "already_sent": already, "unknown_sent": unknown, "approved_waiting": waiting,
+            "failing": checks, "documents_back": back, "documents_missing": lost}

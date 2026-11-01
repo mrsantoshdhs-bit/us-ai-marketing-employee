@@ -558,11 +558,18 @@ def cmd_restore(args, settings) -> int:
         print(f"The database it replaced is kept as {done['kept']} in the backups folder.")
     print(f"Emails this database thinks are still to go, that the record of sent emails says already went: {len(done['already_sent'])} "
           f"{done['already_sent'] or ''}. They will not be sent again; they are on Follow-ups for you to check.")
+    if done["unknown_sent"]:
+        print(f"Emails approved in this copy that the old PC may have sent after it was made: {len(done['unknown_sent'])} "
+              f"{done['unknown_sent']}. Nobody here knows. They wait on Follow-ups: check your Sent folder, then mark each sent or requeue.")
+    if done["documents_back"] or done["documents_missing"]:
+        print(f"Deal documents brought back: {done['documents_back']}."
+              + (f" Still missing: {', '.join(done['documents_missing'])}." if done["documents_missing"] else ""))
     print(f"Approved emails waiting: {done['approved_waiting']}. Sending is ON HOLD: nothing goes out yet.")
     for c in done["failing"]:
         print(f"[FAIL] {c['name']}: {c['detail']}")
     print("Next steps:\n"
-          "  1. Check your Sent folder for what went out after this backup, and read Follow-ups.\n"
+          "  1. Check your Sent folder for what went out after this backup, and read Follow-ups. An email both written and sent\n"
+          "     after this backup left no trace here at all: only the Sent folder shows it.\n"
           "  2. Do-not-contact entries and edits made after the backup are gone; replies are read again from the mailbox.\n"
           "  3. `python -m aime confirm-sending` lets approved emails go again.\n"
           "  4. `python -m aime maintenance off` starts the scheduled work and the dashboard again.")
@@ -750,7 +757,7 @@ def build_parser() -> argparse.ArgumentParser:
     bv.add_argument("file")
     rd = sub.add_parser("restore-drill", help="Restore a backup into a temp folder and check it (never touches data/)")
     rd.add_argument("--source", help="Backup .db, bundle .zip or encrypted .aimebak (default: latest local backup)")
-    rd.add_argument("--extract-to", help="New folder (outside data/) to receive the checked files for a manual restore")
+    rd.add_argument("--extract-to", help="New folder (outside data/) to receive the checked files, to look at; `restore` is what puts a copy back")
     sub.add_parser("acceptance-report", help="Read-only: evidence for each of the 19 acceptance tests")
     sr = sub.add_parser("simulate-reply", help="Process a clearly labelled SIMULATED reply from a lead (testing)")
     sr.add_argument("--lead", type=int, required=True)

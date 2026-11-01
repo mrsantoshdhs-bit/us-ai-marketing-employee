@@ -163,7 +163,7 @@ def test_doctor_warns_when_the_offsite_folder_does_not_leave_the_pc(make_ctx, tm
     import aime.backup
     monkeypatch.setattr(aime.backup, "onedrive_folders", lambda: [])
     ctx = make_ctx(backup_offsite_dir=str(tmp_path / "OneDrive" / "AIME-Backups"), backup_passphrase=PASSPHRASE)
-    check = next(c for c in run_checks(ctx) if c["name"] == "Off-machine folder leaves this PC")
+    check = next(c for c in run_checks(ctx) if c["name"] == "Off-machine folder is one that syncs")
     assert not check["ok"] and check["severity"] == "warning" and "sign in to OneDrive" in check["detail"]
     monkeypatch.setattr(aime.backup, "onedrive_folders", lambda: [tmp_path / "OneDrive"])
-    assert next(c for c in run_checks(ctx) if c["name"] == "Off-machine folder leaves this PC")["ok"]
+    assert next(c for c in run_checks(ctx) if c["name"] == "Off-machine folder is one that syncs")["ok"]

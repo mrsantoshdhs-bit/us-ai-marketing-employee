@@ -1,8 +1,9 @@
 """Online SQLite backups, verification, encrypted off-machine bundles, restore drills, WAL checkpoints.
 
 Local backups (data/backups/aime-*.db) are verified right after they are written. An optional off-machine
-copy is a zip bundle (database snapshot, publish and sent journals, post images, config, manifest with SHA-256 per
-file) encrypted with AES-256-GCM under a key derived from BACKUP_PASSPHRASE (scrypt). The restore drill
+copy is a zip bundle (database snapshot, publish and sent journals, post images, report files, config, manifest with SHA-256
+per file) encrypted with AES-256-GCM under a key derived from BACKUP_PASSPHRASE (scrypt). Deal documents are not in the
+bundle: each is encrypted once into an attachments subfolder, so none can fail the copy of the database. The restore drill
 rebuilds a backup in a temporary folder and checks it; it never touches the live data folder.
 """
 
@@ -42,6 +43,11 @@ MIN_FREE_BYTES = 2 * 2**30
 DAMAGE_WORDS = ("malformed", "not a database")  # what SQLite says of a damaged file; anything else may pass by itself
 DRILL_EVERY_DAYS = 7
 PREDEPLOY_KEPT = 5  # the newest pre-deploy copies, whatever BACKUP_KEEP_MANUAL says: what a rollback goes back to
+DOCUMENTS = "attachments"  # under the data folder as files, under the off-machine folder as one encrypted file each
+DOCUMENT_COPY_HOURS = 30  # a document has reached the off-machine folder by the next daily copy
+NAME_MAY_DIFFER_SECONDS = 300  # between a copy's own date and the date in its name
+HELD_NOW = "could not be read just now: another program has it"
+NO_MEMORY = "not enough free memory on this PC to open it just now"
 
 
 class BackupError(Exception):
@@ -242,6 +248,9 @@ def create_bundle(settings, db_path: Path, out_dir: Path) -> Path:
         if settings.assets_dir.exists():
             members += [(f"assets/{p.name}", p) for p in sorted(settings.assets_dir.iterdir())
                         if p.suffix.lower() in (".png", ".jpg", ".jpeg")]
+        if settings.reports_dir.exists():
+            members += [(f"reports/{p.name}", p) for p in sorted(settings.reports_dir.iterdir())
+                        if p.suffix.lower() in (".html", ".md") and p.is_file()]
         config_dir = settings.base_dir / "config"
         if config_dir.exists():
             members += [(f"config/{p.name}", p) for p in sorted(config_dir.glob("*.toml"))]
@@ -251,7 +260,12 @@ def create_bundle(settings, db_path: Path, out_dir: Path) -> Path:
         target = out_dir / f"aime-bundle-{datetime.now():%Y%m%d-%H%M%S}.zip"
         with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for arcname, path in members:
-                data = path.read_bytes()
+                try:
+                    data = path.read_bytes()
+                except OSError:  # a report another program holds waits for the next copy; it must not stop this one
+                    if arcname.startswith("reports/"):
+                        continue
+                    raise
                 manifest["files"][arcname] = _sha256(data)
                 zf.writestr(arcname, data)
             zf.writestr("manifest.json", json.dumps(manifest, indent=1))
@@ -286,6 +300,92 @@ def decrypt_bytes(blob: bytes, passphrase: str) -> bytes:
         raise
     except Exception as exc:  # cryptography.exceptions.InvalidTag: wrong passphrase or damaged file
         raise BackupError("cannot decrypt: wrong passphrase or damaged file") from exc
+
+
+def _document_copy(folder: Path, stored_as: str) -> Path:
+    return folder / DOCUMENTS / f"{Path(stored_as).name}.aimebak"
+
+
+def _copy_documents_offsite(settings, folder: Path) -> list[str]:
+    """Each deal document once, encrypted: they never change, and each name is new. Returns the names that could not be
+    copied (a file another program holds, too little memory): they are tried again with the next copy."""
+    here = settings.data_dir / DOCUMENTS
+    if not here.is_dir():
+        return []
+    (folder / DOCUMENTS).mkdir(exist_ok=True)
+    _clear_leftovers(folder / DOCUMENTS, "*.partial")
+    skipped = []
+    for path in sorted(here.iterdir()):
+        target = _document_copy(folder, path.name)
+        partial = target.with_suffix(".partial")
+        try:
+            if not path.is_file() or target.exists():
+                continue
+            data = path.read_bytes()
+            partial.write_bytes(encrypt_bytes(data, settings.backup_passphrase))
+            if decrypt_bytes(partial.read_bytes(), settings.backup_passphrase) != data:
+                raise BackupError("encrypted copy did not decrypt to the same document")
+            partial.replace(target)
+        except Exception:  # the database's copy is what matters, and it is in place
+            _removed(partial)
+            skipped.append(path.name)
+    return skipped
+
+
+def bring_back_documents(settings, rows, source_folder: Path | None = None) -> tuple[int, list[str]]:
+    """After a restore: of (stored_as, sha256, filename) rows, those missing here, from the folder the copy was restored from
+    or the off-machine folder. Each is checked against its row before it is put in place. Returns how many came back, and the
+    names of those still missing."""
+    here = settings.data_dir / DOCUMENTS
+    places = [source_folder] if source_folder else []
+    if settings.backup_offsite_dir:
+        places.append(Path(settings.backup_offsite_dir).expanduser())
+    back, lost = 0, []
+    for stored_as, digest, filename in rows:
+        target = here / Path(stored_as).name
+        if target.exists():
+            continue
+        for place in places:
+            copy = _document_copy(place, stored_as)
+            try:
+                if not copy.is_file():
+                    continue
+                data = decrypt_bytes(copy.read_bytes(), settings.backup_passphrase or "")
+                if _sha256(data) != digest:
+                    continue
+                here.mkdir(parents=True, exist_ok=True)
+                partial = target.with_name(target.name + ".partial")
+                partial.write_bytes(data)
+                partial.replace(target)
+                back += 1
+                break
+            except (OSError, BackupError, MemoryError):
+                continue
+        else:
+            lost.append(filename)
+    return back, lost
+
+
+def document_problem(settings, rows, now: datetime) -> str | None:
+    """Deal documents missing here or, a day after they were added, from the off-machine folder. By name and size only:
+    this runs routinely, and must neither read every document nor download one."""
+    gone, not_copied = [], []
+    folder = Path(settings.backup_offsite_dir).expanduser() if offsite_status(settings)[0] else None
+    for stored_as, size, filename, created_at in rows:
+        path = settings.data_dir / DOCUMENTS / Path(stored_as).name
+        try:
+            if not path.is_file() or path.stat().st_size != size:
+                gone.append(filename)
+            elif folder and (now - created_at).total_seconds() > DOCUMENT_COPY_HOURS * 3600 and not _document_copy(folder, stored_as).exists():
+                not_copied.append(filename)
+        except OSError:  # another program has it for a moment
+            continue
+    words = []
+    if gone:
+        words.append(f"{len(gone)} missing or changed on this PC ({', '.join(gone[:5])})")
+    if not_copied:
+        words.append(f"{len(not_copied)} with no off-machine copy ({', '.join(not_copied[:5])})")
+    return "; ".join(words) or None
 
 
 def _cloud_only(path: Path) -> bool:
@@ -369,7 +469,7 @@ def onedrive_folders() -> list[Path]:
 def offsite_sync(folder: str | Path, synced: list[Path] | None = None) -> tuple[bool | None, str]:
     """Whether copies written to `folder` actually leave this PC.
 
-    True: inside a folder a signed-in OneDrive account syncs. False: its drive is not connected, or a OneDrive path that no
+    True: inside a folder a signed-in OneDrive account syncs; nothing here can tell whether a copy has gone up. False: its drive is not connected, or a OneDrive path that no
     signed-in account syncs, so the copies stay on this PC. None: another kind of folder (USB drive, network share) that this
     check cannot judge.
     """
@@ -377,7 +477,7 @@ def offsite_sync(folder: str | Path, synced: list[Path] | None = None) -> tuple[
     roots = [root.expanduser().resolve() for root in (onedrive_folders() if synced is None else synced)]
     for synced_root in roots:
         if path == synced_root or synced_root in path.parents:
-            return True, f"synced by OneDrive ({synced_root})"
+            return True, f"inside a folder OneDrive syncs ({synced_root}); confirm on onedrive.com"
     if path.anchor and not Path(path.anchor).exists():
         return False, (f"The drive {path.anchor} is not connected, so no copy can be written to this folder: connect the drive, "
                        "or choose a folder that is there")
@@ -437,6 +537,11 @@ def record_offsite(session, result: dict, local_ok: bool = True) -> None:
     now = utcnow().isoformat()
     if result["status"] == "ok":
         kv_set(session, "backup.last_offsite", {"file": result["file"], "at": now, "bytes": result["bytes"]})
+        if result.get("documents_skipped"):
+            from aime.monitoring import alert_once
+
+            alert_once(session, "warning", "backup", f"{len(result['documents_skipped'])} deal document(s) could not be copied to the "
+                       "off-machine folder: another program may hold them. The copy of the database is fine; they are tried again with the next one.")
         if result.get("key_changed_after"):
             kv_set(session, OFFSITE_KEY_CHANGED, {"file": result["key_changed_after"], "at": now})
     kv_set(session, OFFSITE_PROBLEM, {"why": result["reason"], "at": now, "local_ok": local_ok} if result["status"] == "error" else None)
@@ -466,7 +571,7 @@ def offsite_copy_problem(settings, record: dict | None) -> str | None:
     except OSError:
         return None  # another program has it for a moment
     if size < MIN_BLOB or (record and record.get("file") == newest.name and record.get("bytes") not in (None, size)):
-        return f"the newest copy, {newest.name}, is cut short: a sync client or a full disk may have damaged it"
+        return f"the newest copy, {newest.name}, differs from the size recorded: cut short or replaced, by a sync client or a full disk"
     if copy_opens(newest) is False:
         return f"the newest copy, {newest.name}, is not a whole encrypted backup: a sync client may have damaged it"
     if copy_opens(newest, settings.backup_passphrase) is False:
@@ -510,6 +615,10 @@ def write_offsite(settings, db_path: Path) -> dict:
             raise
     result = {"status": "ok", "file": target.name, "bytes": len(encrypted), "pruned": 0,
               "key_changed_after": _first_copy_the_passphrase_cannot_open(earlier, settings.backup_passphrase)}
+    try:
+        result["documents_skipped"] = _copy_documents_offsite(settings, folder)
+    except Exception:  # today's copy stands: the documents go next time
+        result["documents_skipped"] = ["the documents folder"]
     try:
         result["pruned"] = prune_offsite(folder, passphrase=settings.backup_passphrase, known_good=target)
     except OSError:  # today's copy stands: the old ones go next time
@@ -564,8 +673,8 @@ def weekly_restore_drill(ctx) -> dict | None:
         pass
     try:
         result = restore_drill(ctx.settings)
-    except (BackupError, OSError) as exc:
-        result = {"ok": False, "source": None, "detail": str(exc)}
+    except (BackupError, OSError, MemoryError) as exc:
+        result = {"ok": False, "source": None, "detail": str(exc) or NO_MEMORY}
     step = {"agent": "restore_drill", "status": "success" if result["ok"] else "failed", "output": result}
     if result["ok"]:
         with ctx.db.session() as s:
@@ -595,8 +704,10 @@ def weekly_offsite_drill(ctx) -> dict | None:
         if not files or _cloud_only(files[-1]):
             return None
         result = restore_drill(ctx.settings, source=files[-1])
-    except (BackupError, OSError) as exc:
-        result = {"ok": False, "source": files[-1].name if files else None, "detail": str(exc)}
+    except (BackupError, OSError, MemoryError) as exc:
+        result = {"ok": False, "source": files[-1].name if files else None, "detail": str(exc) or NO_MEMORY}
+    if result.get("held"):  # a sync client has it for now: no finding about the copy, and tomorrow's run asks again
+        return None
     step = {"agent": "offsite_drill", "status": "success" if result["ok"] else "failed", "output": result}
     if result["ok"]:
         with ctx.db.session() as s:
@@ -604,6 +715,19 @@ def weekly_offsite_drill(ctx) -> dict | None:
     else:
         step["error"] = f"the newest copy, {result.get('source')}, failed the weekly restore check: {result['detail']}"
     return step
+
+
+def _name_and_date_differ(name: str, created_at) -> str | None:
+    """A warning: each name is written once, so a copy dated otherwise is another version put back, by a person or a sync client."""
+    stamp = re.search(r"\d{8}-\d{6}", name)
+    try:
+        named = datetime.strptime(stamp.group(), "%Y%m%d-%H%M%S") if stamp else None
+        made = datetime.fromisoformat(created_at) if created_at else None
+    except (TypeError, ValueError):
+        return None
+    if named and made and abs((named - made).total_seconds()) > NAME_MAY_DIFFER_SECONDS:
+        return f"WARNING: it says it was made {made:%Y-%m-%d %H:%M}, which is not the date in its name: it may be another version under this name"
+    return None
 
 
 def restore_drill(settings, source: Path | None = None, extract_to: Path | None = None) -> dict:
@@ -625,10 +749,15 @@ def restore_drill(settings, source: Path | None = None, extract_to: Path | None 
         return {"ok": False, "source": None, "detail": "no backup found"}
     with tempfile.TemporaryDirectory(prefix="aime-restore-drill-") as tmp:
         work = Path(tmp)
-        expected = None
+        expected, older = None, None
         if source.suffix in (".aimebak", ".zip"):
             try:
                 data = source.read_bytes()
+            except OSError:  # says nothing about the copy; still not ok, so `aime restore` refuses it
+                return {"ok": False, "source": source.name, "detail": HELD_NOW, "held": True}
+            except MemoryError:
+                return {"ok": False, "source": source.name, "detail": NO_MEMORY}
+            try:
                 if source.suffix == ".aimebak":
                     data = decrypt_bytes(data, settings.backup_passphrase)
                 with zipfile.ZipFile(io.BytesIO(data)) as zf:
@@ -638,7 +767,12 @@ def restore_drill(settings, source: Path | None = None, extract_to: Path | None 
                             return {"ok": False, "source": source.name, "detail": f"checksum mismatch in {name}"}
                     zf.extractall(work)
                 expected = manifest["db"]["counts"]
-            except (zipfile.BadZipFile, zlib.error, EOFError, OSError, KeyError, TypeError, ValueError) as exc:
+                older = _name_and_date_differ(source.name, manifest.get("created_at"))
+            except OSError as exc:  # this PC's temporary folder, not the copy
+                return {"ok": False, "source": source.name, "detail": f"could not be unpacked on this PC ({type(exc).__name__})"}
+            except MemoryError:
+                return {"ok": False, "source": source.name, "detail": NO_MEMORY}
+            except (zipfile.BadZipFile, zlib.error, EOFError, KeyError, TypeError, ValueError) as exc:
                 return {"ok": False, "source": source.name, "detail": f"damaged bundle ({type(exc).__name__}: {exc})"}
             restored = work / "aime.db"
         else:
@@ -648,7 +782,7 @@ def restore_drill(settings, source: Path | None = None, extract_to: Path | None 
         counts_ok = expected is None or check["counts"] == expected
         ok = check["ok"] and counts_ok
         detail = (f"integrity={check['integrity']}, {check['tables']} tables, {check['rows']} rows"
-                  + ("" if counts_ok else ", row counts differ from the manifest"))
+                  + ("" if counts_ok else ", row counts differ from the manifest") + (f"; {older}" if older else ""))
         if ok and extract_to is not None:
             shutil.copytree(work, extract_to)
             detail += f"; extracted to {extract_to}"
