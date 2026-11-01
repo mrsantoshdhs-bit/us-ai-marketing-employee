@@ -12,9 +12,13 @@ from sqlalchemy.orm import Session
 from aime.models import Company
 
 LEGAL_SUFFIXES = {
-    "inc", "incorporated", "llc", "l l c", "ltd", "limited", "corp", "corporation", "co", "company",
+    "inc", "incorporated", "llc", "ltd", "limited", "corp", "corporation", "co", "company",
     "plc", "lp", "llp", "pc", "pllc", "gmbh",
 }
+# A legal suffix written with spaces or dots ("L.L.C.", "L P"), and an operating partnership's "OP LP", which is the parent's name
+# again. Not after a lone initial ("A L P") and not a "Co-Op". What rows stored earlier hold instead: see find_duplicate.
+_SPACED_SUFFIX_RE = re.compile(r"(?<=[a-z0-9]{2})(?: l l c| l p|(?<!\bco) op (?:lp|l p))$")
+_OLD_SUFFIX_KEYS = (" l l c", " l p", " op")
 FREE_EMAIL_DOMAINS = {
     "gmail.com", "googlemail.com", "yahoo.com", "outlook.com", "hotmail.com", "live.com", "aol.com",
     "icloud.com", "me.com", "proton.me", "protonmail.com", "gmx.com", "msn.com", "ymail.com",
@@ -54,7 +58,12 @@ def clean_company_name(name: str) -> str:
 _DOMAIN_NAME_RE = re.compile(r"^(?:www\.)?([a-z0-9][a-z0-9-]*)(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|ai|co|app|dev|xyz|so|tech|us|inc|health|bio|me)$",
                              re.I)
 # A post's first words that describe rather than name: "Looking for a co-founder", "SaaS Startup", "AI x Healthcare Startup".
-_DESCRIPTION_RE = re.compile(r"^(?:looking|seeking|hiring|join|building|we|our)\b|\b(?:start-?up|stealth)$|\sx\s", re.I)
+# A job post's header fields are no name either: "Role: UX Designer", "acme.example Location: Austin".
+_DESCRIPTION_RE = re.compile(r"^(?:looking|seeking|hiring|join|building|we|our)\b|\b(?:start-?up|stealth)$|\sx\s"
+                             r"|^(?:role|position|title|company|job|salary|compensation|apply|location)\s*:|\blocation\s*:", re.I)
+# How a homepage title says a company changed its name: "Newname (formerly Oldname)".
+_RENAMED_RE = re.compile(r"(.+?)\s*\((?:formerly|previously)(?:\s+known\s+as)?\s+(.+)\)", re.I)
+_TITLE_SEPARATORS = re.compile(r"\s+[|\-\u2013\u2014\u00b7\u2022]\s+|\s*:\s+")
 
 
 def describes_rather_than_names(name: str) -> bool:
@@ -67,15 +76,43 @@ def domain_part_of_name(name: str) -> str | None:
     return m.group(1) if m else None
 
 
-def company_to_address(name: str | None, website_title: str | None = None, domain: str | None = None) -> str | None:
-    """The name to write to the company itself. A web address used as a name gives way to the homepage's own spelling, or
-    to its name part when that was written with capitals ("Zentro.com"). None when there is no name fit to write
-    ("meetzentro.com" with no title, "AI x Healthcare Startup"): a greeting says "team" rather than guess."""
+def _new_name_in_title(name: str, website_title: str | None, domain: str | None) -> str | None:
+    """The new name when the homepage title says "<new> (formerly <this name>)". Only of this very name, only words that read as a name, and only
+    when they spell the site's domain as name_from_title asks ("Welcome To Newname" or "Home" does not): no wider guessing."""
+    own = normalize_name(name)
+    for part in _TITLE_SEPARATORS.split(website_title or ""):
+        m = _RENAMED_RE.fullmatch(" ".join(part.split()))
+        if (m and own and normalize_name(m[2]) == own and name_from_title(m[1], domain) and not describes_rather_than_names(m[1])
+                and all(w[0].isupper() or w[0].isdigit() for w in m[1].split())):
+            return m[1]
+    return None
+
+
+def company_to_address(name: str | None, website_title: str | None = None, domain: str | None = None,
+                       name_set_by: str | None = None) -> str | None:
+    """The name to write to the company itself. A name a person set (`name_set_by`) is written as it is. Otherwise a homepage title that says the
+    company was renamed gives its new name, and a web address used as a name gives way to the homepage's own spelling, or to its name part when
+    that was written with capitals ("Zentro.com"); so do a description and a name in capitals with the same letters as the title's ("ACME WIDGETS").
+    None when there is no name fit to write ("meetzentro.com" with no title, "AI x Healthcare Startup" with none that spells its name): a greeting
+    says "team" rather than guess. Only what is written changes: the stored name stays."""
     name = " ".join((name or "").split()).rstrip(" .,")  # "Acme Inc." would read "Hello Acme Inc. team,"
+    if name_set_by:
+        return name or None
+    renamed = _new_name_in_title(name, website_title, domain)
+    if renamed:
+        return renamed
     inner = domain_part_of_name(name)
     if inner:
         return name_from_title(website_title, domain or name) or (inner if any(c.isupper() for c in inner) else None)
-    return None if not name or describes_rather_than_names(name) else name
+    if not name:
+        return None
+    if describes_rather_than_names(name):
+        return name_from_title(website_title, domain)
+    if name.isupper():
+        spelled = name_from_title(website_title, domain)
+        if spelled and spelled.lower() == name.lower():
+            return spelled
+    return name
 
 
 def normalize_name(name: str) -> str:
@@ -83,7 +120,7 @@ def normalize_name(name: str) -> str:
     n = re.sub(r"\(.*?\)", " ", n)
     n = n.replace("&", " and ")
     n = re.sub(r"[^a-z0-9 ]+", " ", n)
-    words = [w for w in n.split() if w]
+    words = _SPACED_SUFFIX_RE.sub("", " ".join(n.split())).split()
     if words and words[0] == "the":
         words = words[1:]
     while words and words[-1] in LEGAL_SUFFIXES:
@@ -101,7 +138,7 @@ def name_from_title(title: str | None, domain: str | None) -> str | None:
         return None
     label = re.sub(r"[^a-z0-9]", "", registrable_domain(domain).split(".")[0].lower())
     bare = re.sub(rf"^(?:{'|'.join(_DOMAIN_PREFIXES)})(?=.{{3}})", "", label)  # "meetzentro.com" is the site of "Zentro"
-    for part in re.split(r"\s+[|\-\u2013\u2014\u00b7\u2022]\s+|\s*:\s+", title):
+    for part in _TITLE_SEPARATORS.split(title):
         part = " ".join(part.split())
         if label and 2 <= len(part) <= 80 and re.sub(r"[^a-z0-9]", "", part.lower()) in (label, bare):
             return part
@@ -188,6 +225,9 @@ def find_duplicate(session: Session, name: str, domain: str | None, state: str |
     candidates = list(session.execute(select(Company).where(active, Company.normalized_name == norm)).scalars())
     # a name a person corrected: normalized_name keeps what the sources called the company, so both names find the record
     candidates += [c for c in session.execute(select(Company).where(active, Company.name_set_by.is_not(None))).scalars()
+                   if c not in candidates and normalize_name(c.name) == norm]
+    # a row stored before spaced suffixes were stripped keeps its old key ("acme l p"), so the same name must still find it, not make a second company
+    candidates += [c for c in session.execute(select(Company).where(active, Company.normalized_name.in_([norm + s for s in _OLD_SUFFIX_KEYS]))).scalars()
                    if c not in candidates and normalize_name(c.name) == norm]
     for c in candidates:
         if domain and c.domain and c.domain != domain:

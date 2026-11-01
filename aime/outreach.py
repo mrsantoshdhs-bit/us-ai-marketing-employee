@@ -63,13 +63,16 @@ def policy(settings: Settings) -> dict:
 # A full stop that ends an abbreviation or an initial does not end the sentence: "U.S.", "e.g.", "Inc.".
 _NOT_THE_END = re.compile(r"(?:\b[A-Za-z]\.|\b(?:etc|vs|inc|ltd|llc|corp|co|dr|mr|mrs|ms|st|jr|sr|no|approx|prev)\.)$", re.I)
 _NOT_PROSE = re.compile(r"[|$€£\"•→]|--|https?://|www\.|\S+@\S|\[email|\b\w+\.(?:com|io|ai|org|net|co)\b|\d+\s?[kK]\b|^[-*\d(]"
-                        r"|^[\w/&+ -]{1,30}:\s", re.I)
+                        r"|^[\w/&+ -]{1,30}:\s"
+                        # a pay range in words; a large figure alone is a fair thing to quote
+                        r"|\d[\d,.]*\s*(?:to|[-–—])\s*\d[\d,.]*\s*(?:usd|dollars?|eur|euros?|gbp)\b|\b(?:usd|eur|gbp)\s*\d[\d,.]*\s*(?:to|[-–—])\s*\d", re.I)
 # What a person would not quote back: how to get the job, what it pays, who may apply, the technology list.
-_JOB_TALK = re.compile(r"\b(?:salary|salaries|compensation|visa|sponsor\w*|citizen\w*|clearance|equity|bonus|benefits?|pto|401k|apply|applicants?|"
+_JOB_TALK = re.compile(r"\b(?:salary|salaries|compensation|pay|usd|per year|visas?|sponsor\w*|citizen\w*|clearance|equity|bonus|benefits?|pto|401k|apply|applicants?|"
                        r"resumes?|cv|interview\w*|hiring|hire|recruit\w*|candidates?|jobs?|roles?|positions?|openings?|full[- ]time|part[- ]time|"
-                       r"onsite|on-site|hybrid|remote|in[- ]office|relocat\w*|time ?zones?|yrs|years? of|experience|you|you'?ll|you'?re|you'?ve|"
+                       r"onsite|on-site|hybrid|remote|in[- ]office|in the office|relocat\w*|time ?zones?|yrs|years? of|experience|you|you'?ll|you'?re|you'?ve|"
                        r"your|looking for|join|must|nice to have|stack|languages?|engineers?|developers?|teammates?|colleagues?|comfortable|"
-                       r"expect to|manager|ownership|"
+                       r"expect to|manager|ownership|please|requirements?|required|preferred|background|degree|qualifications|skills?|eng|"
+                       r"react(?:js)?|typescript|javascript|node(?:js)?|python|java|golang|ruby|rails|kubernetes|sql|aws|gcp|azure|docker|terraform|"
                        r"we use|i|i'?m|i'?ve)\b", re.I)
 # What a website says that is not about the company's work: a person's career, a customer's words, a button.
 _NOT_ABOUT_THE_WORK = re.compile(r"\b(?:previously|prior to|formerly|holds? a|joined|alumni|prev\.|ph\.?d|co-?founder|founder|ceo|cto|served as|"
@@ -136,13 +139,18 @@ def gather_evidence(session: Session, lead: Lead) -> list[Evidence]:
     """What the company says about its own work comes first: its description, its website on a topic we serve, then its
     job post, which is written for engineers. Only sentences fit to quote count; none at all means a review task."""
     out: list[Evidence] = []
-    snap = session.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == lead.company_id)
-                           .order_by(ResearchSnapshot.id.desc())).scalars().first()
-    if snap:
-        quote = website_quote(snap.description) if snap.description else ""
+    snaps = session.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == lead.company_id)
+                            .order_by(ResearchSnapshot.id.desc())).scalars().all()
+    # A re-read that failed, was blocked or was sent elsewhere has no description, which says nothing about the one on record.
+    described = next((s for s in snaps if s.description), None)
+    # The topics are what the latest real read found: a newer read that dropped one, or found one, is believed over an older read.
+    read = next((s for s in snaps if s.status in ("done", "no_people")), described or (snaps[0] if snaps else None))
+    if described:
+        quote = website_quote(described.description)
         if len(quote) >= 25:
-            out.append(Evidence(quote, snap.description_url, "description", snap.description))
-        for need in snap.needs or []:
+            out.append(Evidence(quote, described.description_url, "description", described.description))
+    if read:
+        for need in read.needs or []:
             if need.get("service") == lead.primary_service and need.get("quote"):
                 quote = website_quote(need["quote"], list(need.get("keywords") or []))
                 if len(quote) >= 25:
@@ -186,7 +194,7 @@ def personal_line(ev: Evidence, company: str | None) -> str:
 def _addressed(lead: Lead, contact) -> tuple[str | None, str, str]:
     """(the company's name fit to write, or None), the greeting, and " at <company>" for a subject line."""
     record = lead.company
-    company = company_to_address(record.name, getattr(record, "website_title", None), getattr(record, "domain", None))
+    company = company_to_address(record.name, getattr(record, "website_title", None), getattr(record, "domain", None), getattr(record, "name_set_by", None))
     inbox = contact.role_category == "inbox" or not contact.first_name
     team = f"Hello {company} team," if company else "Hello team,"
     return company, team if inbox else f"Hi {contact.first_name.split()[0]},", f" at {company}" if company else ""

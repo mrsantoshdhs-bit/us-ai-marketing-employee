@@ -1039,7 +1039,7 @@ def suggest(settings, category: str, row: InboundEmail, contact: Contact | None,
         minutes = booking_minutes(settings)
         day = offered_day(row.new_text or own_text(row.body_text or ""))
         record = lead.company if lead else None
-        company = company_to_address(record.name, getattr(record, "website_title", None), getattr(record, "domain", None)) if record else None
+        company = company_to_address(record.name, getattr(record, "website_title", None), getattr(record, "domain", None), getattr(record, "name_set_by", None)) if record else None
         about = TOPICS.get(lead.primary_service or "") if lead else None  # the words step 2 uses, not the record's
         topic = (f" about {about}{f' at {company}' if company else ''}" if about else f" with the {company} team" if company else "")
         if meeting is not None:  # in the US time zone we write in; Calendly's own emails give them theirs
