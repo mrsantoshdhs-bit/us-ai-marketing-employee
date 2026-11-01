@@ -315,10 +315,11 @@ and what was done.
   sending. When in doubt the body is fetched, and only those emails count against the 50 per run. Sending waits only for a failed read,
   more than 50 possibly related emails, or more than 500 new emails: the rest come in on the next runs. The server is also asked which
   new emails hold words of our footer, or the whole address of someone we have emailed: those are read whatever their header lines say.
-  An email naming such an address, or with a subject naming a company we emailed, reaches Replies for a person. It is tied to no lead by
-  that, and newsletters and robots naming an address are not kept for it. Nothing here suppresses the address named, but an opt-out
-  naming it counts on that company's record while it is unread: the company's waiting steps are cancelled, whoever wrote it. Marking the
-  mail reviewed ends that count and does not bring a cancelled step back; a person approves a new one. Still unread: an
+  An email naming such an address, or with a subject naming a company we emailed, reaches Replies for a person. An email naming exactly
+  one such lead's address holds that lead's emails until a person decides; a subject naming a company ties it to no lead, and newsletters and
+  robots naming an address are not kept for it. Nothing here suppresses the address named, but an opt-out naming it counts on that company's
+  record, whoever wrote it. Marking the mail reviewed does not end that count: the waiting step is then cancelled. Only reclassifying the
+  mail takes it back; a cancelled step does not return, and a person approves a new one. Still unread: an
   opt-out from another address that names neither the address nor our subject, and the same mail in junk. If the server refuses the
   address search, an alert says so and it is not asked again until the mailbox is renumbered; the footer search is not affected.
 - **Large email.** Over 10 MB only the first 4 MB is read: what it says counts, it goes to review, and a note says so.

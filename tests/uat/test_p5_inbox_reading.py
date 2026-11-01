@@ -222,19 +222,21 @@ def test_an_opt_out_from_a_personal_address_naming_the_address_reaches_a_person(
 
 
 def test_an_opt_out_from_a_personal_address_naming_the_address_lets_no_step_go(make_ctx, monkeypatch, clock, server):
-    """Read and kept, the mail counts on the company's record (outreach.company_opted_out), so step 2 stops. The named address is not suppressed."""
+    """Read and kept, the mail holds the lead it names (reply_intel.lead_named_in_body) until a person decides. The named address is not suppressed."""
     clock(IN_WINDOW)
     srv = server({"INBOX": {}})
     ctx = mail_world(make_ctx, monkeypatch, imap=srv.factory)
-    _, v, step2 = we_wrote(ctx)
+    lead_id, v, step2 = we_wrote(ctx)
     srv.folders["INBOX"][1] = personal_opt_out(v)
     tick(ctx, srv)
-    assert FakeSMTP.sent == [] and status_of(ctx, step2)[0] == "cancelled"
+    row = stored(ctx)[0]
+    assert (row.category, row.status, row.lead_id, row.holds_sending) == ("unsubscribe", "needs_review", lead_id, True)
+    assert FakeSMTP.sent == [] and status_of(ctx, step2)[0] == "approved"
     assert v.to not in suppressed(ctx)
 
 
-def test_a_stranger_opting_out_and_naming_the_address_cancels_the_step_and_a_review_does_not_bring_it_back(make_ctx, monkeypatch, clock, server):
-    """What the docs say of this mail. It fails safe: no email goes wrongly. Whether a stranger's words should cancel rather than hold is the owner's to say."""
+def test_a_stranger_opting_out_and_naming_the_address_holds_the_step_and_a_review_does_not_let_it_go(make_ctx, monkeypatch, clock, server):
+    """What the docs say of this mail. It fails safe: no email goes wrongly. Only reading it another way takes the opt-out back."""
     clock(IN_WINDOW)
     srv = server({"INBOX": {}})
     ctx = mail_world(make_ctx, monkeypatch, imap=srv.factory)
@@ -242,16 +244,16 @@ def test_a_stranger_opting_out_and_naming_the_address_cancels_the_step_and_a_rev
     srv.folders["INBOX"][1] = K.msg(PERSONAL, "Hello", f"Unsubscribe me. By the way {v.to} gave me your name.", tag="pers3")
     tick(ctx, srv)
     row = stored(ctx)[0]
-    assert (row.category, row.status, row.lead_id) == ("unsubscribe", "needs_review", None)
-    assert status_of(ctx, step2)[0] == "cancelled" and "opted out" in status_of(ctx, step2)[1]
+    assert (row.category, row.status, row.lead_id, row.holds_sending) == ("unsubscribe", "needs_review", lead_id, True)
+    assert status_of(ctx, step2)[0] == "approved" and FakeSMTP.sent == []
     assert suppressed(ctx) == {"j.person@private.example"}, "the sender only, never the address named"
     with ctx.db.session() as s:
         assert outreach.company_opted_out(s, s.get(Lead, lead_id).company)
         s.get(InboundEmail, row.id).status = "reviewed"
     with ctx.db.session() as s:
-        assert not outreach.company_opted_out(s, s.get(Lead, lead_id).company), "reviewed, the mail no longer counts"
+        assert outreach.company_opted_out(s, s.get(Lead, lead_id).company), "reviewed, the mail still counts: it is tied to the lead"
     tick(ctx, srv)
-    assert status_of(ctx, step2)[0] == "cancelled", "and the step stays cancelled"
+    assert status_of(ctx, step2)[0] == "cancelled" and "opted out" in status_of(ctx, step2)[1], "the send gate stops it, and it stays stopped"
     assert FakeSMTP.sent == []
     with ctx.db.session() as s:
         assert list(s.execute(select(FollowUp.id).where(FollowUp.lead_id == lead_id, FollowUp.status.in_(ia.STEP_WAITING))).scalars()) == [], "nothing takes its place"
