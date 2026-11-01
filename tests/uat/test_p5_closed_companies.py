@@ -824,6 +824,11 @@ def test_one_opt_out_stops_the_other_sequences_at_the_company_with_no_extra_addr
     opt_out_by_reply(ctx, sent)
     with ctx.db.session() as s:
         row = s.get(Lead, other)
+        # The reply stops this lead at once (reply_intel._stop_the_company), and the company's own refusal stands behind that stage.
+        assert row.outreach_status == "stopped" and company_opted_out(s, row.company)
+        assert eligible(s, ctx.settings, row, running=True)[0] is False
+        assert eligible(s, ctx.settings, row, reengage=True)[0] is False
+        row.outreach_status = "contacted"
         assert eligible(s, ctx.settings, row, running=True) == (False, COMPANY_OPTED_OUT)
         assert eligible(s, ctx.settings, row, reengage=True) == (False, COMPANY_OPTED_OUT)
         assert s.execute(select(Suppression.id).where(Suppression.value == MARIA)).first() is None
