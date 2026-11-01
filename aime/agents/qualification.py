@@ -37,6 +37,7 @@ MOVED_ALERT = "leads:moved"
 MOVED_NAMED = 30  # lead numbers named in the notice; the count covers the rest
 MOVED_SOURCE = "qualification"  # whose notice it is, whichever rule moved the lead: it is one notice
 NEW_POST_TASK = "New hiring post from "  # how the task starts that tells a person who parked a lead of a new post
+NEW_POST_NOTE = "News of a post, not this lead's review"  # with a reason, ticking it closes no review (SalesWorkflowAgent._ensure_task)
 NAMES_ALERT = "leads:names_refused"
 WRITE_BATCH = 50  # leads saved at a time: at about 5 ms a lead, a click waits a quarter of a second at most
 
@@ -291,7 +292,7 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                                                      | (FollowUp.created_at >= newest.created_at)).limit(1)).first():
             return
         session.add(FollowUp(lead_id=lead.id, company_id=lead.company_id, channel="task", step=1, due_at=utcnow(), status="pending",
-                             subject=f"{NEW_POST_TASK}{company.name}"[:300],
+                             blocked_reason=NEW_POST_NOTE, subject=f"{NEW_POST_TASK}{company.name}"[:300],
                              body=(f"A person moved this lead to nurture, and this company has posted again since: {newest.source_url or 'no link on record'}. "
                                    "It stays in nurture and nothing is drafted: whether to bring it back is a person's decision, on the lead's page.")))
         log_activity(session, "Task created: a new hiring post on a lead a person parked", self.name, type_="task", company_id=company.id, lead_id=lead.id)

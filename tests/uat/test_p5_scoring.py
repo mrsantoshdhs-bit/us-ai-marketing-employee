@@ -15,7 +15,7 @@ import aime.timeutil as tu
 from aime.agents.company_research import CompanyResearchAgent
 from aime.agents.crm import CRMManagementAgent
 from aime.agents.inbox_agent import InboxAgent
-from aime.agents.qualification import NEW_POST_TASK, LeadQualificationAgent
+from aime.agents.qualification import NEW_POST_NOTE, NEW_POST_TASK, LeadQualificationAgent
 from aime.agents.sales_workflow import REVIEW_MARK, SalesWorkflowAgent
 from aime.crm_ops import add_signal
 from aime.db import kv_set
@@ -288,21 +288,21 @@ def test_a_new_post_on_a_lead_a_person_parked_opens_a_task_and_the_lead_stays_pa
     new_post(ctx, lead_id)
     LeadQualificationAgent(ctx).run({"rescore_all": True})
     assert status_of(ctx, lead_id) == "nurture"
-    assert tasks(ctx, lead_id, NEW_POST_TASK) == [("pending", None)]
+    assert tasks(ctx, lead_id, NEW_POST_TASK) == [("pending", NEW_POST_NOTE)]
     with ctx.db.session() as s:
         body = s.execute(select(FollowUp.body).where(FollowUp.lead_id == lead_id, FollowUp.subject.startswith(NEW_POST_TASK))).scalar_one()
         assert "https://example.test/2" in body and "nothing is drafted" in body
     # still open, or ticked off: the same post is told once
     morning(ctx, clock, 1)
-    assert tasks(ctx, lead_id, NEW_POST_TASK) == [("pending", None)]
+    assert tasks(ctx, lead_id, NEW_POST_TASK) == [("pending", NEW_POST_NOTE)]
     tick(ctx, lead_id, NEW_POST_TASK)
     morning(ctx, clock, 2)
-    assert tasks(ctx, lead_id, NEW_POST_TASK) == [("done", None)]
+    assert tasks(ctx, lead_id, NEW_POST_TASK) == [("done", NEW_POST_NOTE)]
     # and a later post is news again
     tu.CLOCK_OFFSET = clock + timedelta(days=3)
     new_post(ctx, lead_id, "3")
     LeadQualificationAgent(ctx).run({"rescore_all": True})
-    assert tasks(ctx, lead_id, NEW_POST_TASK) == [("done", None), ("pending", None)]
+    assert tasks(ctx, lead_id, NEW_POST_TASK) == [("done", NEW_POST_NOTE), ("pending", NEW_POST_NOTE)]
     assert status_of(ctx, lead_id) == "nurture"
     SalesWorkflowAgent(ctx).run({"send": False})
     with ctx.db.session() as s:
@@ -408,6 +408,52 @@ def test_a_new_post_on_a_reviewed_lead_opens_a_new_review_the_normal_way(make_ct
     assert [t[0] for t in tasks(ctx, lead_id, "Review ")] == ["done", "done"]
 
 
+def person_brings_back(ctx, lead_id):
+    client = TestClient(create_app(ctx), base_url="http://127.0.0.1", follow_redirects=False, headers={"origin": "http://127.0.0.1"})
+    assert client.post(f"/leads/{lead_id}/status", data={"status": "qualified"}).status_code == 303
+    assert status_of(ctx, lead_id) == "qualified"
+
+
+def test_a_ticked_post_task_does_not_stop_the_review_of_a_lead_a_machine_parked_later(make_ctx, clock):
+    ctx = make_ctx(handler=site, polite_delay=0)
+    lead_id = qualified_lead(ctx, post_age=5, activity_age=1, researched_age=1, post=LASTING_POST)
+    person_parks(ctx, lead_id)
+    tu.CLOCK_OFFSET = clock + timedelta(hours=1)
+    new_post(ctx, lead_id)
+    LeadQualificationAgent(ctx).run({"rescore_all": True})
+    tick(ctx, lead_id, NEW_POST_TASK)
+    person_brings_back(ctx, lead_id)
+    morning(ctx, clock, 32)  # no activity for a month: the stale rule parks it
+    assert status_of(ctx, lead_id) == "nurture"
+    tu.CLOCK_OFFSET = clock + timedelta(days=33)
+    new_post(ctx, lead_id, "3")
+    LeadQualificationAgent(ctx).run({})
+    assert status_of(ctx, lead_id) == "qualified"
+    SalesWorkflowAgent(ctx).run({"send": False})
+    assert [t[0] for t in tasks(ctx, lead_id, "Review ")] == ["done", "pending"]
+
+
+@pytest.mark.parametrize("ticked_first", [True, False])
+def test_a_lead_a_person_brought_back_gets_its_first_review_once_the_post_task_is_closed(make_ctx, clock, ticked_first):
+    ctx = make_ctx(handler=site, polite_delay=0)
+    lead_id = qualified_lead(ctx, post_age=5, activity_age=1, post=LASTING_POST)
+    with ctx.db.session() as s:  # never reviewed
+        s.delete(s.execute(select(FollowUp).where(FollowUp.lead_id == lead_id)).scalar_one())
+    person_parks(ctx, lead_id)
+    tu.CLOCK_OFFSET = clock + timedelta(hours=1)
+    new_post(ctx, lead_id)
+    LeadQualificationAgent(ctx).run({"rescore_all": True})
+    if ticked_first:
+        tick(ctx, lead_id, NEW_POST_TASK)
+    person_brings_back(ctx, lead_id)
+    SalesWorkflowAgent(ctx).run({"send": False})
+    if not ticked_first:  # the open task is the next step, and closing it does not end the road
+        assert tasks(ctx, lead_id, "Review ") == []
+        tick(ctx, lead_id, NEW_POST_TASK)
+        SalesWorkflowAgent(ctx).run({"send": False})
+    assert [t[0] for t in tasks(ctx, lead_id, "Review ")] == ["pending"]
+
+
 def test_a_new_review_falls_away_by_the_same_rule_when_the_score_drops(make_ctx, clock):
     ctx = make_ctx(handler=site, polite_delay=0)
     lead_id = qualified_lead(ctx, post_age=40, researched_age=1, post=POST)
@@ -511,13 +557,15 @@ def post_signal(text):
     return SimpleNamespace(signal_type="hiring", text=text, matched_services=["ai_agents"], strength=0.9, observed_at=utcnow(), source_url="https://example.test/1")
 
 
-@pytest.mark.parametrize("words", ["Position Filled", "position filled", "ROLE FILLED", "This role  filled."])
+@pytest.mark.parametrize("words", ["Position Filled", "position filled", "ROLE FILLED", "Role  filled.", "------ Position Filled -------", "Software Engineer: role filled"])
 def test_a_hiring_post_marked_as_filled_earns_nothing(words):
     fact = signal_fact(post_signal(f"{POST} We need engineers to build AI agents for our CRM. {words}"))
     assert fact.matched_services == [] and fact.strength == 0.0 and fact.hires_builders is False
 
 
-@pytest.mark.parametrize("words", ["Position open", "We have filled seats", "The role is open", "Role: filled with variety is not this phrase"])
+@pytest.mark.parametrize("words", ["Position open", "We have filled seats", "The role is open", "Role: filled with variety is not this phrase",
+                                   "We need this role filled by March.", "We need this role filled.", "Looking to get this position filled quickly, engineers apply.",
+                                   "Backend Engineer: position filled. Frontend Engineer: open now."])
 def test_a_post_that_does_not_say_so_is_read_as_before(words):
     fact = signal_fact(post_signal(f"{POST} We need engineers to build AI agents for our CRM. {words}"))
     assert fact.hires_builders is True and fact.matched_services

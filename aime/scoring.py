@@ -108,7 +108,7 @@ _BUILDERS_RE = re.compile(r"\b(?:engineers?|developers?|programmers?|swe)\b", re
 _RUNNING_BUSINESS_RE = re.compile(r"\b(?:customers?|clients?|users|patients?|partners|hq|headquartered|revenue|profitable|paying|funded|funding|raised|series [a-f]|"
                                   r"seed|backed by|investors?|venture|y ?combinator|yc|arr|mrr|live product|in production|piloting|"
                                   r"(?:builds?|creates?|makes?|sells?) software|our (?:product|platform))\b", re.I)
-_FILLED_RE = re.compile(r"\b(?:position|role)\s+filled\b", re.I)
+_FILLED_RE = re.compile(r"(?:^|[^\w\s])\s*(?:position|role)\s+filled\W*$", re.I)  # the post's own last words: "get this role filled by March" still wants someone
 
 
 def signal_fact(signal) -> SignalFact:
