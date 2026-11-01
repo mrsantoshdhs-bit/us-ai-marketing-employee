@@ -219,6 +219,9 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         out.sec_kept_as_evidence = len(kept_as_evidence)
         if kept_as_evidence:
             self.log.info("%s SEC filer(s) kept as market evidence, with no lead", len(kept_as_evidence))
+        if out.import_notices:  # so far only the rows _keep_closed told of: a person's own rows do not vanish, and one run raises one alert
+            session.add(Alert(level="warning", source=self.name, message=(f"{len(out.import_notices)} imported row(s) made no lead: "
+                                                                          + "; ".join(out.import_notices))[:500]))
 
         # Imported files leave data/imports only after their companies are committed.
         for src in file_sources:

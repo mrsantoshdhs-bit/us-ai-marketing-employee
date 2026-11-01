@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
@@ -18,7 +19,7 @@ from sqlalchemy.orm import Session
 from aime.automation import audit
 from aime.config import Settings
 from aime.contact_validation import STATUS_OK
-from aime.crm_ops import BOUNCED_REASON, canonical_address, canonical_sql, is_suppressed, lift_time, log_activity
+from aime.crm_ops import BOUNCED_REASON, _entries_covering, canonical_address, canonical_sql, is_suppressed, lift_time, log_activity
 from aime.dedupe import company_to_address, domain_from_email
 from aime.integrations.email_smtp import compliance_footer
 from aime.knowledge.content_bank import BRAND_LINES
@@ -389,10 +390,14 @@ def _merged_family(session: Session, company: Company) -> list[int]:
     return family
 
 
+def _emailed_addresses(session: Session, lead_id: int) -> set[str]:
+    return {a for a in session.execute(select(FollowUp.to_email).where(FollowUp.lead_id == lead_id, FollowUp.channel == "email",
+                                                                       FollowUp.status.in_(("sent", "sending", "uncertain")))).scalars() if a}
+
+
 def _emailed_address_closed(session: Session, lead: Lead) -> bool:
     """An address this lead's emails went to is on the do-not-contact list or opted out, whoever its contact is by now."""
-    sent = {a for a in session.execute(select(FollowUp.to_email).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
-                                                                       FollowUp.status.in_(("sent", "sending", "uncertain")))).scalars() if a}
+    sent = _emailed_addresses(session, lead.id)
     return any(is_suppressed(session, a) for a in sent) or session.execute(select(Contact.id).where(
         canonical_sql(Contact.email).in_({canonical_address(a) for a in sent}), Contact.consent_status == "opted_out").limit(1)).first() is not None
 
@@ -443,20 +448,43 @@ def _said_no(session: Session, person: Contact, mail: list) -> bool:
                 and not any(m.category == "unsubscribe" and canonical_address(m.from_email or "") == canonical_address(person.email) for m in mail))
 
 
+def _marked_by_a_lifted_domain(session: Session, company: Company, person: Contact, mail: list) -> bool:
+    """The mark on this person was written while a domain entry stood, and the owner has lifted every entry that covers them. lift_suppression leaves
+    such a mark on the contact, whose own gate in eligible keeps reading it, but it is not their no: a real one also leaves an entry on their address, whose
+    lift clears the mark, and their mail. A mark that does not fit, or has no time, is doubt and counts."""
+    if not person.email or person.consent_at is None:
+        return False
+    entries = session.execute(_entries_covering(person.email, company.domain)).scalars().all()
+    return (all(r.lifted_at is not None for r in entries) and any(r.kind == "domain" and r.created_at <= person.consent_at <= r.lifted_at for r in entries)
+            and not any(m.category == "unsubscribe" and canonical_address(m.from_email or "") == canonical_address(person.email) for m in mail))
+
+
+def _lift_of_a_stop(session: Session, company: Company, lead_id: int) -> datetime | None:
+    """A stop that names nobody speaks for the addresses its lead was emailed at and for its contact by now, whom company research may have moved since.
+    The newest lift among those, or None while one stands for anything but a dead address, or none was ever listed. Whoever wrote the stop has their own entry and mail, which still count."""
+    contact = session.get(Lead, lead_id).contact
+    speaks_for = _emailed_addresses(session, lead_id) | ({contact.email} if contact is not None and contact.email else set())
+    entries = [r for a in speaks_for for r in session.execute(_entries_covering(a, company.domain)).scalars()]
+    if any(r.lifted_at is None and not r.reason.startswith(BOUNCED_REASON) for r in entries):
+        return None
+    return max((r.lifted_at for r in entries if r.lifted_at), default=None)
+
+
 def _asked_not_to(session: Session, company: Company, on_record: _CompanyOnRecord, lead: Lead | None = None) -> bool:
     """An unsubscribe mail or a stop someone asked for, newer than the owner's lift of who it speaks for. The stop names who asked when it
-    was not the lead's own contact (aime.reply_intel); one that names nobody speaks for `lead`'s contact, or else for its own lead's."""
+    was not the lead's own contact (aime.reply_intel); one that names nobody speaks for `lead`'s contact, or else as _lift_of_a_stop says."""
     def lifted_since(m) -> bool:
         cut = lift_time(session, m.from_email) if m.from_email else None
         return cut is not None and m.received_at < cut
 
     def stop_lifted_since(a) -> bool:
         named = _AN_ADDRESS.search(a.subject)
-        contact = None if named else (lead or session.get(Lead, a.lead_id)).contact
         if named:
             cut = lift_time(session, named.group())
+        elif lead is None:
+            cut = _lift_of_a_stop(session, company, a.lead_id)
         else:
-            cut = lift_time(session, contact.email, company.domain) if contact is not None and contact.email else None
+            cut = lift_time(session, lead.contact.email, company.domain) if lead.contact is not None and lead.contact.email else None
         return cut is not None and a.created_at < cut
 
     return any(m.category == "unsubscribe" and not lifted_since(m) for m in on_record.mail) or any(not stop_lifted_since(a) for a in session.execute(
@@ -475,7 +503,8 @@ def company_opted_out(session: Session, company: Company) -> bool:
     definition, with reopen_refusal, whose own lines read the do-not-contact list). An opt-out from someone with no Contact row marks no contact, so their
     mail, the stop and their entry count as well."""
     on_record = _on_record(session, company)
-    return (any(_said_no(session, p, on_record.mail) for p in on_record.people) or _asked_not_to(session, company, on_record)
+    return (any(_said_no(session, p, on_record.mail) and not _marked_by_a_lifted_domain(session, company, p, on_record.mail) for p in on_record.people)
+            or _asked_not_to(session, company, on_record)
             or _address_listed(session, on_record))
 
 

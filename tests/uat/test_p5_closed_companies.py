@@ -500,6 +500,54 @@ def test_a_persons_own_csv_row_for_a_closed_company_is_told_and_the_file_is_kept
     assert len(leads_at(ctx, cid)) == 1
 
 
+@pytest.mark.parametrize("notes", ["", "From the trade show list"])
+def test_a_persons_csv_row_for_a_closed_company_is_told_where_a_person_reads(make_ctx, notes):
+    """With no notes nothing in the row is new, so no listing notice is raised, and the row must still not vanish."""
+    ctx = make_ctx()
+    read_listing(ctx, listing("Harbor Goods", "harbor.example"))
+    with ctx.db.session() as s:
+        cid = s.execute(select(Company.id).where(Company.normalized_name == "harbor goods")).scalar_one()
+    (lead,) = leads_at(ctx, cid)
+    close_by_person(ctx, lead.id)
+    for name, rows in (("first.csv", ()), ("again.csv", ("",))):  # the same row in a new file is a person's act again (the same bytes count as read)
+        csv_rows(ctx, f"Harbor Goods,https://harbor.example,TX,saas,{notes}", *rows, name=name)
+        res = USBusinessResearchAgent(ctx).run({"sources": ["csv_import"]})
+        assert res.ok and res.output.import_files_rejected == [] and res.output.import_files_archived == 1
+    with ctx.db.session() as s:
+        told = s.execute(select(Alert).where(Alert.message.contains("already closed, reopen it on its lead page"))).scalars().all()
+    assert len(told) == 2 and all(a.level == "warning" and a.source == "research" for a in told)
+    assert "Harbor Goods: already closed, reopen it on its lead page" in web(ctx).get("/system").text
+    assert len(leads_at(ctx, cid)) == 1
+
+
+def test_a_list_of_closed_companies_raises_one_alert_that_counts_them(make_ctx):
+    ctx = make_ctx()
+    names = [f"Harbor Goods {i}" for i in range(40)]
+    read_listing(ctx, *[listing(n, f"harbor{i}.example", record=f"hn:{i}") for i, n in enumerate(names)], limit=100)
+    with ctx.db.session() as s:
+        for lead in s.execute(select(Lead)).scalars():
+            lead.status = "disqualified"
+            log_activity(s, "Status new → disqualified (manual)", "owner", type_="status_change", company_id=lead.company_id, lead_id=lead.id)
+    csv_rows(ctx, *[f"{n},https://harbor{i}.example,TX,saas," for i, n in enumerate(names)])
+    res = USBusinessResearchAgent(ctx).run({"sources": ["csv_import"]})
+    assert res.ok and res.output.leads_created == 0 and len(res.output.import_notices) == 40
+    with ctx.db.session() as s:
+        (told,) = s.execute(select(Alert).where(Alert.message.startswith("40 imported row"))).scalars().all()
+    assert len(told.message) <= 500
+
+
+def test_a_hiring_post_on_a_closed_company_raises_no_import_alert(make_ctx):
+    ctx = make_ctx()
+    read_listing(ctx, listing("Harbor Goods", "harbor.example"))
+    with ctx.db.session() as s:
+        cid = s.execute(select(Company.id).where(Company.normalized_name == "harbor goods")).scalar_one()
+    (lead,) = leads_at(ctx, cid)
+    close_by_person(ctx, lead.id)
+    repost(ctx, cid, item=78)
+    with ctx.db.session() as s:
+        assert s.execute(select(Alert.message).where(Alert.message.contains("imported row"))).scalars().all() == []
+
+
 def test_a_csv_row_for_an_opted_out_company_does_not_invite_a_reopen(make_ctx):
     ctx, _s, sent = contacted(make_ctx)
     lid, cid = lead_of(ctx).id, company_of(ctx)
@@ -513,6 +561,9 @@ def test_a_csv_row_for_an_opted_out_company_does_not_invite_a_reopen(make_ctx):
     assert res.ok and res.output.leads_created == 0
     (notice,) = res.output.import_notices
     assert "stays closed" in notice and "reopen" not in notice
+    with ctx.db.session() as s:
+        (told,) = s.execute(select(Alert.message).where(Alert.message.contains(notice))).scalars().all()
+    assert "reopen" not in told
 
 
 def test_a_new_post_on_a_day_past_the_company_cap_still_raises_its_notice(make_ctx):
@@ -928,16 +979,102 @@ def lead_of_row(s, company_id):
     return row
 
 
-def test_a_lifted_domain_entry_leaves_its_contacts_counted(make_ctx):
-    """lift_suppression leaves a domain's contacts as they are, since any of them may have said no: doubt counts as a no."""
+def maria_at(s, cid):
+    """A colleague on file with a qualified lead of her own, who said nothing."""
+    colleague = Contact(company_id=cid, email=MARIA, first_name="Maria", last_name="Lopez", source="website", role_category="executive", email_status="published",
+                        email_source_url=f"https://{SITE}/team", consent_status="none", confidence="high", email_confidence="high")
+    s.add(colleague)
+    s.flush()
+    other = Lead(company_id=cid, contact_id=colleague.id, source="research", status="qualified", score=70, grade="B", primary_service="custom_crm")
+    s.add(other)
+    s.flush()
+    return other
+
+
+def test_a_lifted_domain_entry_no_longer_closes_the_company(make_ctx):
+    """The owner took it off and nothing else says no. Its contacts stay marked, as lift_suppression leaves them, and their own gate still refuses them."""
     ctx, _s, _sent = contacted(make_ctx)
+    lid, cid = lead_of(ctx).id, company_of(ctx)
+    with ctx.db.session() as s:
+        suppress(s, SITE, "Added by mistake")
+    with ctx.db.session() as s:
+        assert company_opted_out(s, s.get(Company, cid))  # while it stands
+    days_later(1)
+    with ctx.db.session() as s:
+        assert lift_suppression(s, SITE, "owner", "Added by mistake") is None
+    with ctx.db.session() as s:
+        assert not company_opted_out(s, s.get(Company, cid))
+        assert eligible(s, ctx.settings, maria_at(s, cid)) == (True, "")
+        marked = s.get(Lead, lid)
+        assert marked.contact.consent_status == "opted_out"
+        assert eligible(s, ctx.settings, marked) == (False, "on the do-not-contact list")
+        marked.outreach_status = "stopped"
+        assert reopen_refusal(s, marked) == "someone at this company has opted out"  # its results do not change
+
+
+def test_a_real_no_during_a_domain_entry_outlives_its_lift(make_ctx):
+    ctx, _s, sent = contacted(make_ctx)
     cid = company_of(ctx)
     with ctx.db.session() as s:
-        suppress(s, SITE, "Asked by phone")
+        suppress(s, SITE, "Added by mistake")
+    days_later(1)
+    opt_out_by_reply(ctx, sent)  # the contact is marked already, so this writes only their own entry and the mail
+    days_later(1)
     with ctx.db.session() as s:
-        assert lift_suppression(s, SITE, "owner", "They asked us to write again") is None
+        assert lift_suppression(s, SITE, "owner", "Added by mistake") is None
     with ctx.db.session() as s:
         assert company_opted_out(s, s.get(Company, cid))
+    with ctx.db.session() as s:
+        assert lift_suppression(s, DAVID, "owner", "They asked us to write again") is None
+    with ctx.db.session() as s:
+        assert not company_opted_out(s, s.get(Company, cid))
+
+
+def test_a_no_after_a_domain_entry_was_lifted_counts(make_ctx):
+    ctx, _s, sent = contacted(make_ctx)
+    cid = company_of(ctx)
+    with ctx.db.session() as s:
+        suppress(s, SITE, "Added by mistake")
+    days_later(1)
+    with ctx.db.session() as s:
+        assert lift_suppression(s, SITE, "owner", "Added by mistake") is None
+    days_later(1)
+    opt_out_by_reply(ctx, sent)
+    with ctx.db.session() as s:
+        assert company_opted_out(s, s.get(Company, cid))
+
+
+@pytest.mark.parametrize("mark, entry, counts", [
+    ("while listed", "lifted", False),
+    ("while listed", "standing", True),
+    ("before it was listed", "lifted", True),  # their own no, and this entry did not write it
+    ("after the lift", "lifted", True),
+    ("with no time", "lifted", True),
+    ("erased", "lifted", True),
+    ("while listed, and unsubscribed", "lifted", True),
+    ("while listed, under another entry that stands", "lifted", True),
+    ("while listed, and their own entry stands", "lifted", True),
+])
+def test_only_a_mark_the_lifted_domain_entry_wrote_stops_counting(make_ctx, mark, entry, counts):
+    ctx = make_ctx()
+    now = utcnow()
+    at = {"before it was listed": now - timedelta(days=5), "after the lift": now + timedelta(minutes=5), "with no time": None}.get(mark, now - timedelta(days=2))
+    with ctx.db.session() as s:
+        co = Company(name="Harbor Goods", normalized_name="harbor goods", source="test", domain="us.harbor.example", state="TX", country="US")
+        s.add(co)
+        s.flush()
+        s.add(Contact(company_id=co.id, email=None if mark == "erased" else "pat@us.harbor.example", source="website", consent_status="opted_out", consent_at=at))
+        lifted = dict(lifted_at=now - timedelta(days=1), lifted_by="owner", lift_reason="asked") if entry == "lifted" else {}
+        s.add(Suppression(value="us.harbor.example", kind="domain", reason="Added by mistake", created_at=now - timedelta(days=3), **lifted))
+        if "another entry" in mark:
+            s.add(Suppression(value="harbor.example", kind="domain", reason="Asked by phone", created_at=now - timedelta(days=3)))
+        if "their own entry" in mark:
+            s.add(Suppression(value="pat+news@us.harbor.example", kind="email", reason="Unsubscribe request by email", created_at=now - timedelta(days=2)))
+        if "unsubscribed" in mark:
+            s.add(InboundEmail(message_id="<m1@x.example>", from_email="pat@us.harbor.example", subject="Re: hello", body_text="Stop", category="unsubscribe", status="actioned", company_id=co.id,
+                               received_at=now - timedelta(days=2)))
+        s.flush()
+        assert company_opted_out(s, co) is counts
 
 
 def test_a_stop_that_names_nobody_needs_the_lift_of_its_own_contact(make_ctx):
@@ -958,6 +1095,70 @@ def test_a_stop_that_names_nobody_needs_the_lift_of_its_own_contact(make_ctx):
         s.add(Suppression(value="pat@harbor.example", kind="email", reason="Unsubscribe", lifted_at=utcnow() + timedelta(minutes=5), lifted_by="owner", lift_reason="asked"))
         s.flush()
         assert not company_opted_out(s, co)
+
+
+def test_after_the_re_read_moves_the_contact_a_lift_of_the_emailed_inbox_clears_the_company(make_ctx):
+    """The normal first opt-out: every email so far went to an inbox, and the 30-day re-read then finds a named person for the closed lead."""
+    ctx, _s, sent, cid, site_now_shows = emailed(make_ctx)
+    assert sent.to_email == INBOX
+    opt_out_by_reply(ctx, sent, who=INBOX)
+    LeadQualificationAgent(ctx).run({})
+    site_now_shows(TEAM_WITH_ADDRESS)
+    assert CompanyResearchAgent(ctx, mail_checker=FakeChecker({})).run({"company_ids": [cid]}).ok
+    lid = lead_of(ctx).id
+    with ctx.db.session() as s:
+        assert s.get(Lead, lid).contact.email == DAVID
+        assert company_opted_out(s, s.get(Company, cid))
+    days_later(1)
+    with ctx.db.session() as s:
+        assert lift_suppression(s, INBOX, "owner", "They asked us to write again") is None
+    with ctx.db.session() as s:
+        assert not company_opted_out(s, s.get(Company, cid))
+        assert eligible(s, ctx.settings, maria_at(s, cid)) == (True, "")
+        assert reopen_refusal(s, s.get(Lead, lid)) == "its stage is unsubscribed, which stays closed"  # its results do not change
+    days_later(1)
+    FakeIMAP.messages = {2: mail(f"Someone <{INBOX}>", f"Re: {sent.subject}", "Please unsubscribe us, for good.", in_reply_to=sent.message_id, msg_id="<again@mail.example>")}
+    run_inbox(ctx)
+    with ctx.db.session() as s:
+        assert company_opted_out(s, s.get(Company, cid))
+
+
+@pytest.mark.parametrize("emailed_at, current, counts", [
+    ("lifted after", None, False),
+    ("lifted after", "lifted after", False),
+    ("lifted after", "lifted before", False),
+    ("lifted before", "lifted after", False),  # an opt-out, its lift, a new contact emailed, a second opt-out and its lift
+    (None, "lifted after", False),
+    (None, None, True),  # nothing was ever lifted
+    ("standing", None, True),
+    ("lifted before", None, True),  # the lift is older than the stop
+    ("lifted after", "standing", True),
+    ("standing", "lifted after", True),
+    ("a dead address", "lifted after", False),  # a bounce is nobody's no, and nobody should have to lift it for this
+    ("a dead address", None, True),
+])
+def test_a_stop_that_names_nobody_speaks_for_where_its_lead_was_emailed_and_its_contact(make_ctx, emailed_at, current, counts):
+    ctx = make_ctx()
+    now = utcnow()
+    with ctx.db.session() as s:
+        co = Company(name="Harbor Goods", normalized_name="harbor goods", source="test", domain="harbor.example", state="TX", country="US")
+        s.add(co)
+        s.flush()
+        c = Contact(company_id=co.id, email="pat@harbor.example", source="website", consent_status="none")
+        s.add(c)
+        s.flush()
+        lead = Lead(company_id=co.id, contact_id=c.id, source="research", status="disqualified")
+        s.add(lead)
+        s.flush()
+        s.add(FollowUp(lead_id=lead.id, company_id=co.id, channel="email", step=1, kind="outreach", status="sent", to_email="info@harbor.example", subject="Hi", body="Body", sent_at=now - timedelta(days=5)))
+        s.add(Activity(lead_id=lead.id, company_id=co.id, type="outreach", actor="inbox_monitor", subject="Outreach: unsubscribed (Asked not to be contacted)", created_at=now - timedelta(days=2)))
+        when = {"lifted before": now - timedelta(days=3), "lifted after": now - timedelta(days=1)}
+        for value, state in (("info@harbor.example", emailed_at), ("pat@harbor.example", current)):
+            if state:
+                lifted = dict(lifted_at=when[state], lifted_by="owner", lift_reason="asked") if state in when else {}
+                s.add(Suppression(value=value, kind="email", reason="Bounced (delivery failure report)" if state == "a dead address" else "Unsubscribe", created_at=now - timedelta(days=4), **lifted))
+        s.flush()
+        assert company_opted_out(s, co) is counts
 
 
 def test_reopen_refusal_keeps_its_answers(make_ctx):
