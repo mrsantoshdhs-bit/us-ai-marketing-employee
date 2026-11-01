@@ -155,9 +155,40 @@ def test_their_own_business_below_the_quote_suppresses_nothing_either():
     "Stop sending them.", "stop emailing our team", "We want you to stop emailing us.", "I need you to stop emailing me.", "Take us off this thread", "I want to stop emailing you.",
     "We need to stop sending invoices by hand. Separately, please stop emailing me.", "Don't email me the deck. In fact, don't email me at all.",
     "No further contact with the company please.", "No further contact with our company.", "Please opt me out of the plan.", "Take us off our list.",
+    # stopping something with no paperwork named is them stopping us
+    "We want to stop emailing with you.", "We want to stop emailing with your company.", "I just want to stop emailing back and forth with you. Thanks.", "I want to stop emailing now.",
+    "I'd like to stop emailing altogether, thanks.", "We need to stop sending replies to you people.", "We want to stop sending reports to you.",
+    # whose link it is: only theirs is their business
+    "Your newsletter unsubscribe link does not work.", "Your newsletter unsubscribe link is broken. Why do I keep getting these?", "The newsletter unsubscribe link does not work.",
+    "Newsletter unsubscribe link is broken", "Our unsubscribe link did nothing, I still get your mail.", "Your unsubscribe page is broken.", "Your unsubscribe rate must be huge.",
+    # no further contact with someone, unless it is an account of the past
+    "No further contact with the CEO please.", "No further contact with the owner of this address.", "We want no further contact with the people at your firm.",
+    "No further contact with the person you emailed.", "No further contact with the recipient.", "I want to have no further contact with the vendor.",
+    # off a list of any age, whoever's they call it
+    "Take us off old lists please.", "Take us off old contacts.", "Take us off our distribution.", "Take us off our marketing.", "Take us off our old customer list.", "Take us off our system.",
+    # a file, and everything else with it
+    "Don't email me the report or anything else again.", "Don't email me the proposals. Or anything else.", "Do not email us the reports ever again", "Don't email me the deck. Stop.",
+    "Don't email me the newsletter.", "Don't email me those offers.",
 ])
 def test_a_plain_opt_out_stays_one(text):
     assert read(text)[0] == "unsubscribe", read(text)
+
+
+@pytest.mark.parametrize("text", ["We need to stop writing reports by hand.", "We want to stop sending out our invoices by hand, can you help?", "Our newsletter unsubscribe link is broken and customers complain.",
+                                  "Get us off our old billing tool.", "Don't email me the report, just bring it to the call."])
+def test_what_names_their_own_paperwork_or_tools_goes_to_a_person(text):
+    category, confidence, why = read(text)
+    assert (category, confidence) == ("other", "low") and why[0].startswith(ri.OWN_BUSINESS_REASON)
+
+
+@pytest.mark.parametrize("text", ["I'll never hear from your team again if I sign?", "I never want to hear from you again?"])
+def test_a_question_about_never_hearing_from_us_suppresses_nobody(text):
+    assert read(text)[:2] == ("question", "medium")
+
+
+@pytest.mark.parametrize("text", ["I never want to hear from you again.", "We'd like to never hear from your company again."])
+def test_never_hearing_from_us_said_outright_is_an_opt_out(text):
+    assert read(text)[0] == "unsubscribe"
 
 
 @pytest.mark.parametrize("text", PLAIN_OPT_OUTS)
@@ -202,9 +233,19 @@ def test_a_date_after_the_opt_out_words_is_an_objection_with_a_reminder(text, mo
     "Stop emailing me. We close the books on April 15.", "Stop emailing me. See you at the expo in March.", "Don't email me until April, or ever.", "Don't email me until April if at all.",
     "Stop emailing me until further notice.", "Stop sending me emails until I ask.", "Do not email me until hell freezes over.", "No more emails until I ask for them.",
     "Please do not contact me again.", "Never email me after April, or before it.", "Don't email me. April is our busy month.", "Don't email me until April. Actually, take me off your list.",
+    "Don't email me until April. Actually never.", "Don't email me until April. Or rather never.", "No more emails until April please. Actually no more at all.",
+    "Do not contact me until next year. If at all.", "Don't email me until April. Not even then.", "Don't email me until April. Actually, don't.", "Don't email me until April. On second thought, don't.",
 ])
 def test_an_opt_out_without_a_date_of_its_own_stays_one(text):
     assert read(text)[0] == "unsubscribe", read(text)
+
+
+@pytest.mark.xfail(reason="suggest() belongs to the replies-acting group: drop this mark when the objection branch gives no draft for a dated no", strict=False)
+def test_a_date_leaves_no_draft_that_writes_to_them_now(make_ctx):
+    ctx, r = answer(make_ctx, "Don't email me until April.")
+    assert r.suggested_followup_id is None
+    with ctx.db.session() as s:
+        assert not s.execute(select(FollowUp).where(FollowUp.kind == "response")).scalars().all()
 
 
 def test_a_date_stops_the_sequence_suppresses_nothing_and_leaves_a_reminder(make_ctx):
@@ -390,6 +431,15 @@ def test_passing_it_on_is_not_a_no(text):
 @pytest.mark.parametrize("text", ["Yes, worth a chat. How does Wednesday look?", "Yes please, send me a time.", "Worth a conversation. When are you free?"])
 def test_a_plain_yes_is_interested(text):
     assert classified(text).category == "interested"
+
+
+def test_worth_a_talk_with_a_question_about_when_is_interest():
+    assert read("Probably worth a conversation, when are you free?")[0] == "interested"
+
+
+@pytest.mark.parametrize("text", ["Worth a call? No.", "Is this worth a chat?", "Is this worth a chat with your team?", "Would it be worth a call, do you think?"])
+def test_asking_whether_it_is_worth_a_talk_is_no_good_news(text):
+    assert read(text)[:2] == ("question", "medium")
 
 
 @pytest.mark.parametrize("text", ["Yes", "Yes please", "Not worth a call."])

@@ -95,7 +95,7 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
         # Only when nothing follows: "don't send me more info" and "don't send more details, just call me" stop nothing.
         r"(do not|don'?t|never) send (me |us )?(any |anything )?(more|further|else)( of (these|this|them|your \w+))?(?=\s*($|[.!,;]\s*($|thanks?\b|thank you\b|please\b)))|"
         r"(not interested|no thanks|no, thank you)\W+(please |pls |just )?stop(?=\W*($|[.!]))|"
-        r"forget (this|my|our) (e-?mail )?address|never (want to |wish to |to )hear from (you|your|anyone)\b|never hear from (you|your)\b[^.?!]{0,30}\bagain|"
+        r"forget (this|my|our) (e-?mail )?address|never (want to |wish to |to )hear from (you|your|anyone)\b(?![^.!?\n]*\?)|never hear from (you|your)\b[^.?!]{0,30}\bagain(?![^.!?\n]*\?)|"
         r"(do not|don'?t|no longer)( \w+)? (wish|want|like|need) to (receive|get)( \w+){0,3} "
         r"(e-?mails?|messages?|mail|communications?|newsletters?)|"
         r"(do not|don'?t|no longer)( \w+)? (wish|want|like|need) to hear (back )?from (you|your)|"
@@ -117,7 +117,7 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
     ("interested", re.compile(r"\b(interested|sounds? (good|great|interesting|in(te|t|tr)[a-z]{0,3}st(ed|ing))|"
                               r"in(te|tr)[a-z]{0,3}st(ed|ing)|let'?s (talk|chat|connect|set up)|"
                               r"happy to (chat|talk|connect|meet)|book a (time|call|meeting)|schedule a (call|meeting)|"
-                              r"set up a (call|meeting)|tell me more|send (me )?(more|some) (info|details)|send (me|us) a time|worth a (chat|conversation|call)|"
+                              r"set up a (call|meeting)|tell me more|send (me )?(more|some) (info|details)|send (me|us) a time|(?<!is this )(?<!is it )(?<!would it be )(?<!would this be )worth a (chat|conversation|call)(?![^.!?,\n]*\?)|"
                               rf"what (does it|would it) cost|{_HOW_MUCH}|pricing|availab(le|ility)|free (on|next)|"
                               r"(monday|tuesday|wednesday|thursday|friday) (works|at|morning|afternoon))\b", re.I)),
     ("objection", re.compile(rf"{_NO_BUDGET}|" r"\b(too expensive|budget (is|was)|not (a priority|right now|now)|maybe later|"
@@ -379,7 +379,8 @@ CHECK_BACK = re.compile(r"\b((check|circle|come|get) back|touch base|reach (back
 _MONTH_WORD = rf"(?:{'|'.join(_MONTHS)}|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)"
 # An opt-out's words with a date after them: "don't email me until April", "stop emailing me until the new year". Not for good: the sequence
 # stops, nothing is suppressed, and a person gets a reminder for the date. "until I contact you", "until further notice" name no date and stay
-# opt-outs, and so does a date with "ever" or "at all" behind it. A date in another sentence is not this: it has to follow the words.
+# opt-outs, and so does a date with "ever" or "at all" anywhere behind it ("until April. Actually never."). A date in another sentence is not
+# this: it has to follow the words.
 NOT_UNTIL = re.compile(
     r"\b((do not|don'?t)( ever)? (e-?mail|contact|message|write( to)?|reach out( to)?|send)( (me|us))?( any| anything| any more)?( more| further| other)?( e-?mails?| messages?| mail)?|"
     r"(stop|quit|cease) (e-?mailing|contacting|sending|messaging|mailing|writing( to)?)( (me|us))?( all| the| these| those| your| any)?( e-?mails?| messages?| mail)?|"
@@ -388,7 +389,7 @@ NOT_UNTIL = re.compile(
     rf"(?:(?P<month>{_MONTH_WORD})\b( (?P<day>\d{{1,2}})(st|nd|rd|th)?\b)?(,? (?P<year>20\d\d)\b)?|"
     rf"(?P<dayfirst>\d{{1,2}})(st|nd|rd|th)?( of)? (?P<month2>{_MONTH_WORD})\b|(?P<numeric>0?[1-9]|1[0-2])/(?P<numday>\d{{1,2}})(/\d{{2,4}})?\b|"
     r"(?P<quarter>q[1-4])\b( (?P<qyear>20\d\d)\b)?|(?P<coming>(the )?new year|next quarter|next year)\b)"
-    r"(?![^.!?]*\b(ever|never|at all|for good)\b)", re.I)
+    r"(?![\s\S]*\b(ever|never|at all|for good|not even|on second thought|actually,? (no|not|do not|don'?t))\b)", re.I)
 # Someone else will write, or they will: "Our CFO will get back to you in March", "Sam can reach out in March". Not "you can", not "can we".
 _SOMEONE_WILL = re.compile(r"\b(?!you\b|we\b)[\w']+('ll| will| shall| would| might| may| is going to| are going to| can| could)( \w+){0,2} $|"
                            r"\b(i|we)('ll| will| shall| am going to| are going to)( \w+){0,2} $", re.I)
@@ -494,15 +495,19 @@ NOTICE_SPEAKER = re.compile(r"\b(i|i'm|i've|i'd|me|my|mine|we are|we were|we rec
 NOTICE_REMOVAL = re.compile(r"\b(remove|delete|erase)\s+(it|this|them|these|that|same|copies|e-?mails?|messages?)\s+from\s+(your|all)\s+(records?|systems?)\b", re.I)
 # Their own business in opt-out words: "we need to stop sending invoices by hand", "our unsubscribe rate", "get us off our old ERP". Taken out
 # of the text before reading it again, and only here: the opt-out wording itself is not narrowed, and any other opt-out in the email still counts.
+# Each one names what it is about, because anything less may be an opt-out: "we want to stop emailing with you", "no further contact with the CEO",
+# "take us off old lists", "your newsletter unsubscribe link is broken" all stay what they were.
+_THEIR_PAPERWORK = (r"(decks?|invoices?|bills?|files?|documents?|attachments?|pdfs?|contracts?|proposals?|slides?|reports?|quotes?|spreadsheets?|statements?|"
+                    r"receipts?|faxes|purchase orders?|paperwork)")
 OWN_BUSINESS = re.compile(
-    r"\b(we|i)( really| just)?( need| want| have| would like|'d like| are trying|'re trying) to (stop|quit|cease) (e-?mailing|sending|writing to) "
-    r"(?!(me|us|you|this|these|those|that|it|them|your|any|all|anyone)\b)\w+|"
-    r"\b(our|their|customers'?|newsletter)( newsletter)? unsubscribe (rates?|pages?|links?)\b|\bunsubscribe rates?\b|"
+    r"\b(we|i)( really| just)?( need| want| have| would like|'d like| are trying|'re trying) to (stop|quit|cease) (e-?mailing|sending|writing) "
+    rf"((out|our|the|all|all our|these|those) )*{_THEIR_PAPERWORK}\b(?![^.!?\n]*\b(to|with|from|at) (you|your)\b)|"
+    r"\b(our|their|customers'?)( newsletter)? unsubscribe (rates?|pages?|links?)\b(?![^.!?\n]*\b(your|still)\b)|(?<!your )(?<!your newsletter )\bunsubscribe rates?\b|"
     r"\ban opt[- ]?out (on|for) (our|their)\b|"
     r"\bopt[- ]?out of (the|our)( (?!e-?mails?\b|mail\w*\b|marketing\b|contact\w*\b|list\b)\w+){0,3} (plan|contract|trial|renewal)s?\b|"
-    r"\b(take|get) us off (our\b(?! (\w+ )?(list|mailing|database))|old\b|spreadsheets?\b)|"
-    r"\bno further contact with (our|their|the)\b(?! (undersigned|sender|writer|author|company|firm|business|organi[sz]ation|team|staff|office|above)\b)|"
-    r"\b(do not|don'?t) e-?mail (me|us) (the|that|those) (decks?|invoices?|files?|documents?|attachments?|pdfs?|contracts?|proposals?|slides?|reports?|quotes?)\b", re.I)
+    r"\b(take|get) us off ((our|old)( \w+){0,2}? (erps?|software|excel|platforms?|tools?|vendors?|providers?|process(es)?|stack|paper\w*|spreadsheets?)|our old( \w+)? systems?|spreadsheets?)\b|"
+    r"\bhad no further contact with (our|their|the)\b|"  # an account of the past; "no further contact with the CEO" asks for it
+    rf"\b(do not|don'?t) e-?mail (me|us) (the|that|those) {_THEIR_PAPERWORK}\b(?![\s\S]*\b(anything|ever|again|any ?more|at all|stop)\b)", re.I)
 
 
 def _is_notice(paragraph: str) -> bool:
