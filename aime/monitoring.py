@@ -17,7 +17,7 @@ from aime.backup import OFFSITE_PROBLEM, offsite_problem_words
 from aime.config import Settings
 from aime.db import kv_get, kv_set
 from aime.llm.ollama import OllamaProvider
-from aime.models import AgentRun, Alert, JobState
+from aime.models import AgentRun, Alert, JobRun, JobState
 from aime.notify import notify_alert
 from aime.session_info import session_kind
 from aime.timeutil import utcnow
@@ -52,6 +52,18 @@ def agent_stats(session: Session, days: int = 7) -> list[dict]:
             "llm_ms": sum(r.llm_ms or 0 for r in runs), "llm_cost_usd": round(sum(r.llm_cost_usd or 0 for r in runs), 4),
         })
     return out
+
+
+# What a failed run says when this PC could not reach the network: DNS failures (11001-11004 on Windows) and no route.
+NO_NETWORK = re.compile(r"gaierror|getaddrinfo|name or service not known|name resolution|nodename nor servname"
+                        r"|network is unreachable|no route to host|errno 1100[1-4]|winerror 100(51|65)", re.I)
+
+
+def network_cause(session: Session, job: str) -> str:
+    """Plain words for a job's latest failure when it was the network, otherwise nothing. Fixed words: no error text."""
+    errors = [session.execute(select(model.error).where(model.job == job, model.status == "failed", model.error.is_not(None))
+                              .order_by(model.id.desc()).limit(1)).scalar() for model in (AgentRun, JobRun)]
+    return ": no internet or DNS at the last try" if any(e and NO_NETWORK.search(e) for e in errors) else ""
 
 
 # Alerts raised before keys existed (until 27 Oct 2026): their key is read from the message.
@@ -173,7 +185,7 @@ def check_health(session: Session, settings: Settings, llm_probe: Callable[[], b
         offsite = offsite if offsite and offsite.get("local_ok") else None
         if st.consecutive_failures >= 2:
             msg = (offsite_problem_words(offsite, st.consecutive_failures) if offsite
-                   else f"Job '{spec.name}' failed {st.consecutive_failures} times in a row")
+                   else f"Job '{spec.name}' failed {st.consecutive_failures} times in a row{network_cause(session, spec.name)}")
             issues.append(msg)
             active.add(f"job_failing:{spec.name}")
             created += alert_once(session, "error", "monitor", msg, settings, key=f"job_failing:{spec.name}")

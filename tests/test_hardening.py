@@ -1,5 +1,6 @@
 """Production-hardening tests: migrations, backups, isolation, recovery, security, compliance."""
 
+import hashlib
 import logging
 import os
 import re
@@ -353,6 +354,31 @@ def test_secret_scan_blocks_credentials_and_data(tmp_path):
     res = subprocess.run([sys.executable, "scripts/secret_scan.py", "--staged"], cwd=repo, capture_output=True, text=True)
     assert res.returncode == 1
     assert "GitHub token" in res.stdout and "personal email" in res.stdout and "runtime data" in res.stdout
+
+
+def foreign_addresses(text):
+    """Addresses in a document that are neither examples nor the owner's own business addresses (kept here as digests)."""
+    found = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}", text)
+    return [a for a in found if a.lower().rsplit("@", 1)[1].rsplit(".", 1)[-1] not in ("example", "test", "invalid")
+            and a.lower().rsplit("@", 1)[1] not in ("example.com", "example.org", "example.net", "yourdomain.com")
+            and hashlib.sha256(a.lower().encode()).hexdigest() not in OWN_BUSINESS_ADDRESSES]
+
+
+OWN_BUSINESS_ADDRESSES = {
+    "252f1a62a372c34d46f0d27aa793133f27ee3b6d2eec35dcebb15947413c0fbb",
+    "de87dc7ad743141d9b5b3f382e5d30bdd8fcf9c0cc350070a1605c8c3f548c98",
+}
+
+
+def test_documents_name_leads_by_number_never_by_address():
+    """Status documents are written by hand and the repository is read by others: a prospect's address stays in the database."""
+    assert foreign_addresses("Write to sales@northwind-widgets.co or a@b.example") == ["sales@northwind-widgets.co"]
+    found = {}
+    for path in (ROOT / "docs").rglob("*"):
+        if path.is_file() and path.suffix in (".md", ".txt", ".html", ".toml", ".json", ".csv"):
+            if hits := foreign_addresses(path.read_text(encoding="utf-8", errors="replace")):
+                found[path.name] = hits
+    assert not found
 
 
 def test_repository_ignores_private_files():

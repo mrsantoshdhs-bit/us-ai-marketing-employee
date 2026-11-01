@@ -121,6 +121,9 @@ def cmd_serve(args, ctx) -> int:
     from aime.dashboard_probe import start_self_check
 
     start_self_check(host, port, ctx.settings.data_dir)  # a hung dashboard ends itself, so that the task can start a new one
+    from aime.desk_notices import start as start_desk_notices
+
+    start_desk_notices(ctx)  # the tick runs in the background session: toasts for the signed-in person come from here
     # proxy_headers off: nothing sits in front of this local dashboard, so X-Forwarded-For is never trusted (it
     # would let any local program pick the address the inbound API's rate limit counts)
     uvicorn.run(create_app(ctx), host=host, port=port, log_level="info", proxy_headers=False)

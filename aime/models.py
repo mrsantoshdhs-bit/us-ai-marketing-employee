@@ -871,8 +871,8 @@ class CampaignAuthorization(Timestamped, Base):
 
 
 class AuditEvent(Base):
-    """Who changed an operating mode, the automation state or a campaign authorization, and every email a campaign
-    approved instead of a person. Append-only."""
+    """Who changed an operating mode, the automation state or a campaign authorization, every email a campaign
+    approved instead of a person, and each sign-in lockout. Append-only."""
 
     __tablename__ = "audit_events"
 
