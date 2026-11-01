@@ -220,13 +220,25 @@ def test_an_opt_out_from_a_personal_address_naming_the_address_reaches_a_person(
     assert v.to not in suppressed(ctx), "anyone can write someone's address: it is never suppressed by this"
 
 
-@pytest.mark.xfail(not hasattr(reply_intel, "lead_named_in_body"), reason="for the integrator: the hold is replies-acting's lead_named_in_body", strict=True)
-def test_an_opt_out_from_a_personal_address_naming_the_address_holds_step_2(make_ctx, monkeypatch, clock, server):
+def test_an_opt_out_from_a_personal_address_naming_the_address_lets_no_step_go(make_ctx, monkeypatch, clock, server):
+    """Read and kept, the mail counts on the company's record (outreach.company_opted_out), so step 2 stops. The named address is not suppressed."""
     clock(IN_WINDOW)
     srv = server({"INBOX": {}})
     ctx = mail_world(make_ctx, monkeypatch, imap=srv.factory)
     _, v, step2 = we_wrote(ctx)
     srv.folders["INBOX"][1] = personal_opt_out(v)
+    tick(ctx, srv)
+    assert FakeSMTP.sent == [] and status_of(ctx, step2)[0] in ("approved", "cancelled")
+    assert v.to not in suppressed(ctx)
+
+
+@pytest.mark.xfail(not hasattr(reply_intel, "lead_named_in_body"), reason="for the integrator: the hold is replies-acting's lead_named_in_body", strict=True)
+def test_other_mail_from_a_personal_address_naming_the_address_holds_step_2(make_ctx, monkeypatch, clock, server):
+    clock(IN_WINDOW)
+    srv = server({"INBOX": {}})
+    ctx = mail_world(make_ctx, monkeypatch, imap=srv.factory)
+    _, v, step2 = we_wrote(ctx)
+    srv.folders["INBOX"][1] = K.msg(PERSONAL, "A word about your emails", f"You have been writing to {v.to}. Please call me before you write again.", tag="pers2")
     tick(ctx, srv)
     assert FakeSMTP.sent == [] and status_of(ctx, step2)[0] == "approved"
     assert v.to not in suppressed(ctx)
