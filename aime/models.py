@@ -148,6 +148,7 @@ class Contact(Timestamped, Base):
     email_confidence: Mapped[str | None] = mapped_column(String(10))  # high: next to the name | medium: name match
     email_evidence: Mapped[str | None] = mapped_column(Text)
     email_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    erased_name_hash: Mapped[str | None] = mapped_column(String(64))  # one-way, on an erased row: research does not collect them again
 
     company: Mapped[Company | None] = relationship(back_populates="contacts")
 

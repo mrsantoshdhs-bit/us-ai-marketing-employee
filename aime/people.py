@@ -11,6 +11,7 @@ The evidence is the exact published text and the page URL. Titles are kept as pu
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 
@@ -169,6 +170,11 @@ def is_title(text: str) -> bool:
     return bool(TITLE_RE.search(t))
 
 
+def _title_of_someone_who_decides(text: str) -> bool:
+    """is_title takes any short line with "owner" in it, so a sentence on a values card passes it."""
+    return is_title(text) and decision_maker_title(clean_title(text))
+
+
 def _run_together(word: str) -> bool:
     """Words stuck together by a page's menu ("HomeAbout"); a name's own capital comes after a short prefix ("McDonald",
     "DeShawn", "MacArthur")."""
@@ -287,12 +293,13 @@ def _pairs(items: list[str], url: str, company: str | None, confidence: str, out
     names = [i for i, t in enumerate(items) if looks_like_name(t, company)]
     if not names:
         return
-    nxt = sum(1 for i in names if i + 1 < len(items) and is_title(items[i + 1]) and not looks_like_name(items[i + 1]))
-    prv = sum(1 for i in names if i > 0 and is_title(items[i - 1]) and not looks_like_name(items[i - 1]))
+    is_one = _title_of_someone_who_decides
+    nxt = sum(1 for i in names if i + 1 < len(items) and is_one(items[i + 1]) and not looks_like_name(items[i + 1]))
+    prv = sum(1 for i in names if i > 0 and is_one(items[i - 1]) and not looks_like_name(items[i - 1]))
     title_first = prv > nxt
     for i in names:
         j = i - 1 if title_first else i + 1
-        if (0 <= j < len(items) and is_title(items[j]) and not looks_like_name(items[j], company)
+        if (0 <= j < len(items) and is_one(items[j]) and not looks_like_name(items[j], company)
                 and not names_other_org(items[j], company)):
             name, title = items[i].strip(" ,|·•–—-:"), clean_title(items[j])
             evidence = f"{title} — {name}" if title_first else f"{name} — {title}"
@@ -319,7 +326,7 @@ def extract_people(pages, company: str | None = None) -> list[PersonFinding]:
         for block in page.blocks:
             text = block[1]
             m = SPLIT_RE.match(text) if on_team_page and block in content_set else None
-            if m and looks_like_name(m["name"], company) and is_title(m["title"]) and not names_other_org(m["title"], company):
+            if m and looks_like_name(m["name"], company) and _title_of_someone_who_decides(m["title"]) and not names_other_org(m["title"], company):
                 title = clean_title(m["title"])
                 found.append(PersonFinding(m["name"].strip(), title, role_category(title), "high", text, page.url))
             if len(text) < 30:
@@ -354,6 +361,13 @@ def same_name(a: str, b: str) -> bool:
     bare_a = " ".join(w for w in a.split() if len(w) > 1)
     bare_b = " ".join(w for w in b.split() if len(w) > 1)
     return bare_a == bare_b and len(bare_a.split()) >= 2 and (bare_a == a or bare_b == b)
+
+
+def name_hash(full_name: str) -> str:
+    """One-way, for an erased person (crm_ops.erase_person). Names that same_name takes for one person hash alike: the middle initial is left out."""
+    name = normalize_name(full_name)
+    bare = " ".join(w for w in name.split() if len(w) > 1)
+    return hashlib.sha256((bare if len(bare.split()) >= 2 else name).encode()).hexdigest()
 
 
 def merge_findings(found: list[PersonFinding]) -> list[PersonFinding]:

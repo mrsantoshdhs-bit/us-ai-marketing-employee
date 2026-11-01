@@ -17,12 +17,13 @@ from sqlalchemy.orm import Session
 
 from aime.agents.base import AgentError, BaseAgent, RetryPolicy
 from aime.agents.contracts import BlockedItem
-from aime.company_research import (WITHDRAWN, build_snapshot, cik_of, is_plausible_website, save_contact,
+from aime.company_research import (WITHDRAWN, build_snapshot, cik_of, has_real_text, is_plausible_website, save_contact, was_erased,
                                    withdraw_missing)
-from aime.contact_validation import STATUS_OK, MailDomainChecker, assign_published_emails, recheck_emails
-from aime.crm_ops import log_activity, primary_lead
+from aime.contact_validation import STATUS_OK, MailDomainChecker, address_was_erased, assign_published_emails, recheck_emails
+from aime.crm_ops import OPEN_LEAD_STATUSES, log_activity, primary_lead
 from aime.matching import competitor_evidence
-from aime.models import Company, Contact, Lead, ResearchSnapshot
+from aime.models import Company, Contact, FollowUp, Lead, ResearchSnapshot
+from aime.outreach import REACHED_PROSPECT
 from aime.people import extract_people, merge_findings
 from aime.redact import redact
 from aime.site_reader import SiteReader
@@ -155,6 +156,7 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                 status = "done"  # the website could not be read, but the filings name the officers
         elif not pages:
             status = "no_website"
+        people = [f for f in people if not was_erased(session, company, f)]  # or the snapshot would keep the name, and a Review task show it
         if status == "done" and not people:
             status = "no_people"
             out.no_people.append(company.id)
@@ -166,7 +168,7 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             contacts.append(contact)
             out.contacts_created += int(created)
         out.people_found += len(people)
-        site_read = bool(pages) and pages[0].ok
+        site_read = bool(pages) and pages[0].ok and any(map(has_real_text, pages))
         if site_read:
             for c in withdraw_missing(session, company, people, pages):
                 out.contacts_withdrawn += 1
@@ -174,6 +176,7 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                              f"{company.domain}", self.name, type_="research", company_id=company.id,
                              lead_id=lead.id if lead else None)
         snapshot = build_snapshot(company, pages, people, status)
+        snapshot.emails = [e for e in snapshot.emails if not address_was_erased(session, e["email"])]  # and the name printed by it
         session.add(snapshot)
         titles = " ".join(p.title for p in pages if p.ok and p.kind == "home")  # the page title is its own words too
         phrase = competitor_evidence(f"{snapshot.description or ''} {' '.join(snapshot.services_offered or [])} {titles}")
@@ -190,10 +193,11 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             company.phone = snapshot.phones[0]["phone"][:40]  # as published on the company's own site
         researched = session.execute(select(Contact).where(Contact.company_id == company.id, Contact.source.in_(
             ("website", "sec_filing")))).scalars().all()
-        if lead and researched and (lead.contact_id is None or (lead.contact and lead.contact.source in ("website", "sec_filing", WITHDRAWN))):
-            lead.contact_id = best_contact(researched).id
-        elif lead and lead.contact and lead.contact.source == WITHDRAWN:
-            lead.contact_id = None
+        if lead and not self._contact_stays(session, lead):
+            if researched and (lead.contact_id is None or (lead.contact and lead.contact.source in ("website", "sec_filing", WITHDRAWN))):
+                lead.contact_id = best_contact(researched).id
+            elif lead.contact and lead.contact.source == WITHDRAWN:
+                lead.contact_id = None
         if status == "failed":
             self._note_failed_read(session, company, out, f"Website could not be read ({pages[0].status})")
         else:
@@ -203,6 +207,20 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         log_activity(session, f"Company research: {read} page(s) read, {len(people)} decision-maker(s) named"
                      + (f" ({status})" if status != "done" else ""), self.name, type_="research",
                      body=snapshot.summary, company_id=company.id, lead_id=lead.id if lead else None)
+
+    @staticmethod
+    def _contact_stays(session: Session, lead: Lead) -> bool:
+        """The lead keeps its contact, whoever a re-read finds. A closed lead, or one whose contact said no, keeps the record of who
+        it was about. Once an email reached the prospect the sequence stays with the address it went to: "I wanted to follow up on
+        my note" means nothing to someone else, and a do-not-contact entry on that address would stop covering the lead. A
+        rehearsal in test mode reached nobody. An open lead with no contact can always be given one."""
+        if lead.status not in OPEN_LEAD_STATUSES:
+            return True
+        if lead.contact_id is None:
+            return False
+        return (lead.outreach_status in ("unsubscribed", "bounced") or (lead.contact is not None and lead.contact.consent_status == "opted_out")
+                or session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
+                                                             FollowUp.status.in_(("sent", "sending", "uncertain")), REACHED_PROSPECT).limit(1)).first() is not None)
 
 
 def best_contact(contacts: list[Contact]) -> Contact | None:

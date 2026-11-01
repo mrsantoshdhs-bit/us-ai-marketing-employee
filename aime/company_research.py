@@ -16,10 +16,12 @@ from sqlalchemy.orm import Session
 from aime.dedupe import normalize_name, registrable_domain
 from aime.matching import match_services
 from aime.models import Company, Contact, ResearchSnapshot
-from aime.people import PersonFinding, looks_like_name, relevance, same_name, split_name
+from aime.people import PersonFinding, looks_like_name, name_hash, relevance, same_name, split_name
 from aime.timeutil import utcnow
 
 MIN_DESCRIPTION = 60
+MIN_PAGE_TEXT, MIN_PAGE_BLOCKS = 200, 3
+HOSTING_BLURB = "Made in"  # "Made in Notion...": what a hosting platform says of itself, not the company's words
 
 
 def describe(pages) -> tuple[str | None, str | None]:
@@ -27,11 +29,11 @@ def describe(pages) -> tuple[str | None, str | None]:
     for page in sorted((p for p in pages if p.ok), key=lambda p: {"home": 0, "about": 1}.get(p.kind, 2)):
         for key in ("description", "og:description"):
             text = page.meta.get(key)
-            if text and len(text) >= MIN_DESCRIPTION:
+            if text and len(text) >= MIN_DESCRIPTION and not text.startswith(HOSTING_BLURB):
                 return text[:500], page.url
     for page in (p for p in pages if p.ok and p.kind in ("home", "about")):
         for tag, text in page.blocks:
-            if tag == "p" and len(text) >= 80:
+            if tag == "p" and len(text) >= 80 and not text.startswith(HOSTING_BLURB):
                 return text[:500], page.url
     return None, None
 
@@ -126,9 +128,17 @@ def _same_person(contact: Contact, finding: PersonFinding) -> bool:
     return same_name(normalize_name(f"{contact.first_name or ''} {contact.last_name or ''}"), finding.key)
 
 
-def save_contact(session: Session, company: Company, finding: PersonFinding, service: str | None) -> tuple[Contact, bool]:
+def was_erased(session: Session, company: Company, finding: PersonFinding) -> bool:
+    """This person asked to be erased from this company's records (crm_ops.erase_person), and its pages still name them."""
+    return session.execute(select(Contact.id).where(Contact.company_id == company.id, Contact.erased_name_hash == name_hash(finding.full_name))).first() is not None
+
+
+def save_contact(session: Session, company: Company, finding: PersonFinding, service: str | None) -> tuple[Contact | None, bool]:
     """Create or refresh the contact for a researched person. Never overwrites a person's own details
-    (inbound or manual contacts) and never adds an email: emails are assigned from published pages only."""
+    (inbound or manual contacts) and never adds an email: emails are assigned from published pages only.
+    Someone who asked to be erased is not collected again: no contact, and nothing created."""
+    if was_erased(session, company, finding):
+        return None, False
     rank = {"high": 2, "medium": 1, None: 0}
     existing = next((c for c in session.execute(select(Contact).where(Contact.company_id == company.id)).scalars()
                      if _same_person(c, finding)), None)
@@ -156,19 +166,25 @@ def _page_key(url: str | None) -> str:
     return f"{parsed.netloc.lower().removeprefix('www.')}{parsed.path.rstrip('/')}"
 
 
+def has_real_text(page) -> bool:
+    """The page came back with words of its own. An empty JavaScript shell answers 200 as well, and says nothing about who works there."""
+    content = page.blocks if page.content_blocks is None else page.content_blocks
+    return page.ok and (len(content) >= MIN_PAGE_BLOCKS or sum(len(t) for _, t in content) >= MIN_PAGE_TEXT)
+
+
 def withdraw_missing(session: Session, company: Company, people: list[PersonFinding], pages=None) -> list[Contact]:
     """After a successful re-read of the company's site: people recorded from it earlier who are no longer found
     (or no longer pass the rules) are withdrawn, never deleted. Anyone with an email queued or sent is kept for a
     person to review. With `pages`, only people whose page (or a page of the same kind) was read this time can
-    be withdrawn: a team page that failed to load says nothing about its people."""
+    be withdrawn: a team page that failed to load, or came back with no text, says nothing about its people."""
     from aime.models import FollowUp
     from aime.site_reader import classify_link
 
     def kind_of(url: str | None) -> str | None:
         return "home" if urlparse(url or "").path.rstrip("/") == "" else classify_link(url or "", "")
 
-    ok_pages = {_page_key(p.url) for p in pages or [] if p.ok}
-    ok_kinds = {p.kind for p in pages or [] if p.ok}
+    ok_pages = {_page_key(p.url) for p in pages or [] if has_real_text(p)}
+    ok_kinds = {p.kind for p in pages or [] if has_real_text(p)}
     withdrawn = []
     for c in session.execute(select(Contact).where(Contact.company_id == company.id, Contact.source == "website",
                                                    Contact.last_name.is_not(None))).scalars().all():
