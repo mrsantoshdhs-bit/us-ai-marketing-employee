@@ -1097,8 +1097,10 @@ def test_a_stop_that_names_nobody_needs_the_lift_of_its_own_contact(make_ctx):
         assert not company_opted_out(s, co)
 
 
-def test_after_the_re_read_moves_the_contact_a_lift_of_the_emailed_inbox_clears_the_company(make_ctx):
-    """The normal first opt-out: every email so far went to an inbox, and the 30-day re-read then finds a named person for the closed lead."""
+@pytest.mark.parametrize("moved_by_an_older_build", [False, True])
+def test_after_the_re_read_finds_a_person_a_lift_of_the_emailed_inbox_clears_the_company(make_ctx, moved_by_an_older_build):
+    """The normal first opt-out: every email so far went to an inbox, and the 30-day re-read then finds a named person for the closed lead.
+    A re-read now leaves a closed lead's contact alone, but an older build moved it, and leads it moved are still on file."""
     ctx, _s, sent, cid, site_now_shows = emailed(make_ctx)
     assert sent.to_email == INBOX
     opt_out_by_reply(ctx, sent, who=INBOX)
@@ -1107,7 +1109,10 @@ def test_after_the_re_read_moves_the_contact_a_lift_of_the_emailed_inbox_clears_
     assert CompanyResearchAgent(ctx, mail_checker=FakeChecker({})).run({"company_ids": [cid]}).ok
     lid = lead_of(ctx).id
     with ctx.db.session() as s:
-        assert s.get(Lead, lid).contact.email == DAVID
+        lead = s.get(Lead, lid)
+        assert lead.contact.email == INBOX
+        if moved_by_an_older_build:
+            lead.contact_id = s.execute(select(Contact.id).where(Contact.email == DAVID)).scalar_one()
         assert company_opted_out(s, s.get(Company, cid))
     days_later(1)
     with ctx.db.session() as s:
@@ -1115,7 +1120,8 @@ def test_after_the_re_read_moves_the_contact_a_lift_of_the_emailed_inbox_clears_
     with ctx.db.session() as s:
         assert not company_opted_out(s, s.get(Company, cid))
         assert eligible(s, ctx.settings, maria_at(s, cid)) == (True, "")
-        assert reopen_refusal(s, s.get(Lead, lid)) == "its stage is unsubscribed, which stays closed"  # its results do not change
+        # its results do not change: the entry lifted is on the lead's own address only when the contact stayed, and the lead stays closed
+        assert reopen_refusal(s, s.get(Lead, lid)) == ("its stage is unsubscribed, which stays closed" if moved_by_an_older_build else "the lead is disqualified")
     days_later(1)
     FakeIMAP.messages = {2: mail(f"Someone <{INBOX}>", f"Re: {sent.subject}", "Please unsubscribe us, for good.", in_reply_to=sent.message_id, msg_id="<again@mail.example>")}
     run_inbox(ctx)
