@@ -36,7 +36,7 @@ from aime.models import (Activity, Alert, Contact, FollowUp, InboundEmail, Inbou
                          ResearchSnapshot, Signal)
 from aime.monitoring import alert_once, resolve_alerts
 from aime.outreach import (ALREADY_CUSTOMER, COMPANY_OPTED_OUT, OPEN, REACHED_PROSPECT, RUNNING_STAGES, STOP_STATUSES, TEST_SENT, TOPICS,
-                           company_opted_out, draft_outreach, draft_reengage, eligible, gather_evidence, sent_earlier, record_delivery,
+                           _emailed_address_closed, _merged_family, company_opted_out, draft_outreach, draft_reengage, eligible, gather_evidence, sent_earlier, record_delivery,
                            set_status, stop_sequence)
 from aime.people import looks_like_name
 from aime.pipeline import pipeline_checks, reached_address
@@ -62,6 +62,8 @@ MAILBOX_ALERT = "mail:not_read"
 UNREACHABLE_ALERT = "mail:unreachable"
 REVIEW_MARK = "Why no email was drafted:"  # in every review task written since this note was added
 HAND_TASK = "Decide by hand: "  # the one task for a lead whose next email has nobody it may go to; never "Review ", whose bodies get rewritten
+# no_response is how the lead of such a task gets parked, unanswered: only an answer or a stop ends the task.
+HAND_TASK_STOPS = tuple(s for s in STOP_STATUSES if s != "no_response")
 NEVER_REACHED = "this address never received the earlier emails of this sequence"
 # Between two looks in one send run a slow mail server takes seconds. More than this: the PC slept, or its clock was changed.
 SEND_RUN_JUMP = timedelta(minutes=5)
@@ -162,7 +164,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         return out
 
     def _draft(self, session: Session, inp: SalesInput, now: datetime, cfg: dict, out: SalesOutput) -> None:
-        self._close_review_tasks_of_stopped_leads(session)
+        self._close_tasks_of_stopped_leads(session)
         stmt = select(Lead).where(Lead.status == "qualified").order_by(Lead.score.desc(), Lead.id)
         if inp.lead_ids:
             stmt = stmt.where(Lead.id.in_(inp.lead_ids))
@@ -294,7 +296,9 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         return bool(self.sender.settings.test_recipients) or reached_address(session, lead.id, to)
 
     def _leave_to_a_person(self, session: Session, lead: Lead, out: SalesOutput) -> None:
-        """Once per lead, and it stays closed once a person closed it. The stage stays as it is: nothing restarts by itself."""
+        """Once per lead, and it stays closed once closed. The stage stays as it is: nothing restarts by itself."""
+        if self._no_hand_task_because(session, lead):
+            return
         if session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task",
                                                      FollowUp.subject.startswith(HAND_TASK, autoescape=True))).first():
             return
@@ -425,20 +429,30 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         stages = set(session.execute(select(Opportunity.stage).where(Opportunity.lead_id == lead_id)).scalars())
         return "lost" in stages and not stages - {"lost", "won"}
 
-    def _no_task_because(self, session: Session, lead: Lead) -> str | None:
+    def _no_task_because(self, session: Session, lead: Lead, stages: tuple[str, ...] = STOP_STATUSES) -> str | None:
         """Why a person must not be told to write to this lead by hand: it answered or said no, or it is closed for us."""
         contact = lead.contact
-        if lead.outreach_status in STOP_STATUSES:
+        if lead.outreach_status in stages:
             return f"outreach stopped ({lead.outreach_status})"
         if (contact and contact.consent_status == "opted_out") or is_suppressed(session, contact.email if contact else None, lead.company.domain):
             return "on the do-not-contact list"
         if company_opted_out(session, lead.company):
             return COMPANY_OPTED_OUT
-        why = eligible(session, self.settings, lead)[1]
-        return why if why == ALREADY_CUSTOMER else None
+        # Asked here, not of eligible(): it answers "no published business email" or the grade first, the usual reasons for a task.
+        if session.execute(select(Lead.id).where(Lead.company_id.in_(_merged_family(session, lead.company)), Lead.id != lead.id,
+                                                 Lead.status == "converted").limit(1)).first():
+            return ALREADY_CUSTOMER
+        return None
 
-    @staticmethod
-    def _close_review_tasks_of_stopped_leads(session: Session) -> None:
+    def _no_hand_task_because(self, session: Session, lead: Lead) -> str | None:
+        """As above, and its emails went to an earlier address, which counts too."""
+        if lead.status not in ("qualified", "nurture"):
+            return f"lead is {lead.status}"
+        if _emailed_address_closed(session, lead):
+            return "an address this lead was emailed at is on the do-not-contact list"
+        return self._no_task_because(session, lead, HAND_TASK_STOPS)
+
+    def _close_tasks_of_stopped_leads(self, session: Session) -> None:
         """Those in nurture or converted never reach the qualified loop. Cancelled with a reason, never done: a task closed
         with no reason reads as a person's, blocks a fresh one for good and counts as work by hand."""
         tasks = session.execute(select(FollowUp, Lead.outreach_status).join(Lead, FollowUp.lead_id == Lead.id).where(
@@ -446,6 +460,12 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             Lead.outreach_status.in_(STOP_STATUSES))).all()
         for task, stage in tasks:
             task.status, task.blocked_reason = "cancelled", f"outreach stopped ({stage})"
+        # Any kind of lead: a hand task invites an email, so what closes the lead's address closes it too.
+        for task in session.execute(select(FollowUp).where(FollowUp.channel == "task", FollowUp.status == "pending",
+                                                           FollowUp.subject.startswith(HAND_TASK, autoescape=True))).scalars().all():
+            why = self._no_hand_task_because(session, task.lead)
+            if why:
+                task.status, task.blocked_reason = "cancelled", why[:300]
 
     def _ensure_task(self, session: Session, lead: Lead, out: SalesOutput) -> None:
         stop = self._no_task_because(session, lead)
@@ -893,25 +913,31 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
 
     @staticmethod
     def _same_address_on_another_lead(session: Session, f: FollowUp) -> int | None:
-        """Another lead's outreach to this address that went out, may have, or is open and older than this one."""
+        """Another lead's outreach that reached this address, may have, or is open and older than this one. A rehearsal went to our own."""
         return session.execute(select(FollowUp.lead_id).where(
             FollowUp.kind == "outreach", FollowUp.lead_id != f.lead_id, func.lower(FollowUp.to_email) == (f.to_email or "").lower(),
-            or_(FollowUp.status.in_(COUNTS_AS_SENT), and_(FollowUp.status.in_(OPEN_FOLLOWUP), FollowUp.id < f.id)))).scalars().first()
+            or_(and_(FollowUp.status.in_(COUNTS_AS_SENT), REACHED_PROSPECT), and_(FollowUp.status.in_(OPEN_FOLLOWUP), FollowUp.id < f.id)))).scalars().first()
 
     @staticmethod
     def _meeting_time_passed(session: Session, f: FollowUp) -> bool:
         """A note about a meeting whose time has gone with no later one on the lead, or an offer whose times have all gone.
-        Read from the real clock: `now` may be a run's own time."""
+        A cancelled meeting is no later meeting, except to its own cancel note. Read from the real clock: `now` may be a run's own time."""
         if f.purpose in automation.MEETING_NOTES:
-            times = list(session.execute(select(Meeting.starts_at).where(Meeting.lead_id == f.lead_id)).scalars())
-            times += [datetime.fromisoformat(slot) for p in session.execute(select(MeetingProposal).where(
+            meetings = session.execute(select(Meeting.starts_at, Meeting.status).where(Meeting.lead_id == f.lead_id)).all()
+            times = [m.starts_at for m in meetings]
+            later = [m.starts_at for m in meetings if f.purpose == "meeting_cancel" or m.status != "cancelled"]
+            offered = [datetime.fromisoformat(slot) for p in session.execute(select(MeetingProposal).where(
                 MeetingProposal.lead_id == f.lead_id, MeetingProposal.status.in_(("draft", "offered")))).scalars() for slot in p.slots or []]
+            times += offered
+            later += offered
         elif f.purpose == "meeting_offer":
             times = [datetime.fromisoformat(slot) for p in session.execute(select(MeetingProposal).where(
                 MeetingProposal.offer_followup_id == f.id)).scalars() for slot in p.slots or []]
+            later = times
         else:
             return False
-        return bool(times) and max(as_aware_utc(t) for t in times) <= as_aware_utc(utcnow())
+        clock = as_aware_utc(utcnow())
+        return any(as_aware_utc(t) <= clock for t in times) and not any(as_aware_utc(t) > clock for t in later)
 
     def _recipient_refused(self, session: Session, f: FollowUp, exc: smtplib.SMTPRecipientsRefused, out: SalesOutput) -> None:
         """The mail server said no at RCPT TO. Temporary (4xx): tried again later. Permanent (5xx): asking again every run

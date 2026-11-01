@@ -961,3 +961,163 @@ def test_pipeline_checks_alone_stop_a_listed_lead(make_ctx):
         suppress(s, "brightline-logistics.example", "Asked by phone")
         pipeline_checks(s, ctx.settings, NOW, "test")
         assert s.execute(select(Lead)).scalar_one().outreach_status == "stopped"
+
+
+# ------------------------------------------------------------------ second look: the "Decide by hand" task closes when the lead stops
+HAND = "Decide by hand%"
+SHARED = "pat@first.example"
+
+
+def hand_task_open(make_ctx):
+    ctx, sender, sent = contacted(make_ctx)
+    move_contact(ctx, lead_of(ctx).id)
+    run(ctx, NOW + timedelta(days=4, minutes=5), sender)
+    assert len(tasks(ctx, HAND)) == 1
+    return ctx, sender, sent
+
+
+def add_converted_sibling(ctx, lead_id):
+    with ctx.db.session() as s:
+        s.add(Lead(company_id=s.get(Lead, lead_id).company_id, source="research", status="converted", score=70, grade="B"))
+
+
+@pytest.mark.parametrize("what", ["unsubscribe", "interested", "bounce", "new_address_listed", "domain_listed", "old_address_listed", "lead_converted", "sibling_converted"])
+def test_a_hand_task_closes_with_its_reason_when_the_lead_stops(make_ctx, what):
+    ctx, sender, sent = hand_task_open(make_ctx)
+    lead_id = lead_of(ctx).id
+    if what in ("unsubscribe", "interested"):
+        said = "Please unsubscribe me from this list." if what == "unsubscribe" else "Sounds interesting. Could we talk Thursday afternoon?"
+        FakeIMAP.messages = {1: mail(f"David Chen <{DAVID}>", f"Re: {sent.subject}", said, in_reply_to=sent.message_id)}
+        run_inbox(ctx)
+    elif what == "bounce":
+        FakeIMAP.messages = {1: bounce_for(DAVID, sent.message_id)}
+        run_inbox(ctx)
+    elif what == "lead_converted":
+        with ctx.db.session() as s:
+            s.get(Lead, lead_id).status = "converted"
+    elif what == "sibling_converted":
+        add_converted_sibling(ctx, lead_id)
+    else:
+        with ctx.db.session() as s:
+            domain = s.get(Lead, lead_id).company.domain
+            suppress(s, {"new_address_listed": "dana@swap.example", "domain_listed": domain, "old_address_listed": DAVID}[what], "Asked by phone")
+    run(ctx, NOW + timedelta(days=4, minutes=10), sender)
+    assert tasks(ctx, HAND) == []
+    (closed,) = tasks(ctx, HAND, "cancelled")
+    assert closed.blocked_reason  # never "done" with no reason: that reads as a person's work
+    run(ctx, NOW + timedelta(days=5), sender)
+    assert tasks(ctx, HAND) == []  # and nothing opens it again
+
+
+def test_a_hand_task_stays_open_when_the_unanswered_lead_is_parked(make_ctx):
+    """no_response is what the sequence ending does, not an answer: it is the very lead the task is about."""
+    ctx, sender, _sent = hand_task_open(make_ctx)
+    run(ctx, NOW + timedelta(days=9), sender)
+    run(ctx, NOW + timedelta(days=9, minutes=5), sender)
+    lead = lead_of(ctx)
+    assert (lead.status, lead.outreach_status) == ("nurture", "no_response")
+    assert len(tasks(ctx, HAND)) == 1
+
+
+def test_no_hand_task_opens_for_a_company_that_is_already_a_customer(make_ctx):
+    ctx, sender, _sent = contacted(make_ctx)
+    lead_id = lead_of(ctx).id
+    move_contact(ctx, lead_id)
+    add_converted_sibling(ctx, lead_id)
+    run(ctx, NOW + timedelta(days=4, minutes=5), sender)
+    assert tasks(ctx, HAND) == [] and tasks(ctx, HAND, "cancelled") == []
+
+
+# ------------------------------------------------------------------ second look: a rehearsal on another lead
+def test_an_approved_first_email_goes_when_the_other_leads_email_was_only_a_rehearsal(make_ctx):
+    ctx = make_ctx(outbound_test_recipients="me@us.example", **SEND)
+    lead_with_inbox(ctx, "first", SHARED, "first.example")
+    run(ctx)
+    approve_all(ctx)
+    run(ctx)
+    assert [m["To"] for m in FakeSMTP.sent] == ["me@us.example"]
+    ctx.settings.outbound_test_recipients = ""
+    second = lead_with_inbox(ctx, "second", SHARED, "second.example")
+    later = NOW + timedelta(days=1)
+    run(ctx, later, send=False)
+    approve_all(ctx)
+    FakeSMTP.sent = []
+    run(ctx, later + timedelta(minutes=1))
+    assert [m["To"] for m in FakeSMTP.sent] == [SHARED]
+    with ctx.db.session() as s:
+        assert s.execute(select(FollowUp.status).where(FollowUp.lead_id == second, FollowUp.step == 1, FollowUp.channel == "email")).scalars().all() == ["sent"]
+
+
+@pytest.mark.parametrize("status, delivered_to, blocks", [
+    ("sent", SHARED, True), ("sent", SHARED.upper(), True), ("sent", None, True), ("sending", None, True), ("uncertain", None, True),
+    ("awaiting_approval", None, True), ("approved", None, True), ("sent", "me@us.example", False), ("rejected", None, False), ("cancelled", None, False)])
+def test_what_on_another_lead_holds_a_first_email(make_ctx, status, delivered_to, blocks):
+    """Anything that may really have reached the address still holds it; only a rehearsal, which went to our own, does not."""
+    ctx = make_ctx(**SEND)
+    other, this = lead_with_inbox(ctx, "other", SHARED, "other.example"), lead_with_inbox(ctx, "this", SHARED, "this.example")
+    with ctx.db.session() as s:
+        s.add(FollowUp(lead_id=other, channel="email", kind="outreach", step=1, status=status, to_email=SHARED, delivered_to=delivered_to, subject="x", body="x", due_at=NOW))
+        s.flush()
+        f = FollowUp(lead_id=this, channel="email", kind="outreach", step=1, status="approved", to_email=SHARED, subject="x", body="x", due_at=NOW)
+        s.add(f)
+        s.flush()
+        assert SalesWorkflowAgent._same_address_on_another_lead(s, f) == (other if blocks else None)
+
+
+# ------------------------------------------------------------------ second look: a cancelled meeting
+@pytest.mark.parametrize("purpose, meetings, goes", [
+    ("meeting_confirmation", [(-24, "scheduled"), (72, "cancelled")], False),
+    ("meeting_reminder", [(-24, "scheduled"), (72, "cancelled")], False),
+    ("meeting_move", [(-24, "scheduled"), (72, "cancelled")], False),
+    ("meeting_reminder", [(-24, "cancelled")], False),  # no live meeting left does not make it "none known"
+    ("meeting_reminder", [(-24, "cancelled"), (72, "cancelled")], False),
+    ("meeting_reminder", [(72, "cancelled")], True),  # its time has not passed: the rule about past meetings says nothing here
+    ("meeting_reminder", [(-24, "cancelled"), (72, "scheduled")], True),
+    ("meeting_cancel", [(72, "cancelled")], True),  # a cancel note's own meeting is the cancelled one
+    ("meeting_cancel", [(-24, "scheduled"), (72, "cancelled")], True),
+    ("meeting_cancel", [(-24, "cancelled")], False)])
+def test_a_cancelled_meeting_is_no_later_meeting_except_for_its_own_cancel_note(make_ctx, clock, purpose, meetings, goes):
+    ctx = make_ctx(**MAIL)
+    now = clock(IN_WINDOW)
+    lead_id = add_lead(ctx, stage="approved")
+    for hours, status in meetings:
+        _meeting(ctx, lead_id, now + timedelta(hours=hours), status)
+    fid = _note(ctx, lead_id, now, purpose)
+    run(ctx, utcnow())
+    f = row(ctx, fid)
+    if goes:
+        assert f.status == "sent"
+    else:
+        assert f.status == "awaiting_approval" and "meeting time has passed" in f.blocked_reason and FakeSMTP.sent == []
+
+
+# ------------------------------------------------------------------ second look: already a customer
+@pytest.mark.parametrize("task_first", [True, False])
+@pytest.mark.parametrize("why", ["no_contact", "low_grade"])
+def test_a_customer_company_gets_no_review_task_whatever_else_is_missing(make_ctx, why, task_first):
+    ctx = make_ctx(**SEND)
+    lead_id = lead_with_inbox(ctx, "cust", "info@cust.example", "cust.example")
+    with ctx.db.session() as s:
+        lead = s.get(Lead, lead_id)
+        if why == "no_contact":
+            lead.contact_id = None
+        else:
+            lead.grade = "D"
+    if task_first:
+        run(ctx)
+        assert len(tasks(ctx, "Review %")) == 1
+    add_converted_sibling(ctx, lead_id)
+    run(ctx)
+    assert tasks(ctx, "Review %") == []
+    closed = tasks(ctx, "Review %", "cancelled")
+    assert len(closed) == (1 if task_first else 0) and all(t.blocked_reason for t in closed)
+
+
+def test_a_hand_task_on_a_parked_lead_still_closes_when_the_address_is_listed(make_ctx):
+    ctx, sender, _sent = hand_task_open(make_ctx)
+    run(ctx, NOW + timedelta(days=9), sender)
+    assert lead_of(ctx).outreach_status == "no_response"
+    with ctx.db.session() as s:
+        suppress(s, "dana@swap.example", "Asked by phone")
+    run(ctx, NOW + timedelta(days=9, minutes=5), sender)
+    assert tasks(ctx, HAND) == [] and len(tasks(ctx, HAND, "cancelled")) == 1
