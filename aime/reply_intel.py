@@ -499,15 +499,23 @@ NOTICE_REMOVAL = re.compile(r"\b(remove|delete|erase)\s+(it|this|them|these|that
 # "take us off old lists", "your newsletter unsubscribe link is broken" all stay what they were.
 _THEIR_PAPERWORK = (r"(decks?|invoices?|bills?|files?|documents?|attachments?|pdfs?|contracts?|proposals?|slides?|reports?|quotes?|spreadsheets?|statements?|"
                     r"receipts?|faxes|purchase orders?|paperwork)")
+# Only with a product named, or being built: "an opt out for our company" and "an opt-out on our account" ask for one. Nor is "don't email me the
+# proposals" arranging anything until another way of getting it is named: "just bring it to the call", not "I did not ask for them".
+_THEIR_PRODUCT = r"(sms|texts?|text messages?|reminders?|apps?|forms?|checkout|portal)"
+_NOT_ABOUT_US = r"(?! (team|staff|people|department))(?![^.!?\n]*\b(you|your|e-?mails?|list)\b)"
+_ANOTHER_WAY = (r"\b((bring|hand|print|post|upload|share|fax|send|mail|drop|give|show) (it|them|that|those|copies|a copy|me a copy)|use (the|our|my)|instead|yet|until|"
+                r"(at|on|in|for) the (call|meeting|portal|drive|office)|in person)\b")
 OWN_BUSINESS = re.compile(
     r"\b(we|i)( really| just)?( need| want| have| would like|'d like| are trying|'re trying) to (stop|quit|cease) (e-?mailing|sending|writing) "
     rf"((out|our|the|all|all our|these|those) )*{_THEIR_PAPERWORK}\b(?![^.!?\n]*\b(to|with|from|at) (you|your)\b)|"
     r"\b(our|their|customers'?)( newsletter)? unsubscribe (rates?|pages?|links?)\b(?![^.!?\n]*\b(your|still)\b)|(?<!your )(?<!your newsletter )\bunsubscribe rates?\b|"
-    r"\ban opt[- ]?out (on|for) (our|their)\b|"
+    rf"\ban opt[- ]?out (on|for) (our|their)( \w+){{0,2}}? {_THEIR_PRODUCT}\b{_NOT_ABOUT_US}|"
+    rf"\b(build|add|adding|offer|offering) an opt[- ]?out (on|for) (our|their)( \w+){{0,2}}? (customers?|clients?|users?|subscribers?|members?|sites?|websites?)\b{_NOT_ABOUT_US}|"
     r"\bopt[- ]?out of (the|our)( (?!e-?mails?\b|mail\w*\b|marketing\b|contact\w*\b|list\b)\w+){0,3} (plan|contract|trial|renewal)s?\b|"
     r"\b(take|get) us off ((our|old)( \w+){0,2}? (erps?|software|excel|platforms?|tools?|vendors?|providers?|process(es)?|stack|paper\w*|spreadsheets?)|our old( \w+)? systems?|spreadsheets?)\b|"
     r"\bhad no further contact with (our|their|the)\b|"  # an account of the past; "no further contact with the CEO" asks for it
-    rf"\b(do not|don'?t) e-?mail (me|us) (the|that|those) {_THEIR_PAPERWORK}\b(?![\s\S]*\b(anything|ever|again|any ?more|at all|stop)\b)", re.I)
+    rf"\b(do not|don'?t) e-?mail (me|us) (the|that|those) {_THEIR_PAPERWORK}\b(?=[^\n]{{0,60}}?{_ANOTHER_WAY})"
+    r"(?![\s\S]*\b(anything|ever|again|any ?more|at all|stop|you keep|keep (sending|pushing)|(did not|didn'?t|never) ask|not a customer|hint)\b)", re.I)
 
 
 def _is_notice(paragraph: str) -> bool:

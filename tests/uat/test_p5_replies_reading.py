@@ -169,13 +169,23 @@ def test_their_own_business_below_the_quote_suppresses_nothing_either():
     # a file, and everything else with it
     "Don't email me the report or anything else again.", "Don't email me the proposals. Or anything else.", "Do not email us the reports ever again", "Don't email me the deck. Stop.",
     "Don't email me the newsletter.", "Don't email me those offers.",
+    # an opt out for the writer's own company asks for one: only a product of theirs makes it their business
+    "Please record an opt out for our company.", "We are requesting an opt out for our company. Do not reply.", "I want an opt-out for our domain.",
+    "This is an opt out for our whole team.", "Consider this an opt out for our firm.", "Please process an opt out on our account.", "We are asking for an opt out for our company.",
+    "Please add an opt out for our company.", "We would like an opt out for our customers from your emails.", "Please record an opt out for our website.",
+    # refusing what we send: no other way of getting it is named
+    "Don't email me the reports you keep sending.", "Don't email me those invoices you keep sending, I'm not a customer.", "Do not email us the quotes you keep pushing, we did not ask.",
+    "Don't email me the proposals, I did not ask for them.", "Don't email me the proposal. Take a hint.", "Don't email me the reports.", "Do not email us the invoices. Nobody here wants them.",
+    "Don't email me the deck, I never asked.", "Don't email me the deck, we are not interested.", "Don't email me the file, wrong person.", "Don't email me the quotes, I'm not your customer.",
 ])
 def test_a_plain_opt_out_stays_one(text):
     assert read(text)[0] == "unsubscribe", read(text)
 
 
 @pytest.mark.parametrize("text", ["We need to stop writing reports by hand.", "We want to stop sending out our invoices by hand, can you help?", "Our newsletter unsubscribe link is broken and customers complain.",
-                                  "Get us off our old billing tool.", "Don't email me the report, just bring it to the call."])
+                                  "Get us off our old billing tool.", "Don't email me the report, just bring it to the call.", "We need to add an opt-out on our signup form.",
+                                  "Can you build an opt out for our customers?", "Users keep asking for an opt out on our app.", "Don't email me the invoice, send it to accounting.",
+                                  "Don't email me the deck yet, I need to check with my boss.", "Don't email me the file, share it on the portal instead."])
 def test_what_names_their_own_paperwork_or_tools_goes_to_a_person(text):
     category, confidence, why = read(text)
     assert (category, confidence) == ("other", "low") and why[0].startswith(ri.OWN_BUSINESS_REASON)
@@ -189,6 +199,12 @@ def test_a_question_about_never_hearing_from_us_suppresses_nobody(text):
 @pytest.mark.parametrize("text", ["I never want to hear from you again.", "We'd like to never hear from your company again."])
 def test_never_hearing_from_us_said_outright_is_an_opt_out(text):
     assert read(text)[0] == "unsubscribe"
+
+
+@pytest.mark.parametrize("text", ["Please record an opt out for our company.", "Don't email me the reports you keep sending."])
+def test_a_refused_report_or_a_company_opt_out_is_suppressed_through_the_inbox(make_ctx, text):
+    ctx, r = answer(make_ctx, text)
+    assert r.category == "unsubscribe" and DAVID in suppressed(ctx)
 
 
 @pytest.mark.parametrize("text", PLAIN_OPT_OUTS)
