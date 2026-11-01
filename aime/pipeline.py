@@ -20,7 +20,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from aime.crm_ops import lead_with_the_deals, leads_replying_into, log_activity
-from aime.models import Activity, FollowUp, Lead, Meeting, Opportunity
+from aime.models import Activity, FollowUp, InboundEmail, Lead, Meeting, Opportunity
 from aime.monitoring import alert_once, resolve_alerts
 from aime.outreach import OPEN, policy, set_status
 from aime.timeutil import utcnow
@@ -78,25 +78,32 @@ def _remind_about_drafts(session: Session, settings, actor: str) -> None:
 
 # The next steps written by the system about a reply to a person who wrote to us (aime.reply_intel, the Sales Workflow
 # Agent), and what is true once that reply went out or is gone. A next step a person typed is none of these and stays.
-ASKS_FOR_APPROVAL = ("Book a meeting: approve the suggested reply with your booking link", "Review the drafted reply and send once approved")
+WRITE_THE_ANSWER = "Write the answer they asked for: it waits in the suggested reply"
+BOOK_ASKING_TIMES = "Book a meeting: approve the suggested reply asking for times that suit them"
+ASKS_FOR_APPROVAL = ("Book a meeting: approve the suggested reply with your booking link", "Review the drafted reply and send once approved", WRITE_THE_ANSWER,
+                     BOOK_ASKING_TIMES)
 REPLY_WAITING = "Read the reply waiting on Follow-ups, then approve or reject it"
 REPLY_SENT = "Reply sent: wait for their answer, or log the meeting when one is booked"
 NO_REPLY = "No reply is waiting and the latest did not go out: decide the next step"
+READ_THEIR_REPLY = "Read their latest reply on Replies, then decide"
 
 
 def settle_next_steps(session: Session, lead_id: int | None = None) -> None:
     """A deal's next step says what is true now. Its last change stays as it was: this is no activity on the deal, and the
     stalled check below must not read it as such."""
     stmt = select(Opportunity).where(Opportunity.stage.not_in(("won", "lost")), Opportunity.lead_id.is_not(None),
-                                     Opportunity.next_step.in_((*ASKS_FOR_APPROVAL, REPLY_WAITING, REPLY_SENT, NO_REPLY)))
+                                     Opportunity.next_step.in_((*ASKS_FOR_APPROVAL, REPLY_WAITING, REPLY_SENT, NO_REPLY, READ_THEIR_REPLY)))
     if lead_id:
         stmt = stmt.where(Opportunity.lead_id == lead_with_the_deals(session, session.get(Lead, lead_id)).id)
     for opp in session.execute(stmt).scalars().all():
+        replying = leads_replying_into(session, opp)
         emails = session.execute(select(FollowUp.status).where(  # a merged lead's replies still wait on it, and its deal is here
-            FollowUp.lead_id.in_(leads_replying_into(session, opp)), FollowUp.channel == "email",
+            FollowUp.lead_id.in_(replying), FollowUp.channel == "email",
             or_(FollowUp.kind.is_(None), FollowUp.kind == "response")).order_by(FollowUp.id.desc())).scalars().all()
         if set(emails) & set(OPEN):
             true_now = opp.next_step if opp.next_step in ASKS_FOR_APPROVAL else REPLY_WAITING
+        elif session.execute(select(InboundEmail.id).where(InboundEmail.lead_id.in_(replying), InboundEmail.status == "needs_review").limit(1)).first():
+            true_now = READ_THEIR_REPLY  # "no reply is waiting" means our draft, and theirs is unread
         else:  # the newest decides: an earlier reply that went out says nothing about the one rejected after it
             true_now = REPLY_SENT if emails and emails[0] == "sent" else NO_REPLY
         if true_now != opp.next_step:
