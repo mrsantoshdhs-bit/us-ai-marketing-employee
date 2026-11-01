@@ -19,7 +19,7 @@ from aime.db import kv_get, kv_set
 from aime.doctor import DISCOVERY_QUIET_DAYS, run_checks
 from aime.inbound import record_inquiry
 from aime.integrations import linkedin_leads as ll
-from aime.models import Alert, Company, FollowUp, InboundInquiry, Lead, OAuthToken
+from aime.models import Alert, Company, Contact, FollowUp, InboundInquiry, Lead, OAuthToken, ResearchSnapshot
 from aime.secure_store import protect
 from aime.sources.base import ResearchFocus
 from aime.sources.hn_hiring import HNHiringSource, pick_website
@@ -310,6 +310,90 @@ def test_a_filer_sec_does_not_have_is_no_failure(make_ctx):
     with ctx.db.session() as s:
         company = s.get(Company, cid)
         assert company.researched_at is not None and company.research_status == "no_people"
+
+
+# ------------------------------------------------------------------ the same, for a company whose own site was read
+SITE_HOME = ("<!doctype html><html><head><title>Filed Co | Parts</title></head><body><h1>Parts for regional fleets</h1>"
+             "<p>We supply parts to regional fleets across the Midwest and answer every order on the same working day.</p>"
+             '<a href="mailto:sales@filedco.example">sales@filedco.example</a></body></html>')
+SITE = {"filedco.example": {"/": SITE_HOME}}
+
+
+def filer_with_site(ctx):
+    with ctx.db.session() as s:
+        company = Company(name="Filed Co", normalized_name="filed co", source="sec_edgar", source_record_id="cik:0000000001", state="IN",
+                          verified=True, domain="filedco.example", website_status="verified")
+        s.add(company)
+        s.flush()
+        s.add(Lead(company_id=company.id, source="research", status="qualified", score=80))
+        return company.id
+
+
+def research(ctx, cid):
+    return CompanyResearchAgent(ctx, mail_checker=lambda domain: True).run({"company_ids": [cid]})
+
+
+def website_addresses(ctx, cid):
+    with ctx.db.session() as s:
+        return sorted(a for a in s.execute(select(Contact.email).where(Contact.company_id == cid)).scalars() if a)
+
+
+def refuse(status):
+    return lambda r: httpx.Response(status, text=BLOCK)
+
+
+def unreachable(req):
+    raise httpx.ConnectError("no route", request=req)
+
+
+@pytest.mark.parametrize("sec", [refuse(403), refuse(429), refuse(503), unreachable])
+def test_sec_failing_keeps_what_the_companys_own_site_said(make_ctx, sec):
+    ctx = make_ctx(handler=web(sec=sec, sites=SITE), sec_user_agent=UA)
+    cid = filer_with_site(ctx)
+    run = research(ctx, cid)
+    assert website_addresses(ctx, cid) == ["sales@filedco.example"]
+    assert run.output.no_people == [] and [f.id for f in run.output.failed] == [cid]  # "no people" is not known yet
+    with ctx.db.session() as s:
+        company = s.get(Company, cid)
+        assert company.research_status == "failed" and company.researched_at is None  # the filings are tried again
+        snap = s.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == cid)).scalars().one()
+        assert snap.status == "no_people" and "SEC" in snap.error  # the site was read: a Review task must not say it was not
+
+
+def test_sec_coming_back_finishes_the_research_of_a_company_whose_site_was_read(make_ctx):
+    today = utcnow().date().isoformat()
+    answer = {"sec": refuse(403)}
+    ctx = make_ctx(handler=web(sec=lambda r: answer["sec"](r), sites=SITE), sec_user_agent=UA)
+    cid = filer_with_site(ctx)
+    research(ctx, cid)
+    answer["sec"] = lambda r: filings(today) if "submissions" in r.url.path else httpx.Response(200, text=FORM4)
+    run = research(ctx, cid)
+    assert run.output.failed == [] and run.output.sec_officers == 1
+    with ctx.db.session() as s:
+        company = s.get(Company, cid)
+        assert company.research_status == "done" and company.researched_at is not None
+        assert "Vance" in " ".join(c.last_name or "" for c in s.execute(select(Contact).where(Contact.company_id == cid)).scalars())
+    assert website_addresses(ctx, cid) == ["sales@filedco.example"]
+
+
+def test_sec_that_stays_refused_waits_for_the_recheck_with_the_site_kept(make_ctx):
+    ctx = make_ctx(handler=web(sec=refuse(403), sites=SITE), sec_user_agent=UA)
+    cid = filer_with_site(ctx)
+    for _ in range(3):
+        research(ctx, cid)
+    with ctx.db.session() as s:
+        assert s.get(Company, cid).researched_at is not None  # cannot take a place in every batch
+    assert website_addresses(ctx, cid) == ["sales@filedco.example"]
+
+
+def test_sec_refusing_when_the_site_was_not_read_either_saves_nothing(make_ctx):
+    ctx = make_ctx(handler=web(sec=refuse(403), sites={}), sec_user_agent=UA)
+    cid = filer_with_site(ctx)
+    research(ctx, cid)
+    with ctx.db.session() as s:
+        company = s.get(Company, cid)
+        assert company.research_status == "failed" and company.researched_at is None
+        assert s.execute(select(ResearchSnapshot.error).where(ResearchSnapshot.company_id == cid)).scalar_one()
 
 
 FORM4 = """<ownershipDocument><issuer><issuerCik>0000000001</issuerCik></issuer><reportingOwner>
