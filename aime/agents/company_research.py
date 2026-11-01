@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import httpx
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -107,9 +108,9 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         company.research_status = "failed"
         out.failed.append(BlockedItem(id=company.id, reason=reason))
         session.flush()
-        latest = session.execute(select(ResearchSnapshot.status).where(ResearchSnapshot.company_id == company.id)
-                                 .order_by(ResearchSnapshot.id.desc()).limit(FAILED_READS_BEFORE_WAITING)).scalars().all()
-        if len(latest) == FAILED_READS_BEFORE_WAITING and set(latest) == {"failed"}:
+        latest = session.execute(select(ResearchSnapshot.status, ResearchSnapshot.error).where(ResearchSnapshot.company_id == company.id)
+                                 .order_by(ResearchSnapshot.id.desc()).limit(FAILED_READS_BEFORE_WAITING)).all()
+        if len(latest) == FAILED_READS_BEFORE_WAITING and all(st == "failed" or error for st, error in latest):
             company.researched_at = utcnow()
 
     def _recheck_unknown_emails(self, session: Session, limit: int) -> int:
@@ -148,8 +149,16 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                           else "redirected" if pages[0].status == "offsite_redirect" else "failed")
         people = extract_people(pages, company.name) if pages else []
         cik = cik_of(company)
+        sec_failure = None
         if cik:
-            officers = sec_officers(self.ctx, cik)
+            try:
+                officers = sec_officers(self.ctx, cik)
+            except httpx.HTTPError as exc:
+                if not pages or status != "done":
+                    raise
+                # the site was read and what it says stays; only the filings are tried again
+                sec_failure = redact(f"SEC filings could not be read: {type(exc).__name__}: {exc}")[:300]
+                officers = []
             out.sec_officers += len(officers)
             people = merge_findings(people + officers)
             if status != "done" and officers:
@@ -159,7 +168,8 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         people = [f for f in people if not was_erased(session, company, f)]  # or the snapshot would keep the name, and a Review task show it
         if status == "done" and not people:
             status = "no_people"
-            out.no_people.append(company.id)
+            if not sec_failure:
+                out.no_people.append(company.id)
         lead = primary_lead(session, company.id)
         service = lead.primary_service if lead else None
         contacts = []
@@ -175,7 +185,7 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                 log_activity(session, f"Decision-maker withdrawn: {c.display_name} ({c.title}) is no longer found on "
                              f"{company.domain}", self.name, type_="research", company_id=company.id,
                              lead_id=lead.id if lead else None)
-        snapshot = build_snapshot(company, pages, people, status)
+        snapshot = build_snapshot(company, pages, people, status, error=sec_failure)
         snapshot.emails = [e for e in snapshot.emails if not address_was_erased(session, e["email"])]  # and the name printed by it
         session.add(snapshot)
         titles = " ".join(p.title for p in pages if p.ok and p.kind == "home")  # the page title is its own words too
@@ -198,8 +208,8 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                 lead.contact_id = best_contact(researched).id
             elif lead.contact and lead.contact.source == WITHDRAWN:
                 lead.contact_id = None
-        if status == "failed":
-            self._note_failed_read(session, company, out, f"Website could not be read ({pages[0].status})")
+        if status == "failed" or sec_failure:
+            self._note_failed_read(session, company, out, sec_failure or f"Website could not be read ({pages[0].status})")
         else:
             company.research_status, company.researched_at = status, utcnow()
             out.companies_researched += 1

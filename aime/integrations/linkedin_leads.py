@@ -207,7 +207,10 @@ class LeadSyncClient:
             url = (f"{API}/leadFormResponses?q=owner&owner=({kind}:{quote(owner, safe='')})"
                    f"&leadType=(leadType:{lead_type})&limitedToTestLeads={'true' if test_only else 'false'}"
                    f"&submittedAtTimeRange=(start:{start_ms},end:{end_ms})&start={page * PAGE_SIZE}&count={PAGE_SIZE}")
-            elements = self._get(token, url).get("elements", [])
+            data = self._get(token, url)
+            elements = data.get("elements") if isinstance(data, dict) else None
+            if not isinstance(elements, list):  # not an empty page but no answer: the cursor stays, so this window is asked for again
+                raise LinkedInAPIError(200, "the answer has no list of leads")
             out.extend(elements)
             if len(elements) < PAGE_SIZE:
                 break

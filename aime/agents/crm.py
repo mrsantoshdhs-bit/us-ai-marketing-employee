@@ -136,6 +136,10 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             alert_once(session, "warning", self.name, f"LinkedIn leads not synced: could not reach LinkedIn "
                        f"({type(exc).__name__})", self.settings, key="linkedin_leads:down")
             return
+        except (ValueError, KeyError, TypeError, AttributeError):  # a 200 that is not what the API documents: website inquiries still go on
+            alert_once(session, "warning", self.name, "LinkedIn leads not synced: LinkedIn's answer could not be read",
+                       self.settings, key="linkedin_leads:down")
+            return
         if not res.ran:  # switched on, but not connected or no Page chosen yet
             alert_once(session, "warning", self.name, f"LinkedIn leads not synced: {res.reason}", self.settings,
                        key="linkedin_leads:down")

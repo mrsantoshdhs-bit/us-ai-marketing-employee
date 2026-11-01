@@ -24,6 +24,7 @@ from aime.secure_store import is_protected
 from aime.timeutil import utcnow
 
 BACKUP_MAX_AGE_HOURS = 30  # the backup job runs daily; allow for a late or retried run
+DISCOVERY_QUIET_DAYS = 45  # new leads come from a monthly thread: one quiet month is normal, more is not
 
 
 def run_checks(ctx: AppContext) -> list[dict]:
@@ -43,6 +44,7 @@ def run_checks(ctx: AppContext) -> list[dict]:
         _sent_record_check(ctx, add)
         _record_checks(ctx, add)
         _setup_checks(ctx, add)
+        _discovery_check(ctx, add)
     except DatabaseError as exc:  # a damaged file: say so, and still report what needs no database
         add("Database readable", False, f"Records cannot be read, so their checks did not run: {redact(str(exc.orig))[:200]}. "
             f"{restore_advice(ctx.settings)}")
@@ -180,6 +182,28 @@ def _record_checks(ctx: AppContext, add) -> None:
         add("No duplicate company domains", not dup_domains, f"{len(dup_domains)} duplicated domain(s)", "warning")
         plain_tokens = [t.provider for t in s.execute(select(OAuthToken)).scalars() if not is_protected(t.access_token)]
         add("OAuth tokens encrypted at rest", not plain_tokens, f"unencrypted: {', '.join(plain_tokens) or 'none'}")
+
+
+def _discovery_check(ctx: AppContext, add) -> None:
+    """New leads stop when no public source is on, or when they stop bringing companies: nothing else says so. Only the
+    live database has that duty, and SEC filings do not count, because they make no lead (the owner's decision of 1 Nov 2026)."""
+    if not ctx.settings.is_production:
+        return
+    from aime.agents.research import EVIDENCE_ONLY_SOURCES
+    from aime.sources.registry import SOURCE_CLASSES
+
+    country = str(ctx.settings.section("targeting").get("country") or "US").upper()
+    sources = [cls(ctx) for name, cls in SOURCE_CLASSES.items() if not hasattr(cls, "finish_intake") and name not in EVIDENCE_ONLY_SOURCES]
+    on = [src.name for src in sources if src.configured()[0] and (country in src.countries or "*" in src.countries)]
+    if not on:
+        add("New leads are being found", False, "No public source that finds leads is switched on, so no new companies will arrive: "
+            "see the Integrations page", "warning")
+        return
+    with ctx.db.session() as s:
+        newest = s.execute(select(func.max(Company.created_at)).where(Company.source.in_(on))).scalar_one()
+    days = (utcnow() - newest).days if newest else 0
+    add("New leads are being found", days <= DISCOVERY_QUIET_DAYS, f"the newest company from {', '.join(on)} arrived {days} day(s) ago"
+        if newest else f"none from {', '.join(on)} yet", "warning")
 
 
 def _setup_checks(ctx: AppContext, add) -> None:

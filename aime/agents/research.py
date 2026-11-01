@@ -21,12 +21,14 @@ from aime.models import Activity, Alert, Company, Contact, Lead, Opportunity, Si
 from aime.monitoring import alert_once, resolve_alerts
 from aime.outreach import _merged_family, company_opted_out
 from aime.pipeline import _task
+from aime.redact import redact
 from aime.sources.base import ResearchFocus
 from aime.sources.registry import get_sources
 from aime.validation import validate_candidate
 
 EVIDENCE_ONLY_SOURCES = ("sec_edgar",)  # the owner's decision of 1 Nov 2026: a filing is market evidence and makes no lead
 ON_THE_LIST_REASON = "suppression list"  # how scoring words the close of a lead on the do-not-contact list (aime.scoring)
+STALE_ALERT_HOURS = 48  # a source living on its saved answer for longer than a missed day or two: a person is told
 
 
 def _leads_on_file(session: Session, company: Company) -> list[Lead]:
@@ -110,6 +112,7 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         # Your own CSV lists are always "configured", so only the public sources tell whether discovery failed.
         public_sources, public_failures = 0, 0
         file_sources = []  # sources whose files are archived only after this run commits
+        stale_alerts = []
 
         country = str(self.settings.section("targeting").get("country") or "US").upper()
         for src in get_sources(self.ctx, inp.sources):
@@ -132,11 +135,16 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             except httpx.HTTPError as exc:
                 problem = f"network: {exc}"
             except (ValueError, KeyError, TypeError, AttributeError) as exc:  # a 200 that is not what the API documents
-                problem = f"unexpected answer ({type(exc).__name__})"
+                problem = "unexpected answer (" + redact(f"{type(exc).__name__}: {exc}")[:200] + ")"
             if problem:  # one source's failure must not stop the others
                 public_failures += int(is_public)
                 out.sources.append(SourceReport(name=src.name, configured=True, ok=False, message=problem))
                 continue
+            stale_hours = getattr(src, "stale_hours", None)
+            if stale_hours is not None:  # still used: an old list beats none, but it must not read as a fresh answer
+                msg = f"stale: the API gave no answer, using a saved one {stale_hours / 24:.1f} days old"
+                if stale_hours > STALE_ALERT_HOURS:
+                    stale_alerts.append(f"{src.name} ({msg})")
             out.sources.append(SourceReport(name=src.name, configured=True, ok=True, records=len(found), message=msg))
             candidates.extend(found)
             if hasattr(src, "finish_intake"):
@@ -238,6 +246,11 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                        + "; ".join(f"{r.name} ({r.message})" for r in unread)[:400], self.settings, key="research:sources")
         elif inp.sources is None:
             resolve_alerts(session, ("research:sources",), set())
+        if stale_alerts:
+            alert_once(session, "warning", self.name, "Research source(s) not answering, so no new posts are coming in: "
+                       + "; ".join(stale_alerts)[:400], self.settings, key="research:stale")
+        elif inp.sources is None:
+            resolve_alerts(session, ("research:stale",), set())
         session.commit()
         for src in file_sources:
             out.import_files_archived += src.archive_intake()
