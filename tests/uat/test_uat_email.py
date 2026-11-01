@@ -920,9 +920,7 @@ def test_ok_reply_after_an_opt_out_stays_opted_out_and_cannot_be_answered(make_c
     deliver(ctx, in_thread(sent, "Actually it sounds interesting, can we talk Thursday?"))
     r = latest_reply(ctx)
     assert DAVID in suppressed_values(ctx) and consent_of(ctx) == "opted_out"
-    draft = followup(ctx, r.suggested_followup_id)
-    r2 = web(ctx).post(f"/followups/{draft.id}/approve", headers=ORIGIN, follow_redirects=False)
-    assert "do-not-contact" in r2.headers["location"].replace("%20", " ").replace("+", " ")
+    assert r.suggested_followup_id is None and r.status == "needs_review"  # no draft that no one could approve
     run(ctx, sender, NOW + timedelta(hours=1))
     assert len(FakeSMTP.sent) == 1
 
@@ -1633,6 +1631,10 @@ def test_ok_an_alert_is_raised_days_after_a_booking_link_with_no_notice_and_clos
         a = s.execute(select(Alert).where(Alert.key == "calendly:no_notices")).scalar_one()
         assert a.level == "warning" and a.resolved_at is None
     deliver(ctx, notice())
+    with ctx.db.session() as s:  # an unsigned notice waits for a person: no booking is recorded yet, so the warning stays
+        assert s.execute(select(Alert).where(Alert.key == "calendly:no_notices")).scalar_one().resolved_at is None
+    web(ctx).post(f"/inbox/{latest_reply(ctx).id}/apply_calendly", headers=ORIGIN, follow_redirects=False)
+    run_inbox(ctx)
     with ctx.db.session() as s:
         assert s.execute(select(Alert).where(Alert.key == "calendly:no_notices")).scalar_one().resolved_at is not None
 

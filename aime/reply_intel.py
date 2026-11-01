@@ -1110,6 +1110,8 @@ def suggest(settings, category: str, row: InboundEmail, contact: Contact | None,
             body = (f"Hi {name},\n\nThank you for getting back to me. I would be glad to talk{topic}. Could you share "
                     f"two or three times {when}that suit you for a {minutes}-minute call?\n\n{sign}")
     elif category == "objection":
+        if any(r.startswith(NOT_UNTIL_REASON) for r in row.reasons or []):  # "don't email me until April": the reminder is the answer, not an email now
+            return None
         when = check_back_when(row)
         if when:  # they said when: asking again whether to write would be asking twice
             body = f"Hi {name},\n\nThank you for letting me know. I will check back {when['words']}, as you suggest.\n\n{sign}"
@@ -1501,8 +1503,6 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
                 _tie_to_lead(row, tied)
             else:  # only their own address is suppressed for now: anyone can write under a subject
                 notes.append(_hold_lead(row, tied))
-        elif unmatched and not person and (tied := lead_named_in_body(session, row)):
-            notes.append(_hold_lead(row, tied))  # the address it names is not suppressed: anyone can write it
         company_decides = _stop_the_company(session, settings, row, lead, contact, keeper is not None, actor) if lead or contact else False
         if company_decides:
             notes.append("Everything queued at this company's other leads is stopped too, and nothing more is suppressed: someone there opted out, and a person reads it")

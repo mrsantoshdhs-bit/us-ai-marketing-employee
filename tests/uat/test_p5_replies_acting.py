@@ -541,8 +541,19 @@ def paste(to, words):
     return f"{words}\n\n________________________________\nFrom: Sales <sales@us.example>\nSent: Friday, October 30, 2026 1:09 PM\nTo: Pat Lead <{to}>\nSubject: A question\n\nHello"
 
 
-@pytest.mark.parametrize("words", ["Sounds interesting, can we talk Friday?", "Please stop writing to my work address and take me off your list."])
-def test_an_outlook_paste_from_a_personal_address_holds_step_2_and_nothing_else(make_ctx, words):
+def test_an_outlook_paste_opting_out_from_a_personal_address_cancels_step_2_and_suppresses_only_the_sender(make_ctx):
+    """Stricter than a hold, which Mark reviewed would release: the mail counts on the company's record (outreach.company_opted_out)."""
+    ctx, sender, sent = contacted(make_ctx)
+    step = queue_approved_step(ctx, lead_of(ctx).id)
+    reply(ctx, sent, paste(DAVID, "Please stop writing to my work address and take me off your list."), frm=HOME, subject="your email to my work address", thread=False)
+    assert try_to_send(ctx, sender) == []
+    assert status_of(ctx, step) == "cancelled"
+    with ctx.db.session() as s:
+        assert is_suppressed(s, HOME) and not is_suppressed(s, DAVID)
+
+
+def test_an_outlook_paste_from_a_personal_address_holds_step_2_and_nothing_else(make_ctx):
+    words = "Sounds interesting, can we talk Friday?"
     ctx, sender, sent = contacted(make_ctx)
     lead = lead_of(ctx).id
     step = queue_approved_step(ctx, lead)
