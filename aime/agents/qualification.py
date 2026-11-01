@@ -13,12 +13,15 @@ from aime.agents.base import BaseAgent
 from aime.crm_ops import is_suppressed, log_activity
 from aime.db import kv_get, kv_set
 from aime.matching import seeks_external_help
-from aime.models import Activity, Alert, Company, Contact, FollowUp, InboundInquiry, Lead, Signal
+from aime.models import Activity, Alert, Company, Contact, FollowUp, InboundInquiry, Lead, ResearchSnapshot, Signal
 from aime.monitoring import alert_once, resolve_alerts
-from aime.outreach import RUNNING_STAGES, set_status
+from aime.outreach import RUNNING_STAGES, STOP_STATUSES, set_status
 from aime.pipeline import clear_stage
 from aime.scoring import LeadFacts, categorize, lasting_grade, read_company, score_lead, signal_fact
+from aime.sources.base import CompanyCandidate
 from aime.timeutil import utcnow
+from aime.validation import validate_candidate
+from aime.website_check import name_matches
 
 # Who writes the activity log besides people. People are recorded by user name, whatever the name is, so a name that is
 # not here counts as a person: an agent left off this list keeps a lead qualified, it never drops one.
@@ -32,7 +35,42 @@ CLOSED_STAGES = ("not_interested", "no_response", "reengage")
 MOVED_TODAY = "qualification.moved_today"  # what the unread "Scoring moved" notice has counted so far
 MOVED_ALERT = "leads:moved"
 MOVED_NAMED = 30  # lead numbers named in the notice; the count covers the rest
+MOVED_SOURCE = "qualification"  # whose notice it is, whichever rule moved the lead: it is one notice
+NEW_POST_TASK = "New hiring post from "  # how the task starts that tells a person who parked a lead of a new post
+NAMES_ALERT = "leads:names_refused"
 WRITE_BATCH = 50  # leads saved at a time: at about 5 ms a lead, a click waits a quarter of a second at most
+
+
+def say_moved(session: Session, moved: list[tuple[str, int]], settings) -> None:
+    """One warning that names the leads and keeps adding up until a person has read it: a run on Sunday is still there on
+    Monday. Once read, the next move starts a new one. `moved` is emptied into it; the running count is saved beside the
+    moves, so they stand or fall together."""
+    if not moved:
+        return
+    unread = session.execute(select(Alert.id).where(Alert.source == MOVED_SOURCE, Alert.key == MOVED_ALERT,
+                                                    Alert.acknowledged.is_(False))).first()
+    kept = (kv_get(session, MOVED_TODAY) or {}) if unread else {}
+    if not unread:
+        resolve_alerts(session, (MOVED_ALERT,), set())  # that one was read: this is a new notice, not silenced by the dismissal
+    leads: dict[str, list[int]] = {status: list(ids) for status, ids in (kept.get("leads") or {}).items()}
+    # a notice from before leads were named left only a count: it is kept beside the total, which counts leads
+    earlier = int(kept.get("earlier") or 0) or (0 if "leads" in kept else sum((kept.get("moved") or {}).values()))
+    for status, lead_id in moved:
+        if lead_id not in leads.setdefault(status, []):
+            leads[status].append(lead_id)
+    moved.clear()
+    kv_set(session, MOVED_TODAY, {"leads": leads, "earlier": earlier})
+    total = len({i for ids in leads.values() for i in ids})
+    words = ", ".join(f"{len(ids)} to {status}" for status, ids in sorted(leads.items()))
+    named, left = [], MOVED_NAMED
+    for status, ids in sorted(leads.items()):
+        if left > 0:
+            named.append(f"{status}: " + ", ".join(f"#{i}" for i in ids[:left]))
+        left -= len(ids)
+    more = f", and {-left} more" if left < 0 else ""
+    before = f" {earlier} earlier move(s) were counted without lead numbers." if earlier else ""
+    alert_once(session, "warning", MOVED_SOURCE, f"Scoring moved {total} lead(s) since this was last read: {words}. Leads {'; '.join(named)}{more}."
+               f"{before} Each lead's page says why, and a wrong competitor flag can be cleared there.", settings, key=MOVED_ALERT)
 
 
 class QualifyInput(BaseModel):
@@ -114,6 +152,7 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                 contact_role=contact.role_category if contact else None,
                 contact_email_status=contact.email_status if contact else None,
                 contact_title=contact.title if contact else None,
+                page_names_it=name_matches(company.name, company.website_title),
                 now=now,
             )
             result = score_lead(facts, thresholds)
@@ -149,6 +188,9 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                   and self._may_requalify(session, lead, company, signals, prev_status)):
                 lead.status = "qualified"
                 out.newly_qualified.append(lead.id)
+                if prev_status == "nurture":
+                    lead.last_activity_at = now  # or the stale-lead rule, still counting from the old date, parks it again the next morning
+                    self._review_again(session, lead, signals)
             elif lasting in ("C", "D") and prev_status == "new":
                 lead.status = "nurture"
             elif (result.grade in ("C", "D") and prev_status == "qualified" and lead.source == "research"
@@ -177,62 +219,99 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                 self._say_moved(session, moved)  # with the moves it counts: a run that fails later has still told someone
                 session.commit()
         self._say_moved(session, moved)
+        if not inp.lead_ids:
+            self._say_names_refused(session)
         out.grade_counts = dict(grades)
         return out
 
     def _say_moved(self, session: Session, moved: list[tuple[str, int]]) -> None:
-        """One warning that names the leads and keeps adding up until a person has read it: a run on Sunday is still there on
-        Monday. Once read, the next move starts a new one. `moved` is emptied into it; the running count is saved beside the
-        moves, so they stand or fall together."""
-        if not moved:
+        say_moved(session, moved, self.settings)
+
+    def _say_names_refused(self, session: Session) -> None:
+        """Names are checked only when a company comes in, so one that came in before a rule stays as it is. A person is told
+        once, and corrects the name on the lead's page; nothing is closed, as a real prospect may be behind the wrong name."""
+        rows = session.execute(select(Lead.id, Company.name, Company.name_set_by).join(Company, Lead.company_id == Company.id).where(
+            Lead.status.in_(("new", "qualified", "nurture")), Company.merged_into_id.is_(None)).order_by(Lead.id)).all()
+        refused = [lead_id for lead_id, name, set_by in rows
+                   if not set_by and validate_candidate(CompanyCandidate(name=name, source="", source_url="", signal_type=""))[0]]
+        if not refused:
+            resolve_alerts(session, (NAMES_ALERT,), set())
             return
-        unread = session.execute(select(Alert.id).where(Alert.source == self.name, Alert.key == MOVED_ALERT,
-                                                        Alert.acknowledged.is_(False))).first()
-        kept = (kv_get(session, MOVED_TODAY) or {}) if unread else {}
-        if not unread:
-            resolve_alerts(session, (MOVED_ALERT,), set())  # that one was read: this is a new notice, not silenced by the dismissal
-        leads: dict[str, list[int]] = {status: list(ids) for status, ids in (kept.get("leads") or {}).items()}
-        # a notice from before leads were named left only a count: it is kept beside the total, which counts leads
-        earlier = int(kept.get("earlier") or 0) or (0 if "leads" in kept else sum((kept.get("moved") or {}).values()))
-        for status, lead_id in moved:
-            if lead_id not in leads.setdefault(status, []):
-                leads[status].append(lead_id)
-        moved.clear()
-        kv_set(session, MOVED_TODAY, {"leads": leads, "earlier": earlier})
-        total = len({i for ids in leads.values() for i in ids})
-        words = ", ".join(f"{len(ids)} to {status}" for status, ids in sorted(leads.items()))
-        named, left = [], MOVED_NAMED
-        for status, ids in sorted(leads.items()):
-            if left > 0:
-                named.append(f"{status}: " + ", ".join(f"#{i}" for i in ids[:left]))
-            left -= len(ids)
-        more = f", and {-left} more" if left < 0 else ""
-        before = f" {earlier} earlier move(s) were counted without lead numbers." if earlier else ""
-        alert_once(session, "warning", self.name, f"Scoring moved {total} lead(s) since this was last read: {words}. Leads {'; '.join(named)}{more}."
-                   f"{before} Each lead's page says why, and a wrong competitor flag can be cleared there.", self.settings, key=MOVED_ALERT)
+        named = ", ".join(f"#{i}" for i in refused[:MOVED_NAMED])
+        more = f", and {len(refused) - MOVED_NAMED} more" if len(refused) > MOVED_NAMED else ""
+        alert_once(session, "warning", self.name, f"{len(refused)} open lead(s) have a company name today's rules would refuse, as it reads like a "
+                   f"job title, a description or a place: leads {named}{more}. Nothing was closed; a person can correct the name on the lead's page.",
+                   self.settings, key=NAMES_ALERT, until_resolved=True)
+
+    @staticmethod
+    def _last_move(session: Session, lead: Lead) -> Activity | None:
+        return session.execute(select(Activity).where(Activity.lead_id == lead.id, Activity.type == "status_change")
+                               .order_by(Activity.created_at.desc(), Activity.id.desc())).scalars().first()
 
     def _may_requalify(self, session: Session, lead: Lead, company: Company, signals: list[Signal],
                        prev_status: str) -> bool:
-        """A lead that a person or the stale-lead rule moved to nurture is qualified again only on evidence
-        recorded after that move (a new signal or a new research read); the same score is not enough."""
+        """A lead that the stale-lead rule moved to nurture is qualified again only on evidence recorded after that move: a new
+        signal, or a read of its website that names someone no earlier read named; the same score is not enough, and neither is a
+        read as such, as researched_at only says when to read next. One a person moved stays there on a read and on a new post,
+        which opens a task for that person instead; any other new signal, such as the company writing to us, still brings it back."""
         if prev_status != "nurture":
             return True
         if lead.outreach_status in CLOSED_STAGES:
             return False
-        last = session.execute(select(Activity).where(Activity.lead_id == lead.id, Activity.type == "status_change")
-                               .order_by(Activity.created_at.desc(), Activity.id.desc())).scalars().first()
+        last = self._last_move(session, lead)
         if last is None or last.actor == self.name or not ("→ nurture" in last.subject or "moved to nurture" in last.subject):
             return True
         moved = last.created_at
-        return (any(s.created_at and s.created_at > moved for s in signals)
-                or (company.researched_at is not None and company.researched_at > moved))
+        new = [s for s in signals if s.created_at and s.created_at > moved]
+        if (last.actor or "") in NOT_A_PERSON:
+            return bool(new) or self._read_names_someone_new(session, company, moved)
+        posts = [s for s in new if s.signal_type == "hiring"]
+        if posts:
+            self._tell_of_new_post(session, lead, company, posts)
+        return len(posts) < len(new)
+
+    @staticmethod
+    def _read_names_someone_new(session: Session, company: Company, moved) -> bool:
+        """People and addresses only, as the words around them change on an unchanged site. Every earlier read counts, so a partial
+        read before the move does not make the next full one look new, and a read that finds fewer, or was blocked, is no evidence."""
+        known, found = set(), set()
+        for snap in session.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == company.id,
+                                                                   ResearchSnapshot.status.in_(("done", "no_people")))).scalars():
+            names = {(p.get("name") or "").strip().lower() for p in snap.people or []} | {(e.get("email") or "").strip().lower() for e in snap.emails or []}
+            (known if snap.fetched_at <= moved else found).update(names)
+        return bool(found - known - {""})
+
+    def _tell_of_new_post(self, session: Session, lead: Lead, company: Company, posts: list[Signal]) -> None:
+        """Each post is told once: a task a person ticked off does not come back the next morning, and one still open is enough."""
+        if lead.outreach_status in STOP_STATUSES:
+            return
+        newest = max(posts, key=lambda s: s.created_at)
+        task = FollowUp.subject.startswith(NEW_POST_TASK, autoescape=True)
+        if session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task", task, (FollowUp.status == "pending")
+                                                     | (FollowUp.created_at >= newest.created_at)).limit(1)).first():
+            return
+        session.add(FollowUp(lead_id=lead.id, company_id=lead.company_id, channel="task", step=1, due_at=utcnow(), status="pending",
+                             subject=f"{NEW_POST_TASK}{company.name}"[:300],
+                             body=(f"A person moved this lead to nurture, and this company has posted again since: {newest.source_url or 'no link on record'}. "
+                                   "It stays in nurture and nothing is drafted: whether to bring it back is a person's decision, on the lead's page.")))
+        log_activity(session, "Task created: a new hiring post on a lead a person parked", self.name, type_="task", company_id=company.id, lead_id=lead.id)
+
+    def _review_again(self, session: Session, lead: Lead, signals: list[Signal]) -> None:
+        """A new post brought back a lead a machine parked, and its review was ticked off before that. A ticked task with a reason
+        no longer stops a fresh one (SalesWorkflowAgent._ensure_task), so the next run opens it the normal way, or drafts instead."""
+        last = self._last_move(session, lead)
+        if last is None or (last.actor or "") not in NOT_A_PERSON or not any(
+                s.signal_type == "hiring" and s.created_at and s.created_at > last.created_at for s in signals):
+            return
+        for task in session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task", FollowUp.status == "done",
+                                                           FollowUp.blocked_reason.is_(None), FollowUp.subject.startswith("Review "))).scalars():
+            task.blocked_reason = "Reviewed before a new post brought this lead back"
 
     def _sequence_parked_by_score(self, session: Session, lead: Lead) -> bool:
         """Its sequence is running, and only this agent's own downgrade moved it to nurture (before that was prevented)."""
         if lead.outreach_status != "contacted":
             return False
-        last = session.execute(select(Activity).where(Activity.lead_id == lead.id, Activity.type == "status_change")
-                               .order_by(Activity.created_at.desc(), Activity.id.desc())).scalars().first()
+        last = self._last_move(session, lead)
         return last is not None and last.actor == self.name and "→ nurture" in (last.subject or "")
 
     @staticmethod

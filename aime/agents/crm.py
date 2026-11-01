@@ -9,11 +9,11 @@ from typing import Literal
 
 import httpx
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent
-from aime.agents.qualification import NOT_A_PERSON
+from aime.agents.qualification import NOT_A_PERSON, say_moved
 from aime.crm_ops import (add_signal, ensure_lead, is_suppressed, log_activity, merge_companies, upsert_company,
                           upsert_contact, us_location_evidence)
 from aime.dedupe import clean_company_name, domain_from_email, domain_from_url, name_from_title, normalize_name
@@ -438,22 +438,32 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         }
 
     def _stale(self, session: Session) -> int:
+        from aime.workflows import mailbox_hold  # here, not at import time: the workflows import the agents
+
+        if mailbox_hold(self.ctx):  # a reply may be waiting in a mailbox nobody has just read: tomorrow's run judges, after a read
+            return 0
         days = int(self.settings.section("followup").get("stale_lead_days", 30))
         cutoff = utcnow() - timedelta(days=days)
-        moved = 0
+        newest_post = dict(session.execute(select(Signal.company_id, func.max(Signal.created_at)).where(Signal.signal_type == "hiring")
+                                           .group_by(Signal.company_id)).all())
+        moved: list[tuple[str, int]] = []
         for lead in session.execute(select(Lead).where(Lead.status.in_(("new", "qualified")))).scalars():
-            last = lead.last_activity_at or lead.created_at
+            last = max(filter(None, (lead.last_activity_at or lead.created_at, newest_post.get(lead.company_id))), default=None)
             if last and last < cutoff:
                 open_items = session.execute(select(FollowUp.id).where(
                     FollowUp.lead_id == lead.id,
                     FollowUp.status.in_(("pending", "awaiting_approval", "approved", "sending", "uncertain")))).first()
-                if open_items:
+                open_deal = session.execute(select(Opportunity.id).where(Opportunity.lead_id == lead.id,
+                                                                         Opportunity.stage.not_in(("won", "lost")))).first()
+                if open_items or open_deal:
                     continue
                 lead.status = "nurture"
                 log_activity(session, f"No activity for {days}+ days: moved to nurture", self.name,
                              type_="status_change", company_id=lead.company_id, lead_id=lead.id)
-                moved += 1
-        return moved
+                moved.append(("nurture", lead.id))
+        count = len(moved)
+        say_moved(session, moved, self.settings)
+        return count
 
     def _lifecycle(self, session: Session) -> int:
         updates = 0

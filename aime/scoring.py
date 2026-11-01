@@ -57,6 +57,7 @@ class LeadFacts:
     contact_role: str | None = None  # role category; "inbox" for a published company inbox
     contact_email_status: str | None = None  # see aime.contact_validation
     contact_title: str | None = None
+    page_names_it: bool = True  # the homepage title we keep names the company; False: only its domain spells the name
     now: datetime | None = None
 
 
@@ -107,16 +108,18 @@ _BUILDERS_RE = re.compile(r"\b(?:engineers?|developers?|programmers?|swe)\b", re
 _RUNNING_BUSINESS_RE = re.compile(r"\b(?:customers?|clients?|users|patients?|partners|hq|headquartered|revenue|profitable|paying|funded|funding|raised|series [a-f]|"
                                   r"seed|backed by|investors?|venture|y ?combinator|yc|arr|mrr|live product|in production|piloting|"
                                   r"(?:builds?|creates?|makes?|sells?) software|our (?:product|platform))\b", re.I)
+_FILLED_RE = re.compile(r"\b(?:position|role)\s+filled\b", re.I)
 
 
 def signal_fact(signal) -> SignalFact:
     """A stored signal as scoring sees it. A hiring post is read again by today's rules, so what the matching rules no longer
     accept stops counting at the next score, with nothing rewritten; what a person stated stays as recorded."""
     services, strength = list(signal.matched_services or []), signal.strength
+    filled = signal.signal_type == "hiring" and bool(_FILLED_RE.search(signal.text or ""))  # the post says itself that nobody is wanted any more
     if signal.signal_type == "hiring" and signal.text:
-        matches = match_services(signal.text)
+        matches = [] if filled else match_services(signal.text)
         services, strength = [m.service_id for m in matches], max((m.strength for m in matches), default=0.0)
-    builds = signal.signal_type == "hiring" and bool(_BUILDERS_RE.search(signal.text or ""))
+    builds = signal.signal_type == "hiring" and not filled and bool(_BUILDERS_RE.search(signal.text or ""))
     return SignalFact(signal.signal_type, services, strength, signal.observed_at, bool(signal.source_url), builds)
 
 
@@ -283,7 +286,8 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
         reasons.append("+3 data: evidence links to its source")
     if f.website_status in ("verified", "redirected"):
         data += 2
-        reasons.append("+2 data: website confirmed live and naming the company")
+        reasons.append("+2 data: website confirmed live and naming the company" if f.page_names_it
+                       else "+2 data: website live; the domain spells the name, and the page does not confirm it")
     if f.verified:
         data += 2
         reasons.append("+2 data: company record verified from an official registry")
