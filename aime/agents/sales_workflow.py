@@ -207,9 +207,11 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         """Whether the inquiry sequence may write to this lead: a qualified one, or a person who asked us (an
         inquiry, a LinkedIn form or event registration, with consent) whom only the score put in nurture. Never a
         disqualified lead, nor one that a person, a "not interested" reply or the stale-lead rule parked."""
+        contact = lead.contact
+        if contact and contact.email_status == "bounced":  # a bounce leaves their consent as it was, and nobody is answered at a dead address
+            return False
         if lead.status == "qualified":
             return True
-        contact = lead.contact
         if (lead.status != "nurture" or lead.source != "inbound" or not contact or not contact.email
                 or contact.consent_status not in CONSENTED):
             return False
@@ -345,8 +347,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                         or not eligible(session, self.settings, lead, running=True)[0]):
                     continue  # replied, unsubscribed, bounced, stopped, or no longer reachable
             elif (not self._may_answer(session, lead) or not lead.contact
-                    or lead.contact.consent_status not in CONSENTED or lead.contact.email_status == "bounced"
-                    or lead.outreach_status in STOP_STATUSES):
+                    or lead.contact.consent_status not in CONSENTED or lead.outreach_status in STOP_STATUSES):
                 continue  # they replied, booked, unsubscribed, bounced, or a person stopped the sequence
             has_open = session.execute(select(FollowUp.id).where(
                 FollowUp.lead_id == lead_id, FollowUp.channel == "email", FollowUp.status.in_(OPEN_FOLLOWUP))).first()

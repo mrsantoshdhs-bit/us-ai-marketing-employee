@@ -20,7 +20,7 @@ from aime.meetings import reopen_after_cancel
 from aime.migrations import migrate, pending_columns
 from aime.models import Activity, Alert, AuditEvent, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity, ResearchSnapshot, Signal, Suppression
 from aime.outreach import eligible, reopen_refusal, reopen_stopped, stop_sequence
-from aime.pipeline import ASKS_FOR_APPROVAL, REPLY_SENT, settle_next_steps
+from aime.pipeline import ASKS_FOR_APPROVAL, REPLY_SENT, REPLY_WAITING, settle_next_steps
 from aime.sources.base import CompanyCandidate
 from aime.timeutil import utcnow
 from aime.web.app import create_app
@@ -260,6 +260,29 @@ def test_a_person_who_asked_us_and_bounced_gets_no_further_draft(make_ctx, sent_
     assert open_emails(ctx) == 0
 
 
+@pytest.mark.parametrize("dead, drafts", [(False, 1), (True, 0)])
+def test_a_person_who_asked_us_parked_by_the_score_and_bounced_gets_no_draft(make_ctx, dead, drafts):
+    """Parked inbound leads have their own way in: a draft here could never be approved, and would sit in the queue for good."""
+    ctx = make_ctx(**SENDING)
+    with ctx.db.session() as s:
+        co = Company(name="Parked", normalized_name="parked", source="inbound", domain="parked.example")
+        s.add(co)
+        s.flush()
+        c = Contact(company_id=co.id, email="pat@parked.example", source="inbound", consent_status="inquiry", first_name="Pat")
+        s.add(c)
+        s.flush()
+        lead = Lead(company_id=co.id, contact_id=c.id, source="inbound", status="nurture", score=30, grade="C", primary_service="ai_agents")
+        s.add(lead)
+        s.flush()
+        s.add(Activity(lead_id=lead.id, company_id=co.id, type="status_change", subject="Status new → nurture", actor=LeadQualificationAgent.name))
+        lead_id = lead.id
+    if dead:
+        _bounced(ctx, lead_id)
+    work(ctx, send=False)
+    work(ctx, when=TUESDAY_11AM_ET + timedelta(days=1), send=False)
+    assert open_emails(ctx) == drafts
+
+
 # ------------------------------------------------------------------ C. merges: which lead goes on
 
 def _keeper(s, **kw):
@@ -469,6 +492,148 @@ def test_a_meeting_cancelled_on_a_merged_lead_still_updates_its_deal(make_ctx):
         s.flush()
         reopen_after_cancel(s, meeting, "owner")
     assert "was cancelled" in _deals(ctx)[0][2]
+
+
+YES, NO, STOP = "Yes, sounds good. Let's set up a call next week.", "Not interested, thanks.", "Please remove me from your list."
+
+
+def _both_leads_have_a_deal(make_ctx, keeper_stage, dup_stage="new"):
+    """Two people, one deal each. The duplicate's person writes into the thread of the merged lead."""
+    ctx, _, sent = contacted(make_ctx)
+    merged = lead_of(ctx)
+    with ctx.db.session() as s:
+        keeper, own = _keeper_with_contact(s, sent=True)
+        own_id = own.id
+        s.add(Opportunity(lead_id=own.id, company_id=keeper.id, name="Keeper's deal", stage=keeper_stage, probability=20, lost_reason="Not interested" if keeper_stage == "lost" else None))
+        s.flush()
+        s.add(Opportunity(lead_id=merged.id, company_id=merged.company_id, name="Duplicate's deal", stage=dup_stage, probability=10))
+        s.flush()
+        merge_companies(s, keeper, s.get(Company, merged.company_id), "crm")
+    return ctx, sent, merged.id, own_id
+
+
+def _deal_stages(ctx):
+    with ctx.db.session() as s:
+        return {o.name: (o.lead_id, o.stage) for o in s.execute(select(Opportunity)).scalars()}
+
+
+@pytest.mark.parametrize("keeper_stage", ["lost", "won"])
+def test_an_interested_reply_moves_the_writers_deal_not_the_closed_one_beside_it(make_ctx, keeper_stage):
+    ctx, sent, _, own_id = _both_leads_have_a_deal(make_ctx, keeper_stage)
+    _reply(ctx, sent, YES)
+    assert _deal_stages(ctx) == {"Keeper's deal": (own_id, keeper_stage), "Duplicate's deal": (own_id, "discovery")}
+
+
+def test_an_opt_out_closes_the_writers_deal_and_not_another_persons(make_ctx):
+    ctx, sent, merged_id, own_id = _both_leads_have_a_deal(make_ctx, "discovery")
+    _reply(ctx, sent, STOP)
+    assert _deal_stages(ctx) == {"Keeper's deal": (own_id, "discovery"), "Duplicate's deal": (merged_id, "lost")}
+    with ctx.db.session() as s:
+        assert is_suppressed(s, DAVID)
+
+
+def test_a_no_writes_the_next_step_on_the_writers_deal_only(make_ctx):
+    ctx, sent, *_ = _both_leads_have_a_deal(make_ctx, "discovery")
+    with ctx.db.session() as s:
+        s.execute(select(Opportunity).where(Opportunity.name == "Keeper's deal")).scalar_one().next_step = "Theirs"
+        s.execute(select(Opportunity).where(Opportunity.name == "Duplicate's deal")).scalar_one().stage = "proposal"  # a person's: the no does not close it
+    _reply(ctx, sent, NO)
+    with ctx.db.session() as s:
+        steps = {o.name: o.next_step for o in s.execute(select(Opportunity)).scalars()}
+    assert steps["Keeper's deal"] == "Theirs" and steps["Duplicate's deal"].startswith("They replied")
+
+
+def test_two_open_deals_each_stay_with_their_person_after_an_interested_reply(make_ctx):
+    ctx, sent, merged_id, own_id = _both_leads_have_a_deal(make_ctx, "proposal")
+    _reply(ctx, sent, YES)
+    assert _deal_stages(ctx) == {"Keeper's deal": (own_id, "proposal"), "Duplicate's deal": (merged_id, "discovery")}
+
+
+def test_a_reply_in_the_keepers_thread_leaves_the_duplicates_open_deal_alone(make_ctx):
+    ctx, _, merged_id, own_id = _both_leads_have_a_deal(make_ctx, "discovery")
+    FakeIMAP.messages = {1: mail("pat@keeper.example", "Re: Hi", STOP, in_reply_to="<keeper-first@us.example>")}
+    run_inbox(ctx)
+    assert _deal_stages(ctx) == {"Keeper's deal": (own_id, "lost"), "Duplicate's deal": (merged_id, "new")}
+
+
+def test_a_closed_deal_stays_with_its_person_beside_a_closed_one(make_ctx):
+    """Nothing is live to show on the open lead, and which deal is whose is all a later reply has to go on."""
+    ctx, sent, merged_id, own_id = _both_leads_have_a_deal(make_ctx, "won", dup_stage="lost")
+    assert _deal_stages(ctx) == {"Keeper's deal": (own_id, "won"), "Duplicate's deal": (merged_id, "lost")}
+    _reply(ctx, sent, YES)
+    assert _deal_stages(ctx) == {"Keeper's deal": (own_id, "won"), "Duplicate's deal": (merged_id, "discovery")}
+
+
+def test_a_next_step_counts_only_the_mail_of_leads_that_reach_the_deal(make_ctx):
+    ctx, _, merged_id, own_id = _both_leads_have_a_deal(make_ctx, "discovery")
+    with ctx.db.session() as s:
+        for opp in s.execute(select(Opportunity)).scalars():
+            opp.next_step = REPLY_SENT
+        s.add(FollowUp(lead_id=own_id, company_id=s.get(Lead, own_id).company_id, channel="email", kind="response", step=1, status="sent", due_at=utcnow(), sent_at=utcnow(), to_email="pat@keeper.example", subject="Re", body="Hi"))
+        s.add(FollowUp(lead_id=merged_id, company_id=s.get(Lead, merged_id).company_id, channel="email", kind="response", step=1, status="awaiting_approval", due_at=utcnow(), to_email=DAVID, subject="Re", body="Hi"))
+    with ctx.db.session() as s:
+        settle_next_steps(s)
+    with ctx.db.session() as s:
+        steps = {o.name: o.next_step for o in s.execute(select(Opportunity)).scalars()}
+    assert steps == {"Keeper's deal": REPLY_SENT, "Duplicate's deal": REPLY_WAITING}
+
+
+def test_a_meeting_cancelled_on_a_merged_lead_touches_its_own_deal_only(make_ctx):
+    ctx, _, merged_id, _ = _both_leads_have_a_deal(make_ctx, "discovery")
+    with ctx.db.session() as s:
+        s.execute(select(Opportunity).where(Opportunity.name == "Keeper's deal")).scalar_one().next_step = "Theirs"
+        when = utcnow() + timedelta(days=1)
+        meeting = Meeting(lead_id=merged_id, invitee_email=DAVID, starts_at=when, ends_at=when + timedelta(minutes=30), source="manual", status="cancelled")
+        s.add(meeting)
+        s.flush()
+        reopen_after_cancel(s, meeting, "crm")
+    with ctx.db.session() as s:
+        steps = {o.name: o.next_step for o in s.execute(select(Opportunity)).scalars()}
+    assert steps["Keeper's deal"] == "Theirs" and "cancelled" in steps["Duplicate's deal"]
+
+
+@pytest.mark.parametrize("words, stage, next_step", [(STOP, "lost", None), (NO, "discovery", "They replied"), (YES, "discovery", None)])
+def test_a_merged_threads_reply_follows_the_merge_record_when_another_lead_opened_since(make_ctx, words, stage, next_step):
+    """The lead the deal moved to was closed and a new inquiry is the company's primary lead by now: the deal is still where it moved to."""
+    ctx, _, sent, _, own_id = _deal_then_merge_with_an_emailed_keeper(make_ctx)
+    with ctx.db.session() as s:
+        own = s.get(Lead, own_id)
+        c = Contact(company_id=own.company_id, email="sam@keeper.example", source="inbound", consent_status="inquiry")
+        s.add(c)
+        s.flush()
+        s.add(Lead(company_id=own.company_id, contact_id=c.id, source="inbound", status="qualified", score=80, grade="A", primary_service="ai_agents"))
+        own.status = "disqualified"
+    _reply(ctx, sent, words)
+    (lead, found, step), = _deals(ctx)  # one deal: none opened on the new inquiry's lead
+    assert (lead, found) == (own_id, stage)
+    if next_step:
+        assert step.startswith(next_step)
+
+
+def test_a_reply_follows_two_merges_to_the_deal(make_ctx):
+    ctx, _, sent, _, own_id = _deal_then_merge_with_an_emailed_keeper(make_ctx)
+    with ctx.db.session() as s:
+        first = s.get(Lead, own_id)
+        third = Company(name="Third Co", normalized_name="third co", source="test", domain="third.example")
+        s.add(third)
+        s.flush()
+        goes_on = Lead(company_id=third.id, source="research", status="qualified", score=70, grade="B", primary_service="ai_agents", outreach_status="contacted")
+        s.add(goes_on)
+        s.flush()
+        goes_on_id = goes_on.id
+        merge_companies(s, third, first.company, "crm")
+    with ctx.db.session() as s:
+        assert s.get(Lead, own_id).status == "merged"
+    _reply(ctx, sent, STOP)
+    assert [(lead, stage) for lead, stage, _ in _deals(ctx)] == [(goes_on_id, "lost")]
+
+
+def test_a_lead_merged_by_hand_has_no_record_and_goes_by_the_companys_primary_lead(make_ctx):
+    ctx, _, sent, merged_id, own_id = _deal_then_merge_with_an_emailed_keeper(make_ctx)
+    with ctx.db.session() as s:
+        s.get(Lead, merged_id).disqualify_reason = None
+    _reply(ctx, sent, STOP)
+    assert [(lead, stage) for lead, stage, _ in _deals(ctx)] == [(own_id, "lost")]
 
 
 def _dead_duplicate_then_merge(make_ctx):

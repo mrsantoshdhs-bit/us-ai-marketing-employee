@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime
 
 from sqlalchemy import and_, case, exists, func, literal, or_, select
@@ -12,6 +13,7 @@ from aime.dedupe import _MULTI_PART_TLDS, HOSTED_PLATFORMS, clean_company_name, 
 from aime.matching import competitor_evidence, competitor_in_post, detect_competitor, match_services
 from aime.models import Activity, Alert, AuditEvent, Company, Contact, FollowUp, InboundEmail, Lead, Opportunity, ResearchSnapshot, Signal, Suppression
 from aime.sources.base import CompanyCandidate
+from aime.stages import CLOSED
 from aime.timeutil import utcnow
 
 OPEN_LEAD_STATUSES = ("new", "qualified", "nurture")
@@ -26,9 +28,29 @@ def primary_lead(session: Session, company_id: int) -> Lead | None:
 
 
 def lead_that_went_on(session: Session, lead: Lead) -> Lead:
-    """Where a merged lead's work went: replies and bookings still find the merged lead, by its thread and its contact, while
-    its deal moved to the lead that goes on (merge_companies). Any other lead is its own."""
-    return primary_lead(session, lead.company_id) if lead.status == "merged" else lead
+    """Where a merged lead went: the lead its merge record names, whatever became of that lead since, as another may be the
+    company's primary by now. One set to merged by hand names none, so the company's primary lead. Any other lead is its own."""
+    if lead.status != "merged":
+        return lead
+    named = re.fullmatch(r"Merged into lead #(\d+)", lead.disqualify_reason or "")
+    return (session.get(Lead, int(named[1])) if named else None) or primary_lead(session, lead.company_id)
+
+
+def lead_with_the_deals(session: Session, lead: Lead) -> Lead:
+    """The lead whose deals a reply or a booking on this lead acts on. Replies still find a merged lead, by its thread and its
+    contact, while its deal may have moved on (_merge_lead). A deal still on it is its own, and the lead that went on may hold
+    someone else's: so its own while it has any, else along the merges."""
+    seen = set()
+    while lead.status == "merged" and lead.id not in seen and not session.execute(select(Opportunity.id).where(Opportunity.lead_id == lead.id)).first():
+        seen.add(lead.id)
+        lead = lead_that_went_on(session, lead)
+    return lead
+
+
+def leads_replying_into(session: Session, opp: Opportunity) -> list[int]:
+    """lead_with_the_deals seen from a deal: its own lead and the merged leads whose replies reach it."""
+    merged = session.execute(select(Lead).where(Lead.company_id == opp.company_id, Lead.status == "merged", Lead.id != opp.lead_id)).scalars().all()
+    return [opp.lead_id, *(x.id for x in merged if lead_with_the_deals(session, x).id == opp.lead_id)]
 
 
 def fingerprint(*parts: str | None) -> str:
@@ -445,8 +467,13 @@ def _untouched(session: Session, lead: Lead) -> bool:
 def _merge_lead(session: Session, gone: Lead, survivor: Lead) -> None:
     gone.status = "merged"
     gone.disqualify_reason = f"Merged into lead #{survivor.id}"
-    for opp in session.execute(select(Opportunity).where(Opportunity.lead_id == gone.id)).scalars():
-        opp.lead_id = survivor.id  # the open lead's page shows it and opens no second deal; a reply on this lead finds it by lead_that_went_on
+    # The deal moves so that the open lead's page shows it and no second one opens; a reply on this lead finds it by lead_with_the_deals.
+    # Not where the survivor has a deal of its own it would be taken for: each stays with the person it is about, as a merge always left it.
+    deals = session.execute(select(Opportunity).where(Opportunity.lead_id == gone.id)).scalars().all()
+    theirs = session.execute(select(Opportunity.stage).where(Opportunity.lead_id == survivor.id)).scalars().all()
+    if not theirs or (set(theirs) <= set(CLOSED) and any(x.stage not in CLOSED for x in deals)):
+        for opp in deals:
+            opp.lead_id = survivor.id
 
 
 def _carry_competitor_word(session: Session, keeper: Company, dup: Company, keeper_domain: str | None, actor: str) -> None:
