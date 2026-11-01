@@ -377,6 +377,7 @@ def erase_person(session: Session, email: str, actor: str) -> dict[str, int]:
     The address stays only on the suppression list, so nothing is ever sent to it again. Company records stay."""
     from aime.automation import audit
     from aime.models import InboundInquiry, SkippedMail
+    from aime.people import name_hash
 
     email = (email or "").strip().lower()
     if "@" not in email:
@@ -386,6 +387,8 @@ def erase_person(session: Session, email: str, actor: str) -> dict[str, int]:
     names: set[str] = set()
     for c in session.execute(select(Contact).where(Contact.email == email)).scalars().all():
         names |= {n for n in (c.first_name, c.last_name) if n and len(n) > 2}
+        if c.first_name or c.last_name:  # the name goes, and the company's pages still print it: the next re-read must know
+            c.erased_name_hash = name_hash(f"{c.first_name or ''} {c.last_name or ''}")
         for f in session.execute(select(FollowUp).where(FollowUp.contact_id == c.id)).scalars():
             if f.status in ("pending", "awaiting_approval", "approved"):
                 f.status, f.blocked_reason = "cancelled", "Contact erased on request"
