@@ -487,7 +487,8 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         self._watch_booking_notices(session)
         self._meetings(session, out)
         out.needs_review = len(session.execute(select(InboundEmail.id).where(InboundEmail.status == "needs_review")).all())
-        if self._signed_in_again and not self._refused:  # a refusal only the reading saw ends when the reading signs in again
+        # A refusal only the reading saw ends when the reading signs in again, on every mailbox that refused: one still waiting holds the mail too.
+        if self._signed_in_again and not any(kv_get(session, f"{key}.refused") for _, _, key, _ in sources):
             resolve_alerts(session, (SIGN_IN_ALERT,), set())
         if failed:
             session.commit()

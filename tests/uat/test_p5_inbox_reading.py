@@ -15,7 +15,7 @@ from sqlalchemy.exc import OperationalError
 import aime.inbox as inbox
 import aime.timeutil
 from aime import mail_accounts as ma
-from aime import reply_intel, workflows
+from aime import outreach, reply_intel, workflows
 from aime.agents import inbox_agent as ia
 from aime.agents.inbox_agent import InboxAgent, addresses_we_wrote_to, names_someone_we_wrote_to, sales_related
 from aime.db import kv_get
@@ -45,7 +45,8 @@ class Picky(Server):
             self.commands.append(rest)
             if self.on_addresses == "drop":
                 return True
-            conn.sendall(f"{tag} BAD too long\r\n".encode())
+            answer = "NO [CANNOT] search not possible" if self.on_addresses == "no" else "BAD too long"
+            conn.sendall(f"{tag} {answer}\r\n".encode())
             return False
         return super()._answer(conn, line)
 
@@ -228,8 +229,32 @@ def test_an_opt_out_from_a_personal_address_naming_the_address_lets_no_step_go(m
     _, v, step2 = we_wrote(ctx)
     srv.folders["INBOX"][1] = personal_opt_out(v)
     tick(ctx, srv)
-    assert FakeSMTP.sent == [] and status_of(ctx, step2)[0] in ("approved", "cancelled")
+    assert FakeSMTP.sent == [] and status_of(ctx, step2)[0] == "cancelled"
     assert v.to not in suppressed(ctx)
+
+
+def test_a_stranger_opting_out_and_naming_the_address_cancels_the_step_and_a_review_does_not_bring_it_back(make_ctx, monkeypatch, clock, server):
+    """What the docs say of this mail. It fails safe: no email goes wrongly. Whether a stranger's words should cancel rather than hold is the owner's to say."""
+    clock(IN_WINDOW)
+    srv = server({"INBOX": {}})
+    ctx = mail_world(make_ctx, monkeypatch, imap=srv.factory)
+    lead_id, v, step2 = we_wrote(ctx)
+    srv.folders["INBOX"][1] = K.msg(PERSONAL, "Hello", f"Unsubscribe me. By the way {v.to} gave me your name.", tag="pers3")
+    tick(ctx, srv)
+    row = stored(ctx)[0]
+    assert (row.category, row.status, row.lead_id) == ("unsubscribe", "needs_review", None)
+    assert status_of(ctx, step2)[0] == "cancelled" and "opted out" in status_of(ctx, step2)[1]
+    assert suppressed(ctx) == {"j.person@private.example"}, "the sender only, never the address named"
+    with ctx.db.session() as s:
+        assert outreach.company_opted_out(s, s.get(Lead, lead_id).company)
+        s.get(InboundEmail, row.id).status = "reviewed"
+    with ctx.db.session() as s:
+        assert not outreach.company_opted_out(s, s.get(Lead, lead_id).company), "reviewed, the mail no longer counts"
+    tick(ctx, srv)
+    assert status_of(ctx, step2)[0] == "cancelled", "and the step stays cancelled"
+    assert FakeSMTP.sent == []
+    with ctx.db.session() as s:
+        assert list(s.execute(select(FollowUp.id).where(FollowUp.lead_id == lead_id, FollowUp.status.in_(ia.STEP_WAITING))).scalars()) == [], "nothing takes its place"
 
 
 @pytest.mark.xfail(not hasattr(reply_intel, "lead_named_in_body"), reason="for the integrator: the hold is replies-acting's lead_named_in_body", strict=True)
@@ -282,6 +307,23 @@ def test_a_refused_address_search_leaves_the_footer_search_working(make_ctx, ser
     assert read(ctx, srv).ok
     assert address_searches(srv) == [] and len(footer_searches(srv)) == 1 and len(stored(ctx)) == 2
     assert len([a for a in open_alerts(ctx) if "search for the addresses" in a.message]) == 1, "one keyed alert"
+
+
+def test_an_address_search_answered_no_is_said_like_any_refusal_and_leaves_the_footer_search_working(make_ctx, server):
+    """imaplib raises on BAD only: NO comes back as an answer, and it is how RFC 3501 has a server refuse a search."""
+    ctx = make_ctx(**MAIL)
+    _, v, _ = we_wrote(ctx)
+    srv = server({"INBOX": {1: K.msg(PERSONAL, "Please stop writing to me", f"Please take {v.to} off.", tag="no1"),
+                            2: K.msg(PERSONAL, "Hello there", "Stop this.\n\n> To stop receiving emails from us, reply unsubscribe", tag="no2")}})
+    srv.on_addresses = "no"
+    assert read(ctx, srv).ok, "a refusal only leaves the header lines to decide"
+    state = state_of(ctx)
+    assert state.get("no_address_search") is True and not state.get("no_body_search")
+    assert skipped(ctx) == ["Please stop writing to me"] and len(stored(ctx)) == 1, "the footer search still found the quoted footer"
+    assert len([a for a in open_alerts(ctx) if "search for the addresses" in a.message]) == 1, "a protection gone quiet is said"
+    srv.folders["INBOX"][3] = K.msg(PERSONAL, "Hello again", "Hi.", tag="no3")
+    srv.commands.clear()
+    assert read(ctx, srv).ok and address_searches(srv) == [] and len(footer_searches(srv)) == 1
 
 
 def test_a_dropped_address_search_fails_the_read_and_never_switches_off_the_footer_search(make_ctx, server):
@@ -585,6 +627,69 @@ def test_the_alert_closes_and_the_count_ends_when_the_mailbox_signs_in_again(mak
     with ctx.db.session() as s:
         assert s.execute(select(Alert).where(Alert.key == "mail:sign_in", Alert.resolved_at.is_(None))).first() is None
         assert kv_get(s, "inbox.state.refused") is None
+
+
+def two_panel_mailboxes(ctx):
+    with ctx.db.session() as s:
+        for address in ("a@us.example", "b@us.example"):
+            account = ma.save(s, "owner", {"provider": "gmail", "label": address, "email": address, "secret": "a" * 16})
+            ma.change(s, "owner", account.id, "enable")
+            ma.change(s, "owner", account.id, "read_on")
+
+
+def sign_in_alerts(ctx):
+    with ctx.db.session() as s:
+        return list(s.execute(select(Alert).where(Alert.key == "mail:sign_in", Alert.resolved_at.is_(None))).scalars())
+
+
+def test_the_alert_stays_while_another_mailbox_waits_out_its_refusals(make_ctx, clock, refused):
+    class Two(FakeIMAP):
+        refusing = {"a@us.example"}
+
+        def login(self, user, password):
+            if user in Two.refusing:
+                return Refused.login(self, user, password)
+
+    FakeIMAP.messages = {}
+    ctx = make_ctx(inbox_scope="all")
+    two_panel_mailboxes(ctx)
+    now = clock(IN_WINDOW)
+    for i in range(ia.REFUSED_TICKS - 1):
+        clock(now + TICK * i)
+        assert not InboxAgent(ctx, imap_factory=Two).run({}).ok
+    Two.refusing = {"a@us.example", "b@us.example"}
+    clock(now + TICK * (ia.REFUSED_TICKS - 1))
+    assert not InboxAgent(ctx, imap_factory=Two).run({}).ok
+    Two.refusing = {"a@us.example"}
+    asked = Refused.tries.count("a@us.example")
+    assert asked == ia.REFUSED_TICKS
+    clock(now + TICK * ia.REFUSED_TICKS)
+    assert not InboxAgent(ctx, imap_factory=Two).run({}).ok
+    assert Refused.tries.count("a@us.example") == asked, "a waits, b signed in again"
+    assert len(sign_in_alerts(ctx)) == 1, "mail is still held, so the alert still says why"
+    Two.refusing = set()
+    clock(now + TICK * (ia.REFUSED_TICKS - 1) + ia.REFUSED_WAIT)
+    assert InboxAgent(ctx, imap_factory=Two).run({}).ok
+    assert sign_in_alerts(ctx) == [], "closed once the last of them signs in"
+
+
+def test_the_alert_stays_when_a_mailbox_that_refused_only_dropped_this_time(make_ctx, refused):
+    class Two(FakeIMAP):
+        trouble = "refused"
+
+        def login(self, user, password):
+            if Two.trouble == "refused":
+                return Refused.login(self, user, password)
+            if user == "a@us.example":
+                raise imaplib.IMAP4.abort("connection dropped")
+
+    FakeIMAP.messages = {}
+    ctx = make_ctx(inbox_scope="all")
+    two_panel_mailboxes(ctx)
+    assert not InboxAgent(ctx, imap_factory=Two).run({}).ok
+    Two.trouble = "dropped"
+    assert not InboxAgent(ctx, imap_factory=Two).run({}).ok
+    assert len(sign_in_alerts(ctx)) == 1, "b signed in, but nothing says a's password is good"
 
 
 def test_a_good_read_does_not_close_a_refusal_only_the_sending_saw(make_ctx):

@@ -733,8 +733,11 @@ class Mailbox:
         if query and window and not state.get("no_address_search"):
             try:
                 typ, data = conn.uid("SEARCH", None, "UID", f"{window[0]}:{window[-1]}", *query)
-                named = {int(u) for u in (data[0] or b"").split()} if typ == "OK" else set()
                 state.pop("address_search_drops", None)
+                if typ == "OK":
+                    named = {int(u) for u in (data[0] or b"").split()}
+                else:  # NO comes back as an answer, not an error: refused all the same
+                    state["no_address_search"] = True
             except (imaplib.IMAP4.abort, OSError):  # this read has failed; only a connection that drops each time says it is too much to ask
                 state["address_search_drops"] = int(state.get("address_search_drops", 0)) + 1
                 if state["address_search_drops"] >= ADDRESS_SEARCH_DROPS:
