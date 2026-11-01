@@ -24,8 +24,8 @@ from aime.mail_auth import sender_signed
 from aime.meetings import check_double_bookings
 from aime.models import Alert, Contact, FollowUp, InboundEmail, SkippedMail
 from aime.monitoring import alert_once, resolve_alerts
-from aime.reply_intel import (BOOKING_NOTICE_DAYS, CALENDLY_NOTICE, JUNK_ALERT, NO_REPLY, REPLY_WORDS, UNSUBSCRIBE_SUBJECT,
-                              booking_links_without_notice, company_leads, forget_old_skipped_mail, process_pending, remember_sent_subjects,
+from aime.reply_intel import (BOOKING_NOTICE_DAYS, CALENDLY_NOTICE, CALENDLY_SUBJECT, JUNK_ALERT, NO_REPLY, REPLY_WORDS, UNSUBSCRIBE_SUBJECT,
+                              booking_links_without_notice, calendly_sender, company_leads, forget_old_skipped_mail, process_pending, remember_sent_subjects,
                               remembered_lead_id, sent_with_our_subject, subdomain_leads)
 from aime.timeutil import utcnow
 
@@ -417,7 +417,6 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         return out
 
 
-CALENDLY_SUBJECT = re.compile(r"\b(new event|canceled|cancelled|rescheduled|invitee)\b", re.I)
 REPLY_SUBJECT = re.compile(rf"\s*(?:{REPLY_WORDS})\s*[:：]", re.I)
 FOOTER_WORDS = "to stop receiving emails from us"  # the line every email of ours ends with
 OUR_FOOTER_QUOTED = re.compile(FOOTER_WORDS, re.I)
@@ -425,8 +424,7 @@ OUR_FOOTER_QUOTED = re.compile(FOOTER_WORDS, re.I)
 
 def looks_like_calendly(p: ParsedEmail) -> bool:
     """A Calendly booking notice, sent by Calendly or forwarded (its subject and a calendly.com mention)."""
-    sender_domain = p.from_email.rsplit("@", 1)[-1]
-    return bool((sender_domain.endswith("calendly.com") or "calendly.com" in (p.body_text or "").lower())
+    return bool((calendly_sender(p.from_email) or "calendly.com" in (p.body_text or "").lower())
                 and (CALENDLY_SUBJECT.search(p.subject or "") or CALENDLY_NOTICE.match(p.subject or "")))
 
 

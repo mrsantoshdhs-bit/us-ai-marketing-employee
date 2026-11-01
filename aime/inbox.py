@@ -224,7 +224,7 @@ def _no_text_note(body: str, files: list) -> str | None:
 
 
 # Where a plain-text bounce starts copying the original message (our own footer and addresses are in it).
-COPY_START = re.compile(r"(?im)^.*\b(copy of (the|your) (original )?message|original message|returned message|"
+COPY_START = re.compile(r"(?im)^.*\b(copy of (the|your) (original )?message|original message(?! was received)|returned message|"
                         r"message headers follow|undelivered message)\b.*$")
 SOFT_TEXT = re.compile(r"\b(delay(ed)?|will (retry|keep trying|try again)|temporar(y|ily)|deferred|4\.\d{1,3}\.\d{1,3})\b", re.I)
 HARD_TEXT = re.compile(r"\b(permanent(ly)?|given up|5\.\d{1,3}\.\d{1,3}|no such|user unknown|does not exist|"
@@ -420,6 +420,11 @@ OUR_FOOTER = re.compile(r"(to stop receiving emails from us|receiving emails fro
                         r"\"?unsubscribe\"? or write to|we emailed you because|you are receiving this because)", re.I)
 
 
+def _wrapped_quote_start(lines: list[str], i: int) -> bool:
+    """A long "On ... <address> wrote:" that the mail program wrapped, leaving "wrote:" alone on the next line."""
+    return lines[i].strip().lower().startswith("on ") and i + 1 < len(lines) and lines[i + 1].strip().lower() == "wrote:"
+
+
 def _split_reply(body: str) -> tuple[str, list[str]]:
     """(what they wrote above the quote, every line from the quote or their signature on). Our own compliance footer
     ends the reply too: quoted in a form nothing here recognises, it must still never be read as their words."""
@@ -431,7 +436,7 @@ def _split_reply(body: str) -> tuple[str, list[str]]:
         if footer:
             above.append(line[:footer.start()])
             return "\n".join(above).strip(), lines[i + 1:]
-        if QUOTE_START.match(stripped) or stripped == "--":
+        if QUOTE_START.match(stripped) or stripped == "--" or _wrapped_quote_start(lines, i):
             if stripped.lower().startswith("sent from my") and not any(x.strip() for x in above):
                 continue  # a device signature above the reply, not the end of it
             return "\n".join(above).strip(), lines[i:]
@@ -443,13 +448,13 @@ def _own_lines(lines: list[str]) -> str:
     """The sender's words among these lines: quoted lines, quote headers, signatures and our own footer are dropped, and
     a copied header block ("From:", "De:", ...) ends them, because all below it is the earlier message."""
     keep, signature = [], False
-    for line in lines:
+    for i, line in enumerate(lines):
         stripped = line.strip()
         if HEADER_COPY.match(stripped):
             break
         if stripped == "--":
             signature = True
-        elif QUOTE_LINE.match(stripped):
+        elif QUOTE_LINE.match(stripped) or _wrapped_quote_start(lines, i) or (i and _wrapped_quote_start(lines, i - 1)):
             signature = False
         elif not signature and not OUR_FOOTER.search(line):
             keep.append(line)
@@ -473,6 +478,25 @@ def below_header_copy(body: str) -> str:
     lines = body.replace("\r\n", "\n").split("\n")
     last = max((i for i, line in enumerate(lines) if HEADER_COPY.match(line.strip())), default=None)
     return "" if last is None else _own_lines(lines[last + 1:])[:NEW_TEXT_LIMIT]
+
+
+COPIED_FIELD = re.compile(r"^[^\s:]{1,20}\s?:(\s|$)")  # "Date: ...", "To: ...", "Subject: ...": the rest of a copied header block
+
+
+def between_header_copies(body: str) -> list[str]:
+    """The words in each part of a forwarded chain that lies between two copied header blocks, where someone's answer sits. Only ever read
+    for an opt-out. What is below the last header is the earliest email, and a part holding our footer is our own email, so neither is read;
+    an attached email is not the writer's either."""
+    lines = body.replace("\r\n", "\n").split(ATTACHED_MARK, 1)[0].split("\n")
+    marks = [i for i, line in enumerate(lines) if HEADER_COPY.match(line.strip())]
+    sections = []
+    for start, end in zip(marks, marks[1:], strict=False):
+        part = lines[start + 1:end]
+        while part and COPIED_FIELD.match(part[0].strip()):
+            part = part[1:]
+        if not any(OUR_FOOTER.search(line) for line in part) and (words := _own_lines(part)):
+            sections.append(words[:NEW_TEXT_LIMIT])
+    return sections
 
 
 def rest_of_reply(body: str) -> str:
