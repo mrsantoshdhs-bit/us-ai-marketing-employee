@@ -423,6 +423,10 @@ class Suppression(Base):
     kind: Mapped[str] = mapped_column(String(10))  # email | domain
     reason: Mapped[str] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # The owner's lift (crm_ops.lift_suppression). The row stays for good: whatever does not read these keeps blocking.
+    lifted_at: Mapped[datetime | None] = mapped_column(DateTime)
+    lifted_by: Mapped[str | None] = mapped_column(String(80))
+    lift_reason: Mapped[str | None] = mapped_column(String(300))
 
 
 class InboundInquiry(Base):

@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, exists, func, literal, or_, select
 from sqlalchemy.orm import Session
 
-from aime.dedupe import clean_company_name, domain_from_email, find_duplicate, normalize_name
-from aime.matching import detect_competitor, match_services
-from aime.models import Activity, Company, Contact, FollowUp, InboundEmail, Lead, Opportunity, Signal, Suppression
+from aime.dedupe import _MULTI_PART_TLDS, HOSTED_PLATFORMS, clean_company_name, domain_from_email, find_duplicate, normalize_name, registrable_domain
+from aime.matching import competitor_evidence, competitor_in_post, detect_competitor, match_services
+from aime.models import Activity, Alert, AuditEvent, Company, Contact, FollowUp, InboundEmail, Lead, Opportunity, ResearchSnapshot, Signal, Suppression
 from aime.sources.base import CompanyCandidate
+from aime.stages import CLOSED
 from aime.timeutil import utcnow
 
 OPEN_LEAD_STATUSES = ("new", "qualified", "nurture")
@@ -23,6 +25,32 @@ def primary_lead(session: Session, company_id: int) -> Lead | None:
     leads = session.execute(select(Lead).where(Lead.company_id == company_id).order_by(Lead.id.desc())).scalars().all()
     open_leads = sorted((x for x in leads if x.status in OPEN_LEAD_STATUSES), key=lambda x: (x.source != "research", -x.id))
     return (open_leads or [x for x in leads if x.status != "merged"] or leads or [None])[0]
+
+
+def lead_that_went_on(session: Session, lead: Lead) -> Lead:
+    """Where a merged lead went: the lead its merge record names, whatever became of that lead since, as another may be the
+    company's primary by now. One set to merged by hand names none, so the company's primary lead. Any other lead is its own."""
+    if lead.status != "merged":
+        return lead
+    named = re.fullmatch(r"Merged into lead #(\d+)", lead.disqualify_reason or "")
+    return (session.get(Lead, int(named[1])) if named else None) or primary_lead(session, lead.company_id)
+
+
+def lead_with_the_deals(session: Session, lead: Lead) -> Lead:
+    """The lead whose deals a reply or a booking on this lead acts on. Replies still find a merged lead, by its thread and its
+    contact, while its deal may have moved on (_merge_lead). A deal still on it is its own, and the lead that went on may hold
+    someone else's: so its own while it has any, else along the merges."""
+    seen = set()
+    while lead.status == "merged" and lead.id not in seen and not session.execute(select(Opportunity.id).where(Opportunity.lead_id == lead.id)).first():
+        seen.add(lead.id)
+        lead = lead_that_went_on(session, lead)
+    return lead
+
+
+def leads_replying_into(session: Session, opp: Opportunity) -> list[int]:
+    """lead_with_the_deals seen from a deal: its own lead and the merged leads whose replies reach it."""
+    merged = session.execute(select(Lead).where(Lead.company_id == opp.company_id, Lead.status == "merged", Lead.id != opp.lead_id)).scalars().all()
+    return [opp.lead_id, *(x.id for x in merged if lead_with_the_deals(session, x).id == opp.lead_id)]
 
 
 def fingerprint(*parts: str | None) -> str:
@@ -141,48 +169,182 @@ def log_activity(session: Session, subject: str, actor: str, type_: str = "syste
     return act
 
 
-def is_suppressed(session: Session, email: str | None = None, domain: str | None = None) -> bool:
+BARE_SUFFIXES = _MULTI_PART_TLDS | HOSTED_PLATFORMS  # not one company's domain, so a walk up a host never stops on one
+BOUNCED_REASON = "Bounced"  # how the reason of an entry that records a dead address starts
+ERASURE_REASON = "Erased on the person's request"
+
+
+def canonical_address(address: str) -> str:
+    """Lower case, with the +tag of the local part removed: pat+news@x.example and pat@x.example reach one person."""
+    local, at, host = address.strip().lower().partition("@")
+    plus = local.find("+")
+    return f"{local[:plus] if plus > 0 else local}{at}{host}"
+
+
+def canonical_sql(column):
+    """canonical_address in SQL, for a stored value."""
+    low = func.lower(column)
+    plus, at = func.instr(low, "+"), func.instr(low, "@")
+    return case((and_(plus > 1, plus < at), func.substr(low, 1, plus - 1).op("||")(func.substr(low, at))), else_=low)
+
+
+def _host_and_parents(host: str) -> list[str]:
+    """The host and each parent of it, up to its registrable domain: never a bare suffix such as co.uk."""
+    host = host.strip(" .").lower()
+    site, found = registrable_domain(host), [host]
+    while host != site:
+        host = host.partition(".")[2]
+        if "." not in host or host in BARE_SUFFIXES:
+            break
+        found.append(host)
+    return found
+
+
+def _entries_covering(email: str | None = None, domain: str | None = None):
+    """The do-not-contact entries that speak for this address or domain, lifted ones included."""
     values = []
     if email:
-        values.append(email.lower())
-        dom = email.rsplit("@", 1)[-1].lower() if "@" in email else None
-        if dom:
-            values.append(dom)
+        values.append(canonical_address(email))
+        if "@" in email:
+            values += _host_and_parents(email.rsplit("@", 1)[-1])
     if domain:
-        values.append(domain.lower())
-    if not values:
+        values += _host_and_parents(domain)
+    return select(Suppression).where(canonical_sql(Suppression.value).in_(values)) if values else None
+
+
+def is_suppressed(session: Session, email: str | None = None, domain: str | None = None) -> bool:
+    entries = _entries_covering(email, domain)
+    if entries is None:
         return False
-    return session.execute(select(Suppression.id).where(Suppression.value.in_(values))).first() is not None
+    return session.execute(entries.where(Suppression.lifted_at.is_(None))).first() is not None
 
 
-_ON_THE_LIST = select(Suppression.value).correlate(None)
-# is_suppressed for a query over contacts: the address, its domain, or its company's domain is on the do-not-contact list.
+def lift_time(session: Session, email: str | None = None, domain: str | None = None) -> datetime | None:
+    """When the owner lifted what covered this address: the newest lift. None when nothing ever covered it or an entry
+    still stands, so what was said before a lift stops counting only for an address the owner really took off the list."""
+    entries = _entries_covering(email, domain)
+    rows = session.execute(entries).scalars().all() if entries is not None else []
+    if not rows or any(r.lifted_at is None for r in rows):
+        return None
+    return max(r.lifted_at for r in rows)
+
+
+def _under_a_listed_domain(host, table):
+    """SQL for: a domain on the list is a parent of this host. Bare suffixes are left out, as in _host_and_parents."""
+    value = Suppression.value
+    return exists(select(Suppression.id).where(
+        Suppression.lifted_at.is_(None), Suppression.kind == "domain", value.contains("."), value.not_in(BARE_SUFFIXES),
+        func.substr(host, -(func.length(value) + 1)) == literal(".").op("||")(value))).correlate(table)
+
+
+_ON_THE_LIST = select(Suppression.value).where(Suppression.lifted_at.is_(None)).correlate(None)
+_CANONICAL_ON_THE_LIST = select(canonical_sql(Suppression.value)).where(Suppression.lifted_at.is_(None)).correlate(None)
+_CONTACT_HOST = func.lower(func.substr(Contact.email, func.instr(Contact.email, "@") + 1))
+_COMPANY_DOMAIN = func.lower(Company.domain)
+# is_suppressed for a query over contacts: the address with or without a +tag, its domain or a parent of it, or its company's domain is on the do-not-contact list.
 # suppress() marks the contacts on file at that moment; one found later, or at another domain than its company's, is caught here.
 CONTACT_NOT_SUPPRESSED = and_(
-    func.lower(Contact.email).not_in(_ON_THE_LIST),
-    func.lower(func.substr(Contact.email, func.instr(Contact.email, "@") + 1)).not_in(_ON_THE_LIST),
+    canonical_sql(Contact.email).not_in(_CANONICAL_ON_THE_LIST),
+    _CONTACT_HOST.not_in(_ON_THE_LIST),
+    ~_under_a_listed_domain(_CONTACT_HOST, Contact),
     or_(Contact.company_id.is_(None),
-        Contact.company_id.not_in(select(Company.id).where(func.lower(Company.domain).in_(_ON_THE_LIST)).correlate(None))))
+        Contact.company_id.not_in(select(Company.id).where(or_(
+            _COMPANY_DOMAIN.in_(_ON_THE_LIST), _under_a_listed_domain(_COMPANY_DOMAIN, Company))).correlate(None))))
 
 
-def suppress(session: Session, value: str, reason: str) -> None:
+def _contacts_under(session: Session, value: str) -> list[Contact]:
+    """The contacts a new entry speaks for, by the rules of is_suppressed."""
+    if "@" in value:
+        return session.execute(select(Contact).where(canonical_sql(Contact.email) == canonical_address(value))).scalars().all()
+    pattern = value.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")  # the value, not a pattern
+    at_it = [Contact.email == value, Contact.email.like(f"%@{pattern}", escape="\\")]
+    if "." in value and value not in BARE_SUFFIXES:
+        at_it.append(Contact.email.like(f"%@%.{pattern}", escape="\\"))
+    return session.execute(select(Contact).where(or_(*at_it))).scalars().all()
+
+
+def suppress(session: Session, value: str, reason: str, bounce: bool = False) -> None:
+    """Put an address or a domain on the do-not-contact list. `bounce`: the address is dead and nobody said no, so consent is
+    left as it is and only what is queued for this very address stops, not everything on its contact. The entry and
+    email_status "bounced" block the address at every gate all the same."""
+    from aime.automation import audit
+
     value = value.strip().lower()
     if not value:
         return
-    if session.execute(select(Suppression.id).where(Suppression.value == value)).first():
+    row = session.execute(select(Suppression).where(Suppression.value == value)).scalars().first()
+    if row is None:
+        session.add(Suppression(value=value, kind="email" if "@" in value else "domain", reason=reason))
+    elif row.lifted_at is not None:  # on the list again: one row per value, and the lift it replaces stays in the audit log
+        audit(session, "system", "suppression_relisted", f"suppression #{row.id}",
+              f"lifted {row.lifted_at:%Y-%m-%d %H:%M} by {row.lifted_by}: {row.lift_reason}; now: {reason}")
+        row.lifted_at, row.lifted_by, row.lift_reason = None, None, None
+        row.reason, row.created_at = reason, utcnow()  # emails sent while it was lifted were allowed
+    elif not bounce and row.reason.startswith(BOUNCED_REASON):
+        row.reason = reason  # a real no after a bounce: an opt-out from here on, and the contact says so below
+    else:
+        if reason == ERASURE_REASON:
+            row.reason = reason  # never lifted: see lift_suppression
         return
-    session.add(Suppression(value=value, kind="email" if "@" in value else "domain", reason=reason))
+    if bounce:
+        for c in session.execute(select(Contact).where(func.lower(Contact.email) == value)).scalars():
+            c.email_status = "bounced"
+        for f in session.execute(select(FollowUp).where(func.lower(FollowUp.to_email) == value, FollowUp.channel == "email",
+                                                        FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
+            f.status, f.blocked_reason = "cancelled", "The address bounced"
+        return
     # Stop anything queued for that address/domain.
-    literal = value.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")  # the value, not a pattern
-    contacts = session.execute(select(Contact).where(
-        or_(Contact.email == value, Contact.email.like(f"%@{literal}", escape="\\")))).scalars().all()
-    for c in contacts:
+    for c in _contacts_under(session, value):
         if c.consent_status != "opted_out":
             c.consent_status, c.consent_at = "opted_out", utcnow()  # when: emails sent before it were allowed
         for f in session.execute(select(FollowUp).where(
                 FollowUp.contact_id == c.id, FollowUp.status.in_(("pending", "awaiting_approval", "approved")))).scalars():
             f.status = "cancelled"
             f.blocked_reason = "Contact unsubscribed / suppressed"
+
+
+def _records_an_erasure(session: Session, row: Suppression) -> bool:
+    """erase_person's reason on the entry, or, for an address that was on the list before it, its audit line."""
+    if row.reason == ERASURE_REASON:
+        return True
+    target = f"address #{hashlib.sha256(row.value.encode()).hexdigest()[:12]}"
+    return session.execute(select(AuditEvent.id).where(AuditEvent.action == "person_erased", AuditEvent.target == target)).first() is not None
+
+
+def lift_suppression(session: Session, suppression_or_value: Suppression | str, actor: str, reason: str) -> str | None:
+    """The owner takes an entry off the do-not-contact list. Returns why not, with nothing changed, or None. The row stays, with
+    who, when and why, so a build that does not read those keeps blocking. Contacts at this address, with or without a +tag as suppress()
+    marks them, go back to neutral once no spelling of it is listed; a domain's contacts stay as they are, since any of them may have said no themselves. It drafts nothing, sends nothing and
+    reopens nothing: the lead stays closed until a person reopens it (outreach.reopen_stopped). Who may do this is the route's job."""
+    from aime.automation import audit
+
+    row = suppression_or_value
+    if not isinstance(row, Suppression):
+        row = session.execute(select(Suppression).where(Suppression.value == (row or "").strip().lower())).scalars().first()
+    reason = (reason or "").strip()
+    if row is None:
+        return "that is not on the do-not-contact list"
+    if not reason:
+        return "give the reason"
+    if _records_an_erasure(session, row):
+        return "this entry records that a person's data was erased, and that is never lifted"
+    if row.lifted_at is not None:
+        return "this entry was lifted already"
+    row.lifted_at, row.lifted_by, row.lift_reason = utcnow(), actor[:80], reason[:300]
+    person = canonical_address(row.value)
+    contacts = session.execute(select(Contact).where(canonical_sql(Contact.email) == person)).scalars().all()
+    if session.execute(select(Suppression.id).where(canonical_sql(Suppression.value) == person, Suppression.id != row.id, Suppression.lifted_at.is_(None))).first():
+        contacts = []  # another spelling of this address is still on the list, and its own lift clears them
+    for c in contacts:
+        if c.consent_status == "opted_out":
+            c.consent_status, c.consent_at = "none", None
+        if c.email_status == "bounced":
+            c.email_status = "unchecked"  # the mail-server check reads it again before any gate counts it as usable
+    audit(session, actor, "suppression_lifted", f"suppression #{row.id}", f"{row.kind}; it was: {row.reason}; why: {reason}")
+    for company_id in {c.company_id for c in contacts} or {None}:
+        log_activity(session, f"Do-not-contact entry lifted by {actor}: {row.value}. No email follows from this, and a closed lead stays closed",
+                     actor, body=reason, company_id=company_id)
+    return None
 
 
 ERASED = "[erased on request]"
@@ -275,8 +437,80 @@ def upsert_contact(session: Session, company: Company | None, email: str | None,
     return contact
 
 
+def _was_worked(session: Session, lead: Lead) -> bool:
+    """Mail went to this lead's contact, or may have, or its sequence is running."""
+    from aime.outreach import RUNNING_STAGES
+
+    return lead.outreach_status in RUNNING_STAGES or session.execute(select(FollowUp.id).where(
+        FollowUp.lead_id == lead.id, FollowUp.channel == "email", FollowUp.status.in_(("sent", "sending", "uncertain")))).first() is not None
+
+
+def _reads_as_a_seller(session: Session, company: Company) -> bool:
+    """What the next competitors run would read on this company and flag it for (CRMManagementAgent._flag_competitors)."""
+    from aime.agents.crm import _own_words
+
+    if company.is_competitor or company.competitor_cleared_by:
+        return False
+    snap = session.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == company.id).order_by(ResearchSnapshot.id.desc())).scalars().first()
+    if snap and snap.description:
+        return bool(competitor_evidence(_own_words(snap, company)))
+    posts = session.execute(select(Signal.text).where(Signal.company_id == company.id, Signal.signal_type == "hiring")).scalars()
+    return any(map(competitor_in_post, posts)) or bool(competitor_evidence(company.website_title))
+
+
+def _untouched(session: Session, lead: Lead) -> bool:
+    return lead.outreach_status is None and not session.execute(select(FollowUp.id).where(
+        FollowUp.lead_id == lead.id, FollowUp.channel == "email", FollowUp.status != "cancelled")).first() and not session.execute(
+        select(Opportunity.id).where(Opportunity.lead_id == lead.id)).first()
+
+
+def _merge_lead(session: Session, gone: Lead, survivor: Lead) -> None:
+    gone.status = "merged"
+    gone.disqualify_reason = f"Merged into lead #{survivor.id}"
+    # The deal moves so that the open lead's page shows it and no second one opens; a reply on this lead finds it by lead_with_the_deals.
+    # Not where the survivor has a deal of its own it would be taken for: each stays with the person it is about, as a merge always left it.
+    deals = session.execute(select(Opportunity).where(Opportunity.lead_id == gone.id)).scalars().all()
+    theirs = session.execute(select(Opportunity.stage).where(Opportunity.lead_id == survivor.id)).scalars().all()
+    if not theirs or (set(theirs) <= set(CLOSED) and any(x.stage not in CLOSED for x in deals)):
+        for opp in deals:
+            opp.lead_id = survivor.id
+
+
+def _carry_competitor_word(session: Session, keeper: Company, dup: Company, keeper_domain: str | None, actor: str) -> None:
+    """A person's "not a competitor" and an open flag outlive a merge, where that is safe. The clear moves only onto the same site,
+    unjudged: a keeper's own site is not what the person read. The flag moves unless a lead at the keeper is past its first email,
+    which the next rescore would end, and only a person ends a sequence. Its log line does not read "Marked as a possible competitor"
+    and its actor is no agent's name, so _review_competitor_flags leaves it for a person even where the keeper has an old mark of its
+    own. Whatever does not move is told to a person."""
+    def tell(message: str) -> None:
+        session.add(Alert(level="warning", source=actor[:60], message=f"{keeper.name} (#{keeper.id}), after merging duplicate #{dup.id}: {message}"[:500]))
+
+    if dup.competitor_cleared_by:
+        if not keeper.is_competitor and not keeper.competitor_cleared_by and (not keeper_domain or keeper_domain == dup.domain):
+            keeper.competitor_cleared_by = dup.competitor_cleared_by
+            log_activity(session, f"Not a competitor, as {dup.competitor_cleared_by} said of merged duplicate #{dup.id}", actor,
+                         type_="data_quality", company_id=keeper.id)
+        else:
+            tell(f"{dup.competitor_cleared_by} cleared the duplicate as not a competitor. That does not carry over to this company: "
+                 "please look at it and clear it here if it applies.")
+    elif dup.is_competitor and keeper.competitor_cleared_by:
+        tell(f"the duplicate is flagged as a possible competitor, and {keeper.competitor_cleared_by} cleared this company. The clear stands: please check it.")
+    elif dup.is_competitor and not keeper.is_competitor:
+        leads = session.execute(select(Lead).where(Lead.company_id == keeper.id, Lead.status.in_(OPEN_LEAD_STATUSES))).scalars().all()
+        if any(x.outreach_status not in (None, "drafted", "approved") for x in leads):
+            tell("the duplicate is flagged as a possible competitor. It is not flagged here, because a lead here is already in its "
+                 "sequence and a flag would end it: please decide.")
+            return
+        keeper.is_competitor = True
+        why = session.execute(select(Activity.subject).where(Activity.company_id == dup.id, Activity.subject.startswith("Marked as a possible competitor"))
+                              .order_by(Activity.id.desc())).scalars().first()
+        log_activity(session, f"Possible-competitor flag carried over from merged duplicate #{dup.id}" + (f": {why}" if why else ""),
+                     "company merge", type_="data_quality", company_id=keeper.id)
+
+
 def merge_companies(session: Session, keeper: Company, dup: Company, actor: str) -> None:
     """Move everything from dup into keeper and mark dup as merged (no hard deletes)."""
+    keeper_domain = keeper.domain
     for sig in list(dup.signals):
         clash = session.execute(select(Signal.id).where(
             Signal.company_id == keeper.id, Signal.fingerprint == sig.fingerprint)).first()
@@ -288,10 +522,26 @@ def merge_companies(session: Session, keeper: Company, dup: Company, actor: str)
         contact.company_id = keeper.id
     keeper_research = session.execute(select(Lead).where(
         Lead.company_id == keeper.id, Lead.source == "research", Lead.status.in_(OPEN_LEAD_STATUSES))).scalars().first()
-    for lead in session.execute(select(Lead).where(Lead.company_id == dup.id)).scalars():
-        if lead.source == "research" and keeper_research is not None and lead.status in OPEN_LEAD_STATUSES:
-            lead.status = "merged"
-            lead.disqualify_reason = f"Merged into lead #{keeper_research.id}"
+    dup_leads = session.execute(select(Lead).where(Lead.company_id == dup.id)).scalars().all()
+    if keeper_research is not None and not dup.is_competitor and _untouched(session, keeper_research) and not _reads_as_a_seller(session, keeper):
+        # The lead someone was already emailed on goes on: the untouched one would write them a second first email. Not a lead
+        # whose address is dead, as nobody got that email and the keeper's contact may be alive, and not over a keeper the next
+        # competitors run would flag: on an emailed lead it leaves the flag off, and the sequence would go on past that check.
+        worked = next((x for x in dup_leads if x.source == "research" and x.status in OPEN_LEAD_STATUSES and x.outreach_status != "bounced"
+                       and _was_worked(session, x)), None)
+        if worked is not None:
+            if worked.outreach_status in ("not_interested", "no_response", "unsubscribed", "stopped"):
+                session.add(Alert(level="warning", source=actor[:60], message=(
+                    f"{keeper.name} (#{keeper.id}), after merging duplicate #{dup.id}: lead #{keeper_research.id} was closed in favour of lead #{worked.id}, which was "
+                    f"already emailed and whose stage is {worked.outreach_status.replace('_', ' ')}. So nothing goes to the contact of the closed lead: please decide.")[:500]))
+            _merge_lead(session, keeper_research, worked)
+            for task in session.execute(select(FollowUp).where(FollowUp.lead_id == keeper_research.id, FollowUp.channel == "task",
+                                                               FollowUp.status == "pending", FollowUp.subject.startswith("Review "))).scalars():
+                task.status, task.blocked_reason = "cancelled", f"Merged into lead #{worked.id}"
+            keeper_research = worked
+    for lead in dup_leads:
+        if lead is not keeper_research and lead.source == "research" and keeper_research is not None and lead.status in OPEN_LEAD_STATUSES:
+            _merge_lead(session, lead, keeper_research)
         lead.company_id = keeper.id
     for opp in session.execute(select(Opportunity).where(Opportunity.company_id == dup.id)).scalars():
         opp.company_id = keeper.id
@@ -302,6 +552,7 @@ def merge_companies(session: Session, keeper: Company, dup: Company, actor: str)
             setattr(keeper, attr, getattr(dup, attr))
     if dup.name_set_by and not keeper.name_set_by:  # a person's correction outlives the merge
         keeper.name, keeper.name_set_by = dup.name, dup.name_set_by
+    _carry_competitor_word(session, keeper, dup, keeper_domain, actor)
     keeper.verified = keeper.verified or dup.verified
     if not keeper.source_record_id and dup.source_record_id:
         keeper.source_record_id = dup.source_record_id  # e.g. the SEC CIK, so officers are still looked up

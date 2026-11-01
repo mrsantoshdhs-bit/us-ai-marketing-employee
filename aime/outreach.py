@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from aime.automation import audit
 from aime.config import Settings
 from aime.contact_validation import STATUS_OK
-from aime.crm_ops import is_suppressed, log_activity
+from aime.crm_ops import is_suppressed, lift_time, log_activity
 from aime.dedupe import company_to_address, domain_from_email
 from aime.integrations.email_smtp import compliance_footer
 from aime.knowledge.content_bank import BRAND_LINES
@@ -364,6 +364,7 @@ def cancel_queued(session: Session, lead: Lead, reason: str, keep: tuple[int, ..
 
 
 ASKED_NOT_TO = "asked not to be contacted"  # how a stop that someone asked for is worded (aime.reply_intel)
+_AN_ADDRESS = re.compile(r"[^\s(]+@[^\s)]+")
 STOPPABLE_STAGES = ("drafted", "approved", "contacted")  # a page that was open while a reply came in cannot turn those into "stopped"
 
 
@@ -380,11 +381,14 @@ def reopen_refusal(session: Session, lead: Lead) -> str | None:
     """Why this lead's stopped outreach may not be reopened, in words for a person, or None. The owner's rule: "Do not
     reopen opted-out leads or restart outreach without explicit approval." What anyone at the company said counts, not only
     the lead's own contact, on any of its leads and on a duplicate merged into it. Mail nobody has read yet may say anything,
-    so it refuses as well. Every doubt refuses."""
+    so it refuses as well. Every doubt refuses. The one exception is the owner's lift (crm_ops.lift_suppression): once every entry
+    on the lead's address is lifted its closed stage may be reopened, and what was said before the lift no longer counts."""
     company: Company = lead.company
-    if lead.outreach_status in ("unsubscribed", "bounced"):
+    address = lead.contact.email if lead.contact is not None else None
+    lifted = lift_time(session, address, company.domain) if address else None
+    if lead.outreach_status in ("unsubscribed", "bounced") and lifted is None:
         return f"its stage is {lead.outreach_status}, which stays closed"
-    if lead.outreach_status != "stopped":
+    if lead.outreach_status not in ("stopped", "unsubscribed", "bounced"):
         return "only a lead whose outreach was stopped can be reopened"
     if lead.status not in ("new", "qualified", "nurture"):
         return f"the lead is {lead.status}"
@@ -407,14 +411,23 @@ def reopen_refusal(session: Session, lead: Lead) -> str | None:
                         # a delivery report comes from the mail server, and only its text names who it is about
                         *(and_(InboundEmail.status.in_(("new", "needs_review")), func.lower(InboundEmail.body_text).contains(a, autoescape=True))
                           for a in known))
-    mail = session.execute(select(InboundEmail.category, InboundEmail.status, InboundEmail.holds_sending, InboundEmail.from_email)
+    mail = session.execute(select(InboundEmail.category, InboundEmail.status, InboundEmail.holds_sending, InboundEmail.from_email, InboundEmail.received_at)
                            .where(about_company)).all()
     written_to = session.execute(select(FollowUp.to_email).where(or_(FollowUp.lead_id.in_(leads), FollowUp.company_id.in_(family)))).scalars()
     addresses = known | {a for a in written_to if a} | {m.from_email for m in mail if m.from_email}
     if any(is_suppressed(session, domain=d) for d in domains) or any(is_suppressed(session, a) for a in addresses):
         return "an address or a domain of this company is on the do-not-contact list"
-    if any(m.category == "unsubscribe" for m in mail) or session.execute(select(Activity.id).where(
-            Activity.lead_id.in_(leads), func.lower(Activity.subject).contains(ASKED_NOT_TO)).limit(1)).first():
+    def lifted_since(m) -> bool:
+        cut = lift_time(session, m.from_email) if m.from_email else None
+        return cut is not None and m.received_at < cut
+
+    def stop_lifted_since(a) -> bool:  # the stop names who asked when it was not the lead's own contact (aime.reply_intel)
+        named = _AN_ADDRESS.search(a.subject)
+        cut = lift_time(session, named.group()) if named else lifted
+        return cut is not None and a.created_at < cut
+
+    if any(m.category == "unsubscribe" and not lifted_since(m) for m in mail) or any(not stop_lifted_since(a) for a in session.execute(
+            select(Activity.subject, Activity.created_at).where(Activity.lead_id.in_(leads), func.lower(Activity.subject).contains(ASKED_NOT_TO)))):
         return "someone at this company asked not to be contacted"
     if any(m.category == "not_interested" for m in mail):
         return "someone at this company said they are not interested"

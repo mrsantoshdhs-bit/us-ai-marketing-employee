@@ -107,7 +107,7 @@ def acceptance_evidence(session: Session, settings) -> list[dict]:
                     f"lead #{reply.lead_id} outreach stage {session.get(Lead, reply.lead_id).outreach_status}; "
                     f"{still_open} outreach email(s) still queued" if reply else "no reply yet"))
 
-    sup = one(select(Suppression).order_by(Suppression.id))
+    sup = one(select(Suppression).where(Suppression.lifted_at.is_(None)).order_by(Suppression.id))
     after = sup and count(FollowUp, FollowUp.status == "sent", func.lower(FollowUp.to_email) == sup.value.lower(),
                           FollowUp.sent_at > sup.created_at)
     out.append(_row(13, "Unsubscribe and suppression work", ("FAIL" if after else "PASS") if sup else "NOT YET (tested in CI)",
