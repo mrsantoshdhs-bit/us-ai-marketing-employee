@@ -27,9 +27,24 @@ PARKED_MARKERS = (
     "domain is for sale", "buy this domain", "this domain may be for sale", "domain parking",
     "parked domain", "parked free", "hugedomains", "sedo.com", "dan.com/buy", "afternic",
 )
+# The site is gone, lapsed or suspended hosting: a real page may use these words in passing, so only its title or a page of little else counts.
+GONE_MARKERS = (
+    "this website has expired", "website expired", "this domain has expired", "domain has expired", "account suspended",
+    "account has been suspended", "website has been suspended", "site has been suspended",
+)
+# A lander of paid links on the old address: its own disclaimer alone runs past the words of a coming-soon page.
+LANDER_MARKERS = ("sponsored listings service", "sponsored listings displayed above")
+LANDER_MAX_WORDS = 120
+# A browser check answered in place of the page: nothing is learned of the site, and its title is the check's own.
+CHALLENGE_TITLES = ("just a moment", "attention required! | cloudflare")
+CHALLENGE_MARKERS = ("checking your browser before accessing", "enable javascript and cookies to continue")
+# A real small company may say "coming soon" on a page that says much else, so only a page of little else counts.
+PLACEHOLDER_MARKERS = ("coming soon", "launching soon", "under construction")
+PLACEHOLDER_MAX_WORDS = 30
 GENERIC_TOKENS = {"the", "inc", "llc", "corp", "co", "company", "labs", "lab", "hq", "group", "app"}
 _SITE_NAME_RE = re.compile(r"""property=["']og:site_name["'][^>]+content=["']([^"']+)""", re.I)
 MAX_META_TAGS, MAX_TAG_CHARS = 200, 2000
+_META_CHARSET_RE = re.compile(rb"""<meta[^>]{0,200}?charset\s*=\s*["']?\s*([a-z0-9_.:-]{1,40})""", re.I)
 
 
 @dataclass
@@ -38,7 +53,15 @@ class WebsiteResult:
     final_domain: str | None
     title: str | None
     note: str
-    no_answer: bool = False  # nothing answered at all (no network, a timeout, a name not found): this says nothing about the site
+    no_answer: bool = False  # nothing answered at all (no network, a timeout, a name not found), or a passing 5xx or 429: this says nothing about the site
+    error_answer: bool = False  # it answered, with an error one check should not judge by: 5xx, 429, 401, 403, 404, a browser check
+    plain_redirect: bool = False  # reached another domain through plain HTTP, where anyone on the way can answer: it moves nothing
+    unproven: bool = False  # "verified" over plain HTTP on a page that does not itself name the company: a sign-in page could say the same
+
+    @property
+    def proven(self) -> bool:
+        """Verified at its own domain, in a way a sign-in page in front of the internet could not have answered."""
+        return self.status == "verified" and not self.unproven
 
 
 def name_matches(company: str, *haystacks: str | None) -> bool:
@@ -54,6 +77,23 @@ def name_matches(company: str, *haystacks: str | None) -> bool:
     return False
 
 
+def page_names_company(company: str, *texts: str | None) -> bool:
+    """Every word of the name except GENERIC_TOKENS, short ones too, is a whole word of these texts. Never a substring:
+    "Elm" is not in "Helmsman", and one shared word does not make "Acme Health" into "Bright Health"."""
+    words = [w for w in normalize_name(company).split() if w not in GENERIC_TOKENS]
+    found = set(re.findall(r"[a-z0-9]+", " ".join(t for t in texts if t).lower().replace("&", " and ")))
+    return bool(words) and all(w in found for w in words)
+
+
+def redirect_names_company(company: str, title: str | None, site: str | None, final_domain: str) -> bool:
+    """Stricter than name_matches, for a redirect only: acting on one changes where the company's mail goes. The page names
+    the company, or the new domain's label is exactly its name ("Acme Robotics" at acme-robotics.example)."""
+    compact = normalize_name(company).replace(" ", "")
+    label = final_domain.split(".")[0]
+    # only ever narrower than name_matches: a name of one short word it would not trust does not pass here either
+    return name_matches(company, title, site, label) and (page_names_company(company, title, site) or compact in (label, label.replace("-", "")))
+
+
 def _read_limited(resp: httpx.Response, max_bytes: int, max_seconds: float) -> tuple[bytes, bool]:
     """The body up to a size and a total time, and whether it ended by itself."""
     chunks, size, deadline = [], 0, time.monotonic() + max_seconds
@@ -65,8 +105,20 @@ def _read_limited(resp: httpx.Response, max_bytes: int, max_seconds: float) -> t
     return b"".join(chunks), True
 
 
+def _meta_charset(raw: bytes) -> str | None:
+    """The charset a page declares in its first 2 KB. One readable there cannot really be UTF-16 or UTF-32, whatever it says."""
+    found = _META_CHARSET_RE.search(raw[:2048])
+    name = found.group(1).decode("ascii").lower() if found else None
+    return None if name and name.startswith(("utf-16", "utf16", "utf-32", "utf32")) else name
+
+
 def _read_capped(resp: httpx.Response) -> str:
-    return _read_limited(resp, MAX_BYTES, MAX_SECONDS)[0].decode(resp.encoding or "utf-8", errors="replace")
+    raw = _read_limited(resp, MAX_BYTES, MAX_SECONDS)[0]
+    encoding = resp.encoding if resp.charset_encoding else _meta_charset(raw)
+    try:
+        return raw.decode(encoding or "utf-8", errors="replace")
+    except (LookupError, ValueError):  # a charset Python does not know, or one that is no text encoding at all
+        return raw.decode("utf-8", errors="replace")
 
 
 def read_robots(client: httpx.Client, url: str) -> tuple[RobotFileParser | bool, str]:
@@ -128,6 +180,36 @@ def site_name(body: str) -> str | None:
     return None
 
 
+def _visible_text(low: str) -> str:
+    """What a person reads, the title included. Scripts, styles and comments are cut by searching: a hostile page costs one pass."""
+    pieces = re.split(r"<(script\b|style\b|!--)", low)
+    text = [pieces[0]]
+    for tag, piece in zip(pieces[1::2], pieces[2::2], strict=True):
+        end = piece.find("-->" if tag == "!--" else f"</{tag}")
+        text.append(piece[end:] if end >= 0 else "")
+    return " ".join(re.sub(r"<[^<>]*>|-->", " ", " ".join(text)).split())
+
+
+def _word_count(text: str) -> int:
+    return len(re.findall(r"[a-z0-9']+", text))
+
+
+def _says_any(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _is_gone(title: str | None, text: str) -> bool:
+    """A lapsed site or a paid lander. What a live company's page mentions, or its scripts carry, does not count."""
+    words = _word_count(text)
+    return (_says_any((title or "").lower(), GONE_MARKERS) or (words <= PLACEHOLDER_MAX_WORDS and _says_any(text, GONE_MARKERS))
+            or (words <= LANDER_MAX_WORDS and _says_any(text, LANDER_MARKERS)))
+
+
+def _is_placeholder(text: str) -> bool:
+    """A coming-soon page with almost nothing else on it."""
+    return _says_any(text, PLACEHOLDER_MARKERS) and _word_count(text) <= PLACEHOLDER_MAX_WORDS
+
+
 def site_answers(ctx, domain: str) -> bool:
     """Does this site give any HTTP answer at all? One small request, to tell a dead site from a lost network."""
     with ctx.http(public_only=True, timeout=12) as client:
@@ -139,8 +221,9 @@ def check_website(ctx, domain: str, company_name: str) -> WebsiteResult:
         robots, note = _robots(client, domain)
         if robots == "disallow":
             return WebsiteResult("robots_disallowed", domain, None, "Live, but robots.txt disallows the homepage")
-        if robots == "unavailable":
-            return WebsiteResult("blocked", domain, None, f"robots.txt could not be read ({note}): not checked")
+        if robots == "unavailable":  # a passing server error says nothing yet; too large or too slow to read is an answer
+            passing = bool(re.fullmatch(r"HTTP \d+", note))
+            return WebsiteResult("blocked", domain, None, f"robots.txt could not be read ({note}): not checked", no_answer=passing, error_answer=passing)
         if robots == "unreachable":
             return WebsiteResult("unreachable", None, None, "No answer (robots.txt request failed)", no_answer=True)
         resp = body = None
@@ -149,6 +232,7 @@ def check_website(ctx, domain: str, company_name: str) -> WebsiteResult:
             try:
                 with client.stream("GET", f"{scheme}://{domain}/") as r:
                     resp, body = r, _read_capped(r)
+                plain_http = scheme == "http"
                 break
             except httpx.HTTPError as exc:
                 last_error = exc
@@ -156,21 +240,35 @@ def check_website(ctx, domain: str, company_name: str) -> WebsiteResult:
             return WebsiteResult("unreachable", None, None, f"{type(last_error).__name__}", no_answer=True)
 
     final_domain = registrable_domain(resp.url.host or domain)
+    plain_redirect = plain_http and final_domain != registrable_domain(domain)
+
+    def answer(status: str, title: str | None, note: str, **more) -> WebsiteResult:
+        return WebsiteResult(status, final_domain, title, note, plain_redirect=plain_redirect, **more)
+
+    passing = resp.status_code == 429 or resp.status_code >= 500
     if resp.status_code in (401, 403, 429, 503):
-        return WebsiteResult("blocked", final_domain, None, f"HTTP {resp.status_code}: live but blocks automated checks")
+        return answer("blocked", None, f"HTTP {resp.status_code}: live but blocks automated checks", no_answer=passing, error_answer=True)
     if resp.status_code >= 400:
-        return WebsiteResult("unreachable", final_domain, None, f"HTTP {resp.status_code}")
+        return answer("unreachable", None, f"HTTP {resp.status_code}", no_answer=passing, error_answer=passing or resp.status_code == 404)
     title = page_title(body or "")
     low = (body or "").lower()
-    if any(marker in low for marker in PARKED_MARKERS):
-        return WebsiteResult("parked", final_domain, title, "Domain appears parked or for sale")
-    matched = name_matches(company_name, title, site_name(body or ""), final_domain.split(".")[0])
+    if (title or "").lower().startswith(CHALLENGE_TITLES) or any(marker in low for marker in CHALLENGE_MARKERS):
+        return answer("blocked", None, "A browser check answered in place of the page: live, but not read", error_answer=True)
+    text = _visible_text(low)
+    if any(marker in low for marker in PARKED_MARKERS) or _is_gone(title, text):
+        return answer("parked", title, "Domain appears parked or for sale")
+    if _is_placeholder(text):
+        return answer("mismatch", title, "Only a coming-soon page: it does not show the company")
+    named = site_name(body or "")
     if final_domain != registrable_domain(domain):
         if is_job_board(final_domain):
-            return WebsiteResult("mismatch", final_domain, title, "Redirects to a job board or third-party site")
-        if matched:
-            return WebsiteResult("redirected", final_domain, title, f"Redirects to {final_domain}")
-        return WebsiteResult("mismatch", final_domain, title, f"Redirects to unrelated site {final_domain}")
-    if matched:
-        return WebsiteResult("verified", final_domain, title, "Homepage names the company")
-    return WebsiteResult("mismatch", final_domain, title, "Homepage does not name the company")
+            return answer("mismatch", title, "Redirects to a job board or third-party site")
+        if redirect_names_company(company_name, title, named, final_domain):
+            return answer("redirected", title, f"Redirects to {final_domain}")
+        return answer("mismatch", title, f"Redirects to unrelated site {final_domain}")
+    if is_job_board(final_domain):
+        return answer("mismatch", title, "A page on a job board or third-party site, not the company's own site")
+    if name_matches(company_name, title, named, final_domain.split(".")[0]):
+        note = "Homepage names the company" if name_matches(company_name, title, named) else "The domain spells the name; the page does not confirm it"
+        return answer("verified", title, note, unproven=plain_http and not page_names_company(company_name, title, named))
+    return answer("mismatch", title, "Homepage does not name the company")
