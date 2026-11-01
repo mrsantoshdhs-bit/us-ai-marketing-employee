@@ -59,10 +59,12 @@ def test_recency_bonus_needs_a_recent_signal_with_a_need():
 
 
 def test_a_lead_moved_to_nurture_is_not_requalified_without_new_evidence(make_ctx):
+    from sqlalchemy import select
+
     from aime.agents.crm import CRMManagementAgent
-    from aime.agents.qualification import LeadQualificationAgent
+    from aime.agents.qualification import NEW_POST_TASK, LeadQualificationAgent
     from aime.crm_ops import add_signal, ensure_lead, log_activity
-    from aime.models import Company, Lead
+    from aime.models import Company, FollowUp, Lead, Signal
     ctx = make_ctx()
     post = ("Our SaaS company is hiring a senior engineer to rebuild our CRM integration, automate sales follow-up emails and "
             "lead scoring, and build AI agents for our pipeline. Contractors welcome.")
@@ -82,6 +84,8 @@ def test_a_lead_moved_to_nurture_is_not_requalified_without_new_evidence(make_ct
         lead = s.get(Lead, lid)
         assert lead.status == "qualified"
         lead.last_activity_at = lead.created_at = utcnow() - timedelta(days=40)
+        # the newest post counts as activity too: this one was recorded as long ago, though it was observed lately
+        s.execute(select(Signal).where(Signal.company_id == cid)).scalars().one().created_at = utcnow() - timedelta(days=40)
     CRMManagementAgent(ctx).run({"operations": ["stale"]})
     LeadQualificationAgent(ctx).run({"rescore_all": True})
     with ctx.db.session() as s:
@@ -94,6 +98,18 @@ def test_a_lead_moved_to_nurture_is_not_requalified_without_new_evidence(make_ct
         assert s.get(Lead, lid).status == "nurture"  # a person's decision holds
         add_signal(s, s.get(Company, cid), "hiring", post + " Now also hiring a RevOps lead.", "hn_hiring",
                    "https://news.ycombinator.com/item?id=2", utcnow())
+    LeadQualificationAgent(ctx).run({"rescore_all": True})
+    with ctx.db.session() as s:
+        assert s.get(Lead, lid).status == "nurture"  # the owner's decision of 1 Nov 2026: a new post does not undo a person's move...
+        task = s.execute(select(FollowUp).where(FollowUp.lead_id == lid, FollowUp.channel == "task")).scalars().one()
+        assert task.status == "pending" and task.subject.startswith(NEW_POST_TASK)  # ...it tells a person
+        # a move by the stale rule is another matter: new evidence after it brings the lead back
+        log_activity(s, "No activity for 30+ days: moved to nurture", "crm", type_="status_change", lead_id=lid)
+        add_signal(s, s.get(Company, cid), "hiring", post + " Now also hiring a data engineer.", "hn_hiring",
+                   "https://news.ycombinator.com/item?id=3", utcnow() + timedelta(seconds=1))
+        s.flush()
+        newest = s.execute(select(Signal).where(Signal.company_id == cid).order_by(Signal.id.desc())).scalars().first()
+        newest.created_at = utcnow() + timedelta(seconds=1)
     LeadQualificationAgent(ctx).run({"rescore_all": True})
     with ctx.db.session() as s:
         assert s.get(Lead, lid).status == "qualified"  # new evidence after the move
