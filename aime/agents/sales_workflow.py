@@ -164,7 +164,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         budget = outreach_policy(self.settings)["drafts_per_run"]
         for lead in session.execute(stmt).scalars().all():
             contact = lead.contact
-            if contact and contact.consent_status in CONSENTED and contact.email:
+            if contact and contact.consent_status in CONSENTED and contact.email and contact.email_status != "bounced":
                 self._ensure_opportunity(session, lead, out)
                 self._ensure_sequence(session, lead, now, cfg, out)
                 continue
@@ -345,7 +345,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                         or not eligible(session, self.settings, lead, running=True)[0]):
                     continue  # replied, unsubscribed, bounced, stopped, or no longer reachable
             elif (not self._may_answer(session, lead) or not lead.contact
-                    or lead.contact.consent_status not in CONSENTED or lead.outreach_status in STOP_STATUSES):
+                    or lead.contact.consent_status not in CONSENTED or lead.contact.email_status == "bounced"
+                    or lead.outreach_status in STOP_STATUSES):
                 continue  # they replied, booked, unsubscribed, bounced, or a person stopped the sequence
             has_open = session.execute(select(FollowUp.id).where(
                 FollowUp.lead_id == lead_id, FollowUp.channel == "email", FollowUp.status.in_(OPEN_FOLLOWUP))).first()
@@ -787,7 +788,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             f.blocked_reason = f"Not sent: the mail server says this address does not exist ({said})"[:300]
             for c in session.execute(select(Contact).where(func.lower(Contact.email) == to.lower())).scalars():
                 c.email_status = "bounced"
-            suppress(session, to, "Bounced (refused by the mail server)")
+            suppress(session, to, "Bounced (refused by the mail server)", bounce=True)
             if f.lead and f.lead.outreach_status:
                 stop_sequence(session, f.lead, "bounced", "Email refused: the address does not exist", self.name)
             out.cancelled += 1
