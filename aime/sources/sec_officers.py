@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 from datetime import date, timedelta
 
 from aime.people import PersonFinding, role_category
+from aime.sources.sec_edgar import refused
 
 log = logging.getLogger("aime.sources.sec_officers")
 
@@ -92,7 +93,8 @@ def _raw_document(primary: str) -> str:
 
 
 def sec_officers(ctx, cik: str, max_filings: int = 12, since_days: int = 730) -> list[PersonFinding]:
-    """Officers (and directors) named in the company's recent Form 3/4 filings."""
+    """Officers (and directors) named in the company's recent Form 3/4 filings. SEC refusing raises, so the company
+    counts as not read and is tried again: "no officers found" would hold it back until the next re-check."""
     ua = ctx.settings.sec_user_agent.strip()
     if not ua or "@" not in ua:
         return []
@@ -100,6 +102,8 @@ def sec_officers(ctx, cik: str, max_filings: int = 12, since_days: int = 730) ->
     found: dict[str, PersonFinding] = {}
     with ctx.http(headers={"User-Agent": ua, "Accept-Encoding": "gzip, deflate"}) as client:
         resp = client.get(SUBMISSIONS.format(cik=cik10))
+        if refused(resp.status_code):
+            resp.raise_for_status()
         if resp.status_code != 200:
             return []
         recent = (resp.json().get("filings") or {}).get("recent") or {}
@@ -107,6 +111,7 @@ def sec_officers(ctx, cik: str, max_filings: int = 12, since_days: int = 730) ->
         rows = zip(recent.get("form", []), recent.get("accessionNumber", []), recent.get("primaryDocument", []),
                    recent.get("filingDate", []), strict=False)
         checked = 0
+        refused_doc = None
         for form, accession, primary, filed_on in rows:
             if form not in ("3", "4") or not primary or checked >= max_filings:
                 continue
@@ -119,6 +124,8 @@ def sec_officers(ctx, cik: str, max_filings: int = 12, since_days: int = 730) ->
             acc = accession.replace("-", "")
             time.sleep(0.15)  # stay well under SEC's 10 requests/second
             doc = client.get(ARCHIVE.format(cik=int(cik10), acc=acc, doc=_raw_document(primary)))
+            if refused(doc.status_code):
+                refused_doc = doc
             if doc.status_code != 200:
                 continue
             url = INDEX.format(cik=int(cik10), acc=acc, accession=accession)
@@ -134,4 +141,6 @@ def sec_officers(ctx, cik: str, max_filings: int = 12, since_days: int = 730) ->
                 finding = PersonFinding(name, title, role_category(title) if title != "Director" else "board",
                                         "high", evidence, url, source="sec_filing")
                 found.setdefault(finding.key, finding)
+    if refused_doc is not None and not found:
+        refused_doc.raise_for_status()
     return list(found.values())

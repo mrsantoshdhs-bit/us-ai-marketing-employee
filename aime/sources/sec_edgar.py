@@ -44,6 +44,11 @@ _CIK_RE = re.compile(r"CIK=(\d{1,10})", re.IGNORECASE)
 _PLACEHOLDER_NAME = re.compile(r"^ARRAY\(0x[0-9a-f]+\)$", re.IGNORECASE)
 
 
+def refused(status: int) -> bool:
+    """SEC said no (a fair-access block, a rate limit, an outage). A 404 is different: one company it does not have."""
+    return status in (403, 429) or status >= 500
+
+
 def _usable_name(text: str | None) -> str | None:
     value = (text or "").strip()
     return None if not value or _PLACEHOLDER_NAME.match(value) else value
@@ -54,15 +59,20 @@ def parse_company_feed(xml_text: str) -> list[dict]:
 
     The CIK is required; the name may be None because the feed's names are unreliable. The
     authoritative name always comes from the submissions API in SECEdgarSource._detail.
+
+    A body that is no Atom feed (SEC's block page, a new format) raises, so research tells a person. A feed
+    with no entries is a real answer: small state and SIC pairs are empty.
     """
     out: list[dict] = []
+    if len(xml_text) > 5_000_000:  # far larger than any EDGAR company list: refuse to parse
+        raise ValueError("SEC's company list is far larger than any real one")
     try:
-        if len(xml_text) > 5_000_000:
-            return out  # far larger than any EDGAR company list: refuse to parse
         # Python 3.12's bundled expat limits entity expansion (billion-laughs); input is size-capped above.
         root = ET.fromstring(xml_text)  # noqa: S314
-    except ET.ParseError:
-        return out
+    except ET.ParseError as exc:
+        raise ValueError("SEC's company list is not XML: a block page or a new format") from exc
+    if root.tag.rsplit("}", 1)[-1] != "feed":
+        raise ValueError("SEC's company list is not an Atom feed: a block page or a new format")
     for entry in root.iter():
         if not entry.tag.endswith("entry"):
             continue
@@ -91,6 +101,8 @@ class SECEdgarSource(Source):
     title = "SEC EDGAR (official filings)"
     description = "US-registered companies by SIC industry code and state, with addresses filed with the SEC."
     per_query = 10
+    _lookups = _refusals = 0  # of this run's company lookups
+    _last_refusal: int | None = None
 
     def configured(self) -> tuple[bool, str]:
         ua = self.settings.sec_user_agent.strip()
@@ -107,6 +119,7 @@ class SECEdgarSource(Source):
 
     def fetch(self, focus: ResearchFocus) -> list[CompanyCandidate]:
         out: list[CompanyCandidate] = []
+        self._lookups, self._refusals, self._last_refusal = 0, 0, None
         with self._client() as client:
             for industry_id in focus.industries:
                 ind = INDUSTRIES.get(industry_id)
@@ -136,10 +149,16 @@ class SECEdgarSource(Source):
                                  sic, state, accepted, inactive)
                     if len(out) >= focus.limit:
                         return out
+        if self._lookups and self._refusals == self._lookups:  # not "no active companies": a person is told
+            raise ValueError(f"SEC refused all {self._lookups} company lookup(s) (HTTP {self._last_refusal})")
         return out
 
     def _detail(self, client, row: dict, industry_id: str) -> CompanyCandidate | None:
         resp = client.get(SUBMISSIONS.format(cik=row["cik"]))
+        self._lookups += 1
+        if refused(resp.status_code):
+            self._refusals += 1
+            self._last_refusal = resp.status_code
         if resp.status_code != 200:
             return None
         try:
