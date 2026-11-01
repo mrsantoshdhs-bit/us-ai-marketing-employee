@@ -66,7 +66,7 @@ def test_research_run_filters_dedupes_and_is_idempotent(ctx):
     with ctx.db.session() as s:
         acme = s.execute(select(Company).where(Company.name == "Acme Dev Shop")).scalars().one()
         assert acme.is_competitor
-        assert s.execute(select(func.count(Lead.id)).where(Lead.company_id == acme.id)).scalar_one() == 0
+        assert s.execute(select(func.count(Lead.id)).where(Lead.company_id == acme.id)).scalar_one() == 1  # scoring closes it with a reason, and its page can clear the flag
         for sig in s.execute(select(Signal)).scalars():
             assert "@" not in sig.text  # no harvested emails
 
@@ -77,7 +77,7 @@ def test_research_run_filters_dedupes_and_is_idempotent(ctx):
 def test_research_leads_get_evidence_based_scores(ctx):
     USBusinessResearchAgent(ctx).run({"sources": ["hn_hiring"]})
     q = LeadQualificationAgent(ctx).run({})
-    assert q.ok and q.output.scored == 2
+    assert q.ok and q.output.scored == 3  # the flagged company's lead as well: scoring closes it
     with ctx.db.session() as s:
         for lead in s.execute(select(Lead)).scalars():
             assert lead.intent_score <= 6  # hiring posts are signals, never buying intent
