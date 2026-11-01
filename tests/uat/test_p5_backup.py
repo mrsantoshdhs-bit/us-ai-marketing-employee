@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.engine import make_url
 
 from aime import backup as B
 from aime import cli, send_journal
@@ -165,6 +166,96 @@ def test_a_second_restore_with_no_claim_at_all_after_the_first(pc, tmp_path):
     new = bare_pc(pc)
     restore_database(new.settings, copy_empty)
     assert restore_database(new.settings, copy_full)["unknown_sent"] == [fid]
+
+
+def rehearsed_then_old_pc_went_on(pc, tmp_path, monkeypatch):
+    """A rehearsal on the new PC, then the old PC approves an email a week later."""
+    from aime import timeutil
+
+    old = pc()
+    first = approved_email(old, "a")
+    rehearsal = snapshot(old, tmp_path, "rehearsal.zip")
+    new = bare_pc(pc)
+    restore_database(new.settings, rehearsal)
+    monkeypatch.setattr(timeutil, "CLOCK_OFFSET", timeutil.CLOCK_OFFSET + timedelta(days=7))
+    return old, new, first, approved_email(old, "b")
+
+
+@pytest.mark.parametrize("kind", ["zip", "db"])
+def test_a_rehearsal_does_not_let_a_later_copys_email_go_twice(pc, tmp_path, monkeypatch, kind):
+    old, new, first, later = rehearsed_then_old_pc_went_on(pc, tmp_path, monkeypatch)
+    copy = snapshot(old, tmp_path, "later.zip") if kind == "zip" else plain_copy(old, tmp_path)
+    send_run(old)
+    FakeSMTP.sent = []
+    done = restore_database(new.settings, copy)
+    assert sorted(done["unknown_sent"]) == [first, later] and done["approved_waiting"] == 0
+    again = create_context(new.settings)
+    assert status(again, later) == "uncertain"
+    confirm(again)
+    send_run(again)
+    assert FakeSMTP.sent == []
+    again.db.dispose()
+
+
+def test_a_copy_from_the_old_pc_placed_by_hand_after_a_rehearsal_is_noticed(pc, tmp_path, monkeypatch):
+    old, new, _, later = rehearsed_then_old_pc_went_on(pc, tmp_path, monkeypatch)
+    copy = plain_copy(old, tmp_path)
+    send_run(old)
+    FakeSMTP.sent = []
+    shutil.copyfile(copy, make_url(new.settings.database_url).database)
+    again = create_context(new.settings)
+    assert send_journal.hold(new.settings.data_dir) and status(again, later) == "uncertain"
+    confirm(again)
+    send_run(again)
+    assert FakeSMTP.sent == []
+    again.db.dispose()
+    last = create_context(new.settings)  # looked at once: it does not fire again on every start
+    assert send_journal.hold(new.settings.data_dir) is None
+    last.db.dispose()
+
+
+def test_the_old_pc_restoring_a_copy_the_new_pc_made_holds_back_its_emails(pc, tmp_path, monkeypatch):
+    from aime import timeutil
+
+    old = pc()
+    approved_email(old, "a")
+    rehearsal = plain_copy(old, tmp_path)
+    send_run(old)
+    new = bare_pc(pc)
+    restore_database(new.settings, rehearsal)
+    there = create_context(new.settings)
+    confirm(there)
+    monkeypatch.setattr(timeutil, "CLOCK_OFFSET", timeutil.CLOCK_OFFSET + timedelta(minutes=5))
+    fid = approved_email(there, "n")
+    back = plain_copy(there, tmp_path)
+    there.db.dispose()
+    old.db.dispose()
+    assert fid in restore_database(old.settings, back)["unknown_sent"]
+
+
+@pytest.mark.parametrize("kind", ["zip", "db"])
+def test_on_a_new_pc_a_clock_behind_the_copy_holds_back_every_approved_email(pc, tmp_path, monkeypatch, kind):
+    """A row's date against this PC's clock proves nothing on the first restore."""
+    from aime import timeutil
+
+    old = pc()
+    fid = approved_email(old, "a")
+    draft = approved_email(old, "b")
+    with old.db.session() as s:
+        s.get(FollowUp, draft).status = "awaiting_approval"
+    copy = snapshot(old, tmp_path, "copy.zip") if kind == "zip" else plain_copy(old, tmp_path)
+    new = bare_pc(pc)
+    monkeypatch.setattr(timeutil, "CLOCK_OFFSET", timeutil.CLOCK_OFFSET - timedelta(minutes=30))
+    assert restore_database(new.settings, copy)["unknown_sent"] == [fid]
+    again = create_context(new.settings)
+    assert status(again, fid) == "uncertain"
+    with again.db.session() as s:
+        assert s.get(FollowUp, draft).blocked_reason == send_journal.UNKNOWN_DRAFT
+    confirm(again)
+    FakeSMTP.sent = []
+    send_run(again)
+    assert FakeSMTP.sent == []
+    again.db.dispose()
 
 
 def test_what_was_approved_on_the_new_pc_is_known_and_left_alone(pc, tmp_path, monkeypatch):

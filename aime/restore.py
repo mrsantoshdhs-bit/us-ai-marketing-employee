@@ -8,6 +8,7 @@ until a person has confirmed (aime.send_journal). It sends nothing, and it never
 
 from __future__ import annotations
 
+import json
 import shutil
 import socket
 import sqlite3
@@ -96,17 +97,19 @@ def _source_files(settings, source: Path, work: Path) -> Path:
 
 
 def _role_of(path: Path) -> str | None:
+    return _stored_in(path, "db_role")
+
+
+def _stored_in(path: Path, key: str) -> str | None:
     con = sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro&immutable=1", uri=True)
     try:
-        row = con.execute("SELECT value FROM kv_store WHERE key = 'db_role'").fetchone()
+        row = con.execute("SELECT value FROM kv_store WHERE key = ?", (key,)).fetchone()
     except sqlite3.Error:
         return None
     finally:
         con.close()
     if not row:
         return None
-    import json
-
     try:
         return json.loads(row[0]).get("v")
     except (ValueError, AttributeError):
@@ -172,16 +175,34 @@ def _approved_in(path: Path) -> list[tuple]:
         con.close()
 
 
-def _hold_back_what_may_have_gone(settings, incoming: Path, new_pc: bool) -> str | None:
-    """On a PC without the old one's record, nothing can tell whether an email approved in the copy went out after the copy
-    was made. Written before the database is replaced, so a crash half way loses none of it. The moment stays in the journal,
-    so choosing another copy later is covered too; what was approved on this PC since is known and is left alone. Returns
-    that moment, or None on the PC whose record this is."""
-    at = send_journal.record_new_pc(settings.data_dir) if new_pc else send_journal.read(settings.data_dir).new_pc_at
-    if at:
-        view = send_journal.read(settings.data_dir)
-        send_journal.record_unknown(settings.data_dir, send_journal.approved_before(view, at, _approved_in(incoming)))
-    return at
+def _carry_the_moment(incoming: Path, at: str) -> None:
+    """The database and the copies it makes from now on say which journal they lived with. An old copy with no such table has
+    nowhere to say it; start() gives it the key."""
+    con = sqlite3.connect(incoming)
+    try:
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kv_store'").fetchone():
+            with con:
+                con.execute("INSERT OR REPLACE INTO kv_store (key, value, updated_at) VALUES (?, ?, ?)",
+                            (send_journal.NEW_PC_KEY, json.dumps({"v": at}), at.replace("T", " ")))
+    finally:
+        con.close()
+
+
+def _hold_back_what_may_have_gone(settings, incoming: Path, new_pc: bool) -> tuple[bool, str | None]:
+    """Where the copy was made on another PC (nothing here has seen an email, or the copy does not carry this journal's last
+    new_pc moment), nothing can tell whether an email approved in it went out after the copy was made, and its dates prove
+    nothing: every one goes to a person. Written before the database is replaced, so a crash half way loses none of it. A copy
+    made here keeps to that moment: what was approved here since is known and is left alone. Returns whether drafts get the
+    note, and the moment they must be older than (None for all of them)."""
+    view = send_journal.read(settings.data_dir)
+    if new_pc or _stored_in(incoming, send_journal.NEW_PC_KEY) != view.new_pc_at:
+        at = send_journal.record_new_pc(settings.data_dir)
+        _carry_the_moment(incoming, at)
+        send_journal.record_unknown(settings.data_dir, send_journal.approved_before(view, None, _approved_in(incoming)))
+        return True, None
+    if view.new_pc_at:
+        send_journal.record_unknown(settings.data_dir, send_journal.approved_before(view, view.new_pc_at, _approved_in(incoming)))
+    return view.new_pc_at is not None, view.new_pc_at
 
 
 def restore_database(settings, source: Path) -> dict:
@@ -234,7 +255,7 @@ def restore_database(settings, source: Path) -> dict:
                 raise RestoreRefused(f"The copy of {source.name} failed its check ({check}). The present database was not replaced.")
             if source.suffix in (".aimebak", ".zip"):
                 _journals_beside_the_bundle(settings, Path(tmp) / "bundle", new_pc)
-            new_pc_at = _hold_back_what_may_have_gone(settings, incoming, new_pc)
+            note_drafts, drafts_before = _hold_back_what_may_have_gone(settings, incoming, new_pc)
             for side in SIDE_FILES:
                 db.with_name(db.name + side).unlink(missing_ok=True)
             incoming.replace(db)
@@ -262,8 +283,8 @@ def restore_database(settings, source: Path) -> dict:
             marked = send_journal.review_rows(s, view, "restore")
             unknown = [i for i in marked if send_journal.claim_for(view, s.get(FollowUp, i)).get("unknown")]
             already = [i for i in marked if i not in unknown]
-            if new_pc_at:
-                send_journal.note_drafts(s, view, new_pc_at)
+            if note_drafts:
+                send_journal.note_drafts(s, view, drafts_before)
             documents = s.execute(select(Attachment.stored_as, Attachment.sha256, Attachment.filename)).all()
             back, lost = bring_back_documents(settings, documents, source.parent)
             waiting = s.execute(select(func.count(FollowUp.id)).where(FollowUp.channel == "email", FollowUp.status == "approved")).scalar_one()

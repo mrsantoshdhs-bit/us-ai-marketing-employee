@@ -10,7 +10,8 @@ Events, the last one for an email counts:
 - released: it certainly was not delivered (the server refused it, or a person checked the Sent folder and requeued it).
 - confirmed: a person looked after a hold; what was claimed before this is no longer evidence of a new restore.
 - new_pc: this journal did not come with the database. What was approved before this moment may have gone from the old PC
-  after its copy was made: each such email gets a claim marked "unknown" and goes to a person, at this and any later restore.
+  after its copy was made: each such email gets a claim marked "unknown" and goes to a person. The database carries the moment
+  too (NEW_PC_KEY), so a copy that does not carry this journal's last moment was made on another PC, and is treated the same.
 
 No address is stored, only a short hash: the journal outlives an erasure request, and must not hold the person's address.
 
@@ -43,6 +44,7 @@ from aime.timeutil import utcnow
 log = logging.getLogger("aime.send_journal")
 HOLD_FILE = "SENDING_HOLD.json"
 STARTED_KEY = "sent_journal.started"  # in the database: this database has been journalled, so the file should exist
+NEW_PC_KEY = "sent_journal.new_pc"  # in the database: the new_pc moment of the journal it has lived with
 HOLD_ALERT = "sending:hold"
 ACCOUNTED_FOR = ("sending", "sent", "uncertain")  # where a claimed email can be on an ordinary day
 NOT_YET_SENT = ("pending", "awaiting_approval", "approved")  # a claimed email here: this database is older than the claim
@@ -213,12 +215,13 @@ def claim_of(view: View, followup_id: int, address: str | None, message_id: str 
             or (view.by_message_id.get(message_id) if message_id else None))
 
 
-def approved_before(view: View, at: str, rows) -> list[tuple[int, str | None, str | None]]:
-    """Of (id, address, message id, approved at) rows: those approved before `at` that nothing in the journal names yet."""
+def approved_before(view: View, at: str | None, rows) -> list[tuple[int, str | None, str | None]]:
+    """Of (id, address, message id, approved at) rows: those approved before `at` (with None, all of them: a date from
+    another PC proves nothing) that nothing in the journal names yet."""
     def stamp(when) -> str:
         return when.isoformat() if hasattr(when, "isoformat") else str(when or "").replace(" ", "T")
 
-    return [(i, to, mid) for i, to, mid, when in rows if stamp(when) < at and not claim_of(view, i, to, mid)]
+    return [(i, to, mid) for i, to, mid, when in rows if (at is None or stamp(when) < at) and not claim_of(view, i, to, mid)]
 
 
 # ---------------------------------------------------------------------------------------- the hold
@@ -319,12 +322,12 @@ def review_rows(session: Session, view: View, source: str) -> list[int]:
     return marked
 
 
-def note_drafts(session: Session, view: View, at: str) -> int:
+def note_drafts(session: Session, view: View, at: str | None) -> int:
     """A draft of the copy may have been approved and sent by the old PC afterwards. It stays a draft, with a note for whoever
-    opens it. Returns how many."""
+    opens it. With `at` only those made before it, with None all of them. Returns how many."""
     noted = 0
     for f in session.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status.in_(("pending", "awaiting_approval")))).scalars():
-        if f.created_at.isoformat() < at and not claim_for(view, f):
+        if (at is None or f.created_at.isoformat() < at) and not claim_for(view, f):
             f.blocked_reason = UNKNOWN_DRAFT
             noted += 1
     return noted
@@ -385,7 +388,8 @@ def start(db, settings) -> None:
     """On every start. The first time, the journal is started from what the database says was sent, so emails sent
     before this code existed are protected too. A journal that was started and is now gone or empty means this database
     came without it (a new PC, a copied folder), so what went out since its backup is unknown: sending is held, and every
-    approved email goes to a person. One that has lost lines gets back what the database knows."""
+    approved email goes to a person. So too, after a new PC's first restore, for a database that does not carry the journal's
+    last new_pc moment: it was put here by hand from another PC. One that has lost lines gets back what the database knows."""
     from aime.db import kv_get, kv_set
 
     path = journal_path(settings.data_dir)
@@ -394,6 +398,11 @@ def start(db, settings) -> None:
             started = kv_get(s, STARTED_KEY)  # read before looking for the file: another process writes the file first
             exists = path.exists() and path.stat().st_size > 0
             if started and exists:
+                moment = read(settings.data_dir).new_pc_at
+                if moment and kv_get(s, NEW_PC_KEY) != moment:
+                    set_hold(settings.data_dir, "restored", "this database was made on another PC, so what went out after "
+                             "its copy is unknown: check the Sent folder")
+                    _came_without_its_journal(s, settings)
                 _put_back_lost_claims(s, settings)
                 return
             if not exists:
@@ -406,22 +415,25 @@ def start(db, settings) -> None:
                         *[_record("claim", i, to, mid, sent or started) for i, to, mid, sent, started in rows])
                 if started:
                     _came_without_its_journal(s, settings)
+            elif not started:  # a database new to this journal, with nothing to say where it was: they belong together from now on
+                kv_set(s, NEW_PC_KEY, read(settings.data_dir).new_pc_at)
             kv_set(s, STARTED_KEY, True)
     except (OSError, SQLAlchemyError):  # the send gate reports what matters; this must never stop a start
         log.exception("Could not start the record of sent emails")
 
 
 def _came_without_its_journal(session: Session, settings) -> None:
+    from aime.db import kv_set
     from aime.models import Contact
 
-    at = record_new_pc(settings.data_dir)
+    kv_set(session, NEW_PC_KEY, record_new_pc(settings.data_dir))
     approved = session.execute(select(FollowUp.id, func.coalesce(FollowUp.to_email, Contact.email), FollowUp.message_id)
                                .outerjoin(Contact, Contact.id == FollowUp.contact_id)
                                .where(FollowUp.channel == "email", FollowUp.status == "approved")).all()
     record_unknown(settings.data_dir, [tuple(row) for row in approved])
     view = read(settings.data_dir)
     review_rows(session, view, "recovery")
-    note_drafts(session, view, at)
+    note_drafts(session, view, None)
 
 
 def _put_back_lost_claims(session: Session, settings) -> None:
