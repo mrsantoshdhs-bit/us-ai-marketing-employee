@@ -142,12 +142,15 @@ def gather_evidence(session: Session, lead: Lead) -> list[Evidence]:
     snaps = session.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == lead.company_id)
                             .order_by(ResearchSnapshot.id.desc())).scalars().all()
     # A re-read that failed, was blocked or was sent elsewhere has no description, which says nothing about the one on record.
-    snap = next((s for s in snaps if s.description), snaps[0] if snaps else None)
-    if snap:
-        quote = website_quote(snap.description) if snap.description else ""
+    described = next((s for s in snaps if s.description), None)
+    # The topics are what the latest real read found: a newer read that dropped one, or found one, is believed over an older read.
+    read = next((s for s in snaps if s.status in ("done", "no_people")), described or (snaps[0] if snaps else None))
+    if described:
+        quote = website_quote(described.description)
         if len(quote) >= 25:
-            out.append(Evidence(quote, snap.description_url, "description", snap.description))
-        for need in snap.needs or []:
+            out.append(Evidence(quote, described.description_url, "description", described.description))
+    if read:
+        for need in read.needs or []:
             if need.get("service") == lead.primary_service and need.get("quote"):
                 quote = website_quote(need["quote"], list(need.get("keywords") or []))
                 if len(quote) >= 25:

@@ -76,13 +76,13 @@ def domain_part_of_name(name: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _new_name_in_title(name: str, website_title: str | None) -> str | None:
-    """The new name when the homepage title says "<new> (formerly <this name>)". Only of this very name, and only words that read as a name
-    ("Welcome to Newname" does not): no wider guessing."""
+def _new_name_in_title(name: str, website_title: str | None, domain: str | None) -> str | None:
+    """The new name when the homepage title says "<new> (formerly <this name>)". Only of this very name, only words that read as a name, and only
+    when they spell the site's domain as name_from_title asks ("Welcome To Newname" or "Home" does not): no wider guessing."""
     own = normalize_name(name)
     for part in _TITLE_SEPARATORS.split(website_title or ""):
         m = _RENAMED_RE.fullmatch(" ".join(part.split()))
-        if (m and own and normalize_name(m[2]) == own and len(m[1]) <= 80 and not describes_rather_than_names(m[1])
+        if (m and own and normalize_name(m[2]) == own and name_from_title(m[1], domain) and not describes_rather_than_names(m[1])
                 and all(w[0].isupper() or w[0].isdigit() for w in m[1].split())):
             return m[1]
     return None
@@ -98,7 +98,7 @@ def company_to_address(name: str | None, website_title: str | None = None, domai
     name = " ".join((name or "").split()).rstrip(" .,")  # "Acme Inc." would read "Hello Acme Inc. team,"
     if name_set_by:
         return name or None
-    renamed = _new_name_in_title(name, website_title)
+    renamed = _new_name_in_title(name, website_title, domain)
     if renamed:
         return renamed
     inner = domain_part_of_name(name)

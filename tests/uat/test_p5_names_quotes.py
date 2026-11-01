@@ -75,6 +75,28 @@ def test_a_site_that_never_gave_a_description_still_gives_its_newest_read_for_th
         assert [e.kind for e in gather_evidence(s, lead)] == ["website"]
 
 
+NEED = {"service": "ai_agents", "keywords": ["ai agents"], "quote": "We want to use AI agents in our support desk this year.", "url": "https://firm.example/a"}
+GOOD = "Firm builds reliable tools for modern operations teams."
+
+
+@pytest.mark.parametrize("older,newer,kinds", [
+    (dict(description="Home"), dict(description=None, needs=[NEED]), ["website"]),  # an older line unfit to quote does not hide the latest read
+    (dict(description=GOOD), dict(description=None, needs=[NEED]), ["description", "website"]),  # a finding of the latest read is kept
+    (dict(description=GOOD, needs=[NEED]), dict(description=None, needs=[]), ["description"]),  # a topic the latest read no longer found is not quoted
+    (dict(description=GOOD, needs=[NEED]), dict(description=None, needs=[], status="no_people"), ["description"]),
+    (dict(description=GOOD, needs=[NEED]), dict(description=None, needs=None, status="failed"), ["description", "website"]),  # no read: the last read stands
+])
+def test_the_topics_come_from_the_latest_real_read(make_ctx, older, newer, kinds):
+    ctx = make_ctx(**POSTAL)
+    lead_id = add_lead(ctx, description=None)
+    with ctx.db.session() as s:
+        lead = s.get(Lead, lead_id)
+        for row in (older, newer):
+            s.add(ResearchSnapshot(**{"company_id": lead.company_id, "status": "done", "description_url": "https://firm.example/", **row}))
+            s.flush()
+        assert [e.kind for e in gather_evidence(s, lead)] == kinds
+
+
 # ------------------------------------------------------------------ what is not quoted from a job post
 @pytest.mark.parametrize("line", ["No AI text please, keep it short, shorter emails are more likely to get a response.",
                                   "React and TypeScript at depth, Node or Python behind it.",
@@ -109,7 +131,7 @@ def test_a_pay_range_is_no_quote_from_a_website_either_but_a_large_figure_is():
 def test_a_renamed_company_is_written_to_by_its_new_name():
     assert company_to_address("Oldname", "Newname (formerly Oldname) | Gateway for teams", "newname.example") == "Newname"
     assert company_to_address("Oldname", "Newname Labs (previously Oldname) - Gateway", "newnamelabs.example") == "Newname Labs"
-    assert company_to_address("Oldname Inc.", "Newname (Formerly known as OLDNAME) | Gateway", "oldname.example") == "Newname"
+    assert company_to_address("Oldname Inc.", "Newname (Formerly known as OLDNAME) | Gateway", "newname.example") == "Newname"
 
 
 @pytest.mark.parametrize("title", ["Newname (formerly Othername) | Gateway for teams",  # another company's old name
@@ -119,6 +141,22 @@ def test_a_renamed_company_is_written_to_by_its_new_name():
                                    None])
 def test_no_wider_guess_at_a_new_name(title):
     assert company_to_address("Oldname", title, "newname.example") == "Oldname"
+
+
+@pytest.mark.parametrize("title,domain", [("Welcome To Newname (formerly Oldname)", "newname.example"),  # capitals do not make it a name
+                                          ("Home (formerly Oldname)", "old.example"),
+                                          ("Careers (formerly Oldname)", "old.example"),
+                                          ("Acquired By Bigco (previously Oldname)", "old.example"),
+                                          ("Buy Cheap Stuff Now (formerly Oldname)", "old.example"),
+                                          ("X (formerly Oldname)", "old.example"),
+                                          ("Newname (formerly Oldname) | Gateway", "oldname.example"),  # still on its old domain: the old name is safe
+                                          ("Newname (formerly Oldname) | Gateway", None)])
+def test_a_new_name_must_spell_the_domain_of_its_site(title, domain):
+    assert company_to_address("Oldname", title, domain) == "Oldname"
+
+
+def test_a_new_name_may_follow_a_domain_prefix():
+    assert company_to_address("Oldname", "Newname (formerly Oldname)", "getnewname.example") == "Newname"
 
 
 def test_a_name_a_person_set_stays_whatever_the_title_says():
@@ -152,6 +190,7 @@ def test_a_draft_uses_the_new_name_and_the_stored_name_is_not_touched(make_ctx):
     cid = lead_of(ctx).company_id
     with ctx.db.session() as s:
         s.get(Company, cid).website_title = "Newname (formerly Brightline Logistics) | Freight software"
+        s.get(Company, cid).domain = "newname.example"
     SalesWorkflowAgent(ctx).run({"send": False})
     (f,) = drafts(ctx)
     assert "Newname" in f.subject and "Brightline" not in f.subject
