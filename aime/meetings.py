@@ -125,17 +125,25 @@ def _when_label(m: Meeting) -> str:
     return local if local.endswith(" UTC") else f"{local} ({m.starts_at:%H:%M} UTC)"
 
 
-def parse_calendly(subject: str, body: str, own: set[str], default_minutes: int = 30) -> dict | None:
-    """{kind, invitee_name, invitee_email, starts_at, ends_at (UTC naive), event, tz, previous_starts_at} or None.
-    kind: booked | cancelled | rescheduled. Without an end time the length comes from the event type
-    ("30 Minute Meeting"), else `default_minutes`. A time with no zone, or one it cannot place, gives None: a person looks."""
+def _notice_head(subject: str, body: str, own: set[str]) -> tuple[str, str | None, str, str | None]:
+    """The subject without its forward marks, the kind of notice (None: not one we know), the body on one line, and who it names."""
     subject = re.sub(r"^\s*(?:(?:fwd?|fw|wg|rv|tr|sv|aw)\s*:\s*)+", "", subject, flags=re.I)  # a notice forwarded to the sales mailbox
     kind = ("cancelled" if re.match(r"\s*cancel+ed\s*:", subject, re.I)
             else "booked" if re.match(r"\s*new event\s*:", subject, re.I)
             else "rescheduled" if re.match(r"\s*(?:rescheduled|updated)\s*:", subject, re.I) else None)
+    text = " ".join(" ".join(re.sub(r"^[\s>]+", "", line) for line in body.splitlines()).split())  # a forward may quote each line with ">"
+    m = re.search(r"Invitee Email:\s*(" + EMAIL_RE.pattern + ")", text, re.I)
+    email = m.group(1).lower() if m else next((e.lower() for e in EMAIL_RE.findall(text) if e.lower() not in own and "calendly" not in e.lower()), None)
+    return subject, kind, text, email
+
+
+def parse_calendly(subject: str, body: str, own: set[str], default_minutes: int = 30) -> dict | None:
+    """{kind, invitee_name, invitee_email, starts_at, ends_at (UTC naive), event, tz, previous_starts_at} or None.
+    kind: booked | cancelled | rescheduled. Without an end time the length comes from the event type
+    ("30 Minute Meeting"), else `default_minutes`. A time with no zone, or one it cannot place, gives None: a person looks."""
+    subject, kind, text, email = _notice_head(subject, body, own)
     if kind is None:
         return None
-    text = " ".join(" ".join(re.sub(r"^[\s>]+", "", line) for line in body.splitlines()).split())  # a forward may quote each line with ">"
     name = None
     m = re.search(r"Invitee(?: Name)?:\s*(.+?)\s+(?:Invitee Email|Email|Event)", text, re.I)
     if m:
@@ -143,12 +151,6 @@ def parse_calendly(subject: str, body: str, own: set[str], default_minutes: int 
     else:
         sm = re.match(r"\s*(?:new event|cancel+ed|rescheduled|updated)\s*:\s*(.+?)\s+-\s+", subject, re.I)
         name = sm.group(1).strip() if sm else None
-    email = None
-    m = re.search(r"Invitee Email:\s*(" + EMAIL_RE.pattern + ")", text, re.I)
-    if m:
-        email = m.group(1).lower()
-    else:
-        email = next((e.lower() for e in EMAIL_RE.findall(text) if e.lower() not in own and "calendly" not in e.lower()), None)
     m = re.search(r"Event Type:\s*(.+?)\s+(?:Invitee|Event Date|Date/Time|Location|$)", text, re.I)
     event = (m.group(1) if m else re.split(r"\s+-\s+", subject)[-1] if " - " in subject else "Meeting").strip()
     minutes = _length(event, default_minutes)
@@ -340,7 +342,7 @@ def record_meeting(session: Session, settings, info: dict, actor: str, row: Inbo
     log_activity(session, msg + (f", but {hold}" if hold else "") + (f"; {closed} unsent email(s) to them cancelled" if closed else ""), actor,
                  type_="meeting", company_id=lead.company_id, lead_id=lead.id, opportunity_id=meeting.opportunity_id)
     if hold:
-        return meeting, f"{HELD_NOTE}: {hold}. The lead and its deal stay as they are until a person decides"
+        return meeting, _held_note(hold)
     return meeting, "meeting recorded; lead moved to meeting; opportunity advanced"
 
 
@@ -397,6 +399,10 @@ def book_on_lead(session: Session, settings, lead: Lead, contact: Contact | None
     return hold
 
 
+def _held_note(hold: str) -> str:
+    return f"{HELD_NOTE}: {hold}. The lead and its deal stay as they are until a person decides"
+
+
 def _person_decides(session: Session, meeting: Meeting) -> bool:
     """A later change to this meeting must not write "prepare" on its deal: nobody is to be prompted to contact them."""
     lead = session.get(Lead, meeting.lead_id) if meeting.lead_id else None
@@ -424,11 +430,14 @@ def close_open_proposals(session: Session, lead: Lead) -> None:
         p.status = "cancelled"
 
 
+def _own_addresses(settings) -> set[str]:
+    return {a.lower() for a in (settings.smtp_from, settings.imap_credentials[0]) if a}
+
+
 def _read_notice(settings, row: InboundEmail) -> dict | None:
     """The notice as it reads, or None. It runs on mail nobody has vouched for yet, and on what waits at every inbox run: a time that is no time ("10:99am") must not stop either."""
-    own = {a.lower() for a in (settings.smtp_from, settings.imap_credentials[0]) if a}
     try:
-        return parse_calendly(row.subject or "", row.body_text or "", own, booking_minutes(settings))
+        return parse_calendly(row.subject or "", row.body_text or "", _own_addresses(settings), booking_minutes(settings))
     except (ValueError, OverflowError):
         return None
 
@@ -653,6 +662,33 @@ def _waits(session: Session, settings, row: InboundEmail, info: dict | None) -> 
                f"{row.recommended_status}. Apply it or mark it reviewed there.", settings, key=_waiting_key(row, info))
 
 
+def _hold_who_it_names(session: Session, settings, row: InboundEmail, info: dict | None) -> str:
+    """A notice that waits holds the lead it names, even when its time cannot be read: that person may well have booked,
+    and what is approved for them must not go. It only reads the lead; a forged notice can only delay email. Returns
+    what to add to the note."""
+    from aime.reply_intel import _hold_lead
+
+    if info is not None:
+        invitee = info["invitee_email"]
+    else:
+        _, kind, _, invitee = _notice_head(row.subject or "", row.body_text or "", _own_addresses(settings))
+        invitee = invitee if kind else None
+    lead, contact = match_lead(session, invitee, getattr(settings, "test_recipients", frozenset())) if invitee else (None, None)
+    if lead is None:
+        return ""
+    _hold_lead(row, lead)
+    row.contact_id = contact.id if contact else None
+    return f". {lead.company.name}'s emails wait until Apply or Mark reviewed"
+
+
+def _still_held(session: Session, info: dict, meeting: Meeting | None) -> str | None:
+    """Why the lead of a meeting this notice repeats or moves still waits for a person, or None."""
+    if info["kind"] == "cancelled" or meeting is None or meeting.status != "scheduled" or not meeting.lead_id:
+        return None
+    contact = session.get(Contact, meeting.contact_id) if meeting.contact_id else None
+    return booking_hold(session, session.get(Lead, meeting.lead_id), contact, meeting.invitee_email)
+
+
 def handle_calendly_email(session: Session, settings, row: InboundEmail, actor: str, confirmed_by: str | None = None) -> str:
     """Apply a Calendly notice. Unless the mail server vouches for it (aime.mail_auth) or a person confirmed it
     (`confirmed_by`), it changes nothing and waits for review: a forged notice must not book or cancel meetings. While it
@@ -666,8 +702,6 @@ def handle_calendly_email(session: Session, settings, row: InboundEmail, actor: 
 
         trusted, why = calendly_verified(session, settings, row.from_email, row.auth_results, to_email=row.to_email or "")
         if not trusted:
-            from aime.reply_intel import _hold_lead
-
             row.status = "needs_review"
             note = f"Calendly notice not applied: {why}. Check it in Calendly"
             if info is None:
@@ -675,20 +709,21 @@ def handle_calendly_email(session: Session, settings, row: InboundEmail, actor: 
             else:
                 _say(row, "neutral", "Not applied: check it in Calendly, then Apply")
                 note += ", then press Apply on Replies if it is genuine"
-                lead, contact = match_lead(session, info["invitee_email"], getattr(settings, "test_recipients", frozenset()))
-                if lead is not None:
-                    _hold_lead(row, lead)
-                    row.contact_id = contact.id if contact else None
-                    note += f". {lead.company.name}'s emails wait until Apply or Mark reviewed"
+            note += _hold_who_it_names(session, settings, row, info)
             _waits(session, settings, row, info)
             return note
     if info is None:
         row.status = "needs_review"
         _say(row, "neutral", "Could not be read: check it in Calendly and record it by hand")
+        note = "Calendly notification could not be read (time or invitee missing): check it in Calendly"
+        if not confirmed_by:
+            note += _hold_who_it_names(session, settings, row, info)
         _waits(session, settings, row, info)
-        return "Calendly notification could not be read (time or invitee missing): check it in Calendly"
+        return note
     meeting, note = record_meeting(session, settings, info, actor, row)
     held = note.startswith(HELD_NOTE)
+    if not held and (hold := _still_held(session, info, meeting)):  # a repeat or a move leaves them as held as the first notice did
+        note, held = f"{note}. {_held_note(hold)}", True
     decided = note.startswith(HAS_OUTCOME_NOTE)
     if meeting is not None and meeting.lead_id:
         row.lead_id, row.company_id, row.contact_id = meeting.lead_id, meeting.company_id, meeting.contact_id

@@ -44,12 +44,12 @@ def when(t, zone="India Standard Time"):
     return f"{t[0]} - {t[1]} ({zone})"
 
 
-def notice(kind, to=A, old=None, who=DAVID, frm="Calendly <notifications@calendly.com>", dated=None):
+def notice(kind, to=A, old=None, who=DAVID, frm="Calendly <notifications@calendly.com>", dated=None, zone="India Standard Time"):
     subject = {"booked": f"New Event: David Chen - {to[0]} {to[2]} - 30 Minute Meeting",
                "moved": f"Updated: David Chen - {to[0]} {to[2]} - 30 Minute Meeting",
                "cancelled": f"Canceled: 30 Minute Meeting with David Chen on {to[1]}"}[kind]
     former = f"Date & Time:\nFormer: {when(old)}\nUpdated: {when(to)}\n\n" if old else ""
-    body = (f"Calendly\n\nEvent Type:\n30 Minute Meeting\n\nInvitee:\nDavid Chen\n\nInvitee Email:\n{who}\n\nEvent Date/Time:\n{when(to)}\n\n"
+    body = (f"Calendly\n\nEvent Type:\n30 Minute Meeting\n\nInvitee:\nDavid Chen\n\nInvitee Email:\n{who}\n\nEvent Date/Time:\n{when(to, zone)}\n\n"
             f"Location:\nGoogle Meet\n\nInvitee Time Zone:\nEastern Time - US & Canada\n\n{former}View event in Calendly\nhttps://calendly.com/app\n")
     _n[0] += 1
     raw = mail(frm, subject, body, msg_id=f"<c{_n[0]}@calendly.example>")
@@ -263,6 +263,69 @@ def test_applying_a_held_booking_finishes_in_one_step_and_moves_nothing(signed_o
     assert lead(signed_only).outreach_status == "unsubscribed" and live(signed_only) == ["08 15:00"]
     with signed_only.db.session() as s:
         assert not s.execute(select(Opportunity)).scalars().all()
+
+
+HELD_WORDS = "Meeting recorded, lead not moved: a person decides"
+
+
+def _held_row(row, status):
+    assert (row.status, row.sentiment, row.recommended_status) == (status, "neutral", HELD_WORDS)
+    assert "nothing moved" in row.action_note and "do-not-contact" in row.action_note
+
+
+def _still_unsubscribed(ctx):
+    assert lead(ctx).outreach_status == "unsubscribed"
+    with ctx.db.session() as s:
+        assert not s.execute(select(Opportunity)).scalars().all()
+
+
+@pytest.fixture
+def opted_out_booked(ctx):
+    with ctx.db.session() as s:
+        _opted_out(s, s.execute(select(Lead)).scalars().first())
+    deliver(ctx, notice("booked", A))
+    _held_row(notices(ctx)[0], "needs_review")
+    return ctx
+
+
+def test_applying_a_signed_held_booking_never_says_prepare(opted_out_booked):
+    ctx = opted_out_booked
+    web(ctx).post(f"/inbox/{notices(ctx)[0].id}/apply_calendly", headers=ORIGIN, follow_redirects=False)
+    _held_row(notices(ctx)[0], "actioned")
+    assert "confirmed by" in notices(ctx)[0].action_note
+    _still_unsubscribed(ctx)
+
+
+def test_a_second_copy_of_a_held_booking_never_says_prepare(opted_out_booked):
+    ctx = opted_out_booked
+    deliver(ctx, notice("booked", A))
+    _held_row(notices(ctx)[1], "needs_review")
+    assert live(ctx) == ["08 15:00"]
+    _still_unsubscribed(ctx)
+
+
+def test_moving_a_held_booking_never_says_prepare(opted_out_booked):
+    ctx = opted_out_booked
+    deliver(ctx, notice("moved", B, old=A))
+    _held_row(notices(ctx)[1], "needs_review")
+    assert "meeting rescheduled" in notices(ctx)[1].action_note and live(ctx) == ["09 16:00"]
+    _still_unsubscribed(ctx)
+
+
+def test_a_repeat_on_a_lost_deal_says_why_it_waits(ctx):
+    with ctx.db.session() as s:
+        ld = s.execute(select(Lead)).scalars().first()
+        s.add(Opportunity(lead_id=ld.id, company_id=ld.company_id, stage="lost", probability=0, name="Deal", lost_reason="Budget"))
+    deliver(ctx, notice("booked", A), notice("booked", A))
+    row = notices(ctx)[1]
+    assert row.recommended_status == HELD_WORDS and "its deal was lost (Budget)" in row.action_note
+
+
+def test_a_repeat_on_a_lead_nobody_holds_still_says_prepare(ctx):
+    deliver(ctx, notice("booked", A), notice("booked", A))
+    row = notices(ctx)[1]
+    assert (row.status, row.sentiment, row.recommended_status) == ("actioned", "positive", "Meeting booked: prepare for it")
+    assert row.action_note == "already recorded"
 
 
 def test_a_suppressed_address_is_held_whatever_the_stage(ctx):
@@ -594,8 +657,8 @@ def test_one_alert_per_invitee_while_two_notices_wait(signed_only):
     assert len(_waiting(signed_only)) == 1, "the other one still waits"
 
 
-def _step_two_approved(make_ctx):
-    ctx, sender, sent = contacted(make_ctx, calendly_verified_only=True, calendly_url=LINK)
+def _step_two_approved(make_ctx, verified_only=True):
+    ctx, sender, sent = contacted(make_ctx, calendly_verified_only=verified_only, calendly_url=LINK)
     U.stamp_sent(ctx, sent.id, TUESDAY_11AM_ET)
     U.run(ctx, sender, TUESDAY_11AM_ET + timedelta(days=6))
     step2 = U.drafts(ctx)[-1]
@@ -622,6 +685,43 @@ def test_a_waiting_notice_holds_the_lead_it_names_and_changes_nothing_else(make_
         assert lead_on_hold(s, row.lead_id)
     assert _send_run(ctx, sender) == 0
     assert U.followup(ctx, step2.id).status == "approved", "held, never cancelled, on an unproven notice"
+
+
+UNREADABLE = [(A, "Dubai Time"), (A, "PST"), (A, "GMT+5:30"), (("10:99pm", A[1], A[2]), "India Standard Time")]
+
+
+@pytest.mark.parametrize("verified_only", [False, True])
+@pytest.mark.parametrize("kind", ["booked", "moved", "cancelled"])
+@pytest.mark.parametrize("to,zone", UNREADABLE)
+def test_a_notice_whose_time_cannot_be_placed_still_stops_the_approved_email(make_ctx, verified_only, kind, to, zone):
+    ctx, sender, step2 = _step_two_approved(make_ctx, verified_only)
+    deliver(ctx, notice(kind, to, zone=zone))
+    [row] = notices(ctx)
+    assert row.status == "needs_review" and row.holds_sending is True and row.lead_id == lead(ctx).id
+    assert "emails wait until Apply or Mark reviewed" in row.action_note
+    assert lead(ctx).outreach_status == "contacted" and live(ctx) == []
+    assert _send_run(ctx, sender) == 0
+    assert U.followup(ctx, step2.id).status == "approved", "held, never cancelled: nobody knows what the notice says"
+
+
+@pytest.mark.parametrize("action", ["reviewed", "apply_calendly"])
+def test_a_person_releases_the_lead_an_unplaced_notice_held(make_ctx, action):
+    ctx, sender, step2 = _step_two_approved(make_ctx, verified_only=False)
+    deliver(ctx, notice("booked", A, zone="Dubai Time"))
+    [row] = notices(ctx)
+    web(ctx).post(f"/inbox/{row.id}/{action}", headers=ORIGIN, follow_redirects=False)
+    with ctx.db.session() as s:
+        assert not lead_on_hold(s, lead(ctx).id)
+    assert live(ctx) == []
+    assert _send_run(ctx, sender) == 1
+
+
+def test_an_unplaced_notice_naming_nobody_we_know_holds_nothing(make_ctx):
+    ctx, sender, step2 = _step_two_approved(make_ctx, verified_only=False)
+    deliver(ctx, notice("booked", A, who="stranger@unknown-co.example", zone="Dubai Time"))
+    [row] = notices(ctx)
+    assert row.status == "needs_review" and row.lead_id is None and not row.holds_sending
+    assert _send_run(ctx, sender) == 1
 
 
 def test_mark_reviewed_releases_the_lead(make_ctx):
