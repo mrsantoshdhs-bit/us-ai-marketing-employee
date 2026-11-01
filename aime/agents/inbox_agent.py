@@ -9,7 +9,8 @@ from __future__ import annotations
 import hashlib
 import imaplib
 import re
-from datetime import timedelta
+from collections.abc import Collection
+from datetime import datetime, timedelta
 
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -17,21 +18,30 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent, RetryPolicy
+from aime.agents.sales_workflow import SIGN_IN_ALERT
 from aime.db import kv_get, kv_set
-from aime.inbox import (BOUNCE_SUBJECT, HEADER_LIMIT, NO_ADDRESS, Mailbox, ParsedEmail, large_note, new_text, parse_headers,
-                        parse_message)
+from aime.dedupe import normalize_name
+from aime.inbox import (BODY_LIMIT, BOUNCE_SUBJECT, HEADER_LIMIT, NO_ADDRESS, MailSignInRefused, Mailbox, ParsedEmail, large_note, new_text,
+                        parse_headers, parse_message)
 from aime.mail_auth import sender_signed
 from aime.meetings import check_double_bookings
-from aime.models import Alert, Contact, FollowUp, InboundEmail, SkippedMail
+from aime.models import Alert, Company, Contact, FollowUp, InboundEmail, Lead, SkippedMail
 from aime.monitoring import alert_once, resolve_alerts
 from aime.reply_intel import (BOOKING_NOTICE_DAYS, CALENDLY_NOTICE, JUNK_ALERT, NO_REPLY, REPLY_WORDS, UNSUBSCRIBE_SUBJECT,
                               booking_links_without_notice, company_leads, forget_old_skipped_mail, process_pending, remember_sent_subjects,
                               remembered_lead_id, sent_with_our_subject, subdomain_leads)
 from aime.timeutil import utcnow
+from aime.website_check import GENERIC_TOKENS
 
 
 NOTICE_ALERT = "calendly:no_notices"
 READ_TRIES = 3  # an email that every run dies on is met this many times, then set aside so the mail behind it is read
+REFUSED_TICKS = 3  # refused sign-ins on as many ticks, and the next is tried only after REFUSED_WAIT: repeated ones can lock the mailbox
+REFUSED_WAIT = timedelta(hours=1)
+JUNK_HOLD_RUNS = 8  # sending has waited this many ticks in a row for the junk folder to be read through: a person is told
+ADDRESS_SEARCH_LIMIT = 150  # addresses looked for in one command, those with a step waiting aside: a server may refuse a longer line
+ADDRESS_LIMIT_ALERT = "mail:address_search_limit"
+ADDRESS_REFUSED_ALERT = "mail:address_search_refused:"
 
 
 class InboxInput(BaseModel):
@@ -62,7 +72,8 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
     ]
     input_model = InboxInput
     output_model = InboxOutput
-    # a dropped connection or a server hiccup (socket, TLS or IMAP protocol error) is retried once in the run
+    # a dropped connection or a server hiccup (socket, TLS or IMAP protocol error) is retried once in the run; a refused sign-in is not
+    # (MailSignInRefused, which is none of these)
     retry_policy = RetryPolicy(max_attempts=2, retry_on=(*RetryPolicy().retry_on, OSError, imaplib.IMAP4.error))
 
     def __init__(self, ctx, mailbox: Mailbox | None = None, imap_factory=None):
@@ -70,6 +81,9 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         self.injected = mailbox is not None
         self.imap_factory = imap_factory or imaplib.IMAP4_SSL  # for panel mailboxes (tests pass a fake server)
         self.mailbox = mailbox or (Mailbox(ctx.settings) if ctx.settings.imap_configured else None)
+        self._refused: set[str] = set()  # the mailboxes that refused the sign-in in this run: a retry of the run does not ask them again
+        self._signed_in_again = False
+        self._tested: dict[str, datetime | None] = {}  # when Test connection last passed on each panel mailbox
 
     def _sources(self, session: Session) -> list[tuple[str, Mailbox, str, object]]:
         """(name, mailbox, state key, token) for each mailbox to read: the .env one (or one a test injects) and every
@@ -92,6 +106,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
             out.append((f"{a.email} / {a.imap_folder}", Mailbox(mail_accounts.settings_for(self.settings, a),
                                                                   imap_factory=mail_accounts.imap_factory_for(a, self.imap_factory)),
                         f"inbox.state.mailbox{a.id}", token))
+            self._tested[f"inbox.state.mailbox{a.id}"] = a.last_test_at if a.last_test_ok else None
         return out
 
     def _oauth_token(self, session: Session):
@@ -140,9 +155,10 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         return auth_results(raw)
 
     def _store(self, session: Session, key: str, raw: bytes, own: set[str], out: InboxOutput, large: int | None = None,
-               junk: bool = False) -> None:
+               junk: bool = False, named: Collection[str] = ()) -> None:
         """`large`: the size of an email read only as far as its start. `junk`: it came from the junk folder, where only sales
-        mail is kept and the rest leaves no trace (the folder would flood the list of skipped mail)."""
+        mail is kept and the rest leaves no trace (the folder would flood the list of skipped mail). `named`: the addresses we wrote
+        to, when the server found one of them in this email's text."""
         p = parse_message(raw, own)
         # Our own mail is no reply, but a Calendly notice forwarded by hand from this mailbox is a notice.
         if p.from_email in own and not (CALENDLY_NOTICE.match(p.subject or "") and looks_like_calendly(p)):
@@ -152,7 +168,8 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                 InboundEmail.message_id == p.message_id)).first():
             return
         # What decides may lie in the part of a large email that was not read: it is kept for a person, on what its headers say.
-        if (junk or self.settings.inbox_scope != "all") and not sales_related(session, p) and (junk or not (large and needs_the_body(session, p))):
+        if ((junk or self.settings.inbox_scope != "all") and not sales_related(session, p) and (junk or not (large and needs_the_body(session, p)))
+                and not names_someone_we_wrote_to(p, named, large)):
             if not junk:
                 self._note_unrelated(session, key, p, out)
             return
@@ -219,20 +236,50 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                                   f"the {'junk folder' if junk else 'mailbox'} ({key}). It is on Replies."[:500]))
         out.stored += 1
 
-    def _read_mailbox(self, session: Session, box: Mailbox, state_key: str, token, own: set[str], out: InboxOutput) -> None:
+    def _sign_in_waits(self, session: Session, box: Mailbox, state_key: str) -> bool:
+        """The mailbox refused the sign-in on the last ticks, with this same password, and no Test connection has passed since: only
+        one try an hour. Its mail stays unread, so the run still fails and nothing goes out on an older read."""
+        if state_key in self._refused:
+            return True
+        seen = kv_get(session, f"{state_key}.refused")
+        if not seen or seen.get("sign") != _password_sign(box) or int(seen.get("count", 0)) < REFUSED_TICKS:
+            return False
+        at = datetime.fromisoformat(seen["at"])
+        tested = self._tested.get(state_key)
+        return not (tested and tested > at) and utcnow() - at < REFUSED_WAIT
+
+    def _note_refused(self, session: Session, name: str, box: Mailbox, state_key: str) -> None:
+        self._refused.add(state_key)
+        seen = kv_get(session, f"{state_key}.refused") or {}
+        sign = _password_sign(box)
+        kv_set(session, f"{state_key}.refused", {"count": int(seen.get("count", 0)) + 1 if seen.get("sign") == sign else 1, "sign": sign,
+                                                 "at": utcnow().isoformat(timespec="seconds")})
+        alert_once(session, "error", self.name, f"The sales mailbox {name} refused the sign-in, so new mail is not being read and approved emails "
+                   "are waiting. Please change the app password on Mailboxes, then press Test connection. Until then AIME tries it once an "
+                   "hour, because repeated refused sign-ins can lock the mailbox."[:500], self.settings, key=SIGN_IN_ALERT)
+        session.commit()
+
+    def _read_mailbox(self, session: Session, box: Mailbox, state_key: str, token, own: set[str], out: InboxOutput,
+                      addresses: Collection[str] = ()) -> None:
         """The position is saved before each email, with a mark that it is being read. A run killed on one email (the
         scheduler's limit, a reboot, out of memory) therefore loses nothing, and after READ_TRIES such runs that email is
         set aside with an alert, so an opt-out behind it is still read."""
         before = kv_get(session, state_key)
         with box.connected(token) as conn:
-            raws, state = box.read_folder(conn, box.settings.imap_folder, before, self._wanted(session, own), quoting=FOOTER_WORDS)
-            self._handle_inbox(session, state_key, before, raws, state, own, out)
+            if kv_get(session, f"{state_key}.refused"):
+                kv_set(session, f"{state_key}.refused", None)
+                session.commit()
+                self._signed_in_again = True
+            raws, state = box.read_folder(conn, box.settings.imap_folder, before, self._wanted(session, own), quoting=FOOTER_WORDS,
+                                          addresses=addresses)
+            self._handle_inbox(session, state_key, before, raws, state, own, out, addresses)
             # The inbox is dealt with, so nothing that happens in the junk folder can cost it anything.
             self._read_junk(session, box, conn, state_key, own, out)
 
     def _handle_inbox(self, session: Session, state_key: str, before: dict | None, raws: list, state: dict, own: set[str],
-                      out: InboxOutput) -> None:
+                      out: InboxOutput, addresses: Collection[str] = ()) -> None:
         passed = state.pop("unrelated", None) or {}
+        named = set(state.pop("named", None) or ())
         out.fetched += len(raws) + len(passed)
         out.read_to_end = bool(state.pop("complete", True)) and out.read_to_end
         connection_lost = state.pop("connection_lost", None)
@@ -263,7 +310,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                 kv_set(session, state_key, {**state, "last_uid": position, "reading": {str(uid): tries + 1}})
                 session.commit()
                 try:
-                    self._store(session, key, raw, own, out, large=large.get(str(uid)))
+                    self._store(session, key, raw, own, out, large=large.get(str(uid)), named=addresses if uid in named else ())
                     session.commit()
                 except SQLAlchemyError:  # the database, not the email: the position stays, and it is read again next run
                     session.rollback()
@@ -276,6 +323,12 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
             position = uid
             session.commit()
         kv_set(session, state_key, state)
+        refused_search = f"{ADDRESS_REFUSED_ALERT}{state_key}"
+        if state.get("no_address_search"):
+            alert_once(session, "warning", self.name, f"The mail server will not search for the addresses AIME has written to ({state_key}), so an "
+                       "opt-out sent from another address under a new subject can be read as not sales. Please look through \"Mail read as "
+                       "not sales\" on Replies now and then.", self.settings, key=refused_search)
+        resolve_alerts(session, (refused_search,), {refused_search} if state.get("no_address_search") else set())
         session.commit()
         if connection_lost is not None:  # what was read is handled; the run is a failed read, and tried again at once
             if int((state.get("dropped") or {}).get(str(connection_lost), 0)) >= READ_TRIES:
@@ -301,8 +354,8 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
     def _read_junk(self, session: Session, box: Mailbox, conn, state_key: str, own: set[str], out: InboxOutput) -> None:
         """A real answer filtered as spam must not be lost, so sales mail in the junk folder is kept. Only what proves itself (our own
         thread, or the sender's signature) is acted on at once: the rest may be forged, and waits for a person (reply_intel). The folder is
-        read a little each run, with a position of its own. Trouble with the folder itself raises one warning, fails nothing, and holds
-        nothing: a false hold stops real work."""
+        read a little each run, with a position of its own, and sending waits while there is more to read (_handle_junk). Trouble with the
+        folder itself raises one warning, fails nothing, and holds nothing: a false hold stops real work."""
         junk_key, alert = f"{state_key}.junk", f"mailbox_junk:{state_key}:"
         try:
             folder = box.junk_folder(conn)
@@ -324,8 +377,15 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
     def _handle_junk(self, session: Session, box: Mailbox, conn, folder: str, junk_key: str, own: set[str], out: InboxOutput) -> None:
         before = kv_get(session, junk_key)
         raws, state = box.read_junk(conn, folder, before, self._wanted(session, own, junk=True))
-        for transient in ("complete", "unrelated"):  # nothing waits on this folder, and what is no sales mail leaves no trace
-            state.pop(transient, None)
+        # An opt-out filtered as spam may lie behind what this run got through, so nothing goes out on this read. Said first: the storing
+        # below can fail, and _read_junk swallows that. A dropped connection holds nothing, like trouble with the folder.
+        short = not state.get("complete", True) and state.get("connection_lost") is None
+        if short:
+            out.read_to_end = False
+        short_runs = int((before or {}).get("short_runs", 0)) + 1 if short else 0
+        state["short_runs"] = short_runs
+        state.pop("complete", None)
+        state.pop("unrelated", None)  # what is no sales mail leaves no trace
         lost = state.pop("connection_lost", None)
         given_up_on = state.pop("skipped_headers", None) or {}
         large = state.pop("large", None) or {}
@@ -355,6 +415,12 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                     session.commit()
             position = uid
         kv_set(session, junk_key, state)
+        hold_alert = f"mailbox_junk_hold:{junk_key}"
+        if short_runs >= JUNK_HOLD_RUNS:
+            alert_once(session, "warning", self.name, f"Sending has waited {short_runs} runs in a row while AIME reads through a long junk folder ({junk_key}), "
+                       "about 100 emails or 10 possible replies a run. It goes on by itself; a follow-up shows it as held until then.",
+                       self.settings, key=hold_alert)
+        resolve_alerts(session, (hold_alert,), {hold_alert} if short_runs >= JUNK_HOLD_RUNS else set())
         session.commit()
         if lost is not None:
             raise ConnectionError(f"the connection dropped while fetching junk email UID {lost}")
@@ -386,6 +452,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                                     self.settings.unsubscribe_email) if a}
         own |= {e.lower() for e in session.execute(select(MailAccount.email)).scalars()}  # our own mail is not a reply
         remember_sent_subjects(session)
+        session.info["sent_companies"] = _sent_companies(session)
         # What an earlier run stored and could not finish (it died on the email behind them) is handled first.
         categories = process_pending(session, self.settings, self.name, llm=self.ctx.llm)
         forget_old_skipped_mail(session)
@@ -393,10 +460,19 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         sources = self._sources(session) if self.settings.network_enabled else []
         if sources:
             out.mailbox = "; ".join(name for name, *_ in sources) + " (read-only)"
+        addresses = self._addresses_to_look_for(session, own) if sources and self.settings.inbox_scope != "all" else []
         failed = []  # a mailbox that cannot be read fails the run, but only after the others' mail has been handled
         for name, box, state_key, token in sources:
             try:
-                self._read_mailbox(session, box, state_key, token, own, out)
+                if self._sign_in_waits(session, box, state_key):
+                    failed.append(MailSignInRefused(f"the mailbox {name} refused the sign-in: not asked again yet"))
+                    continue
+                self._read_mailbox(session, box, state_key, token, own, out, addresses)
+            except MailSignInRefused as exc:
+                session.rollback()
+                self.log.warning("Mailbox %s refused the sign-in", name)
+                self._note_refused(session, name, box, state_key)
+                failed.append(exc)
             except Exception as exc:  # noqa: BLE001 -- raised again below
                 session.rollback()
                 self.log.warning("Mailbox %s could not be read (%s)", name, type(exc).__name__)
@@ -411,16 +487,99 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         self._watch_booking_notices(session)
         self._meetings(session, out)
         out.needs_review = len(session.execute(select(InboundEmail.id).where(InboundEmail.status == "needs_review")).all())
+        if self._signed_in_again and not self._refused:  # a refusal only the reading saw ends when the reading signs in again
+            resolve_alerts(session, (SIGN_IN_ALERT,), set())
         if failed:
             session.commit()
-            raise failed[0]
+            # What can be tried again goes first: the mailbox that refused is not asked again in this run.
+            raise next((exc for exc in failed if not isinstance(exc, MailSignInRefused)), failed[0])
         return out
+
+    def _addresses_to_look_for(self, session: Session, own: set[str]) -> list[str]:
+        addresses, left_out = addresses_we_wrote_to(session)
+        addresses = [a for a in addresses if a not in own]  # our own address is in most of our threads, and says nothing
+        if left_out:
+            alert_once(session, "warning", self.name, f"AIME looks through new mail for {len(addresses)} of the addresses it has written to and leaves out the "
+                       f"oldest {left_out}, none with an email waiting: an opt-out naming one of those from another address may be read as not sales.",
+                       self.settings, key=ADDRESS_LIMIT_ALERT)
+        resolve_alerts(session, (ADDRESS_LIMIT_ALERT,), {ADDRESS_LIMIT_ALERT} if left_out else set())
+        session.commit()  # no database lock is held while the mailbox is read over the network
+        return addresses
 
 
 CALENDLY_SUBJECT = re.compile(r"\b(new event|canceled|cancelled|rescheduled|invitee)\b", re.I)
 REPLY_SUBJECT = re.compile(rf"\s*(?:{REPLY_WORDS})\s*[:：]", re.I)
 FOOTER_WORDS = "to stop receiving emails from us"  # the line every email of ours ends with
 OUR_FOOTER_QUOTED = re.compile(FOOTER_WORDS, re.I)
+STEP_WAITING = ("pending", "awaiting_approval", "approved", "sending")
+# As a one-word company name these say nothing, in a subject line: a name of only such words is not looked for (with GENERIC_TOKENS).
+COMMON_NAME_WORDS = frozenset("""
+    about account action advance advantage agency alert alliance alpha american analytics answer apex apple bank best better black blue bright
+    business call capital care career careers catalyst change chance click cloud commerce connect consulting contract creative data deal demo
+    design digital direct discover elevate energy enterprise enterprises estate event events express family federal finance financial first focus
+    forward free future general global gold good great green growth health hello help hire hiring holdings home homes horizon ideas ignite impact
+    industries info insight insights insurance international invoice job jobs law leader leading legal link logistics marketing media meeting
+    mobile momentum national net network networks new news newsletter next notice offer office one online open order our partner partners payment
+    people pioneer plus premier prime pro project proposal quality question quick real receipt red report request review sale sales security
+    service services simple smart software solution solutions source spark staff start studio studios summit support systems target team tech
+    technology technologies thank thanks today top total trial true trust united update urgent value vision web webinar welcome white with work
+    world you your
+    """.split())
+
+
+def _password_sign(box: Mailbox) -> str:
+    """Enough to notice that the sign-in changed, far too little to say anything about the password."""
+    return hashlib.sha256("\0".join(str(x) for x in box.settings.imap_credentials).encode()).hexdigest()[:4]
+
+
+def addresses_we_wrote_to(session: Session) -> tuple[list[str], int]:
+    """The addresses of sent emails, for the search of new mail, and how many the limit left out: never one whose lead has an email waiting,
+    then the most recent."""
+    waiting = set(session.execute(select(FollowUp.lead_id).where(FollowUp.channel == "email", FollowUp.status.in_(STEP_WAITING))).scalars())
+    must, rest = {}, {}
+    for to, lead_id in session.execute(select(FollowUp.to_email, FollowUp.lead_id).where(
+            FollowUp.status == "sent", FollowUp.channel == "email", FollowUp.to_email.is_not(None)).order_by(FollowUp.sent_at.desc(), FollowUp.id.desc())).all():
+        (must if lead_id in waiting else rest)[to.strip().lower()] = True
+    others = [a for a in rest if a not in must]
+    room = max(0, ADDRESS_SEARCH_LIMIT - len(must))
+    return [*must, *others[:room]], max(0, len(others) - room)
+
+
+def names_someone_we_wrote_to(p: ParsedEmail, named: Collection[str], large: int | None = None) -> bool:
+    """The server found an address we wrote to in this email's text. It looks for any part of a longer address too, so here only the
+    whole address counts. What it found beyond the part we keep cannot be checked, so a person reads it. A newsletter or a robot naming
+    someone is no one asking for anything. This only keeps the email: it suppresses and ties nothing (reply_intel decides what it holds)."""
+    if not named or p.kind == "list" or p.auto_submitted or NO_REPLY.match(p.from_email):
+        return False
+    body = p.body_text or ""
+    if large or len(body) >= BODY_LIMIT:
+        return True
+    body = body.lower()
+    return any(a in body and re.search(rf"(?<![\w.+%-]){re.escape(a)}(?![\w-]|\.\w)", body) for a in named)
+
+
+def _plain_words(text: str) -> str:
+    """Spelled as normalize_name spells a company."""
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", text.lower().replace("&", " and ")).split())
+
+
+def _sent_companies(session: Session) -> list[str]:
+    """The names of the companies a sent outreach email went to, spelled for a subject line. A name of only common or generic words is left out."""
+    names = set()
+    for name in session.execute(select(Company.name).join(Lead, Lead.company_id == Company.id).join(FollowUp, FollowUp.lead_id == Lead.id).where(
+            FollowUp.status == "sent", FollowUp.channel == "email", FollowUp.kind == "outreach").distinct()).scalars():
+        plain = normalize_name(name or "")
+        if any(len(w) >= 3 and not w.isdigit() and w not in GENERIC_TOKENS and w not in COMMON_NAME_WORDS for w in plain.split()):
+            names.add(plain)
+    return sorted(names)
+
+
+def names_company_we_emailed(session: Session, subject: str | None) -> bool:
+    """A prospect writing from a private address under a subject of their own. Whole words only. Such mail reaches a person like any other
+    unmatched mail: this ties it to no lead and changes no gate."""
+    names = session.info["sent_companies"] if "sent_companies" in session.info else _sent_companies(session)
+    words = f" {_plain_words(subject or '')} "
+    return any(f" {name} " in words for name in names)
 
 
 def looks_like_calendly(p: ParsedEmail) -> bool:
@@ -456,7 +615,8 @@ def sales_related(session: Session, p: ParsedEmail) -> bool:
     forwarded), mail from a known contact, a lead's company domain or someone who answered in our thread before, or an
     answer that carries the subject of an email we sent or quotes our footer (helpdesks and personal addresses write
     without our thread headers), or what its subject calls a failed delivery, from whichever sender: a person reads it, and what it
-    does is decided as for any other mail. Everything else in a shared mailbox, Calendly's own newsletters included, is left alone."""
+    does is decided as for any other mail; or a subject that names a company we emailed. Everything else in a shared mailbox, Calendly's
+    own newsletters included, is left alone."""
     if p.is_bounce or p.bounced_addresses or BOUNCE_SUBJECT.search(p.subject or ""):
         return True
     if looks_like_calendly(p):
@@ -472,5 +632,7 @@ def sales_related(session: Session, p: ParsedEmail) -> bool:
         return True
     if (p.kind != "list" and not p.auto_submitted and not NO_REPLY.match(p.from_email)  # a person at a sub-domain, not its robots
             and subdomain_leads(session, p.from_email)):
+        return True
+    if names_company_we_emailed(session, p.subject):
         return True
     return bool(OUR_FOOTER_QUOTED.search(p.body_text or ""))

@@ -290,14 +290,24 @@ and what was done.
 - **Header pass.** Each run first reads the header lines and size of up to 500 new emails. What they show to be no sales mail goes on
   the list "Mail read as not sales" (Replies page) without its body being fetched, so unrelated mail neither delays a reply nor holds
   sending. When in doubt the body is fetched, and only those emails count against the 50 per run. Sending waits only for a failed read,
-  more than 50 possibly related emails, or more than 500 new emails: the rest come in on the next runs.
+  more than 50 possibly related emails, or more than 500 new emails: the rest come in on the next runs. The server is also asked which
+  new emails hold words of our footer, or the whole address of someone we have emailed: those are read whatever their header lines say.
+  An email naming such an address, or with a subject naming a company we emailed, reaches Replies for a person. It is tied to no lead by
+  that, and newsletters and robots naming an address are not kept for it. Nothing here suppresses the address named. Still unread: an
+  opt-out from another address that names neither the address nor our subject, and the same mail in junk. If the server refuses the
+  address search, an alert says so and it is not asked again until the mailbox is renumbered; the footer search is not affected.
 - **Large email.** Over 10 MB only the first 4 MB is read: what it says counts, it goes to review, and a note says so.
-- **Junk.** The junk folder is read too, read-only, about 100 emails or 60 seconds per run, with its own position. Mail that is no sales
+- **Junk.** The junk folder is read too, read-only, about 100 emails (10 bodies) or 60 seconds per run, with its own position. While a
+  read stops short of the end, **sending waits**, because an opt-out may be behind it; after 8 such runs in a row an alert says so. A
+  connection dropped in junk holds nothing, so an opt-out behind a backlog can still lose that race. Mail that is no sales
   mail leaves no trace there. Our own thread (our Message-ID) or the sender's verified signature proves an email: it acts at once, as in
   the inbox. Anything else may be forged. **Nothing is suppressed, stopped, opened or drafted**; the lead's emails wait, an alert says so,
   and the email is on Replies with the pill "Found in junk". **Mark reviewed** releases the lead, and that sender's later junk mail does
   not hold it again unless it is in our thread. **Reclassify** applies what you choose, in full. A failure of the folder itself raises
   one warning and holds nothing; an email kept unread has an alert that stays until dismissed.
+- **Refused sign-in.** When the mailbox refuses the password it is not asked again in that run. The alert says to change the app
+  password on Mailboxes. After 3 refused ticks it is tried once an hour until the password changes or Test connection passes. Mail stays
+  held throughout, and the alert closes when the mailbox signs in again.
 - **Reply-To.** Where someone asks answers to go is shown on Replies and beside the draft. Drafts still go to the sender and nothing
   goes to the other address by itself: a person decides. A draft to a no-reply sender says so.
 
