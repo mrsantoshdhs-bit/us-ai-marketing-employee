@@ -1,8 +1,10 @@
 """Desktop notifications for new alerts: a Windows toast through the built-in PowerShell (no extra software).
 
 Best effort only: alerts are always stored in the database and shown on the dashboard; a toast is an extra
-nudge for whoever is logged in. Text is redacted first and never includes secrets. Kept import-light so the
-scheduler watchdog can use it without loading the app.
+nudge for whoever is logged in. Only the interactive processes can show one: the Watchdog, and the Dashboard through
+aime.desk_notices. The tick runs in the background session even while the owner is signed in, so its calls here show
+nothing. Text is redacted first and never includes secrets. Kept import-light so the scheduler watchdog can use it
+without loading the app.
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ def toast_script(title: str, message: str) -> str:
 
 def toast(title: str, message: str, popen=subprocess.Popen) -> bool:
     """Show a Windows toast without blocking. Returns False where toasts are unavailable, including the background
-    session (signed out): nobody can see it there, and the alert is on the dashboard anyway."""
+    session, signed in or not: nobody can see it there, and the alert is on the dashboard anyway."""
     if os.name != "nt" or not has_desktop():
         return False
     text = (redact(message) or "")[:240]
@@ -54,6 +56,12 @@ def toast(title: str, message: str, popen=subprocess.Popen) -> bool:
     except OSError:
         return False
     return True
+
+
+def can_show(settings) -> bool:
+    """Whether a toast from this process can reach a screen: for the dashboard, whether to look for new notices at all."""
+    return (os.name == "nt" and has_desktop() and settings is not None and bool(getattr(settings, "alert_toast", False))
+            and getattr(settings, "data_role", "") != "test")
 
 
 def notify_alert(settings, level: str, message: str, sender=toast) -> bool:

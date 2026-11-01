@@ -119,7 +119,7 @@ This re-registers the saved interactive definition (no password needed), immedia
 
 - **Signed out:** work continues — research, qualification, CRM upkeep, drafting, monitoring and backups. The PC must be on: locked or signed out, not shut down or asleep (unless `--wake`).
 - **Signed in:** scheduled runs happen in the background session too.
-  - Desktop notifications **from scheduled runs** no longer appear. The alerts are still stored and shown on Manager Today and the dashboard.
+  - Scheduled runs cannot show desktop notifications themselves. The **Dashboard**, which runs on your desktop, shows them instead: new warning and error alerts and new interested replies, within about a minute. The alerts are always stored and shown on Manager Today and the dashboard.
   - The hourly **Watchdog** still notifies, because it stays interactive.
 - **If the Windows password changes,** the stored credential stops working and the task cannot start. Manager Today then shows *Scheduled jobs: FAILED* and the watchdog notifies. Fix it by re-running step 4.
 - **Unchanged:** the Dashboard and Watchdog tasks (interactive, by design), every switch, and every authorization.

@@ -234,13 +234,13 @@ def test_homepage_testimonials_and_people_from_other_companies_are_not_decision_
         <div><p>"Acme saved our team hours every week."</p><h4>Marcus Allen</h4><p>Chief Procurement Officer</p></div>
         <p>Laura Simmons, Finance Director</p>""")
     about = parse_page("https://acme.example/about", "about", """
-        <div><h3>Lauren DeSouza</h3><p>Co-founder and CEO</p></div>
+        <div><h3>Quilla Northgate</h3><p>Co-founder and CEO</p></div>
         <div><h3>Zainab Jangda</h3><p>Founder, Biddify</p></div>
         <div><h3>Aashni Shah</h3><p>Director, Innovative Tech Labs</p></div>
         <div><h3>Domonique Brown</h3><p>Director of Customer Experience</p></div>
         <p>Our advisor Pat Lee, founder of Northwind Labs, joined in 2024.</p>""")
     found = {f.full_name: f for f in extract_people([home, about], "Acme Software")}
-    assert set(found) == {"Lauren DeSouza", "Domonique Brown"}
+    assert set(found) == {"Quilla Northgate", "Domonique Brown"}
     assert found["Domonique Brown"].role_category == "operations"  # a department director, not the board
 
 

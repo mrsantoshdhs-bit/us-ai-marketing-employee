@@ -195,12 +195,23 @@ resumes by itself. If the clock is right (a holiday longer than two weeks), run 
 
 ## Desktop notifications
 
-New warning and error alerts also appear as a Windows notification (`ALERT_TOAST=true`, the default).
-Alerts are always stored and shown on the dashboard; notifications are an extra nudge.
+While you are signed in, new warning and error alerts and new interested replies also appear as a Windows notification
+(`ALERT_TOAST=true`, the default). The tick runs in the background and cannot show one: the Dashboard, which runs on your
+desktop, looks for new ones once a minute (`aime/desk_notices.py`). A restart does not repeat old ones, and the first start
+shows none. After a long gap you see three and a count of the rest.
+
+Alerts are always stored and shown on the dashboard; notifications are an extra nudge. Signed out, or with the Dashboard
+stopped, they wait on the dashboard. The hourly Watchdog also notifies, about stopped ticks, a stopped dashboard and a
+nearly full disk. Nothing tells anyone off this PC: no outside service is used.
 
 Alerts about a condition (a `doctor` check, the local model, a failing or stale job) are kept as one alert
 per condition with the latest details, and close themselves once the condition clears. Dismissing one keeps
 it quiet for 24 hours. One-off notices (a slow job, a rejected import file) stay until you dismiss them.
+
+## Sign-in lockouts
+
+Five wrong passwords lock an account for 15 minutes, and the sign-in page says the same words as for any wrong password.
+Each lockout is in the **audit log** as `sign in locked`, with the username and never a password. Session length is unchanged.
 
 ## Company research and decision-makers
 
@@ -279,7 +290,7 @@ each email to a lead by thread, then by address. **Conversations** page: categor
 and what was done.
 
 - Any human reply stops the automated sequence. Interested: the lead becomes *interested*, an
-  opportunity opens (discovery), you get a notification, and a reply with your Calendly link waits in
+  opportunity opens (discovery), it shows on the dashboard (and as a desktop notification while you are signed in), and a reply with your Calendly link waits in
   Follow-ups. Not interested: the lead moves to nurture. Objections, referrals, questions and anything
   unclear go to review with a suggested reply (a question's reply needs your answer before approval).
 - Unsubscribe requests and complaints are suppressed at once; bounces mark the address bounced and

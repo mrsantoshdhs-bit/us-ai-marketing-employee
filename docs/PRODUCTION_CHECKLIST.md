@@ -17,7 +17,7 @@ Nothing in A sends email. Live sending (B8) happens only on your explicit author
 | Open PRs, CI passed | #36 (doctor consent check), #37 (console crash in `acceptance-report`), #38 (alert after an earlier dismissal), #40 (opt-outs in everyday wording; opt-outs from another address in the thread) |
 | All of them merged together, tested locally | 445 tests passed; no conflicts |
 | Production switches | `OUTBOUND_EMAIL_ENABLED=false`, `PUBLISHING_ENABLED=false`, `REQUIRE_HUMAN_APPROVAL=true`, IMAP off |
-| Approved, unsent production drafts | #38 to hello@meetyogi.com, #46 to hello@hedgespecialty.com (see B1) |
+| Approved, unsent production drafts | #38 to the company inbox of lead #3, #46 to the company inbox of lead #18 (see B1) |
 | Acceptance (Gmail test mailbox) | Real send, real reply in the thread, classification, opportunity and alert all pass. Calendly, a real opt-out reply and the 4-day follow-up step are not yet tested live |
 
 ## A. Deploy the tested code (needs your approval)
