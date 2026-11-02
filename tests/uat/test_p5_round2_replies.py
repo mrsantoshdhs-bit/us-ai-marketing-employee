@@ -330,3 +330,11 @@ def test_no_confirmation_when_they_name_another_time(make_ctx, text):
 
 def test_a_plain_yes_still_gets_the_confirmation(make_ctx):
     assert "look forward to it" in booked_reply(make_ctx, "Sounds good, thanks.")
+
+
+@pytest.mark.parametrize("text", ["No need to write again, I'll call you Tuesday.", "No need to write again, Tuesday works.", "No need to write again, I'm interested, Tuesday at 10.",
+                                  "No need to write again, I signed up on your link.", "No need to email me again, see you Tuesday.", "No need to email me again, the meeting is booked.",
+                                  "No need to email again, talk soon.", "Enough emails for today, I'll call you.", "Enough emails, see you Tuesday.", "Enough of this back and forth, call you tomorrow.",
+                                  "Stop with the emails, I'll call you.", "Stop with the emails, phone is better.", "Stop with the emails, I'd rather talk."])
+def test_a_soft_wording_with_more_behind_it_goes_to_a_person(text):
+    assert reading(text)[0] != "unsubscribe"

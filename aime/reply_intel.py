@@ -140,18 +140,21 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
     ("referral", re.compile(r"\b(you should (talk|speak|reach out) to|reach out to|the right person|"
                             r"(cc|cc'?ing|copying|looping in)\b|forward(ed|ing)? (this|your)|contact our)", re.I)),
 ]
-# Wordings that are a no only if the message does not go on to ask for a talk: "No need to write again, just call me", "Enough emails for today, let's call".
+# Wordings that are a no only when they end the message and it speaks of no talk: "No need to write again." is one, "No need to write again, I'll call you Tuesday" is not.
+# A list of what may follow cannot cover how people ask to talk, so anything else behind them goes to a person, with the sequence stopped and nothing suppressed.
 # Everything else in PATTERNS reads the same whatever else the message says.
 SOFT_OPT_OUT = re.compile(r"\b((stop|quit|cease) with (all |the |these |those |your )?(e-?mails?|messages?|spam)|no need to (write|e-?mail|contact|message)( to)?( (me|us))?( again| any ?more)|"
                           r"enough (e-?mails?|of (these|this|your))\b)", re.I)
-WANTS_TO_TALK = re.compile(r"\blet'?s (call|meet|talk|chat|speak|connect|book|schedule|set up|hop|jump|get on)\b|\bjust (call(?! off)|phone|ring|meet|talk|chat|speak|get on|hop on|jump on)\b|"
-                           r"(?<!don't )(?<!do not )(?<!never )(?<!ever )\b(call|phone|ring) (me|us)\b|\b(can|could|shall) we (call|meet|talk|chat|speak)\b|\b(i|we)( have|'ve)? booked\b|"
-                           r"\b(get|hop|jump) on a call\b|\bbook (a|some) (time|call|meeting)\b", re.I)
+SOFT_ENDS_IT = re.compile(r"\W*((please|pls|thanks?|thank you|regards|bye|goodbye|best|already|now|ok|okay|e-?mails?|messages?|mail|spam|from you|and get off my back|(do not|don'?t|never) call( me| us)?)\W*)*((best|regards|thanks)\W+\w+\W*)?", re.I)
+SPEAKS_OF_A_TALK = re.compile(r"(?<!don't )(?<!do not )(?<!never )\b(call\w*|talk\w*|meet\w*|chat\w*|speak\w*|phone\w*|ring|book\w*|signed up|interested)\b", re.I)
 
 
 def _opt_out_words(said: str) -> re.Match | None:
     """The opt-out wording in these words, with the guard above on the soft ones."""
-    return dict(PATTERNS)["unsubscribe"].search(said) or (None if WANTS_TO_TALK.search(said) else SOFT_OPT_OUT.search(said))
+    if hard := dict(PATTERNS)["unsubscribe"].search(said):
+        return hard
+    soft = SOFT_OPT_OUT.search(said)
+    return soft if soft and SOFT_ENDS_IT.fullmatch(said[soft.end():]) and not SPEAKS_OF_A_TALK.search(said) else None
 
 
 # "I'm not the right person" points nowhere: nobody is referred, and a person reads it like "Wrong person, sorry".
