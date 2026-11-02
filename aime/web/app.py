@@ -1572,7 +1572,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     return back(f"/followups#f{f.id}", "Cannot approve: this address is on the do-not-contact list")
                 elif (said_no := company_opted_out(s, f.lead.company)) and company_said_no != "yes":  # as a booking is held: a person decides
                     return back(f"/followups#f{f.id}", f"Cannot approve yet: {COMPANY_SAID_NO} Tick the box on the email if a person has read that and this should still go")
-                elif f.kind == "outreach" and f.lead.status in ("disqualified", "merged"):  # an answer to someone who wrote is a person's call
+                elif f.kind == "outreach" and f.lead.status in ("disqualified", "merged") and not am.is_given_test_contact(f.contact):  # an answer to someone who wrote is a person's call; a test address has its own authorization
                     return back(f"/followups#f{f.id}", f"Cannot approve: this lead is {f.lead.status}, so outreach to it has ended")
                 elif problem := compliance_problem(C().settings, f.body or ""):
                     # this email's own footer, word for word: outreach says why they hear from us, a reply does not
