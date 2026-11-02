@@ -253,8 +253,8 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                        prev_status: str) -> bool:
         """A lead that the stale-lead rule moved to nurture is qualified again only on evidence recorded after that move: a new
         signal, or a read of its website that names someone no earlier read named; the same score is not enough, and neither is a
-        read as such, as researched_at only says when to read next. One a person moved stays there on a read and on a new post,
-        which opens a task for that person instead; any other new signal, such as the company writing to us, still brings it back."""
+        read as such, as researched_at only says when to read next. One a person moved stays there on a read, on a filing or import and on
+        a new post, which opens a task for that person instead; only the company writing to us brings it back."""
         if prev_status != "nurture":
             return True
         if lead.outreach_status in CLOSED_STAGES:
@@ -267,9 +267,10 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
         if (last.actor or "") in NOT_A_PERSON:
             return bool(new) or self._read_names_someone_new(session, company, moved)
         posts = [s for s in new if s.signal_type == "hiring"]
+        they_wrote = any(s.signal_type == "inbound" for s in new)
         if posts:
-            self._tell_of_new_post(session, lead, company, posts)
-        return len(posts) < len(new)
+            self._tell_of_new_post(session, lead, company, posts, they_wrote)
+        return they_wrote
 
     @staticmethod
     def _read_names_someone_new(session: Session, company: Company, moved) -> bool:
@@ -282,19 +283,25 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
             (known if snap.fetched_at <= moved else found).update(names)
         return bool(found - known - {""})
 
-    def _tell_of_new_post(self, session: Session, lead: Lead, company: Company, posts: list[Signal]) -> None:
-        """Each post is told once: a task a person ticked off does not come back the next morning, and one still open is enough."""
+    def _tell_of_new_post(self, session: Session, lead: Lead, company: Company, posts: list[Signal], back: bool = False) -> None:
+        """Each post is told once: a task a person ticked off does not come back the next morning, and one still open is enough, but it
+        must still say what is true. `back`: the company also wrote to us, which brings the lead back in this same run."""
         if lead.outreach_status in STOP_STATUSES:
             return
         newest = max(posts, key=lambda s: s.created_at)
         task = FollowUp.subject.startswith(NEW_POST_TASK, autoescape=True)
-        if session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task", task, (FollowUp.status == "pending")
-                                                     | (FollowUp.created_at >= newest.created_at)).limit(1)).first():
+        body = (f"A person moved this lead to nurture, and this company has posted again since: {newest.source_url or 'no link on record'}. "
+                + ("The company has also written to us, so this lead is back in qualified, and any draft for it waits for a person's approval."
+                   if back else "It stays in nurture and nothing is drafted: whether to bring it back is a person's decision, on the lead's page."))
+        told = session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task", task, (FollowUp.status == "pending")
+                                                      | (FollowUp.created_at >= newest.created_at)).order_by(FollowUp.status == "pending")).scalars().all()
+        if told:
+            if back and told[-1].status == "pending":
+                told[-1].body = body
             return
         session.add(FollowUp(lead_id=lead.id, company_id=lead.company_id, channel="task", step=1, due_at=utcnow(), status="pending",
                              blocked_reason=NEW_POST_NOTE, subject=f"{NEW_POST_TASK}{company.name}"[:300],
-                             body=(f"A person moved this lead to nurture, and this company has posted again since: {newest.source_url or 'no link on record'}. "
-                                   "It stays in nurture and nothing is drafted: whether to bring it back is a person's decision, on the lead's page.")))
+                             body=body))
         log_activity(session, "Task created: a new hiring post on a lead a person parked", self.name, type_="task", company_id=company.id, lead_id=lead.id)
 
     def _review_again(self, session: Session, lead: Lead, signals: list[Signal]) -> None:

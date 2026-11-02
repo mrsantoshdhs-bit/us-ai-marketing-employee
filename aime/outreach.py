@@ -24,7 +24,7 @@ from aime.crm_ops import BOUNCED_REASON, _entries_covering, canonical_address, c
 from aime.dedupe import company_to_address, domain_from_email
 from aime.integrations.email_smtp import compliance_footer
 from aime.knowledge.content_bank import BRAND_LINES
-from aime.models import Activity, Company, Contact, FollowUp, InboundEmail, Lead, ResearchSnapshot, Signal, Suppression
+from aime.models import Activity, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, ResearchSnapshot, Signal, Suppression
 from aime.timeutil import utcnow
 
 TOPICS = {
@@ -279,6 +279,12 @@ def draft_reengage(settings: Settings, lead: Lead, contact) -> tuple[str, str]:
 
 ALREADY_CUSTOMER = "this company is already a customer, so it gets no first email"
 COMPANY_OPTED_OUT = "someone at this company opted out, so it gets no first email or follow-up unless the owner lifts it"
+MEETING_BOOKED = "a meeting with them is booked"
+
+
+def has_live_meeting(session: Session, lead: Lead) -> bool:
+    """A meeting is booked. The lead's stage may not say so: a booking on a lost deal leaves the lead as it was, for a person to decide."""
+    return session.execute(select(Meeting.id).where(Meeting.lead_id == lead.id, Meeting.status == "scheduled").limit(1)).first() is not None
 
 
 def eligible(session: Session, settings: Settings, lead: Lead, for_send: bool = False,
@@ -311,6 +317,8 @@ def eligible(session: Session, settings: Settings, lead: Lead, for_send: bool = 
         return False, "on the do-not-contact list"
     if lead.outreach_status in STOP_STATUSES and not (reengage and lead.outreach_status == "no_response"):
         return False, f"outreach stopped ({lead.outreach_status})"
+    if has_live_meeting(session, lead):
+        return False, MEETING_BOOKED
     if running or reengage:
         if _emailed_address_closed(session, lead):
             return False, "an address this lead was emailed at is on the do-not-contact list"

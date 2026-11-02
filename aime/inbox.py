@@ -524,7 +524,9 @@ JUNK_BODIES_PER_RUN = 10
 JUNK_BYTES = 16_000_000
 JUNK_SECONDS = 60  # a slow server or a full folder does not hold up the tick: the rest is read next run
 JUNK_NAMES = ("junk", "spam", "inbox.junk", "inbox.spam", "junk e-mail", "junk email", "[gmail]/spam")
-ADDRESS_SEARCH_DROPS = 3  # the connection dropped this many times running on the search for addresses: too much for this server
+ADDRESS_SEARCH_DROPS = 3  # the search for addresses dropped the connection or got a passing NO this many times running: it is given up for now
+ADDRESS_SEARCH_RETRY = timedelta(days=1)  # given up on: asked again after this long, and an answer switches it back on
+SEARCH_NOT_SUPPORTED = re.compile(r"\[(?:CANNOT|BADCHARSET)\b|\b(?:unsupported|not supported|not implemented|not possible)\b", re.I)
 LARGE_MARK = "only its start was read"  # in the note of an email cut short: a person opens it
 
 
@@ -754,22 +756,28 @@ class Mailbox:
                 state["no_body_search"] = True
         named: set[int] = set()
         query = self._address_query(addresses)
-        if query and window and not state.get("no_address_search"):
+        if query and window and self._address_search_due(state):
+            passing = False
             try:
                 typ, data = conn.uid("SEARCH", None, "UID", f"{window[0]}:{window[-1]}", *query)
-                state.pop("address_search_drops", None)
                 if typ == "OK":
                     named = {int(u) for u in (data[0] or b"").split()}
-                else:  # NO comes back as an answer, not an error: refused all the same
-                    state["no_address_search"] = True
-            except (imaplib.IMAP4.abort, OSError):  # this read has failed; only a connection that drops each time says it is too much to ask
+                    for key in ("address_search_drops", "no_address_search", "address_search_off_at"):
+                        state.pop(key, None)
+                elif SEARCH_NOT_SUPPORTED.search(b" ".join(d for d in data if isinstance(d, bytes)).decode("ascii", "replace")):
+                    self._address_search_off(state)  # NO comes back as an answer, not an error: this one says the server cannot: the header lines decide
+                else:
+                    passing = True  # "[UNAVAILABLE] Temporary System Error" and the like say nothing about next time
+            except (imaplib.IMAP4.abort, OSError):
+                passing = True
+            except imaplib.IMAP4.error:  # refused: the header lines decide
+                self._address_search_off(state)
+            if passing:  # this read has failed, so the mail is asked about again; only the same each time says it is too much to ask
                 state["address_search_drops"] = int(state.get("address_search_drops", 0)) + 1
                 if state["address_search_drops"] >= ADDRESS_SEARCH_DROPS:
-                    state["no_address_search"] = True
+                    self._address_search_off(state)
                 state["connection_lost"] = window[0]
                 complete, window = False, []
-            except imaplib.IMAP4.error:  # refused: the header lines decide
-                state["no_address_search"] = True
         for uid in window:
             if deadline is not None and time.monotonic() >= deadline:
                 complete = False
@@ -874,6 +882,18 @@ class Mailbox:
         for address in plain[:-1]:
             query += ["OR", "BODY", f'"{address}"']
         return query + ["BODY", f'"{plain[-1]}"'] if plain else []
+
+    @staticmethod
+    def _address_search_due(state: dict) -> bool:
+        """On, or off for long enough to ask again. Off with no date on record was switched off for good by an earlier version: asked now."""
+        if not state.get("no_address_search"):
+            return True
+        off_at = state.get("address_search_off_at")
+        return not off_at or utcnow() - datetime.fromisoformat(off_at) >= ADDRESS_SEARCH_RETRY
+
+    @staticmethod
+    def _address_search_off(state: dict) -> None:
+        state["no_address_search"], state["address_search_off_at"] = True, utcnow().isoformat()
 
     @staticmethod
     def _connection_lost(state: dict, uid: int) -> None:

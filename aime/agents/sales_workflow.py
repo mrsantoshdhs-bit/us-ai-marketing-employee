@@ -35,11 +35,11 @@ from aime.knowledge.services import service_name
 from aime.models import (Activity, Alert, Contact, FollowUp, InboundEmail, InboundInquiry, Lead, Meeting, MeetingProposal, Opportunity,
                          ResearchSnapshot, Signal)
 from aime.monitoring import alert_once, resolve_alerts
-from aime.outreach import (ALREADY_CUSTOMER, COMPANY_OPTED_OUT, OPEN, REACHED_PROSPECT, RUNNING_STAGES, STOP_STATUSES, TEST_SENT, TOPICS,
-                           _emailed_address_closed, _merged_family, company_opted_out, draft_outreach, draft_reengage, eligible, gather_evidence, sent_earlier, record_delivery,
+from aime.outreach import (ALREADY_CUSTOMER, COMPANY_OPTED_OUT, MEETING_BOOKED, OPEN, REACHED_PROSPECT, RUNNING_STAGES, STOP_STATUSES, TEST_SENT, TOPICS,
+                           _emailed_address_closed, _merged_family, company_opted_out, draft_outreach, draft_reengage, eligible, gather_evidence, has_live_meeting, sent_earlier, record_delivery,
                            set_status, stop_sequence)
 from aime.people import looks_like_name
-from aime.pipeline import pipeline_checks, reached_address
+from aime.pipeline import NOBODY_TO_WRITE_TO, pipeline_checks, reached_address
 from aime.outreach import policy as outreach_policy
 from aime.qc.email_checks import run_email_checks
 from aime.reply_intel import QUESTION_PLACEHOLDER, lead_on_hold
@@ -313,6 +313,13 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                      self.name, type_="outreach", company_id=lead.company_id, lead_id=lead.id)
         out.tasks_created += 1
 
+    def _parked_with_nobody_to_write_to(self, session: Session, lead: Lead) -> bool:
+        """pipeline_checks parked it because its next step had nobody to go to. Nothing else looks at it until the re-engagement date, months on."""
+        if lead.status != "nurture" or lead.outreach_status != "no_response" or not eligible(session, self.settings, lead, reengage=True)[0]:
+            return False
+        return not self._wrote_to(session, lead, lead.contact.email) and session.execute(select(Activity.id).where(
+            Activity.lead_id == lead.id, Activity.type == "outreach", Activity.subject.contains(NOBODY_TO_WRITE_TO, autoescape=True)).limit(1)).first() is not None
+
     def _new_outreach(self, session: Session, lead: Lead, step: int, due: datetime, evidence_dicts: list[dict],
                       evidence, out: SalesOutput, in_reply_to: str | None = None) -> None:
         contact = lead.contact
@@ -375,7 +382,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
 
     def _ensure_sequence(self, session: Session, lead: Lead, now: datetime, cfg: dict, out: SalesOutput) -> None:
         exists = session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email")).first()
-        if not exists:
+        if not exists and not has_live_meeting(session, lead):
             self._new_draft(session, lead, 1, now, out)
 
     def _progress_sequences(self, session: Session, now: datetime, cfg: dict, out: SalesOutput) -> None:
@@ -388,6 +395,9 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         for lead_id, last in latest.items():
             lead = session.get(Lead, lead_id)
             outreach = last.kind == "outreach"
+            if lead is not None and outreach and self._parked_with_nobody_to_write_to(session, lead):
+                self._leave_to_a_person(session, lead, out)
+                continue
             intervals = list(pol["intervals"] if outreach else cfg.get("intervals_days", [0, 3, 7]))
             max_touches = min(pol["max_touches"] if outreach else int(cfg.get("max_touches", 3)), len(intervals))
             if lead is None or last.step >= max_touches:
@@ -435,6 +445,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         contact = lead.contact
         if lead.outreach_status in stages:
             return f"outreach stopped ({lead.outreach_status})"
+        if has_live_meeting(session, lead):
+            return MEETING_BOOKED
         if (contact and contact.consent_status == "opted_out") or is_suppressed(session, contact.email if contact else None, lead.company.domain):
             return "on the do-not-contact list"
         if company_opted_out(session, lead.company):
