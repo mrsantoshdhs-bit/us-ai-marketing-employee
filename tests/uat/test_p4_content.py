@@ -209,6 +209,7 @@ def test_what_was_sent_before_comes_only_from_this_lead_and_only_if_it_went_out(
 
 def test_in_test_mode_the_panel_names_who_really_received_it(make_ctx):
     ctx, sender, sent = contacted(make_ctx)
+    ctx.settings.outbound_test_recipients = "owner@test.example"  # with test mode off a follow-up to someone who never got the first is a person's decision
     with ctx.db.session() as s:
         s.get(FollowUp, sent.id).delivered_to = "owner@test.example"
     run(ctx, sender, TUESDAY_11AM_ET + timedelta(days=4, minutes=5))
@@ -254,8 +255,8 @@ def test_a_named_address_is_a_persons_decision_and_nothing_goes_there(make_ctx):
     other = "sam.ray@brightline.example"
     deliver(ctx, in_thread(sent, f"You should talk to Sam Ray, {other}, who runs engineering."))
     r = latest_reply(ctx)
-    assert r.status == "needs_review" and other in r.action_note and "a person decides" in r.action_note
-    assert "nothing goes there by itself" in r.recommended_status.lower()
+    assert r.status == "needs_review" and other in r.action_note and "Nothing goes there by itself" in r.action_note
+    assert "nothing goes to the address they gave by itself" in r.recommended_status.lower()
     with ctx.db.session() as s:
         draft = s.get(FollowUp, r.suggested_followup_id)
         assert draft.to_email != other and draft.status == "awaiting_approval" and "best way to reach" not in draft.body

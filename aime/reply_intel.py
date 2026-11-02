@@ -43,7 +43,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from aime.crm_ops import OPEN_LEAD_STATUSES, WROTE_AGAIN, is_suppressed, later_reply_waiting, lead_with_the_deals, log_activity, primary_lead, suppress
+from aime.crm_ops import BOUNCED_REASON, OPEN_LEAD_STATUSES, _entries_covering, WROTE_AGAIN, is_suppressed, later_reply_waiting, lead_with_the_deals, log_activity, primary_lead, suppress
 from aime.dedupe import company_to_address
 from aime.inbox import AUTO_SUBJECT, BOUNCE_SENDERS, LARGE_MARK, below_header_copy, between_header_copies, is_address, own_text, rest_of_reply
 from aime.llm.base import LLMError
@@ -51,7 +51,7 @@ from aime.mail_auth import _within, trusted_forwarders
 from aime.models import Alert, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity, SkippedMail
 from aime.notify import notify_event
 from aime.integrations.email_smtp import sender_line
-from aime.outreach import CHECK_BACK_TASK, ENDS_CHECK_BACK, TOPICS, cancel_queued, close_check_back_tasks, stop_sequence
+from aime.outreach import CHECK_BACK_TASK, ENDS_CHECK_BACK, TOPICS, cancel_queued, close_check_back_tasks, company_opted_out, stop_sequence
 from aime.pipeline import BOOK_ASKING_TIMES, WRITE_THE_ANSWER
 from aime.stages import CLOSED, move, opened
 from aime.timeutil import utcnow
@@ -86,8 +86,8 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
         rf"(off|out of) (your|the|this) {_LIST}(?! of\b)|"
         r"from (your|the|this) (mailing|e-?mail|marketing|distribution) list|"
         r"(stop|quit|cease) (e-?maili?ng|contacti?ng|sending|messaging|mailing|writing to|spamming|bothering|pestering)|"
-        r"(stop|quit|cease) (with )?(all |the |these |those |your )?(e-?mails?|messages?|spam)|(stop|quit|cease) (these|writing)\b|"
-        r"discontinue (all |the |these |those |your )?(e-?mails?|messages?|mail(ings?)?)|discontinue (e-?mailing|contacting|messaging|mailing|sending (me|us)\b)|"
+        r"(stop|quit|cease) (with )?(all |the |these |those |your )?(e-?mails?|messages?|spam)(?![^.!?\n]*\b(back and forth|and (just |instead )?(get|jump|hop|meet|talk|chat|call|book|schedule))\b)|(stop|quit|cease) (these|writing)\b|stop for good|"
+        r"discontinue (all |the |these |those |your )?(e-?mails?|messages?|mail(ings?)?)(?![^.!?\n]*\b(our|their|statements?|invoices?|vendors?|can (you|your))\b)|discontinue (e-?mailing|contacting|messaging|mailing|sending (me|us)\b)(?![^.!?\n]*\b(our|their|statements?|invoices?|vendors?|can (you|your))\b)|"
         r"no (more|further) (e-?mails?|messages?|contact|mails?)|no more of (these|this|your)\b|"
         r"(do not|don'?t|never)( ever)? (e-?mail|contact|message|write|reach out|send)( to)?( (me|us))? (again|any ?more)|"
         r"please (remove|delete|go away|stop)(?=\W*($|[.!]))|(i|we) need you to stop(?=\W*($|[.!]))|"
@@ -95,11 +95,18 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
         r"(remove|delete|erase) (\S+|(this|my|that|our) (e-?mail )?address) from (your|all) (records?|systems?)|(remove|delete|erase) (this|my|our) (e-?mail )?address(?=\W*($|[.!]))|"
         r"(do not|don'?t|never)( ever)? (e-?mail|contact|message|write to|reach out to) (me|us)|do not (email|contact)(?! (the|this|that|a|an|our|my)\b)|"
         r"(do not|don'?t|never)( ever)? send(ing)? (me |us )?(any |anymore )?((more|further|other) )?(e-?mails?|messages?|mail|correspondence)|"
-        # "Don't hesitate to call or contact me again" invites them.
-        r"(do not|don'?t|never)(?! hesitate)( \w+){1,5} or (e-?mail|contact|message|write to) (me|us) (again|any ?more)|"
+        # "Don't call or email me again", but "don't forget to call or email me again" and "don't hesitate to ..." invite them.
+        r"(do not|don'?t|never)( ever)? (call|phone|ring|text|bother|pester|visit|e-?mail|contact|message|write to|reply( to (this|that|it|me|us))?)( (me|us))? or (e-?mail|contact|message|write to) (me|us) (again|any ?more)|"
         # Only when nothing follows: "don't send me more info" and "don't send more details, just call me" stop nothing.
-        r"(do not|don'?t|never) send (me |us )?(any |anything )?(more|further|else)( of (these|this|them|your \w+))?(?=\s*($|[.!,;]\s*($|thanks?\b|thank you\b|please\b)))|"
+        r"(do not|don'?t|never) send (me |us )?(any |anything )?(more|further|else)( of (these|this|them|your \w+))?(?=\s*[.!,;]?\s*((please|pls|thanks?|thank you)\W*)?$)|"
         r"(not interested|no thanks|no, thank you)\W+(please |pls |just )?stop(?=\W*($|[.!]))|"
+        # Each of these a notice's own words used to catch by accident; they count by their own words now.
+        r"go away(?=\W*($|[.!,]))|no contact( please)?(?=\W*($|[.!]))|no need to write( to (me|us))? again|stop sendin\b|take this address off|enough (e-?mails?|of (these|this|your))\b|"
+        r"no need to (e-?mail|contact|message|write to) (me|us)( again| any ?more)|"
+        r"(add|put) (me|us) (on|to) your (do[- ]not[- ](e-?mail|contact|call)|no[- ]contact|suppression|unsubscribe|opt[- ]?out) list|"
+        r"(do not|don'?t|never)( ever)? (contact|e-?mail|message|write to) (this|our) (company|firm|organi[sz]ation|business|team|staff|office)\b(?! (yet|until|directly|before)\b)|"
+        r"where did you get (my|this) (e-?mail( address)?|address)\W+(please )?(delete|remove)\b|"
+        rf"(stp|stopp|sotp|stpo|stop) (e-?mailing|emialing|emailng)|take (me|us) of (your|the|this) {_LIST}|(do not|don'?t) (contat|contct|cotact) (me|us)|"
         r"forget (this|my|our) (e-?mail )?address|never (want to |wish to |to )hear from (you|your|anyone)\b(?![^.!?\n]*\?)|never hear from (you|your)\b[^.?!]{0,30}\bagain(?![^.!?\n]*\?)|"
         r"(do not|don'?t|no longer)( \w+)? (wish|want|like|need) to (receive|get)( \w+){0,3} "
         r"(e-?mails?|messages?|mail|communications?|newsletters?)|"
@@ -274,7 +281,7 @@ MEETING = re.compile(
     rf"|{_TALK}\b[^.?!\n]{{0,40}}\b{_WHEN})\b", re.I)
 # "not", "never", "don't", "nobody" ... up to four words before an interest phrase: "not really interested", "don't send me more info",
 # "I doubt we'd be interested". "but", "so" and the like end it ("not now but we are interested"), and "no doubt" is a yes.
-NEGATED = re.compile(r"(\bnot|\bnever|\bno longer|\bcannot|\bdont|\b\w+n['\u2019]t|\bwhy would|\bnobody|\bno one|\bnone|(?<!\bno )(?<!\ba )\bdoubt|\bhardly|"
+NEGATED = re.compile(r"(\bnot|\bnever(?! (got|received|saw)\b)|\bno longer|\bcannot|\bdont|\b\w+n['\u2019]t|\bwhy would|\bnobody|\bno one|\bnone|(?<!\bno )(?<!\ba )\bdoubt|\bhardly|"
                      r"\bunlikely|\bnothing|\bno need)\s+((?!but\b|however\b|though\b|although\b|yet\b|and\b|so\b|only\b|wait\b)[\w'\u2019]+\s+){0,4}$", re.I)
 HUMAN = ("interested", "not_interested", "objection", "referral", "question", "other")
 OUTREACH_STAGE = {"interested": "interested", "not_interested": "not_interested"}
@@ -418,6 +425,28 @@ NOT_UNTIL = re.compile(
 # Someone else will write, or they will: "Our CFO will get back to you in March", "Sam can reach out in March". Not "you can", not "can we".
 _SOMEONE_WILL = re.compile(r"\b(?!you\b|we\b)[\w']+('ll| will| shall| would| might| may| is going to| are going to| can| could)( \w+){0,2} $|"
                            r"\b(i|we)('ll| will| shall| am going to| are going to)( \w+){0,2} $", re.I)
+# What may follow the date for it to stay a date: nothing, a courtesy, a sign-off, why, or when to write again. Anything else behind it keeps the opt-out:
+# "until March and after that too", "or we will go to the FTC", "and keep it that way". So does a date no reminder can mean ("until May 2099").
+_AFTER_A_DATE_REFUSES = re.compile(r"\b(ever|never|forever|permanent\w*|for good|keep it that way|same|too|as well|also|beyond|still|won'?t|no|not|don'?t|do not|stop\w*|remov\w*|delet\w*|unsub\w*|"
+                                   r"last warning|warning|i mean it|complain\w*|ftc|fcc|regulator\w*|lawyer\w*|attorney\w*|su(e|ing)|report\w*|block\w*|spam|or)\b", re.I)
+_AFTER_A_DATE_FINE = re.compile(r"^\W*((please|pls|plz|thanks?( you)?|thx|cheers|regards|kind regards|best|best regards|sincerely)\b.*)?$|"
+                                r"\b(then|after that|by then|at that point|afterwards?)\b.*\b(feel free|talk|chat|try|call|write|e-?mail|reach|contact|happy|open|opens|free|fine|okay|ok|good|meet|speak|connect)\b|"
+                                r"\b(i'?m|i am|we'?re|we are|i'?ll|i will|we'?ll|we will|budget|because|since|i'?d|on leave|travell?ing|holiday\w*|vacation|busy)\b", re.I)
+_NOTICE_BEGINS = re.compile(r"\b(?:confidential\w*|privileged|disclaimer|if you (?:are|have|received|got)|if received|this (?:e-?mail|message) (?:is|may|was)|sent from my)\b", re.I)
+
+
+def _not_until(said: str) -> re.Match | None:
+    """An opt-out's words with a date a person can write on, and nothing behind it that takes that back (see NOT_UNTIL)."""
+    for found in NOT_UNTIL.finditer(said):
+        behind = _NOTICE_BEGINS.split(re.sub(r"^,?\s*20\d\d\b", "", said[found.end():]), maxsplit=1)[0]  # "until 15 March 2027": the year is the date's
+        if _AFTER_A_DATE_REFUSES.search(behind) or not _AFTER_A_DATE_FINE.search(behind):
+            continue
+        if any(int(year) > utcnow().year + 2 for year in re.findall(r"\b20\d\d\b", said[found.start():found.end() + 6])):
+            continue
+        return found
+    return None
+
+
 _PART_DAY = {"early": 1, "the start of": 1, "mid": 15, "late": 25, "the end of": 25}
 _PART_WORD = {"early": "early ", "the start of": "early ", "mid": "mid-", "late": "late ", "the end of": "late "}
 
@@ -432,7 +461,7 @@ def check_back_when(row: InboundEmail) -> dict | None:
             continue
         return _when_of(asked)
     # "don't email me until April": the words that read as a refusal above are the request here, also when written below the quote
-    not_until = NOT_UNTIL.search(said) or NOT_UNTIL.search(_flat(rest_of_reply(row.body_text or "")))
+    not_until = _not_until(said) or _not_until(_flat(rest_of_reply(row.body_text or "")))
     return _when_of(not_until) if not_until else None
 
 
@@ -516,10 +545,11 @@ WEAK_NO = re.compile(r"\b(we'?re good|we'?re all set|no need)\b", re.I)
 # Only that phrase is blanked, only in a paragraph (hard wraps and all) that is such a notice and in which nobody speaks for themselves: "This
 # is my old address. Remove it from your system." and "I am not the intended recipient, please remove me" stay what they are. A notice sits below
 # what the writer says or names itself one: "If you got this address by mistake, remove it from your records" as all they say is them asking.
-NOTICE_TO_YOU = re.compile(r"\b(if|should|in case) you\b.{0,200}?\b(in error|by mistake|intended|addressee)\b|\byou are not the (intended|addressee)\b", re.I)
-NOTICE_SPEAKER = re.compile(r"\b(i|i'm|i've|i'd|me|my|mine|we are|we were|we received|we got|we're)\b", re.I)
+NOTICE_TO_YOU = re.compile(r"\b(if|should|in case) you\b.{0,200}?\b(in error|by mistake|intended|addressee)\b|\byou are not the (intended|addressee)\b|"
+                           r"\bif received (in error|by mistake)\b|\bif (this|the)( e-?mail| message| communication)?( has| was| is)? (reached|sent to|not intended for) you\b|\bnot intended for you\b", re.I)
+NOTICE_SPEAKER = re.compile(r"\b(i|i'm|i've|i'd|me|my|mine|we are(?! not (liable|responsible))|we were|we received|we got|we're(?! not (liable|responsible)))\b", re.I)
 NOTICE_LEGAL = re.compile(r"\b(confidential\w*|privileged?|proprietary|disclaimer|recipients?|addressee)\b", re.I)
-NOTICE_REMOVAL = re.compile(r"\b(remove|delete|erase)\s+(it|this|them|these|that|same|copies|e-?mails?|messages?)\s+from\s+(your|all)\s+(records?|systems?)\b", re.I)
+NOTICE_REMOVAL = re.compile(r"\b(remove|delete|erase)\s+(it|this|them|these|that|same|copies|e-?mails?|messages?)\s+from\s+(your|all)\s+(records?|systems?|files?)\b", re.I)
 # Their own business in opt-out words: "we need to stop sending invoices by hand", "our unsubscribe rate", "get us off our old ERP". Taken out
 # of the text before reading it again, and only here: the opt-out wording itself is not narrowed, and any other opt-out in the email still counts.
 # Each one names what it is about, because anything less may be an opt-out: "we want to stop emailing with you", "no further contact with the CEO",
@@ -533,18 +563,19 @@ _NOT_ABOUT_US = r"(?! (team|staff|people|department))(?![^.!?\n]*\b(you|your|e-?
 _ANOTHER_WAY = (r"\b((bring|hand|print|post|upload|share|fax|send|mail|drop|give|show) (it|them|that|those|copies|a copy|me a copy)|use (the|our|my)|instead|yet|until|"
                 r"(at|on|in|for) the (call|meeting|portal|drive|office)|in person)\b")
 _A_LIST = r"(lists?|databases?|rosters?|director(y|ies)|registers?|records?|mail\w*|e-?mails?)"  # "take us off our vendor list" is an opt-out
-_STOP_BESIDE = r"(?![\s\S]*[.!?]\s+(please |just )?stop\W*($|[.!]))"  # "Unsubscribe rate on this must be awful. Stop."
+_STOP_BESIDE = r"(?![\s\S]*[.!?]\s+(please |just )?stop\W*($|[.!]))(?![\s\S]*\bdone with you\b)"  # "Unsubscribe rate on this must be awful. Stop."
 OWN_BUSINESS = re.compile(
     r"\b(we|i)( really| just)?( need| want| have| would like|'d like| are trying|'re trying) to (stop|quit|cease|discontinue) (e-?mailing|sending|writing) "
     rf"((out|our|the|all|all our|these|those) )*{_THEIR_PAPERWORK}\b(?![^.!?\n]*\b(to|with|from|at) (you|your)\b)|"
-    rf"\b(our|their|customers'?)( newsletter)? unsubscribe (rates?|pages?|links?)\b(?![^.!?\n]*\b(your|still)\b){_STOP_BESIDE}|(?<!your )(?<!your newsletter )\bunsubscribe rates?\b{_STOP_BESIDE}|"
+    rf"\b(our|their|customers'?)( newsletter)? unsubscribe (rates?|pages?|links?)\b(?![.\w-]*@)(?![^.!?\n]*\b(your|still)\b){_STOP_BESIDE}|(?<!your )(?<!your newsletter )\bunsubscribe rates?\b(?![.\w-]*@){_STOP_BESIDE}|"
     rf"\ban opt[- ]?out (on|for) (our|their)( \w+){{0,2}}? {_THEIR_PRODUCT}\b{_NOT_ABOUT_US}|"
-    rf"\b(build|add|adding|offer|offering) an opt[- ]?out (on|for) (our|their)( \w+){{0,2}}? (customers?|clients?|users?|subscribers?|members?|sites?|websites?)\b{_NOT_ABOUT_US}|"
+    rf"\b(build|add|adding|offer|offering) an opt[- ]?out (on|for) (our|their)( \w+){{0,2}}? (customers?|clients?|users?|subscribers?|members?|sites?|websites?)\b{_NOT_ABOUT_US}(?![\s\S]*\bfor us\b)|"
     r"\bopt[- ]?out of (the|our)( (?!e-?mails?\b|mail\w*\b|marketing\b|contact\w*\b|list\b)\w+){0,3} (plan|contract|trial|renewal)s?\b(?![\s\S]*\b(e-?mails?|mail\w*|contact\w*|you|your)\b)|"
-    rf"\b(take|get) us off ((our|old)( (?!{_A_LIST}\b)\w+){{0,2}}? (erps?|software|excel|platforms?|tools?|vendors?|providers?|process(es)?|stack|paper\w*|spreadsheets?)|our old( (?!{_A_LIST}\b)\w+)? systems?|spreadsheets?)\b(?! (mailing |e-?mail |vendor |contact |\w+ )?{_A_LIST}\b)|"
+    rf"\b(take|get) us off ((our|old)( (?!{_A_LIST}\b)\w+){{0,2}}? (erps?|software|excel|platforms?|tools?|vendors?|providers?|process(es)?|stack|paper\w*|spreadsheets?)|our old( (?!{_A_LIST}\b)\w+)? systems?|spreadsheets?)\b(?! (mailing |e-?mail |vendor |contact |\w+ )?{_A_LIST}\b)(?![^.!?\n]*\byou\b)|"
+    r"\b(if|when|once)\b((?!\b(you|your|e-?mails?|e-?mailing|mail\w*|messages?|sales|contact\w*)\b)[^.!?\n]){0,80}?\bplease stop\b|"  # "If the trial goes over budget, please stop."
     r"\bhad no further contact with (our|their|the)\b|"  # an account of the past; "no further contact with the CEO" asks for it
     rf"\b(do not|don'?t) e-?mail (me|us) (the|that|those) {_THEIR_PAPERWORK}\b(?=[^\n]{{0,60}}?{_ANOTHER_WAY})"
-    r"(?![\s\S]*\b(anything|ever|again|any ?more|at all|stop|you keep|keep (sending|pushing)|(did not|didn'?t|never) ask|not a customer|hint)\b)", re.I)
+    r"(?![\s\S]*\b(anything|ever|never|kidding|again|any ?more|at all|stop|you keep|keep (sending|pushing)|(did not|didn'?t|never) ask|not a customer|hint)\b)", re.I)
 
 
 def _is_notice(paragraph: str) -> bool:
@@ -564,6 +595,27 @@ def _without_notice(text: str) -> str:
     """The text with the phrase of a legal notice blanked that asks whoever got this email by mistake to remove it (see NOTICE_TO_YOU)."""
     parts = re.split(r"(\n\s*\n)", text)
     return "".join(_blank_notice_phrase(part) if NOTICE_LEGAL.search(part) or any(p.strip() for p in parts[:i]) else part for i, part in enumerate(parts))
+
+
+# Words of plain English: the rules can say that a line in English is no opt-out they know. Of a line in anything else they cannot say that.
+_STRONG_ENGLISH = re.compile(r"\b(yes|okay|ok|sure|thanks|thank you|great|sounds)\b", re.I)
+_ENGLISH_WORDS = re.compile(r"\b(the|this|that|is|are|was|will|would|can|could|have|has|our|your|you|we|i|i'm|i'll|to|and|for|of|on|at|with|from|it|she|he|they|my|me|us|send|please|call|again|next|week|but|not|just|try)\b", re.I)
+
+
+def _cannot_be_read(text: str) -> bool:
+    """A line the rules cannot place because it is not plainly English may be a refusal in words they do not know. Doubt counts as one, and a person checks.
+    A signature's "Thanks" says nothing of the line above it, and nothing at all is no line to read."""
+    said = _flat(" ".join(part for part in re.split(r"\n\s*\n", text) if not SIGN_OFF.match(part.partition("\n")[0])))
+    return bool(said) and not said.isascii() or bool(said) and not (_STRONG_ENGLISH.search(said) or len(_ENGLISH_WORDS.findall(said)) >= 2)
+
+
+# Words that read as no more than a mild no anywhere else, but that a person above a legal notice has always been held to: the opt-out side of a doubt.
+_REFUSES_ABOVE_NOTICE = re.compile(r"\bno,? thank you\W*$|\b(i|we) (do not|don'?t) want (this|these|them|it)\b|\b(do not|don'?t) (write\b|bother\b|reply\b)|\bstop it\b", re.I)
+
+
+def _their_lines(text: str) -> str:
+    """Without the paragraphs that are a legal notice or start with a sign-off: an opt-out that must end its message ("Do not send anything else.") still does."""
+    return "\n\n".join(part for part in re.split(r"\n\s*\n", text) if not _is_notice(part) and not SIGN_OFF.match(part.partition("\n")[0]))
 
 
 def _is_signature(paragraph: str) -> bool:
@@ -656,6 +708,9 @@ def _classify(row: InboundEmail, text: str | None = None, *, own_addresses: froz
     hits = {name: m.group(0) for name, rx in PATTERNS if (m := rx.search(heard.get(name, said)))}
     if just_stop:
         hits.setdefault("unsubscribe", "stop")
+    opt_out_alone = dict(PATTERNS)["unsubscribe"].search(_flat(f"{subject}\n{_their_lines(raw_text)}"))
+    if opt_out_alone and "unsubscribe" not in hits:
+        hits["unsubscribe"] = opt_out_alone.group(0)
     elsewhere = ELSEWHERE_OPT_OUT.search(said) or ELSEWHERE_WHOLE.fullmatch(raw_text.strip())
     # "Abmelden" over a gateway's legal notice is still all they say.
     beside_notice = "".join(part for part in re.split(r"(\n\s*\n)", raw_text) if not _is_notice(part)).strip()
@@ -665,8 +720,8 @@ def _classify(row: InboundEmail, text: str | None = None, *, own_addresses: froz
         return "unsubscribe", "medium", [f'"{first}" (not in English: a person checks)']
     if "unsubscribe" in hits and not (complaint or just_stop or elsewhere):
         opt_out = dict(PATTERNS)["unsubscribe"]
-        until = NOT_UNTIL.search(said)
-        without = OWN_BUSINESS.sub(" ", NOT_UNTIL.sub(" ", said))
+        until = _not_until(said)
+        without = OWN_BUSINESS.sub(" ", f"{said[:until.start()]} {said[until.end():]}" if until else said)
         if without != said and not opt_out.search(without):  # no other opt-out in the email: a person decides, and nothing is suppressed
             if until:
                 return "objection", "low", [f'{NOT_UNTIL_REASON}: "{until.group(0)}". The sequence stops; a person reads it']
@@ -682,9 +737,16 @@ def _classify(row: InboundEmail, text: str | None = None, *, own_addresses: froz
             only_a_notice = no_notice != raw_text and not dict(PATTERNS)["unsubscribe"].search(_flat(f"{subject}\n{no_notice}"))
             # Nothing else is said, so it is what they say; a list's newsletter says something else as well. A legal notice asks nothing of us,
             # and "We're good for now" or "We're good to go" above a company's footer does say something: it stays for a person, as before.
+            theirs = _without_footer(beside_notice, bare_too=kind == "list").strip()  # what is left of it once the notice has gone too
             if (category == "other" and "unsubscribe" in hits and not only_a_notice and not WEAK_NO.search(kept)
-                    and (kind != "list" or not kept.strip())):
+                    and (kind != "list" or not kept.strip()) and (not theirs or _is_signature(theirs) or _cannot_be_read(theirs))):
                 return "unsubscribe", "medium", [f'"{word}" {ALL_IT_SAYS}, in a line like a footer: a person checks']
+            if category in ("other", "not_interested") and only_a_notice and (mild := _REFUSES_ABOVE_NOTICE.search(_flat(_their_lines(raw_text)))):
+                return "unsubscribe", "medium", [f'"{mild.group(0)}" above a legal notice: a person checks']
+            if category == "other" and only_a_notice and opt_out_alone:  # the notice was all that stood behind words that end the message
+                return "unsubscribe", "high", [f'"{opt_out_alone.group(0)}"']
+            if category == "other" and only_a_notice and theirs and _cannot_be_read(theirs):  # it may be their no, in words the rules do not know
+                return "unsubscribe", "medium", ["their own words above a legal notice cannot be read here, and they may be a refusal: a person checks"]
             return category, "low", [*why, f'{FOOTER_REASON}: "{word}". The sequence stops; a person reads it']
     negated = None
     if "interested" in hits:
@@ -1098,7 +1160,8 @@ _MEETING_CHANGE = re.compile(r"\b(mov(e|ed|es|ing)|re-?schedul\w*|postpon\w*|pus
                              r"not|no|never|\w+n't|may|might|please|could|would|send|need|who|what|when|where|why|how|if)\b", re.I)
 # The one question a confirmation answers: talking on a day, which must then be the booked day. Any other question is for a person to answer.
 _ASKS_THE_DAY = re.compile(r"\bcan we (talk|chat|speak|meet)( on)? (monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*\?", re.I)
-_ANOTHER_WHEN = re.compile(rf"\b(tomorrow|today|tonight|(this|next) (week|month)|morning|afternoon|evening|noon)\b|\b{_MONTH_WORD}\.? \d|\b\d{{1,2}}/\d{{1,2}}\b", re.I)
+_ANOTHER_WHEN = re.compile(rf"\b(tomorrow|today|tonight|next|morning|afternoon|evening|noon|days?|weeks?|months?|quarter|year|fortnight|travell?ing|away|on leave|vacation|holiday|out of (town|office))\b|"
+                           rf"\b{_MONTH_WORD}\.? \d|\b\d{{1,2}}/\d{{1,2}}\b|\b\d{{1,2}}(st|nd|rd|th)\b", re.I)
 _A_DAY = re.compile(r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", re.I)
 _A_TIME = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(?:am|pm|a\.m|p\.m)\b|\b(\d{1,2}):(\d{2})\b|\bat (\d{1,2})\b", re.I)
 
@@ -1195,6 +1258,7 @@ def suggest(settings, category: str, row: InboundEmail, contact: Contact | None,
 
 BOOK_A_MEETING = "Book a meeting: approve the suggested reply with your booking link"
 OPTED_OUT_WROTE_AGAIN = "They opted out earlier and wrote again: read it on Replies. No email can go unless the owner decides"
+BOUNCED_WROTE_AGAIN = "Their address bounced earlier and they wrote: read it on Replies. No email can go unless the owner decides"
 COMPANY_OPTED_OUT_STEP = "Someone at this company opted out: its outreach stays stopped. Decide what to do with this deal"
 
 
@@ -1351,8 +1415,9 @@ def _act_on_bounce(session: Session, settings, row: InboundEmail, f: FollowUp | 
         notes.append("Could not read a failed address from this delivery report, so nothing was suppressed. It may be a "
                      "delay or a failure: read it, and reclassify it as a bounce if delivery failed")
     row.status = "actioned" if failed and certain and (f or contact) else "needs_review"  # unmatched: a person checks
+    keeper = _open_lead_instead(session, lead) if lead else None  # a reply on a merged lead shows on its company's open lead
     wrote = session.execute(select(InboundEmail).where(
-        InboundEmail.lead_id == lead.id, InboundEmail.id != row.id, InboundEmail.is_simulated.is_(False), InboundEmail.category.in_(HUMAN),
+        InboundEmail.lead_id.in_([lead.id, *([keeper.id] if keeper else [])]), InboundEmail.id != row.id, InboundEmail.is_simulated.is_(False), InboundEmail.category.in_(HUMAN),
     ).order_by(InboundEmail.id.desc())).scalars().first() if lead and not person else None
     if wrote:  # the report must not bury a conversation
         row.status = "needs_review"
@@ -1380,6 +1445,18 @@ def _meeting_on(session: Session, *leads: Lead | None) -> Meeting | None:
     from aime.meetings import next_meeting
 
     return next((m for m in (next_meeting(session, x.id) for x in leads if x is not None) if m), None)
+
+
+def _only_bounced(session: Session, row: InboundEmail, contact: Contact | None) -> bool:
+    """All that stands against this sender is a delivery failure: only such list entries, no unsubscribe mail from them, and any opt-out mark on the
+    contact is the one a bounce leaves on that same address. Every doubt says they opted out."""
+    address = (row.from_email or "").lower()
+    standing = [r for r in session.execute(_entries_covering(address)).scalars() if r.lifted_at is None]
+    if not standing or not all(r.reason.startswith(BOUNCED_REASON) for r in standing):
+        return False
+    if contact is not None and contact.consent_status == "opted_out" and not (contact.email_status == "bounced" and (contact.email or "").lower() == address):
+        return False
+    return session.execute(select(InboundEmail.id).where(func.lower(InboundEmail.from_email) == address, InboundEmail.category == "unsubscribe", InboundEmail.id != row.id).limit(1)).first() is None
 
 
 def _speaks_for(lead: Lead, *addresses: str | None) -> bool:
@@ -1631,7 +1708,8 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             lead = keeper
             _tie_to_lead(row, lead)
             if not _speaks_for(lead, row.from_email):
-                stage = "stopped"
+                # Someone at the company is interested: that stage is what the Interested card and list show, unless the company has said no.
+                stage = "interested" if stage == "interested" and not company_opted_out(session, lead.company) else "stopped"
                 if lead.outreach_status in STAGES_THAT_STAND:  # someone else wrote: this lead's own conversation goes on
                     stage = lead.outreach_status
                     standing_answers = tuple(session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.kind == "response")).scalars())
@@ -1696,7 +1774,7 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
         if no_writing and not automatic_simulation and row.category != "not_interested":
             for opp in session.execute(select(Opportunity).where(Opportunity.lead_id == lead_with_the_deals(session, replied_on).id,
                                                                  Opportunity.stage.not_in(CLOSED))).scalars():
-                opp.next_step = OPTED_OUT_WROTE_AGAIN
+                opp.next_step = BOUNCED_WROTE_AGAIN if _only_bounced(session, row, contact) else OPTED_OUT_WROTE_AGAIN
         if not automatic_simulation and not opted_out and not no_writing and (when := check_back_when(row)):
             notes.append(_check_back_task(session, row, lead, contact, when, actor))
         proposal = suggest(settings, row.category, row, contact, lead, booked)
@@ -1734,12 +1812,15 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             notes.append("matched by the company's domain and our subject, not by our thread: a person checks it")
         if no_writing:  # still suppressed: only the owner can take that back
             row.status = "needs_review"
-            row.recommended_status = "They opted out earlier: a person reads it, and no email can go unless the owner decides"
-            notes.append("they opted out earlier and stay suppressed: a person decides")
+            only_bounced = _only_bounced(session, row, contact)
+            row.recommended_status = ("Their address bounced earlier: a person reads it, and no email can go unless the owner decides" if only_bounced
+                                      else "They opted out earlier: a person reads it, and no email can go unless the owner decides")
+            notes.append("this address bounced earlier and stays on the do-not-contact list: a person decides" if only_bounced
+                         else "they opted out earlier and stay suppressed: a person decides")
             if not person and not row.is_simulated:
                 from aime.monitoring import alert_once
 
-                alert_once(session, "warning", "inbox", f"{row.from_email} ({lead.company.name}) opted out earlier and wrote again: read it on Replies; "
+                alert_once(session, "warning", "inbox", f"{row.from_email} ({lead.company.name}) {'bounced earlier and now wrote' if only_bounced else 'opted out earlier and wrote again'}: read it on Replies; "
                            "no email can go unless the owner decides", settings, key=f"wrote_after_opt_out:{lead.id}")
         elif opted_out:  # someone else at the company: their own address is free, the lead's stays closed
             row.status = "needs_review"

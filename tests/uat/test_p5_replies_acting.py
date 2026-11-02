@@ -19,7 +19,7 @@ from aime.meetings import next_meeting
 from aime.models import Activity, Alert, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, Opportunity
 from aime.outreach import reopen_refusal
 from aime.pipeline import ASKS_FOR_APPROVAL, NO_REPLY, READ_THEIR_REPLY, REPLY_SENT, REPLY_WAITING, settle_next_steps
-from aime.reply_intel import BOOK_A_MEETING, OPTED_OUT_WROTE_AGAIN, QUESTION_PLACEHOLDER, booking_links_without_notice, lead_on_hold, process_pending
+from aime.reply_intel import BOOK_A_MEETING, OPTED_OUT_WROTE_AGAIN, QUESTION_PLACEHOLDER, booking_links_without_notice, lead_on_hold, process_pending, reply_footer
 from aime.timeutil import utcnow
 from aime.web.app import create_app
 from tests.test_company_research import SITE
@@ -91,7 +91,7 @@ def queue_approved_step(ctx, lead_id):
     with ctx.db.session() as s:
         lead = s.get(Lead, lead_id)
         f = FollowUp(lead_id=lead.id, company_id=lead.company_id, contact_id=lead.contact_id, channel="email", kind="outreach", step=2, status="approved", due_at=utcnow(),
-                     to_email=lead.contact.email if lead.contact else None, subject="Second step", body="Hello again", approved_by="test", approved_at=utcnow())
+                     to_email=lead.contact.email if lead.contact else None, subject="Second step", body="Hello again" + reply_footer(ctx.settings), approved_by="test", approved_at=utcnow())
         s.add(f)
         s.flush()
         return f.id
@@ -273,7 +273,7 @@ def force_merged(make_ctx):
         s.add(keeper)
         s.flush()
         first = FollowUp(lead_id=keeper.id, company_id=lead.company_id, contact_id=other.id, channel="email", kind="outreach", step=1, status="approved", due_at=utcnow(),
-                         to_email=other.email, subject="Hi", body="Hi", approved_by="test", approved_at=utcnow())
+                         to_email=other.email, subject="Hi", body="Hi" + reply_footer(ctx.settings), approved_by="test", approved_at=utcnow())
         s.add(first)
         s.flush()
         return ctx, sender, sent, merged, keeper.id, first.id
@@ -286,7 +286,7 @@ def test_an_interested_reply_on_a_merged_lead_shows_on_the_open_lead_and_stops_i
     assert r.lead_id == keeper and r.followup_id == sent.id
     assert status_of(ctx, first) == "cancelled"
     with ctx.db.session() as s:
-        assert s.get(Lead, keeper).outreach_status == "stopped", "the keeper's contact did not write"
+        assert s.get(Lead, keeper).outreach_status == "interested", "someone at the company is interested: the Interested card and list must find it"
     assert len(deals(ctx)) == 1
     assert try_to_send(ctx, sender) == []
 
@@ -603,7 +603,14 @@ def test_mark_reviewed_on_an_outlook_paste_opt_out_sends_nothing(make_ctx):
     web(ctx).post(f"/inbox/{latest_reply(ctx).id}/reviewed", headers=ORIGIN, follow_redirects=False)
     assert latest_reply(ctx).status == "reviewed"
     assert try_to_send(ctx, sender) == []
-    assert status_of(ctx, step) != "sent"
+    assert status_of(ctx, step) == "cancelled"
+
+
+def test_the_same_step_with_no_opt_out_on_record_does_go(make_ctx):  # what makes the test above prove something
+    ctx, sender, sent = contacted(make_ctx)
+    step = queue_approved_step(ctx, lead_of(ctx).id)
+    assert len(try_to_send(ctx, sender)) == 1
+    assert status_of(ctx, step) == "sent" and sent.status == "sent"
 
 
 def test_a_person_confirming_an_outlook_paste_opt_out_stops_the_lead_and_closes_the_address(make_ctx):

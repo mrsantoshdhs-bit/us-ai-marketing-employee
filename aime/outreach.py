@@ -494,7 +494,7 @@ def _asked_not_to(session: Session, company: Company, on_record: _CompanyOnRecor
         named = _AN_ADDRESS.search(a.subject)
         if named:
             cut = lift_time(session, named.group())
-        elif lead is None:
+        elif lead is None or a.lead_id != lead.id:  # a stop on another lead speaks for that lead's people, not for `lead`'s contact
             cut = _lift_of_a_stop(session, company, a.lead_id)
         else:
             cut = lift_time(session, lead.contact.email, company.domain) if lead.contact is not None and lead.contact.email else None
