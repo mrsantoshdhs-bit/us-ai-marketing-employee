@@ -210,7 +210,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         log_activity(session, f"Opportunity created: {opp.name}", self.name, type_="opportunity",
                      company_id=lead.company_id, lead_id=lead.id, opportunity_id=opp.id)
 
-    def _may_answer(self, session: Session, lead: Lead) -> bool:
+    @staticmethod
+    def _may_answer(session: Session, lead: Lead) -> bool:
         """Whether the inquiry sequence may write to this lead: a qualified one, or a person who asked us (an
         inquiry, a LinkedIn form or event registration, with consent) whom only the score put in nurture. Never a
         disqualified lead, nor one that a person, a "not interested" reply or the stale-lead rule parked."""

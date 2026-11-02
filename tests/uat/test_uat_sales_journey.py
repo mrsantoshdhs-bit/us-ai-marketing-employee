@@ -1316,11 +1316,11 @@ def test_defect_performance_leads_owned_counts_merged_leads(org):
 
 
 def test_defect_sidebar_count_shows_an_executive_approvals_she_cannot_see(org):
-    """Zoe's page: 'Emails to approve: 0' on My work, while the sidebar badge counts other people's drafts too."""
+    """Zoe's page: 'Emails waiting for a manager: 0' on My work, while the sidebar badge counts other people's drafts too."""
     lid = make_lead(org, owner="eva", email="dana@acme.example")
     make_draft(org, lid)
     page = client(org, "zoe").get("/my").text
-    assert "Emails to approve: 0" in page
+    assert "Emails waiting for a manager: 0" in page
     link = re.search(r'href="/approvals"[^>]*>.*?</a>', page, re.S).group(0)
     assert not re.search(r">\s*1\s*<", link)
 

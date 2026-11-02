@@ -188,6 +188,16 @@ def job_enrich(ctx: AppContext, job: str = "enrich") -> JobOutcome:
     return out
 
 
+def mailbox_read_failed(settings, session) -> bool:
+    """For the pages: a mailbox is set up and its last read did not reach the end, so read_hold keeps approved emails back. Display
+    only: the hold is judged by read_hold at every send."""
+    from aime import mail_accounts
+
+    if not settings.network_enabled or not (settings.imap_configured or mail_accounts.readable(session)):
+        return False
+    return not kv_get(session, MAILBOX_READ) and not kv_get(session, MAILBOX_READ_SHORT)
+
+
 def job_inbox(ctx: AppContext, job: str = "inbox") -> JobOutcome:
     """Read the sales mailbox (read-only) and handle replies; approved emails are sent by the followups job."""
     out = JobOutcome()

@@ -94,6 +94,17 @@
   </form>
 </div>
 
+<div class="card" id="suppressions">
+  <div class="card-head"><h3>Do-not-contact list</h3><span class="meta">administrators only</span></div>
+  <p class="small muted" style="margin:0 0 12px">Lifting an entry drafts and sends nothing, the lead stays closed until a person reopens it, and the entry is kept with who lifted it and why. An entry that records an erasure can never be lifted.</p>
+  <div class="table-wrap"><table>
+    <tr><th>Entry</th><th>Why</th><th>Added</th><th></th></tr>
+    {% for x in suppressions %}<tr><td class="small">{{ x.value or 'erased on the person\'s request' }}</td><td class="small">{{ x.reason or '' }}</td><td class="small">{{ x.at|local(None, '%Y-%m-%d') }}</td>
+      <td class="small">{% if x.lifted_at %}lifted {{ x.lifted_at|local(None, '%Y-%m-%d') }} by {{ x.lifted_by }}: {{ x.lift_reason }}{% elif not x.erased %}<form class="filters" method="post" action="/suppressions/{{ x.id }}/lift"><input name="reason" placeholder="Why lift it? (required)" maxlength="300" required><button class="secondary">Lift</button></form>{% endif %}</td></tr>
+    {% else %}<tr><td colspan="4" class="muted">The list is empty.</td></tr>{% endfor %}
+  </table></div>
+</div>
+
 <div class="card" id="authorize-rule">
   <div class="card-head"><h3>New rule-based authorization</h3><span class="meta">outreach to qualified leads that meet the rule, within the limits; saved as a draft</span></div>
   <p class="small muted" style="margin:0 0 12px">Choose "the address of a person who asked us to contact them" for people from your inquiry

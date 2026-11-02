@@ -32,6 +32,11 @@
     {% endfor %}{% endif %}
   </div>
   {% endif %}
+  {% set card = cards.get(f.id) or {} %}
+  {% if card.reply %}<div class="small" style="margin-top:8px"><b>What they wrote</b> <span class="muted">{{ card.reply.at|local }}</span><div class="post small">{{ card.reply.text }}</div></div>{% endif %}
+  {% if card.away %}<div class="small" style="margin-top:6px"><span class="pill warn">They replied that they are away</span></div>{% endif %}
+  {% if card.emailed %}<div class="small" style="margin-top:6px"><span class="pill warn">This address was already emailed on {{ card.emailed.at|local(None, '%Y-%m-%d') }} (lead #{{ card.emailed.lead_id }})</span></div>{% endif %}
+  {% if card.ai_seller %}<div class="small" style="margin-top:6px"><span class="pill warn">{{ card.ai_seller }}</span></div>{% endif %}
   {% if later.get(f.id) %}
   <div class="flash" style="margin-top:8px"><b>They wrote again after this draft</b> <span class="small muted">{{ later[f.id].at|local }}</span>
     <div class="post small">{{ later[f.id].text }}</div>
@@ -62,6 +67,8 @@
       <form class="inline" method="post" action="/followups/{{ f.id }}/requeue"><button class="secondary">Not delivered: requeue</button></form>{% endif %}
     {% if can_approve and f.id in reconfirm %}<form class="inline" method="post" action="/followups/{{ f.id }}/reconfirm"><button>Confirm again</button></form>{% endif %}
     {% if (can_reject if f.channel == 'email' else can_edit) and f.status in ['pending', 'approved', 'awaiting_approval'] %}<form class="inline" method="post" action="/followups/{{ f.id }}/reject"><button class="danger">{{ 'Reject' if f.status == 'awaiting_approval' else 'Cancel' }}</button></form>{% endif %}
+    {% if can_reject and f.channel == 'email' and f.status == 'approved' %}<form class="inline" method="post" action="/followups/{{ f.id }}/back_to_draft"><button class="secondary">Back to draft</button></form>
+      {% if f.kind == 'outreach' and f.step == 1 %}<span class="small muted">Cancel: this ends the first email for this lead; use Back to draft to change it.</span>{% endif %}{% endif %}
   </div>
   {% endif %}
 </div>

@@ -64,6 +64,7 @@ HELD_NOTE = "meeting recorded, nothing moved"  # how record_meeting says the lea
 HAS_OUTCOME_NOTE = "this meeting already has an outcome"
 UNKNOWN_CANCEL = "cancellation for an unknown meeting"
 FORMER_TIME = "former time"
+APPLIED_NOTES = ("meeting recorded", "recorded but not matched", "meeting rescheduled", "meeting cancelled", "already recorded", "already cancelled")  # what record_meeting says when it acted on a notice
 OPTED_OUT_HOLD = "they opted out or are on the do-not-contact list"
 BOOKING_ARRIVED = "They booked a meeting while this answer waits: check that it still fits"
 REBOOK_TASK, OUTCOME_TASK = "Rebook the meeting with", "Record the outcome of the meeting"
@@ -440,6 +441,44 @@ def _read_notice(settings, row: InboundEmail) -> dict | None:
         return parse_calendly(row.subject or "", row.body_text or "", _own_addresses(settings), booking_minutes(settings))
     except (ValueError, OverflowError):
         return None
+
+
+def older_waiting_notice(session: Session, settings, row: InboundEmail) -> InboundEmail | None:
+    """An older notice about the same invitee that still waits for a person, whoever may see it, or None. Notices must apply in the order
+    Calendly sent them, and Replies lists the newest first. One that cannot be read blocks nothing."""
+    info = _read_notice(settings, row)
+    invitee = (info or {}).get("invitee_email")
+    if not invitee:
+        return None
+    here = (row.received_at or datetime.min, row.id)
+    for other in session.execute(select(InboundEmail).where(InboundEmail.category == "calendly", InboundEmail.status == "needs_review",
+                                                            InboundEmail.id != row.id).order_by(InboundEmail.received_at, InboundEmail.id)).scalars():
+        said = _read_notice(settings, other)
+        if said and said.get("invitee_email") and canonical_address(said["invitee_email"]) == canonical_address(invitee) and (other.received_at or datetime.min, other.id) < here:
+            return other
+    return None
+
+
+def notice_applied(row: InboundEmail) -> bool:
+    """This notice changed or confirmed the meetings. A notice with no lead keeps its row waiting even then, so its status alone does not say."""
+    return row.status == "actioned" or any(said in (row.action_note or "") for said in APPLIED_NOTES)
+
+
+def newer_applied_notice(session: Session, settings, row: InboundEmail) -> InboundEmail | None:
+    """A newer notice about the same invitee that was already applied, or None. Applying this one now would act on a time that has moved on:
+    a cancellation marked reviewed would cancel the meeting they booked again after it."""
+    info = _read_notice(settings, row)
+    invitee = (info or {}).get("invitee_email")
+    if not invitee:
+        return None
+    here = (row.received_at or datetime.min, row.id)
+    for other in session.execute(select(InboundEmail).where(InboundEmail.category == "calendly", InboundEmail.id != row.id)
+                                 .order_by(InboundEmail.received_at.desc(), InboundEmail.id.desc())).scalars():
+        said = _read_notice(settings, other)
+        if said and said.get("invitee_email") and canonical_address(said["invitee_email"]) == canonical_address(invitee) \
+                and (other.received_at or datetime.min, other.id) > here and notice_applied(other):
+            return other
+    return None
 
 
 def _notices(session: Session, settings, invitee: str, row: InboundEmail) -> list[tuple[InboundEmail, dict]]:

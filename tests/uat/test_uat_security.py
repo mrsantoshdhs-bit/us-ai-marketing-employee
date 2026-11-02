@@ -266,7 +266,7 @@ def required(method: str, path: str) -> str | None:
     if path == "/logout":
         return None
     if path.startswith(("/jobs/", "/agents/", "/integrations/linkedin/disconnect", "/inbound/process", "/automation/mode",
-                        "/automation/authorizations")) or path in ("/automation/state/start", "/automation/state/resume"):
+                        "/automation/authorizations", "/suppressions/")) or path in ("/automation/state/start", "/automation/state/resume"):
         return "admin_ops"
     if APPROVALS.fullmatch(path):
         return "approve_outbound"
@@ -341,7 +341,7 @@ def test_ok_every_route_with_an_id_is_classified_for_record_isolation(world):
                              "/meetings/requests/{"),
                   "company": ("/companies/{",),
                   "shared, no owner": ("/content/{", "/assets/{", "/campaigns/{", "/alerts/{", "/agents/", "/command-center/agents/",
-                                       "/jobs/", "/reports/{", "/automation/", "/admin/", "/api/mailboxes/", "/integrations/")}
+                                       "/jobs/", "/reports/{", "/automation/", "/admin/", "/api/mailboxes/", "/integrations/", "/suppressions/{")}
     unknown = [t for _, t in endpoints(app) if "{" in t and not any(t.startswith(v) for vs in classified.values() for v in vs)]
     assert not unknown, unknown
 

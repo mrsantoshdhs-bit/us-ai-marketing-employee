@@ -769,7 +769,6 @@ def test_a_report_already_here_is_not_overwritten(pc, tmp_path):
     assert (ctx.settings.reports_dir / "weekly.html").read_text(encoding="utf-8") == "newer"
 
 
-@pytest.mark.xfail(strict=False, reason="for the integrator: passes once web-routes resolves the path in report_view")
 def test_a_restored_report_opens_on_the_new_pc(pc, tmp_path):
     old = pc()
     rid = a_report(old)
