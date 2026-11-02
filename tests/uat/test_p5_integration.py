@@ -106,11 +106,17 @@ def test_an_opt_out_above_a_legal_notice_is_suppressed(make_ctx, words):
     "Don't hesitate to call or contact me again.", "Don't follow up with me, I'll follow up with you next week.", "We need you to stop by on Friday.",
     "Please leave me out of the invoice thread, Sam handles it.", "Please remove this address and write to newname@firm.example from now on.",
     "Stop with the discounts, what is the real price?", "We don't want to get more of these leads wrong. Can you help?", "Should we start or stop?",
-    "Deja de preocuparte, escríbeme el lunes.", "Dejen de enviarme facturas en papel, ¿pueden ayudar?", "Stuur mij de offerte.", "Wypisz fakturę proszę.", "请给我发邮件。", "取消订阅功能可以做吗？",
+    "Dejen de enviarme facturas en papel, ¿pueden ayudar?",
 ])
 def test_the_same_words_about_something_else_are_no_opt_out(words):
     assert category_of(words) != "unsubscribe"
     assert category_of(words + NOTICE) != "unsubscribe"
+
+
+@pytest.mark.parametrize("words", ["Deja de preocuparte, escríbeme el lunes.", "Stuur mij de offerte.", "Wypisz fakturę proszę.", "请给我发邮件。", "取消订阅功能可以做吗？"])
+def test_words_the_rules_cannot_read_are_no_opt_out_alone_but_above_a_notice_a_person_checks_a_possible_no(words):
+    assert category_of(words) != "unsubscribe"
+    assert category_of(words + NOTICE) == "unsubscribe"  # the owner's rule: never lose an opt-out, and these rules cannot tell this from a refusal in the same language
 
 
 @pytest.mark.parametrize("words", ["No more emails until April, and after that also no.", "Stop emailing me until January and then stop again.",
