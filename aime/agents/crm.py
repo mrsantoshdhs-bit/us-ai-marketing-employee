@@ -27,7 +27,7 @@ from aime.models import Activity, Alert, Company, FollowUp, InboundInquiry, Lead
 from aime.monitoring import alert_once
 from aime.sources.base import CompanyCandidate
 from aime.timeutil import utcnow
-from aime.website_check import WebsiteResult, check_website, page_names_company, site_answers
+from aime.website_check import OUTAGE_WITNESSES, WebsiteResult, check_website, known_sites_still_prove, page_names_company, site_answers
 
 Operation = Literal["ingest_inbound", "verify_websites", "dedupe", "hygiene", "stale", "lifecycle", "competitors"]
 RECHECK_AFTER = timedelta(days=30)
@@ -38,11 +38,13 @@ RECHECK_NO_ANSWER = timedelta(hours=20)
 RECHECK_IN_OUTAGE = timedelta(hours=1)
 OUTAGE_STOP_AFTER = 5  # this many with no answer and none with one: the rest of the run would only wait for timeouts
 OUTAGE_MIN_WITHOUT_WITNESS = 3  # no site that answered before to ask: this many silent ones are read as an outage
-OUTAGE_WITNESSES = 2
 OUTAGE_ALERT = "website_check:outage"
-# Verdicts held back because witnesses failed too wait no longer than silent sites do, so witnesses that really changed cannot hold them forever.
-HOLD_AT_MOST = (NO_ANSWERS_TO_UNREACHABLE - 1) * RECHECK_NO_ANSWER
+# Verdicts held back because witnesses failed too wait this many runs, so witnesses that really changed cannot hold them forever. Runs, not
+# hours: a PC that was shut asked nothing, so a sign-in page days later is still its second sighting. At most one run counts per
+# RECHECK_IN_OUTAGE, as runs come every 30 minutes and more often by hand: this is about 60 hours with the PC on.
+HELD_RUNS_AT_MOST = 60
 HELD_SINCE_KEY = "website_check:held_since"
+HELD_RUNS_KEY = "website_check:held_runs"
 US_NAMES = {"us", "usa", "u.s.", "u.s.a.", "united states", "united states of america", "america"}
 
 
@@ -254,8 +256,11 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
                     errors[company.id] = result
                 else:
                     self._record_website(session, out, company, result)
-            if held and judged is None and not proven:  # the hold ran out while witnesses still fail: an outage's alert stays open
+            if held and judged is None and not proven:  # the hold ran out while witnesses still fail: an outage's alert stays open, saying so
                 answered = 0
+                alert_once(session, "warning", self.name, f"Sites confirmed before still could not be confirmed after {HELD_RUNS_AT_MOST} checks, so "
+                           f"{len(held)} company website result(s) that were waiting are now recorded as they answered. If this PC is behind a "
+                           "sign-in page, some may be wrong: they are checked again once the sites answer.", self.settings, key=OUTAGE_ALERT)
         self._judge_silent_sites(session, silent, answered, errors, judged)
 
     def _one_error_does_not_judge(self, company: Company, result: WebsiteResult) -> bool:
@@ -302,32 +307,33 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
     def _judge_held_verdicts(self, session: Session, held: list[tuple[Company, WebsiteResult]], proven: bool, todo: list[Company]) -> bool | None:
         """No site in this run was proven good: do sites known to be good still prove good? True: they do not, so a sign-in
         page or a lost network answered, and the verdicts wait. False: they do, so the verdicts stand. None: nothing to judge,
-        or the hold has run out; the verdicts stand, with nothing said about the network. Any proof ends a hold, with or
-        without verdicts waiting: its timer left running would make the next sign-in page look long overdue."""
+        or the hold has run out; the verdicts stand. Any proof ends a hold, with or without verdicts waiting: its count left
+        running would make the next sign-in page look long overdue."""
         if not held and not proven:
             return None
         if proven or not self._witnesses_fail(session, held, todo):
             if kv_get(session, HELD_SINCE_KEY):
                 kv_set(session, HELD_SINCE_KEY, None)
+                kv_set(session, HELD_RUNS_KEY, None)
             return None if proven else False
-        since, now = kv_get(session, HELD_SINCE_KEY), utcnow()
-        if not since:
+        now = utcnow()
+        if not kv_get(session, HELD_SINCE_KEY):
             kv_set(session, HELD_SINCE_KEY, now.isoformat())
+        held_runs = kv_get(session, HELD_RUNS_KEY)
+        if not held_runs:  # also a hold begun before runs were counted
+            kv_set(session, HELD_RUNS_KEY, {"runs": 1, "counted_at": now.isoformat()})
             return True
-        return True if now - datetime.fromisoformat(since) < HOLD_AT_MOST else None
+        runs = held_runs["runs"]
+        if now - datetime.fromisoformat(held_runs["counted_at"]) >= RECHECK_IN_OUTAGE:
+            runs += 1
+            kv_set(session, HELD_RUNS_KEY, {"runs": runs, "counted_at": now.isoformat()})
+        return True if runs < HELD_RUNS_AT_MOST else None
 
     def _witnesses_fail(self, session: Session, held: list[tuple[Company, WebsiteResult]], todo: list[Company]) -> bool:
-        """site_answers cannot tell here, as a sign-in page answers it: a witness must still prove good. With none outside this
-        run to ask, the run's own known sites are the witnesses, and this many all failing reads as an outage."""
-        witnesses = session.execute(select(Company.domain, Company.name).where(
-            Company.merged_into_id.is_(None), Company.domain.is_not(None), Company.website_status == "verified",
-            Company.website_retry_at.is_(None), Company.id.not_in([c.id for c in todo]))
-            .order_by(Company.website_checked_at.desc()).limit(OUTAGE_WITNESSES)).all()
+        """With no witness outside this run to ask, the run's own known sites are the witnesses, and this many all failing reads as an outage."""
         known = sum(1 for company, _ in held if company.website_status in ("verified", "redirected"))
-        session.commit()  # no write lock is held during network calls
-        if witnesses:
-            return not any(check_website(self.ctx, domain, name).proven for domain, name in witnesses)
-        return known >= OUTAGE_MIN_WITHOUT_WITNESS
+        prove = known_sites_still_prove(self.ctx, session, [c.id for c in todo])
+        return known >= OUTAGE_MIN_WITHOUT_WITNESS if prove is None else not prove
 
     def _network_looks_down(self, session: Session, silent: list[Company], answered: int) -> bool | None:
         """Most checks got no answer: a lost network, or a run of dead sites? Sites that answered before are asked, so dead

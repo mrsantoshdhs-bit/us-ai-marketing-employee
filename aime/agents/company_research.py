@@ -22,20 +22,26 @@ from aime.company_research import (WITHDRAWN, build_snapshot, cik_of, has_real_t
                                    withdraw_missing)
 from aime.competitor_guard import leave_to_a_person, live_lead_on_company
 from aime.contact_validation import STATUS_OK, MailDomainChecker, address_was_erased, assign_published_emails, recheck_emails
-from aime.crm_ops import OPEN_LEAD_STATUSES, log_activity, primary_lead
+from aime.crm_ops import OPEN_LEAD_STATUSES, is_suppressed, log_activity, primary_lead
 from aime.matching import competitor_evidence
 from aime.models import Company, Contact, FollowUp, Lead, ResearchSnapshot
-from aime.outreach import REACHED_PROSPECT
+from aime.monitoring import alert_once, resolve_alerts
+from aime.outreach import REACHED_PROSPECT, company_opted_out
 from aime.people import extract_people, merge_findings
 from aime.redact import redact
 from aime.site_reader import SiteReader
 from aime.sources.sec_officers import sec_officers
 from aime.timeutil import utcnow
+from aime.website_check import known_sites_still_prove, page_names_company
 
 BLOCKED_STATUSES = ("robots_disallowed", "robots_unavailable", "http_401", "http_403", "http_429", "http_503")
 CONFIDENCE_RANK = {"high": 2, "medium": 1}
 FAILED_READS_BEFORE_WAITING = 3  # after this many in a row a company waits for the normal re-check
 ALL_FAILED_MEANS_FAILURE = 3  # this many failures and no success in a run: no longer about one site (the network?)
+HOLD_ALERT = "research:held"
+HELD_READS_STOP_RUN = 3  # this many held and nothing read: the rest of the run would only read the same sign-in page
+PERSON_FOUND_TASK = "Decision-maker found after the first email: "  # how the task starts, so later re-reads find it
+PERSON_FOUND_NOTE = "News of a person, not this lead's review"  # with a reason, ticking it closes no review (SalesWorkflowAgent._ensure_task)
 
 
 class ResearchInput(BaseModel):
@@ -56,6 +62,7 @@ class ResearchOutput(BaseModel):
     emails_rechecked: int = 0
     competitors: list[int] = Field(default_factory=list)
     no_people: list[int] = Field(default_factory=list)
+    held_back: list[int] = Field(default_factory=list)  # read, but a sign-in page may have answered: nothing was written
     failed: list[BlockedItem] = Field(default_factory=list)
     skipped: str | None = None
 
@@ -86,7 +93,10 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         cfg = self.settings.section("enrichment")
         now = inp.now or utcnow()
         limit = inp.limit or int(cfg.get("companies_per_run", 15))
+        self._known_sites_failed = False
         for company in self._candidates(session, inp, now, int(cfg.get("recheck_days", 30)))[:limit]:
+            if len(out.held_back) >= HELD_READS_STOP_RUN and not out.companies_researched:
+                break
             try:
                 self._research(session, company, out, int(cfg.get("max_pages_per_site", 6)))
             except Exception as exc:  # one site must not stop the batch
@@ -97,6 +107,13 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                 self._note_failed_read(session, company, out, reason)
             session.commit()
         out.emails_rechecked = self._recheck_unknown_emails(session, int(cfg.get("email_rechecks_per_run", 20)))
+        if out.held_back and not out.companies_researched:
+            alert_once(session, "warning", self.name, f"Company research is waiting: {len(out.held_back)} website(s) answered with a page that does not "
+                       "show the company, and sites confirmed before could not be confirmed either, so the internet connection may be behind a "
+                       "sign-in page. Nothing changes for those companies or their leads; they are read again on a coming run.",
+                       self.settings, key=HOLD_ALERT)
+        elif not out.held_back:
+            resolve_alerts(session, (HOLD_ALERT,), set())
         session.commit()
         if len(out.failed) >= ALL_FAILED_MEANS_FAILURE and not out.companies_researched:
             raise AgentError(f"None of the {len(out.failed)} companies could be researched; first: {out.failed[0].reason}")
@@ -138,12 +155,57 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                     -(lead.score if lead else 0), c.id)
         return sorted(companies, key=priority)
 
+    def _sign_in_page_may_have_answered(self, session: Session, company: Company, pages: list) -> bool:
+        """The website check's reading of an outage: over plain HTTP, where a sign-in page can answer for any address, a page that does not
+        name the company proves nothing, and if sites known to be good do not prove good either, nothing was learned about this company.
+        HTTPS at the company's own domain, and a real error, are answers. No other site to ask: it counts as not known to be its site."""
+        home = pages[0]
+        if not home.url.startswith("http://") or home.status not in ("ok", "offsite_redirect"):
+            return False
+        if home.ok and page_names_company(company.name, home.title, home.meta.get("og:site_name")):
+            return False
+        if not self._known_sites_failed:
+            self._known_sites_failed = not known_sites_still_prove(self.ctx, session, [company.id])
+        return self._known_sites_failed
+
+    def _tell_of_person_found_later(self, session: Session, lead: Lead | None, company: Company, found: list[Contact | None]) -> None:
+        """A named decision-maker who is news since the first email went to another address gets a task for a person, once for the lead: first
+        seen since, or now with an address of their own (someone known with no address could not have been written to). The sequence stays with
+        the address it went to (_contact_stays) and writing to someone new is a person's decision. No contact changes and no email."""
+        if lead is None or lead.status not in OPEN_LEAD_STATUSES or lead.outreach_status == "unsubscribed" or company_opted_out(session, company):
+            return
+        sent = session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email", FollowUp.status.in_(("sent", "sending", "uncertain")),
+                                                      REACHED_PROSPECT).order_by(FollowUp.id)).scalars().all()
+        if not sent or session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task",
+                                                                 FollowUp.subject.startswith(PERSON_FOUND_TASK, autoescape=True)).limit(1)).first():
+            return
+        first_at = sent[0].sent_at or sent[0].created_at
+        written_to = {(f.to_email or "").lower() for f in sent} - {""}
+        written_ids = {f.contact_id for f in sent}
+
+        def found_later(c: Contact) -> bool:
+            return (bool(c.last_name) and c.role_category != "inbox" and c.id not in written_ids and (c.email or "").lower() not in written_to
+                    and c.consent_status != "opted_out" and not is_suppressed(session, c.email) and (bool(c.email) or c.created_at >= first_at))
+        person = next((c for c in found if c and found_later(c)), None)
+        if person is None:
+            return
+        # The name stays on the contact, which a request to erase them reaches through contact_id.
+        session.add(FollowUp(lead_id=lead.id, contact_id=person.id, company_id=company.id, channel="task", step=1, due_at=utcnow(), status="pending",
+                             blocked_reason=PERSON_FOUND_NOTE, subject=f"{PERSON_FOUND_TASK}{company.name}"[:300],
+                             body=("Re-reading this company's site or filings named a decision-maker after our first email went to a different address. The "
+                                   "sequence stays with that address and nothing goes out by itself: whether to write to the new person is a person's decision, "
+                                   "on the lead's page.")))
+        log_activity(session, "Task created: a decision-maker found after the first email", self.name, type_="task", company_id=company.id, lead_id=lead.id)
+
     def _research(self, session: Session, company: Company, out: ResearchOutput, max_pages: int) -> None:
         pages = []
         status = "done"
         if is_plausible_website(company):
             reader = SiteReader(self.ctx, company.domain, max_pages=max_pages, delay=self.settings.polite_delay)
             pages = reader.read()
+            if self._sign_in_page_may_have_answered(session, company, pages):  # no snapshot, no withdrawal, no flag, not researched: read again soon
+                out.held_back.append(company.id)
+                return
             out.pages_read += sum(1 for p in pages if p.ok)
             if not pages[0].ok:
                 status = ("blocked" if pages[0].status in BLOCKED_STATUSES
@@ -213,6 +275,7 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                 lead.contact_id = best_contact(researched).id
             elif lead.contact and lead.contact.source == WITHDRAWN:
                 lead.contact_id = None
+        self._tell_of_person_found_later(session, lead, company, contacts)
         if status == "failed" or sec_failure:
             self._note_failed_read(session, company, out, sec_failure or f"Website could not be read ({pages[0].status})")
         else:

@@ -14,6 +14,12 @@ from aime.knowledge.services import SERVICES
 _SAYS_IT_IS = r"(?:\bwe are|\bwe['\u2019]re|(?<!customer )(?<!client )(?<!partner )(?<!vendor )\bis) an? (?:[\w&]+[ ,-]+){0,3}?"
 # "A nearshore partner" and "our nearshore team" are usually someone the company uses. A firm saying it is one is caught by its own words.
 _NOT_ONE_IT_USES = r"(?<!\ba )(?<!\ban )(?<!\bour )"
+# ...but a sentence that opens by naming what it is describes the writer: "As a nearshore partner, we...", "Acme, a nearshore company...". The name
+# must be capitalized words only, or "We use Acme, a nearshore partner" would count, and "A nearshore partner builds our app" is someone it uses.
+_OPENS_SAYING_IT_IS = r"(?:^|(?<=[.!?:|\u2013\u2014-] )|(?<=\n))(?:(?:(?-i:[A-Z][\w&.'-]*) ){0,3}(?-i:[A-Z][\w&.'-]*), )?(?:as )?an? (?:[\w-]+ )?"
+_NOT_ONE_AT_WORK = r"(?! (?:will|would|can|could|may|helps?|handles?|builds?|built|runs?|manages?|supports?|does|did|is|was|works?)\b)"
+_NEARSHORE_SELLER = r"nearshore (?:partner|company|firm|agency|provider|(?:it )?(?:services|consulting|outsourcing))\b"
+_OFFSHORE_SELLER = r"offshore development (?:partner|agency|provider)\b"
 COMPETITOR_PATTERNS = [
     # What sits around these says whether the sentence is about this company: "not a dev shop", "experience at a software development company".
     r"(?<!\bnot a )(?<!\bat a )(?<!\bfrom a )(?<!\bfor )(?<!\bevery )(?<!\bwith )\bsoftware (?:development|engineering) (?:agency|firm|company|services)\b"
@@ -25,10 +31,14 @@ COMPETITOR_PATTERNS = [
     r"staff augmentation",
     r"\bnearshore (?:software|development|engineer\w*|developers?|talent|staffing|outsourcing|teams? for)\b"
     r"|\boffshore (?:software )?development (?:center|centre|company|firm|services)\b",
-    _NOT_ONE_IT_USES + r"\bnearshore (?:partner|company|firm|agency|(?:it )?(?:services|consulting))\b",
-    _NOT_ONE_IT_USES + r"\boffshore development (?:partner|agency)\b",
+    _NOT_ONE_IT_USES + r"\b" + _NEARSHORE_SELLER,
+    _NOT_ONE_IT_USES + r"\b" + _OFFSHORE_SELLER,
+    _OPENS_SAYING_IT_IS + "(?:" + _NEARSHORE_SELLER + "|" + _OFFSHORE_SELLER + ")" + _NOT_ONE_AT_WORK,
+    _NOT_ONE_IT_USES + r"(?<!\bfor )(?<!\bwith )(?<!\bmanage )(?<!\bmanaging )\bnearshore (?:(?:ai|ml|data) (?:engineer\w*|developers?|talent)|programmers?|coders?|dev(?: team)?)\b",
     _SAYS_IT_IS + r"(?:nearshore\b|offshore development\b)",
-    r"\b(?:we (?:offer|provide)|your trusted|a leading) (?:nearshore\b|offshore development\b)",
+    r"\b(?:we (?:do|offer|provide)|your trusted|a leading|(?<!\bwith )(?<!\bhired )(?<!\bneed )(?:speciali[sz]\w+|experts?) in) (?:nearshore\b|offshore development\b)(?! of\b)(?! wind\b)",
+    # "We finance offshore development of wind projects" is another industry's use of the words.
+    _NOT_ONE_IT_USES + r"(?<!\bfor )(?<!\bin )(?<!\bwith )\boffshore development for (?!wind\b|oil\b|gas\b|energy\b|renewable)\w",
     r"\b(?:applied[- ]ai|ai|ai transformation|digital transformation|automation) (?:advisory|consulting|consultancy|"
     r"implementation|transformation) (?:firm|company|agency|studio|partner)\b",
     r"\bai transformation firm\b",

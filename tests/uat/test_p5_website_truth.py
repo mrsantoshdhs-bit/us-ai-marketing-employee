@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 import aime.timeutil as tu
 from aime.agents.company_research import CompanyResearchAgent
-from aime.agents.crm import HELD_SINCE_KEY, CRMManagementAgent
+from aime.agents.crm import HELD_RUNS_AT_MOST, HELD_SINCE_KEY, CRMManagementAgent
 from aime.agents.qualification import LeadQualificationAgent
 from aime.agents.sales_workflow import SalesWorkflowAgent
 from aime.db import kv_get
@@ -379,14 +379,14 @@ def test_witnesses_that_really_changed_cannot_hold_verdicts_forever(make_ctx):
     before = tu.CLOCK_OFFSET
     seen = []
     try:
-        for hours in (0, 2, 24, 48, 61):
+        for hours in range(HELD_RUNS_AT_MOST):  # the cap is counted in runs, each an hour apart here, so a PC that was shut uses none of it
             tu.CLOCK_OFFSET = before + timedelta(hours=hours)
             verify(ctx)
             with ctx.db.session() as s:
                 seen.append(s.get(Company, cid).website_status)
     finally:
         tu.CLOCK_OFFSET = before
-    assert seen == ["verified"] * 4 + ["mismatch"]
+    assert seen == ["verified"] * (HELD_RUNS_AT_MOST - 1) + ["mismatch"]
 
 
 @pytest.mark.parametrize("handler", [portal_302, portal_inline], ids=lambda h: h.__name__)

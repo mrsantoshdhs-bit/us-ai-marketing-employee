@@ -60,8 +60,7 @@ def parse_company_feed(xml_text: str) -> list[dict]:
     The CIK is required; the name may be None because the feed's names are unreliable. The
     authoritative name always comes from the submissions API in SECEdgarSource._detail.
 
-    A body that is no Atom feed (SEC's block page, a new format) raises, so research tells a person. A feed
-    with no entries is a real answer: small state and SIC pairs are empty.
+    A body that is no Atom feed (SEC's block page, a new format) raises. A feed with no entries is a real answer.
     """
     out: list[dict] = []
     if len(xml_text) > 5_000_000:  # far larger than any EDGAR company list: refuse to parse
@@ -102,6 +101,7 @@ class SECEdgarSource(Source):
     description = "US-registered companies by SIC industry code and state, with addresses filed with the SEC."
     per_query = 10
     _lookups = _refusals = 0  # of this run's company lookups
+    unreadable_feeds = 0  # of this run's state and SIC pairs. What EDGAR answers for an empty pair was never seen, so one is no failure
     _last_refusal: int | None = None
 
     def configured(self) -> tuple[bool, str]:
@@ -120,6 +120,7 @@ class SECEdgarSource(Source):
     def fetch(self, focus: ResearchFocus) -> list[CompanyCandidate]:
         out: list[CompanyCandidate] = []
         self._lookups, self._refusals, self._last_refusal = 0, 0, None
+        self.unreadable_feeds = feeds_read = 0
         with self._client() as client:
             for industry_id in focus.industries:
                 ind = INDUSTRIES.get(industry_id)
@@ -134,8 +135,15 @@ class SECEdgarSource(Source):
                             "owner": "include", "count": BROWSE_COUNT, "output": "atom",
                         })
                         resp.raise_for_status()
+                        try:
+                            rows = parse_company_feed(resp.text)
+                        except ValueError as exc:  # one unreadable answer costs one pair, not the source's whole run
+                            self.unreadable_feeds += 1
+                            log.warning("SEC SIC %s %s skipped: %s", sic, state, exc)
+                            continue
+                        feeds_read += 1
                         accepted = inactive = 0
-                        for row in parse_company_feed(resp.text)[:MAX_LOOKUPS_PER_QUERY]:
+                        for row in rows[:MAX_LOOKUPS_PER_QUERY]:
                             if accepted >= self.per_query:
                                 break
                             cand = self._detail(client, row, industry_id)
@@ -149,6 +157,8 @@ class SECEdgarSource(Source):
                                  sic, state, accepted, inactive)
                     if len(out) >= focus.limit:
                         return out
+        if self.unreadable_feeds and not feeds_read:  # a block page or a new format: a person is told
+            raise ValueError(f"SEC's company list could not be read for any of {self.unreadable_feeds} state and industry pair(s): not an Atom feed")
         if self._lookups and self._refusals == self._lookups:  # not "no active companies": a person is told
             raise ValueError(f"SEC refused all {self._lookups} company lookup(s) (HTTP {self._last_refusal})")
         return out
