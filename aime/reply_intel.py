@@ -428,10 +428,10 @@ _SOMEONE_WILL = re.compile(r"\b(?!you\b|we\b)[\w']+('ll| will| shall| would| mig
 # What may follow the date for it to stay a date: nothing, a courtesy, a sign-off, why, or when to write again. Anything else behind it keeps the opt-out:
 # "until March and after that too", "or we will go to the FTC", "and keep it that way". So does a date no reminder can mean ("until May 2099").
 _AFTER_A_DATE_REFUSES = re.compile(r"\b(ever|never|forever|permanent\w*|for good|keep it that way|same|too|as well|also|beyond|still|won'?t|no|not|don'?t|do not|stop\w*|remov\w*|delet\w*|unsub\w*|"
-                                   r"last warning|warning|i mean it|complain\w*|ftc|fcc|regulator\w*|lawyer\w*|attorney\w*|su(e|ing)|report\w*|block\w*|spam|or)\b", re.I)
+                                   r"last warning|warning|i mean it|complain\w*|ftc|fcc|regulator\w*|lawyer\w*|attorney\w*|su(e|ing)|report (it|this|you|them)|block\w*|spam|or(?! (jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)))\b", re.I)
 _AFTER_A_DATE_FINE = re.compile(r"^\W*((please|pls|plz|thanks?( you)?|thx|cheers|regards|kind regards|best|best regards|sincerely)\b.*)?$|"
                                 r"\b(then|after that|by then|at that point|afterwards?)\b.*\b(feel free|talk|chat|try|call|write|e-?mail|reach|contact|happy|open|opens|free|fine|okay|ok|good|meet|speak|connect)\b|"
-                                r"\b(i'?m|i am|we'?re|we are|i'?ll|i will|we'?ll|we will|budget|because|since|i'?d|on leave|travell?ing|holiday\w*|vacation|busy)\b", re.I)
+                                r"\b(i'?m|i am|we'?re|we are|i'?ll|i will|we'?ll|we will|budget|because|since|i'?d|or|on leave|travell?ing|holiday\w*|vacation|busy)\b", re.I)
 _NOTICE_BEGINS = re.compile(r"\b(?:confidential\w*|privileged|disclaimer|if you (?:are|have|received|got)|if received|this (?:e-?mail|message) (?:is|may|was)|sent from my)\b", re.I)
 
 
