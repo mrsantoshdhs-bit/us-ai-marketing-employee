@@ -154,7 +154,7 @@ send_window_end = "18:00"
 send_window_timezone = "America/New_York"
 stale_lead_days = 30
 # Nothing is sent on these days: names from aime/calendar_slots.py (they work out each year's date), or "2026-12-24".
-holidays = ["new_years_day", "mlk_day", "presidents_day", "memorial_day", "juneteenth", "independence_day", "labor_day", "thanksgiving", "day_after_thanksgiving", "christmas"]
+holidays = ["new_years_day", "mlk_day", "presidents_day", "memorial_day", "juneteenth", "independence_day", "labor_day", "veterans_day", "thanksgiving", "day_after_thanksgiving", "christmas"]
 draft_reminder_days = 2  # one reminder stays open while an email has waited this long for approval
 draft_fresh_days = 14  # after this it asks to be read again; an approval this old goes back to a person
 replies_per_run = 10  # approved replies that leave in one run, the rest on the next; notes about a booked meeting go first and are not counted

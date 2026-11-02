@@ -46,7 +46,7 @@ Scheduler, the logs, Ollama and the dashboard. Nothing in production was changed
 | Decision-makers | 42 | 42 named people at 10 companies, plus 2 company inboxes; 3 withdrawn |
 | Qualified leads | 31 | 31: all grade B, scores 55–68 |
 | Competitors | 5 disqualified | 5 leads disqualified. 6 companies flagged (Stellar Science has no lead) |
-| Draft awaiting approval | `hello@meetyogi.com` | Follow-up #38 (lead #3) |
+| Draft awaiting approval | the company inbox of lead #3 | Follow-up #38 (lead #3) |
 | Switches | off | `OUTBOUND_EMAIL_ENABLED=false`, `PUBLISHING_ENABLED=false`, `REQUIRE_HUMAN_APPROVAL=true` |
 | Sent / published | 0 | 0 emails ever, 0 posts ever, 0 publish attempts |
 | Local backups | verified | Daily backup verified 14 h earlier. doctor: 21 pass, 0 errors |
@@ -134,11 +134,13 @@ servers, not yet against your real Gmail or Calendly.
   - `BACKUP_PASSPHRASE` is empty.
   - No OneDrive account is signed in (neither the Personal nor the Business account has a user folder), so
     `OneDrive\AIME-Backups` in your user folder is just a local folder.
-  - With #29, doctor reports this as "Off-machine folder leaves this PC".
+  - With #29, doctor reports this as "Off-machine folder is one that syncs".
 - **Disaster recovery:**
-  - Restore a local backup: `docs/DEPLOYMENT.md`.
-  - Restore an encrypted copy: `restore-drill --source <file> --extract-to <new folder>`, then put that
-    `aime.db` in `data/`.
+  - Restore a local backup: `python -m aime restore --from <file> --confirm` (`docs/OPERATIONS.md`).
+  - Restore an encrypted copy: the same command takes an `.aimebak` (`docs/OPERATIONS.md`), and also brings back documents
+    and holds emails. Do not copy an extracted `aime.db` into `data/` by hand: the `-wal` file a running dashboard leaves
+    can damage it. Never copy it with its `sent_journal.jsonl`: a record that came with its database cannot show that the
+    old PC sent anything after the copy.
   - Keep the `.env` values in your password manager.
 
 ## 7. Gmail / Google Workspace
@@ -214,7 +216,7 @@ now always lists every email awaiting approval.
 | Companies researched (own website) | 15 |
 | Companies with a named decision-maker | 10 |
 | Named decision-makers | 42: 19 executive, 4 technology, 4 sales, 3 operations, 2 marketing, 2 finance, 1 people, 7 other |
-| Usable business emails | 2, both company inboxes: `hello@meetyogi.com`, and `info@balerion.ai` (Balerion is a competitor) |
+| Usable business emails | 2, both company inboxes: leads #3 and #43 (lead #43 is a competitor) |
 | Named people with a published email | 0 |
 | Qualified leads | 31, all grade B |
 | Competitors excluded | 5 leads |
@@ -335,7 +337,7 @@ No simulated result is counted as live.
    - `python -m aime scheduler install-dashboard` (restarts the dashboard), and `install-watchdog`.
    - Ollama in Startup apps, or `OLLAMA_AUTOSTART=true`.
    - Your company website in `config/business.toml`.
-10. **Decide on draft #38** (`hello@meetyogi.com`).
+10. **Decide on draft #38** (the company inbox of lead #3).
 11. **Reconnect LinkedIn** before 24 Dec 2026.
 
 ## 19. Remaining risks and limitations

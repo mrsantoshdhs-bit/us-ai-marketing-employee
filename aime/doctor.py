@@ -5,24 +5,27 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DatabaseError
 
 from aime import clock_check, maintenance, send_journal
-from aime.backup import (OFFSITE_KEY_CHANGED, OFFSITE_PROBLEM, copy_opens, free_space_problem, integrity_check, newest_good_backup,
+from aime.backup import (OFFSITE_KEY_CHANGED, OFFSITE_PROBLEM, copy_opens, document_problem, free_space_problem, integrity_check, newest_good_backup,
                          offsite_copy_problem, offsite_problem_words, offsite_status, offsite_sync, verify_backup)
 from aime.context import AppContext
+from aime.crm_ops import canonical_sql
 from aime.db import kv_get
 from aime.integrations.linkedin import configured_author_urn
-from aime.models import (Company, Contact, ContentItem, FollowUp, InboundInquiry, Lead, OAuthToken,
-                         PublishAttempt, User)
+from aime.models import (Attachment, Company, Contact, ContentItem, FollowUp, InboundInquiry, Lead, OAuthToken,
+                         PublishAttempt, Suppression, User)
 from aime.monitoring import read_heartbeat
 from aime.redact import redact
 from aime.secure_store import is_protected
 from aime.timeutil import utcnow
 
 BACKUP_MAX_AGE_HOURS = 30  # the backup job runs daily; allow for a late or retried run
+DISCOVERY_QUIET_DAYS = 45  # new leads come from a monthly thread: one quiet month is normal, more is not
+OFFSITE_DRILL_MAX_AGE_DAYS = 14  # it runs weekly; two missed in a row is a finding
 
 
 def run_checks(ctx: AppContext) -> list[dict]:
@@ -42,6 +45,7 @@ def run_checks(ctx: AppContext) -> list[dict]:
         _sent_record_check(ctx, add)
         _record_checks(ctx, add)
         _setup_checks(ctx, add)
+        _discovery_check(ctx, add)
     except DatabaseError as exc:  # a damaged file: say so, and still report what needs no database
         add("Database readable", False, f"Records cannot be read, so their checks did not run: {redact(str(exc.orig))[:200]}. "
             f"{restore_advice(ctx.settings)}")
@@ -101,7 +105,9 @@ def _sent_record_check(ctx: AppContext, add) -> None:
     """A backup copied over by hand: found here before the next send run finds it."""
     try:
         with ctx.db.session() as s:
-            behind = send_journal.restore_evidence(s, send_journal.read(ctx.settings.data_dir))
+            view = send_journal.read(ctx.settings.data_dir)
+            behind = send_journal.restore_evidence(s, view)
+            lost = send_journal.not_covered(s, view)
     except OSError as exc:
         add("Database knows what was sent", False, f"The record of sent emails cannot be read just now ({type(exc).__name__}): "
             "nothing is sent while that lasts. Check that no other program holds the file.", "warning")
@@ -110,6 +116,9 @@ def _sent_record_check(ctx: AppContext, add) -> None:
         f"{len(behind)} email(s) went out that this database does not know, so it is older than the record of sent emails. "
         f"They will not be sent again, and sending is held at the next run: read Follow-ups, then {send_journal.CONFIRM}.",
         own_alert=True)
+    add("Record of sent emails covers every sent email", not lost, "it does" if not lost else
+        f"The record of sent emails has lost {len(lost)} email(s) the database knows went out, so a later restore would not know "
+        "them. Something outside this program cut the file; the next start writes them back.")
 
 
 def _record_checks(ctx: AppContext, add) -> None:
@@ -150,7 +159,9 @@ def _record_checks(ctx: AppContext, add) -> None:
             Contact, Contact.id == FollowUp.contact_id).where(FollowUp.status == "sent", *w)).scalar_one()
         # Replies to people who contacted us need their inquiry or opt-in. A response answers an email the
         # prospect sent us (kind "response"), so it must name that email. An opt-out forbids what is sent after it.
-        no_consent = sent_to(FollowUp.kind.is_(None), Contact.consent_status.not_in(("inquiry", "opt_in", "opted_out")))
+        # The owner's lift puts consent back to neutral: what went out before it had the consent of its day.
+        before_a_lift = exists(select(Suppression.id).where(canonical_sql(Suppression.value) == canonical_sql(Contact.email), Suppression.lifted_at > FollowUp.sent_at))
+        no_consent = sent_to(FollowUp.kind.is_(None), Contact.consent_status.not_in(("inquiry", "opt_in", "opted_out")), ~before_a_lift)
         unanswered = n(FollowUp, FollowUp.status == "sent", FollowUp.kind == "response", FollowUp.in_reply_to.is_(None))
         after_opt_out = sent_to(Contact.consent_status == "opted_out",
                                 Contact.consent_at.is_(None) | (FollowUp.sent_at >= Contact.consent_at))
@@ -179,11 +190,35 @@ def _record_checks(ctx: AppContext, add) -> None:
         add("OAuth tokens encrypted at rest", not plain_tokens, f"unencrypted: {', '.join(plain_tokens) or 'none'}")
 
 
+def _discovery_check(ctx: AppContext, add) -> None:
+    """New leads stop when no public source is on, or when they stop bringing companies: nothing else says so. Only the
+    live database has that duty, and SEC filings do not count, because they make no lead (the owner's decision of 1 Nov 2026)."""
+    if not ctx.settings.is_production:
+        return
+    from aime.agents.research import EVIDENCE_ONLY_SOURCES
+    from aime.sources.registry import SOURCE_CLASSES
+
+    country = str(ctx.settings.section("targeting").get("country") or "US").upper()
+    sources = [cls(ctx) for name, cls in SOURCE_CLASSES.items() if not hasattr(cls, "finish_intake") and name not in EVIDENCE_ONLY_SOURCES]
+    on = [src.name for src in sources if src.configured()[0] and (country in src.countries or "*" in src.countries)]
+    if not on:
+        add("New leads are being found", False, "No public source that finds leads is switched on, so no new companies will arrive: "
+            "see the Integrations page", "warning")
+        return
+    with ctx.db.session() as s:
+        newest = s.execute(select(func.max(Company.created_at)).where(Company.source.in_(on))).scalar_one()
+    days = (utcnow() - newest).days if newest else 0
+    add("New leads are being found", days <= DISCOVERY_QUIET_DAYS, f"the newest company from {', '.join(on)} arrived {days} day(s) ago"
+        if newest else f"none from {', '.join(on)} yet", "warning")
+
+
 def _setup_checks(ctx: AppContext, add) -> None:
     """Sign-in accounts, backups and the sales mailbox (their state is kept in the database)."""
     with ctx.db.session() as s:
         last, off = kv_get(s, "backup.last_verified"), kv_get(s, "backup.last_offsite")
         off_problem, key_changed = kv_get(s, OFFSITE_PROBLEM), kv_get(s, OFFSITE_KEY_CHANGED)
+        off_drill = kv_get(s, "backup.last_offsite_drill")
+        documents = s.execute(select(Attachment.stored_as, Attachment.size, Attachment.filename, Attachment.created_at)).all()
         users = s.execute(select(func.count(User.id)).where(User.active.is_(True))).scalar_one()
         admins = s.execute(select(func.count(User.id)).where(User.active.is_(True), User.role.in_(("admin", "super_admin")))).scalar_one()
     if not ctx.settings.dashboard_auth:
@@ -226,10 +261,17 @@ def _setup_checks(ctx: AppContext, add) -> None:
                                                 ctx.settings.backup_passphrase) is False:
         add("Older off-machine copies open", False, f"The copy {key_changed['file']} and those before it do not open with the backup "
             "passphrase in use now: it was changed, or that copy is damaged. Keep the old passphrase until those copies have aged "
-            "out, about 30 days.", "warning")
+            "out, about 30 days. Deal document copies never age out: see the deal documents check.", "warning")
+    if off_ready and off_drill:
+        days = (utcnow() - datetime.fromisoformat(off_drill)).days
+        add("Off-machine copy restored recently", days <= OFFSITE_DRILL_MAX_AGE_DAYS,
+            f"the weekly restore check of the newest copy last passed {days} day(s) ago", "warning")
+    if documents:
+        trouble = document_problem(ctx.settings, documents, utcnow())
+        add("Deal documents are safe", trouble is None, trouble or f"{len(documents)} present", "warning")
     if ctx.settings.backup_offsite_dir:
         leaves, why = offsite_sync(ctx.settings.backup_offsite_dir)
-        add("Off-machine folder leaves this PC", leaves is True, why, "warning")
+        add("Off-machine folder is one that syncs", leaves is True, why, "warning")
 
     st = ctx.settings
     from aime import mail_accounts

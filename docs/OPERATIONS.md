@@ -87,14 +87,21 @@ alert). If no slot is free it is never published late: it returns to "awaiting a
   verifies is never removed.
 - **Off-machine copy (optional):** set `BACKUP_OFFSITE_DIR` (e.g. `C:\Users\<you>\OneDrive\AIME-Backups`)
   and `BACKUP_PASSPHRASE` (12+ characters) in `.env`. Each day an encrypted bundle (database, publish and sent
-  journals, post images, config, SHA-256 manifest; never `.env`) is written there and test-decrypted;
+  journals, post images, report files, config, SHA-256 manifest; never `.env`) is written there and test-decrypted;
   the last 30 copies are kept. **Store the passphrase in your password manager: without it the copies
   cannot be read.**
+- **Deal documents** reach the same folder, encrypted the same way: one file each in its `attachments` subfolder, written
+  once and never removed, so customer documents are in OneDrive too. One a program holds is skipped with an alert and tried
+  the next day; it never fails the copy of the database. `restore` brings back those missing, checks each against the
+  database, and prints any it could not. A document stays under the passphrase of the day it was written: keep an old
+  passphrase for as long as you keep its documents.
 - Manual: `backup --label before-change` (add `--offsite` for an encrypted copy too);
   `backup-verify <file>` checks any backup.
 - An encrypted copy only counts as off-machine when the folder really leaves the PC. `doctor` checks that a
-  signed-in OneDrive account syncs `BACKUP_OFFSITE_DIR` ("Off-machine folder leaves this PC"); on 27 Oct
-  OneDrive was installed but not signed in, so the folder was local only.
+  signed-in OneDrive account syncs `BACKUP_OFFSITE_DIR` ("Off-machine folder is one that syncs"); on 27 Oct
+  OneDrive was installed but not signed in, so the folder was local only. It cannot see an upload: a paused or full OneDrive
+  looks the same, so open onedrive.com now and then and see that the newest copy is there.
+- `doctor` warns when the weekly restore check of the newest off-machine copy last passed over 14 days ago.
 - `doctor` warns while the off-machine copy is not configured (folder or passphrase missing), and when under 2 GB
   of disk is free. `doctor` also opens the newest verified backup each time, and names the next good copy if it has gone bad.
 - **Restore drill:** `restore-drill` (latest local backup) or `restore-drill --source <file.aimebak>`
@@ -132,7 +139,12 @@ trouble began; `backup-verify <file>` checks any other. Every restore loses what
 
 **A new PC** needs: the code (`git clone`) and its `.venv`, your `.env` from the password manager, an encrypted copy
 and `BACKUP_PASSPHRASE`, and the tasks (`scheduler install`, `install-watchdog`, `install-dashboard`). An encrypted copy
-holds the sent record of its own day only, so what went out after it is unknown: check the Sent folder before confirming.
+holds the sent record of its own day only, so what went out after it is unknown. On a PC without the old record (none, or
+one that has seen no email), every email approved in the copy goes to Follow-ups as "outcome unknown", and `restore` prints
+their numbers: check the Sent folder, then mark each sent or requeue. A database copied by hand with no `restore` is treated
+the same at its next start, also after `doctor` or a task has run here. Do not copy `sent_journal.jsonl` over with it: a record
+that came with its database cannot show what went out after the copy, so nothing holds. Drafts stay drafts with the same warning. An email both written and sent after the copy leaves no row at
+all: only the Sent folder shows it, so look there before confirming.
 A backup more than 14 days old, with no check-in on this PC yet, also stops the first check-in for the clock:
 `python -m aime confirm-clock`, once you have seen the clock is right.
 
@@ -183,12 +195,23 @@ resumes by itself. If the clock is right (a holiday longer than two weeks), run 
 
 ## Desktop notifications
 
-New warning and error alerts also appear as a Windows notification (`ALERT_TOAST=true`, the default).
-Alerts are always stored and shown on the dashboard; notifications are an extra nudge.
+While you are signed in, new warning and error alerts and new interested replies also appear as a Windows notification
+(`ALERT_TOAST=true`, the default). The tick runs in the background and cannot show one: the Dashboard, which runs on your
+desktop, looks for new ones once a minute (`aime/desk_notices.py`). A restart does not repeat old ones, and the first start
+shows none. After a long gap you see three and a count of the rest.
+
+Alerts are always stored and shown on the dashboard; notifications are an extra nudge. Signed out, or with the Dashboard
+stopped, they wait on the dashboard. The hourly Watchdog also notifies, about stopped ticks, a stopped dashboard and a
+nearly full disk. Nothing tells anyone off this PC: no outside service is used.
 
 Alerts about a condition (a `doctor` check, the local model, a failing or stale job) are kept as one alert
 per condition with the latest details, and close themselves once the condition clears. Dismissing one keeps
 it quiet for 24 hours. One-off notices (a slow job, a rejected import file) stay until you dismiss them.
+
+## Sign-in lockouts
+
+Five wrong passwords lock an account for 15 minutes, and the sign-in page says the same words as for any wrong password.
+Each lockout is in the **audit log** as `sign in locked`, with the username and never a password. Session length is unchanged.
 
 ## Company research and decision-makers
 
@@ -267,7 +290,7 @@ each email to a lead by thread, then by address. **Conversations** page: categor
 and what was done.
 
 - Any human reply stops the automated sequence. Interested: the lead becomes *interested*, an
-  opportunity opens (discovery), you get a notification, and a reply with your Calendly link waits in
+  opportunity opens (discovery), it shows on the dashboard (and as a desktop notification while you are signed in), and a reply with your Calendly link waits in
   Follow-ups. Not interested: the lead moves to nurture. Objections, referrals, questions and anything
   unclear go to review with a suggested reply (a question's reply needs your answer before approval).
 - Unsubscribe requests and complaints are suppressed at once; bounces mark the address bounced and
@@ -290,14 +313,27 @@ and what was done.
 - **Header pass.** Each run first reads the header lines and size of up to 500 new emails. What they show to be no sales mail goes on
   the list "Mail read as not sales" (Replies page) without its body being fetched, so unrelated mail neither delays a reply nor holds
   sending. When in doubt the body is fetched, and only those emails count against the 50 per run. Sending waits only for a failed read,
-  more than 50 possibly related emails, or more than 500 new emails: the rest come in on the next runs.
+  more than 50 possibly related emails, or more than 500 new emails: the rest come in on the next runs. The server is also asked which
+  new emails hold words of our footer, or the whole address of someone we have emailed: those are read whatever their header lines say.
+  An email naming such an address, or with a subject naming a company we emailed, reaches Replies for a person. An email naming exactly
+  one such lead's address holds that lead's emails until a person decides; a subject naming a company ties it to no lead, and newsletters and
+  robots naming an address are not kept for it. Nothing here suppresses the address named, but an opt-out naming it counts on that company's
+  record, whoever wrote it. Marking the mail reviewed does not end that count: the waiting step is then cancelled. Only reclassifying the
+  mail takes it back; a cancelled step does not return, and a person approves a new one. Still unread: an
+  opt-out from another address that names neither the address nor our subject, and the same mail in junk. If the server refuses the
+  address search, an alert says so and it is not asked again until the mailbox is renumbered; the footer search is not affected.
 - **Large email.** Over 10 MB only the first 4 MB is read: what it says counts, it goes to review, and a note says so.
-- **Junk.** The junk folder is read too, read-only, about 100 emails or 60 seconds per run, with its own position. Mail that is no sales
+- **Junk.** The junk folder is read too, read-only, about 100 emails (10 bodies) or 60 seconds per run, with its own position. While a
+  read stops short of the end, **sending waits**, because an opt-out may be behind it; after 8 such runs in a row an alert says so. A
+  connection dropped in junk holds nothing, so an opt-out behind a backlog can still lose that race. Mail that is no sales
   mail leaves no trace there. Our own thread (our Message-ID) or the sender's verified signature proves an email: it acts at once, as in
   the inbox. Anything else may be forged. **Nothing is suppressed, stopped, opened or drafted**; the lead's emails wait, an alert says so,
   and the email is on Replies with the pill "Found in junk". **Mark reviewed** releases the lead, and that sender's later junk mail does
   not hold it again unless it is in our thread. **Reclassify** applies what you choose, in full. A failure of the folder itself raises
   one warning and holds nothing; an email kept unread has an alert that stays until dismissed.
+- **Refused sign-in.** When the mailbox refuses the password it is not asked again in that run. The alert says to change the app
+  password on Mailboxes. After 3 refused ticks it is tried once an hour until the password changes or Test connection passes. Mail stays
+  held throughout, and the alert closes when every mailbox that refused signs in again.
 - **Reply-To.** Where someone asks answers to go is shown on Replies and beside the draft. Drafts still go to the sender and nothing
   goes to the other address by itself: a person decides. A draft to a no-reply sender says so.
 

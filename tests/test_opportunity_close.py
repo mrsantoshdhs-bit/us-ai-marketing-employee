@@ -80,7 +80,7 @@ def test_an_interested_reply_after_a_no_reopens_the_deal(make_ctx):
     assert (o.stage, o.probability, o.closed_at, o.lost_reason) == ("discovery", 20, None, None)
     with ctx.db.session() as s:
         assert s.execute(select(Activity).where(Activity.opportunity_id == o.id,
-                                                Activity.subject.like("%reopened by an interested reply%"))).first()
+                                                Activity.subject.like("%reopened; it was lost%"))).first()
 
 
 def test_the_pipeline_page_records_why_a_deal_was_lost_and_clears_it_when_reopened(ctx):

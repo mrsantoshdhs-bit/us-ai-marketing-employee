@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import re
+import time
 from datetime import datetime
 
 import httpx
@@ -35,11 +36,10 @@ def clean_html(raw: str) -> str:
 
 
 def pick_website(raw: str, header: str, name: str) -> str | None:
-    """Choose the company's own domain: one that matches the company name. A header link that does not match
-    the name may be a customer, investor or partner, so it is not used. Job boards, short links and media sites
-    are skipped. Unknown beats wrong."""
+    """Choose the company's own domain: one that starts or ends with the company's full name, or is a shorter
+    form of it. A link that only shares a word with the name may be a customer, investor or partner, so it is not
+    used. Job boards, short links and media sites are skipped. Unknown beats wrong."""
     compact = normalize_name(name).replace(" ", "")
-    tokens = [t for t in normalize_name(name).split() if len(t) >= 4]
     header_raw = raw.split("<p>", 1)[0]
     header_domains = {domain_from_url(html.unescape(h)) for h in _HREF_RE.findall(header_raw)}
     header_domains |= {d.lower() for d in _DOMAIN_TEXT_RE.findall(header)}
@@ -47,10 +47,9 @@ def pick_website(raw: str, header: str, name: str) -> str | None:
     for dom in candidates:
         if not dom or is_job_board(dom):
             continue
-        label = dom.split(".")[0]
-        if compact and len(compact) >= 3 and (compact in label or (len(label) >= 4 and label in compact)):
-            return dom
-        if any(t in label for t in tokens):
+        label = dom.split(".")[0].replace("-", "")
+        if compact and len(compact) >= 3 and (label.startswith(compact) or label.endswith(compact)
+                                              or (len(label) >= 4 and label in compact)):
             return dom
     return None
 
@@ -117,6 +116,7 @@ class HNHiringSource(Source):
     name = "hn_hiring"
     title = "Hacker News 'Who is hiring?' (public API)"
     description = "Monthly public thread where US and global companies describe roles and the work they need done."
+    stale_hours: float | None = None  # this run used a saved answer because the API gave none: the age of the oldest one used
 
     def configured(self) -> tuple[bool, str]:
         if not self.settings.hn_source_enabled:
@@ -132,12 +132,18 @@ class HNHiringSource(Source):
                 resp.raise_for_status()
                 hits = [h for h in resp.json().get("hits", [])
                         if (h.get("title") or "").lower().startswith("ask hn: who is hiring")]
-            self.cache_put("threads", hits)
+            if hits:  # an empty answer does not replace the last good list
+                self.cache_put("threads", hits)
         except (httpx.HTTPError, ValueError, AttributeError):  # also a 200 whose body is not the API's JSON
             hits = self.cache_get("threads", max_age_hours=24 * 40)  # API down: use the last known list
             if hits is None:
                 raise
+            self._note_saved_answer("threads")
         return hits[:count]
+
+    def _note_saved_answer(self, key: str) -> None:
+        age = (time.time() - self._cache_path(key).stat().st_mtime) / 3600
+        self.stale_hours = max(self.stale_hours or 0.0, age)
 
     def latest_thread(self) -> dict | None:
         threads = self.latest_threads(1)
@@ -156,6 +162,7 @@ class HNHiringSource(Source):
         except (httpx.HTTPError, ValueError, AttributeError):  # also a 200 whose body is not the API's JSON
             stale = self.cache_get(f"items_{story_id}", max_age_hours=24 * 40)
             if stale is not None:
+                self._note_saved_answer(f"items_{story_id}")
                 return stale
             raise
         slim = [
@@ -163,15 +170,28 @@ class HNHiringSource(Source):
             for c in children
             if c.get("type") == "comment"
         ]
-        self.cache_put(f"items_{story_id}", slim)
+        if slim:  # an empty answer does not replace the last good copy
+            self.cache_put(f"items_{story_id}", slim)
         return slim
 
     def fetch(self, focus: ResearchFocus) -> list[CompanyCandidate]:
-        out = []
-        for thread in self.latest_threads(int(self.settings.section("research").get("hn_threads", 2))):
-            for item in self.thread_items(str(thread["objectID"])):
+        """Raises when the API answers but nothing comes of it, so research tells a person. An empty newest thread is
+        not that: it was only just posted, and last month's thread still has its posts."""
+        self.stale_hours = None
+        threads = self.latest_threads(int(self.settings.section("research").get("hn_threads", 2)))
+        if not threads:
+            raise ValueError("the API lists no 'Who is hiring?' thread")
+        out, posts = [], 0
+        for thread in threads:
+            items = self.thread_items(str(thread["objectID"]))
+            posts += len(items)
+            for item in items:
                 cand = parse_post(item)
                 if cand:
                     cand.extra["thread_title"] = thread.get("title")
                     out.append(cand)
+        if not posts:
+            raise ValueError(f"none of the {len(threads)} 'Who is hiring?' thread(s) has a post")
+        if not out:
+            raise ValueError(f"none of the {posts} post(s) could be read: their format may have changed")
         return out

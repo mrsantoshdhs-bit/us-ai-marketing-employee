@@ -11,18 +11,20 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
+from aime import send_journal
 from aime.automation import audit
 from aime.config import Settings
 from aime.contact_validation import STATUS_OK
-from aime.crm_ops import is_suppressed, log_activity
+from aime.crm_ops import BOUNCED_REASON, _entries_covering, canonical_address, canonical_sql, is_suppressed, lift_time, log_activity
 from aime.dedupe import company_to_address, domain_from_email
 from aime.integrations.email_smtp import compliance_footer
 from aime.knowledge.content_bank import BRAND_LINES
-from aime.models import Activity, Company, Contact, FollowUp, InboundEmail, Lead, ResearchSnapshot, Signal
+from aime.models import Activity, Company, Contact, FollowUp, InboundEmail, Lead, Meeting, ResearchSnapshot, Signal, Suppression
 from aime.timeutil import utcnow
 
 TOPICS = {
@@ -62,13 +64,16 @@ def policy(settings: Settings) -> dict:
 # A full stop that ends an abbreviation or an initial does not end the sentence: "U.S.", "e.g.", "Inc.".
 _NOT_THE_END = re.compile(r"(?:\b[A-Za-z]\.|\b(?:etc|vs|inc|ltd|llc|corp|co|dr|mr|mrs|ms|st|jr|sr|no|approx|prev)\.)$", re.I)
 _NOT_PROSE = re.compile(r"[|$€£\"•→]|--|https?://|www\.|\S+@\S|\[email|\b\w+\.(?:com|io|ai|org|net|co)\b|\d+\s?[kK]\b|^[-*\d(]"
-                        r"|^[\w/&+ -]{1,30}:\s", re.I)
+                        r"|^[\w/&+ -]{1,30}:\s"
+                        # a pay range in words; a large figure alone is a fair thing to quote
+                        r"|\d[\d,.]*\s*(?:to|[-–—])\s*\d[\d,.]*\s*(?:usd|dollars?|eur|euros?|gbp)\b|\b(?:usd|eur|gbp)\s*\d[\d,.]*\s*(?:to|[-–—])\s*\d", re.I)
 # What a person would not quote back: how to get the job, what it pays, who may apply, the technology list.
-_JOB_TALK = re.compile(r"\b(?:salary|salaries|compensation|visa|sponsor\w*|citizen\w*|clearance|equity|bonus|benefits?|pto|401k|apply|applicants?|"
+_JOB_TALK = re.compile(r"\b(?:salary|salaries|compensation|pay|usd|per year|visas?|sponsor\w*|citizen\w*|clearance|equity|bonus|benefits?|pto|401k|apply|applicants?|"
                        r"resumes?|cv|interview\w*|hiring|hire|recruit\w*|candidates?|jobs?|roles?|positions?|openings?|full[- ]time|part[- ]time|"
-                       r"onsite|on-site|hybrid|remote|in[- ]office|relocat\w*|time ?zones?|yrs|years? of|experience|you|you'?ll|you'?re|you'?ve|"
+                       r"onsite|on-site|hybrid|remote|in[- ]office|in the office|relocat\w*|time ?zones?|yrs|years? of|experience|you|you'?ll|you'?re|you'?ve|"
                        r"your|looking for|join|must|nice to have|stack|languages?|engineers?|developers?|teammates?|colleagues?|comfortable|"
-                       r"expect to|manager|ownership|"
+                       r"expect to|manager|ownership|please|requirements?|required|preferred|background|degree|qualifications|skills?|eng|"
+                       r"react(?:js)?|typescript|javascript|node(?:js)?|python|java|golang|ruby|rails|kubernetes|sql|aws|gcp|azure|docker|terraform|"
                        r"we use|i|i'?m|i'?ve)\b", re.I)
 # What a website says that is not about the company's work: a person's career, a customer's words, a button.
 _NOT_ABOUT_THE_WORK = re.compile(r"\b(?:previously|prior to|formerly|holds? a|joined|alumni|prev\.|ph\.?d|co-?founder|founder|ceo|cto|served as|"
@@ -135,13 +140,18 @@ def gather_evidence(session: Session, lead: Lead) -> list[Evidence]:
     """What the company says about its own work comes first: its description, its website on a topic we serve, then its
     job post, which is written for engineers. Only sentences fit to quote count; none at all means a review task."""
     out: list[Evidence] = []
-    snap = session.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == lead.company_id)
-                           .order_by(ResearchSnapshot.id.desc())).scalars().first()
-    if snap:
-        quote = website_quote(snap.description) if snap.description else ""
+    snaps = session.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == lead.company_id)
+                            .order_by(ResearchSnapshot.id.desc())).scalars().all()
+    # A re-read that failed, was blocked or was sent elsewhere has no description, which says nothing about the one on record.
+    described = next((s for s in snaps if s.description), None)
+    # The topics are what the latest real read found: a newer read that dropped one, or found one, is believed over an older read.
+    read = next((s for s in snaps if s.status in ("done", "no_people")), described or (snaps[0] if snaps else None))
+    if described:
+        quote = website_quote(described.description)
         if len(quote) >= 25:
-            out.append(Evidence(quote, snap.description_url, "description", snap.description))
-        for need in snap.needs or []:
+            out.append(Evidence(quote, described.description_url, "description", described.description))
+    if read:
+        for need in read.needs or []:
             if need.get("service") == lead.primary_service and need.get("quote"):
                 quote = website_quote(need["quote"], list(need.get("keywords") or []))
                 if len(quote) >= 25:
@@ -185,7 +195,7 @@ def personal_line(ev: Evidence, company: str | None) -> str:
 def _addressed(lead: Lead, contact) -> tuple[str | None, str, str]:
     """(the company's name fit to write, or None), the greeting, and " at <company>" for a subject line."""
     record = lead.company
-    company = company_to_address(record.name, getattr(record, "website_title", None), getattr(record, "domain", None))
+    company = company_to_address(record.name, getattr(record, "website_title", None), getattr(record, "domain", None), getattr(record, "name_set_by", None))
     inbox = contact.role_category == "inbox" or not contact.first_name
     team = f"Hello {company} team," if company else "Hello team,"
     return company, team if inbox else f"Hi {contact.first_name.split()[0]},", f" at {company}" if company else ""
@@ -267,6 +277,16 @@ def draft_reengage(settings: Settings, lead: Lead, contact) -> tuple[str, str]:
     return subject, body + outreach_footer(settings, contact)
 
 
+ALREADY_CUSTOMER = "this company is already a customer, so it gets no first email"
+COMPANY_OPTED_OUT = "someone at this company opted out, so it gets no first email or follow-up unless the owner lifts it"
+MEETING_BOOKED = "a meeting with them is booked"
+
+
+def has_live_meeting(session: Session, lead: Lead) -> bool:
+    """A meeting is booked. The lead's stage may not say so: a booking on a lost deal leaves the lead as it was, for a person to decide."""
+    return session.execute(select(Meeting.id).where(Meeting.lead_id == lead.id, Meeting.status == "scheduled").limit(1)).first() is not None
+
+
 def eligible(session: Session, settings: Settings, lead: Lead, for_send: bool = False,
              reengage: bool = False, running: bool = False) -> tuple[bool, str]:
     """Can this lead's primary contact receive B2B outreach? Returns (ok, reason when not). `reengage`: the one
@@ -297,6 +317,16 @@ def eligible(session: Session, settings: Settings, lead: Lead, for_send: bool = 
         return False, "on the do-not-contact list"
     if lead.outreach_status in STOP_STATUSES and not (reengage and lead.outreach_status == "no_response"):
         return False, f"outreach stopped ({lead.outreach_status})"
+    if has_live_meeting(session, lead):
+        return False, MEETING_BOOKED
+    if running or reengage:
+        if _emailed_address_closed(session, lead):
+            return False, "an address this lead was emailed at is on the do-not-contact list"
+    elif session.execute(select(Lead.id).where(Lead.company_id.in_(_merged_family(session, company)), Lead.id != lead.id,
+                                               Lead.status == "converted").limit(1)).first():
+        return False, ALREADY_CUSTOMER
+    if company_opted_out(session, company):
+        return False, COMPANY_OPTED_OUT
     return True, ""
 
 
@@ -317,9 +347,13 @@ REACHED_PROSPECT = or_(FollowUp.delivered_to.is_(None), FollowUp.to_email.is_(No
                        func.lower(FollowUp.delivered_to) == func.lower(FollowUp.to_email))
 
 
-def record_delivery(session: Session, f: FollowUp, sent_at, delivered_to: str | None, actor: str) -> None:
+def record_delivery(session: Session, f: FollowUp, sent_at, delivered_to: str | None, actor: str, journal_dir=None) -> None:
     """What a delivered email changes, whether the send succeeded or a person confirmed it ("mark sent"): the
-    follow-up, the lead's last activity, and the outreach stage that lets the next step be drafted."""
+    follow-up, the lead's last activity, and the outreach stage that lets the next step be drafted. A person's word goes
+    into the record of sent emails too (journal_dir), so a later restore cannot bring this email back as approved; a send
+    wrote its claim before it went. Raises OSError with nothing changed if that record cannot be written."""
+    if journal_dir is not None:
+        send_journal.record_claim(journal_dir, f.id, f.to_email or (f.contact.email if f.contact else None), f.message_id)
     f.status, f.sent_at, f.blocked_reason = "sent", sent_at, None
     f.delivered_to = delivered_to or f.delivered_to
     f.delivery_status = f.delivery_status if f.delivery_status in ("bounced", "replied") else "sent"
@@ -364,6 +398,7 @@ def cancel_queued(session: Session, lead: Lead, reason: str, keep: tuple[int, ..
 
 
 ASKED_NOT_TO = "asked not to be contacted"  # how a stop that someone asked for is worded (aime.reply_intel)
+_AN_ADDRESS = re.compile(r"[^\s(]+@[^\s)]+")
 STOPPABLE_STAGES = ("drafted", "approved", "contacted")  # a page that was open while a reply came in cannot turn those into "stopped"
 
 
@@ -376,29 +411,34 @@ def _merged_family(session: Session, company: Company) -> list[int]:
     return family
 
 
-def reopen_refusal(session: Session, lead: Lead) -> str | None:
-    """Why this lead's stopped outreach may not be reopened, in words for a person, or None. The owner's rule: "Do not
-    reopen opted-out leads or restart outreach without explicit approval." What anyone at the company said counts, not only
-    the lead's own contact, on any of its leads and on a duplicate merged into it. Mail nobody has read yet may say anything,
-    so it refuses as well. Every doubt refuses."""
-    company: Company = lead.company
-    if lead.outreach_status in ("unsubscribed", "bounced"):
-        return f"its stage is {lead.outreach_status}, which stays closed"
-    if lead.outreach_status != "stopped":
-        return "only a lead whose outreach was stopped can be reopened"
-    if lead.status not in ("new", "qualified", "nurture"):
-        return f"the lead is {lead.status}"
-    if company.is_competitor:
-        return "the company is marked as a possible competitor"
+def _emailed_addresses(session: Session, lead_id: int) -> set[str]:
+    return {a for a in session.execute(select(FollowUp.to_email).where(FollowUp.lead_id == lead_id, FollowUp.channel == "email",
+                                                                       FollowUp.status.in_(("sent", "sending", "uncertain")))).scalars() if a}
+
+
+def _emailed_address_closed(session: Session, lead: Lead) -> bool:
+    """An address this lead's emails went to is on the do-not-contact list or opted out, whoever its contact is by now."""
+    sent = _emailed_addresses(session, lead.id)
+    return any(is_suppressed(session, a) for a in sent) or session.execute(select(Contact.id).where(
+        canonical_sql(Contact.email).in_({canonical_address(a) for a in sent}), Contact.consent_status == "opted_out").limit(1)).first() is not None
+
+
+@dataclass
+class _CompanyOnRecord:
+    """Who and what counts as this company, on any of its leads and on a duplicate merged into it."""
+    family: list[int]
+    leads: list[int]
+    people: list[Contact]
+    known: set[str]
+    domains: set[str]
+    mail: list
+
+
+def _on_record(session: Session, company: Company) -> _CompanyOnRecord:
     family = _merged_family(session, company)
     leads = list(session.execute(select(Lead.id).where(Lead.company_id.in_(family))).scalars())
-    people = list(session.execute(select(Contact).where(Contact.company_id.in_(family))).scalars())
-    if lead.contact is not None and lead.contact not in people:
-        people.append(lead.contact)
-    if any(p.consent_status == "opted_out" for p in people):
-        return "someone at this company has opted out"
-    if lead.contact is not None and lead.contact.email_status == "bounced":
-        return "the contact's email address bounced"
+    people = list(session.execute(select(Contact).where(or_(
+        Contact.company_id.in_(family), Contact.id.in_(select(Lead.contact_id).where(Lead.id.in_(leads)))))).scalars())
     known = {p.email.lower() for p in people if p.email}
     domains = {d.lower() for d in session.execute(select(Company.domain).where(Company.id.in_(family))).scalars() if d}
     domains |= {d.lower() for d in (domain_from_email(a) for a in known) if d}
@@ -407,14 +447,118 @@ def reopen_refusal(session: Session, lead: Lead) -> str | None:
                         # a delivery report comes from the mail server, and only its text names who it is about
                         *(and_(InboundEmail.status.in_(("new", "needs_review")), func.lower(InboundEmail.body_text).contains(a, autoescape=True))
                           for a in known))
-    mail = session.execute(select(InboundEmail.category, InboundEmail.status, InboundEmail.holds_sending, InboundEmail.from_email)
+    mail = session.execute(select(InboundEmail.category, InboundEmail.status, InboundEmail.holds_sending, InboundEmail.from_email, InboundEmail.received_at)
                            .where(about_company)).all()
+    return _CompanyOnRecord(family, leads, people, known, domains, mail)
+
+
+def _standing_entries(session: Session, person: Contact) -> list[str]:
+    """Why this person's own address, in any spelling, is on the do-not-contact list now."""
+    if not person.email:
+        return []
+    return session.execute(select(Suppression.reason).where(canonical_sql(Suppression.value) == canonical_address(person.email), Suppression.lifted_at.is_(None))).scalars().all()
+
+
+def _said_no(session: Session, person: Contact, mail: list) -> bool:
+    """This person is marked as opted out. The one mark that is not a no is a bounce (suppress() marks those as well): its status, an entry
+    that says so and no unsubscribe mail from them. Doubt counts as a no."""
+    if person.consent_status != "opted_out":
+        return False
+    entries = _standing_entries(session, person)
+    return not (person.email_status == "bounced" and entries and all(r.startswith(BOUNCED_REASON) for r in entries)
+                and not any(m.category == "unsubscribe" and canonical_address(m.from_email or "") == canonical_address(person.email) for m in mail))
+
+
+def _marked_by_a_lifted_domain(session: Session, company: Company, person: Contact, mail: list) -> bool:
+    """The mark on this person was written while a domain entry stood, and the owner has lifted every entry that covers them. lift_suppression leaves
+    such a mark on the contact, whose own gate in eligible keeps reading it, but it is not their no: a real one also leaves an entry on their address, whose
+    lift clears the mark, and their mail. A mark that does not fit, or has no time, is doubt and counts."""
+    if not person.email or person.consent_at is None:
+        return False
+    entries = session.execute(_entries_covering(person.email, company.domain)).scalars().all()
+    return (all(r.lifted_at is not None for r in entries) and any(r.kind == "domain" and r.created_at <= person.consent_at <= r.lifted_at for r in entries)
+            and not any(m.category == "unsubscribe" and canonical_address(m.from_email or "") == canonical_address(person.email) for m in mail))
+
+
+def _lift_of_a_stop(session: Session, company: Company, lead_id: int) -> datetime | None:
+    """A stop that names nobody speaks for the addresses its lead was emailed at and for its contact by now, whom company research may have moved since.
+    The newest lift among those, or None while one stands for anything but a dead address, or none was ever listed. Whoever wrote the stop has their own entry and mail, which still count."""
+    contact = session.get(Lead, lead_id).contact
+    speaks_for = _emailed_addresses(session, lead_id) | ({contact.email} if contact is not None and contact.email else set())
+    entries = [r for a in speaks_for for r in session.execute(_entries_covering(a, company.domain)).scalars()]
+    if any(r.lifted_at is None and not r.reason.startswith(BOUNCED_REASON) for r in entries):
+        return None
+    return max((r.lifted_at for r in entries if r.lifted_at), default=None)
+
+
+def _asked_not_to(session: Session, company: Company, on_record: _CompanyOnRecord, lead: Lead | None = None) -> bool:
+    """An unsubscribe mail or a stop someone asked for, newer than the owner's lift of who it speaks for. The stop names who asked when it
+    was not the lead's own contact (aime.reply_intel); one that names nobody speaks for `lead`'s contact, or else as _lift_of_a_stop says."""
+    def lifted_since(m) -> bool:
+        cut = lift_time(session, m.from_email) if m.from_email else None
+        return cut is not None and m.received_at < cut
+
+    def stop_lifted_since(a) -> bool:
+        named = _AN_ADDRESS.search(a.subject)
+        if named:
+            cut = lift_time(session, named.group())
+        elif lead is None or a.lead_id != lead.id:  # a stop on another lead speaks for that lead's people, not for `lead`'s contact
+            cut = _lift_of_a_stop(session, company, a.lead_id)
+        else:
+            cut = lift_time(session, lead.contact.email, company.domain) if lead.contact is not None and lead.contact.email else None
+        return cut is not None and a.created_at < cut
+
+    return any(m.category == "unsubscribe" and not lifted_since(m) for m in on_record.mail) or any(not stop_lifted_since(a) for a in session.execute(
+        select(Activity.subject, Activity.created_at, Activity.lead_id).where(Activity.lead_id.in_(on_record.leads), func.lower(Activity.subject).contains(ASKED_NOT_TO))))
+
+
+def _address_listed(session: Session, on_record: _CompanyOnRecord) -> bool:
+    """An address of this company stands on the do-not-contact list for anything but a dead address, whether or not anyone is on file for it."""
+    at_company = or_(canonical_sql(Suppression.value).in_({canonical_address(a) for a in on_record.known}),
+                     *(func.lower(Suppression.value).endswith("@" + d, autoescape=True) for d in on_record.domains))
+    return session.execute(select(Suppression.id).where(Suppression.lifted_at.is_(None), at_company, ~Suppression.reason.startswith(BOUNCED_REASON, autoescape=True)).limit(1)).first() is not None
+
+
+def company_opted_out(session: Session, company: Company) -> bool:
+    """Someone at this company said no, on any of its leads and on a duplicate merged into it, and the owner has not lifted it (one
+    definition, with reopen_refusal, whose own lines read the do-not-contact list). An opt-out from someone with no Contact row marks no contact, so their
+    mail, the stop and their entry count as well."""
+    on_record = _on_record(session, company)
+    return (any(_said_no(session, p, on_record.mail) and not _marked_by_a_lifted_domain(session, company, p, on_record.mail) for p in on_record.people)
+            or _asked_not_to(session, company, on_record)
+            or _address_listed(session, on_record))
+
+
+def reopen_refusal(session: Session, lead: Lead) -> str | None:
+    """Why this lead's stopped outreach may not be reopened, in words for a person, or None. The owner's rule: "Do not
+    reopen opted-out leads or restart outreach without explicit approval." What anyone at the company said counts, not only
+    the lead's own contact, on any of its leads and on a duplicate merged into it. Mail nobody has read yet may say anything,
+    so it refuses as well. Every doubt refuses. The one exception is the owner's lift (crm_ops.lift_suppression): once every entry
+    on the lead's address is lifted its closed stage may be reopened, and what was said before the lift no longer counts."""
+    company: Company = lead.company
+    address = lead.contact.email if lead.contact is not None else None
+    lifted = lift_time(session, address, company.domain) if address else None
+    if lead.outreach_status in ("unsubscribed", "bounced") and lifted is None:
+        return f"its stage is {lead.outreach_status}, which stays closed"
+    if lead.outreach_status not in ("stopped", "unsubscribed", "bounced"):
+        return "only a lead whose outreach was stopped can be reopened"
+    if lead.status not in ("new", "qualified", "nurture"):
+        return f"the lead is {lead.status}"
+    if company.is_competitor:
+        return "the company is marked as a possible competitor"
+    on_record = _on_record(session, company)
+    family, leads, known, domains, mail = on_record.family, on_record.leads, on_record.known, on_record.domains, on_record.mail
+    if lead.contact is not None and lead.contact not in on_record.people:
+        on_record.people.append(lead.contact)
+    if any(_said_no(session, p, mail) for p in on_record.people):
+        return "someone at this company has opted out"
+    if lead.contact is not None and lead.contact.email_status == "bounced":
+        return "the contact's email address bounced"
     written_to = session.execute(select(FollowUp.to_email).where(or_(FollowUp.lead_id.in_(leads), FollowUp.company_id.in_(family)))).scalars()
     addresses = known | {a for a in written_to if a} | {m.from_email for m in mail if m.from_email}
     if any(is_suppressed(session, domain=d) for d in domains) or any(is_suppressed(session, a) for a in addresses):
         return "an address or a domain of this company is on the do-not-contact list"
-    if any(m.category == "unsubscribe" for m in mail) or session.execute(select(Activity.id).where(
-            Activity.lead_id.in_(leads), func.lower(Activity.subject).contains(ASKED_NOT_TO)).limit(1)).first():
+    if _asked_not_to(session, company, on_record, lead):
         return "someone at this company asked not to be contacted"
     if any(m.category == "not_interested" for m in mail):
         return "someone at this company said they are not interested"

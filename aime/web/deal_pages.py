@@ -17,7 +17,7 @@ from sqlalchemy import or_, select
 from aime.crm_ops import log_activity
 from aime.db import take_write_lock
 from aime.assignment import owner_choices
-from aime.models import Activity, Assignment, Attachment, Opportunity, Quote, StageChange
+from aime.models import Activity, Assignment, Attachment, Lead, Opportunity, Quote, StageChange
 from aime.timeutil import utcnow
 from aime.visibility import can_see_lead
 
@@ -37,6 +37,12 @@ QUOTE_FROM = {"send": ("draft",), "accept": ("draft", "sent"), "reject": ("draft
 def safe_name(name: str) -> str:
     base = re.sub(r"[^\w .()-]", "_", (name or "file").replace("\\", "/").rsplit("/", 1)[-1]).strip(" .") or "file"
     return base[:200]
+
+
+def comma_problem(amount: str) -> bool:
+    """Whether a comma in a typed amount cannot be a thousands separator: "12,50" is not 1250. The last group has three digits, also in lakhs (1,25,000)."""
+    text = amount.replace("$", "").strip()
+    return "," in text and not re.search(r",\d{3}(?:\.\d*)?$", text)
 
 
 def register(app, C, render, back, who) -> None:
@@ -79,6 +85,8 @@ def register(app, C, render, back, who) -> None:
     @app.post("/opportunities/{opp_id}/quotes")
     def add_quote(request: Request, opp_id: int, amount: str = Form(...), currency: str = Form("USD"),
                   valid_until: str = Form(""), terms: str = Form("")):
+        if comma_problem(amount):
+            return back(f"/opportunities/{opp_id}", "A comma in the amount must be followed by three digits, as in 1,250 or 1,25,000: nothing was saved")
         try:
             value = float(amount.replace(",", "").replace("$", "").strip())
             if not 0 < value < 1e9:
@@ -97,7 +105,9 @@ def register(app, C, render, back, who) -> None:
             s.flush()
             log_activity(s, f"Quote #{q.id} drafted: {cur} {value:,.2f}", who(request), type_="quote",
                          company_id=opp.company_id, lead_id=opp.lead_id, opportunity_id=opp.id)
-        return back(f"/opportunities/{opp_id}", "Quote saved as a draft")
+            if opp.lead_id and (worked := s.get(Lead, opp.lead_id)):
+                worked.last_activity_at = utcnow()  # or the stale-lead rule parks a lead whose deal is being worked
+        return back(f"/opportunities/{opp_id}", f"Quote saved as a draft: {cur} {value:,.2f}")
 
     @app.post("/opportunities/{opp_id}/quotes/{quote_id}/{action}")
     def quote_action(request: Request, opp_id: int, quote_id: int, action: str):

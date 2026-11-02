@@ -36,7 +36,7 @@ person, and sending is a separate switch (A3). The small defects listed below do
 | Out-of-office | Exists | `OOO`; `auto_submitted` in `parse_message` | The sequence continues |
 | Drafted answers | Exists | `reply_intel.py` `suggest`; `act` creates a `FollowUp` with status `awaiting_approval` | An interested reply gets a booking-link answer. Questions and pricing get a placeholder that a person must replace (`QUESTION_PLACEHOLDER`) |
 | Calendly notices | Exists | `aime/meetings.py` `handle_calendly_email` | Bookings, reschedules and cancellations become meeting records (see A4) |
-| Notifications | Partial | `Alert` rows; `aime/notify.py` `notify_event` | Shown on the dashboard, plus a Windows desktop toast that only someone signed in at the PC sees. No email or phone alert |
+| Notifications | Partial | `Alert` rows; `aime/notify.py` `notify_event` | Shown on the dashboard. While someone is signed in, the Dashboard process also shows a desktop toast for warning and error alerts and interested replies (`aime/desk_notices.py`); the tick cannot, it runs in the background. No email or phone alert |
 | Errors and alerts | Partial | `aime/agents/base.py` `BaseAgent.run`; `aime/monitoring.py` `check_health` | A failed run is recorded. An error alert follows 2 failures in a row; a warning follows 45 minutes without a success. See defect 1 |
 | Setup check | Exists | `aime/email_check.py` `check_settings`, `check_imap`; `python -m aime email-check --connect` | Signs in and opens the folder read-only, with Gmail hints |
 | Gmail OAuth sign-in | Not built | — | App password only |

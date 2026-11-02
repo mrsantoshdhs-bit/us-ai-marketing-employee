@@ -94,7 +94,7 @@ def run_email_checks(subject: str, body: str, evidence: list[dict], contact, sup
     record = getattr(contact, "company", None)
     company = getattr(record, "name", None)
     if company and step != 3 and not subject.lower().startswith("closing the loop"):
-        written = company_to_address(company, getattr(record, "website_title", None), getattr(record, "domain", None))
+        written = company_to_address(company, getattr(record, "website_title", None), getattr(record, "domain", None), getattr(record, "name_set_by", None))
         named = bool(written) and _normalize(written) in _normalize(f"{subject}\n{main}")
         results.append(CheckResult("company name", "pass" if named else "uncertain",
                                    f"names {written}" if named else f"{company} is not named: is this the right company?"))

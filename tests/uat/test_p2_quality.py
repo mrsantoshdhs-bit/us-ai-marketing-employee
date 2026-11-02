@@ -189,7 +189,7 @@ def test_defect_footer_does_not_repeat_the_company_name(make_ctx):
 def test_defect_reply_greeting_does_not_use_a_mailbox_name_as_a_first_name(make_ctx):
     """Reproduced in this test only: production has had no replies yet. A role inbox answers under its display name."""
     ctx = make_ctx()
-    row = SimpleNamespace(from_name="Sales Team", subject="Question", new_text="Tell me more", body_text="", intent=None)
+    row = SimpleNamespace(from_name="Sales Team", subject="Question", new_text="Tell me more", body_text="", intent=None, reasons=[])
     _, body = suggest(ctx.settings, "objection", row, None)
     assert not body.startswith("Hi Sales,"), body
 

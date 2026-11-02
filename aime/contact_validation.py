@@ -21,6 +21,7 @@ import unicodedata
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from aime.crm_ops import _entries_covering, _records_an_erasure
 from aime.models import Company, Contact
 from aime.timeutil import utcnow
 
@@ -109,6 +110,12 @@ def _status(checker, domain: str, role: bool) -> str:
     return "role_address" if role else "published"
 
 
+def address_was_erased(session: Session, email: str) -> bool:
+    """The row of an erased person has no address left to find it by, so `taken` does not stop it coming back. Any other address on the
+    do-not-contact list is still attached: on file, it is what closes the lead and counts for the company (outreach.company_opted_out)."""
+    return any(_records_an_erasure(session, row) for row in session.execute(_entries_covering(email)).scalars())
+
+
 def assign_published_emails(session: Session, company: Company, published: list[dict], checker) -> dict:
     """Attach the company's published emails to its researched people or to a company-inbox contact."""
     stats = {"person_emails": 0, "inboxes": 0, "skipped": 0}
@@ -119,6 +126,9 @@ def assign_published_emails(session: Session, company: Company, published: list[
     for item in published:
         email = item["email"].strip().lower()
         if email in taken:
+            continue
+        if address_was_erased(session, email):
+            stats["skipped"] += 1
             continue
         ok, _ = usable(email)
         if not ok or not item.get("on_domain"):

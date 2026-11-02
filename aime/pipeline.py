@@ -19,14 +19,15 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
-from aime.crm_ops import log_activity
-from aime.models import Activity, FollowUp, Lead, Meeting, Opportunity
+from aime.crm_ops import is_suppressed, lead_with_the_deals, leads_replying_into, log_activity, primary_lead
+from aime.models import Activity, FollowUp, InboundEmail, Lead, Meeting, Opportunity
 from aime.monitoring import alert_once, resolve_alerts
-from aime.outreach import OPEN, policy, set_status
+from aime.outreach import OPEN, REACHED_PROSPECT, RUNNING_STAGES, policy, set_status, stop_sequence
 from aime.timeutil import utcnow
 
 DRAFTS_ALERT = "drafts:waiting"
 READ_AGAIN = "Written "  # how the note below starts, so a later run can bring its day count up to date
+NOBODY_TO_WRITE_TO = "the next step has nobody it may go to"  # in the stage's record: the sales agent opens the hand task from it
 
 
 def _task(session: Session, lead_id: int, company_id: int | None, subject: str, body: str) -> bool:
@@ -78,27 +79,50 @@ def _remind_about_drafts(session: Session, settings, actor: str) -> None:
 
 # The next steps written by the system about a reply to a person who wrote to us (aime.reply_intel, the Sales Workflow
 # Agent), and what is true once that reply went out or is gone. A next step a person typed is none of these and stays.
-ASKS_FOR_APPROVAL = ("Book a meeting: approve the suggested reply with your booking link", "Review the drafted reply and send once approved")
+WRITE_THE_ANSWER = "Write the answer they asked for: it waits in the suggested reply"
+BOOK_ASKING_TIMES = "Book a meeting: approve the suggested reply asking for times that suit them"
+ASKS_FOR_APPROVAL = ("Book a meeting: approve the suggested reply with your booking link", "Review the drafted reply and send once approved", WRITE_THE_ANSWER,
+                     BOOK_ASKING_TIMES)
 REPLY_WAITING = "Read the reply waiting on Follow-ups, then approve or reject it"
 REPLY_SENT = "Reply sent: wait for their answer, or log the meeting when one is booked"
 NO_REPLY = "No reply is waiting and the latest did not go out: decide the next step"
+READ_THEIR_REPLY = "Read their latest reply on Replies, then decide"
 
 
 def settle_next_steps(session: Session, lead_id: int | None = None) -> None:
     """A deal's next step says what is true now. Its last change stays as it was: this is no activity on the deal, and the
     stalled check below must not read it as such."""
     stmt = select(Opportunity).where(Opportunity.stage.not_in(("won", "lost")), Opportunity.lead_id.is_not(None),
-                                     Opportunity.next_step.in_((*ASKS_FOR_APPROVAL, REPLY_WAITING, REPLY_SENT, NO_REPLY)))
-    for opp in session.execute(stmt.where(Opportunity.lead_id == lead_id) if lead_id else stmt).scalars().all():
-        emails = session.execute(select(FollowUp.status).where(
-            FollowUp.lead_id == opp.lead_id, FollowUp.channel == "email",
+                                     Opportunity.next_step.in_((*ASKS_FOR_APPROVAL, REPLY_WAITING, REPLY_SENT, NO_REPLY, READ_THEIR_REPLY)))
+    if lead_id:
+        lead = session.get(Lead, lead_id)
+        deals_on = {lead_with_the_deals(session, lead).id}
+        if primary_lead(session, lead.company_id).id == lead.id:  # the answer to a reply on a merged lead is written here, and a deal may have stayed there
+            deals_on |= set(session.execute(select(Lead.id).where(Lead.company_id == lead.company_id, Lead.status == "merged")).scalars())
+        stmt = stmt.where(Opportunity.lead_id.in_(deals_on))
+    for opp in session.execute(stmt).scalars().all():
+        replying = leads_replying_into(session, opp)
+        holder = session.get(Lead, opp.lead_id)
+        if holder is not None and holder.status == "merged":  # its replies and their answers show on the company's open lead (reply_intel._open_lead_instead)
+            replying.append(primary_lead(session, holder.company_id).id)
+        emails = session.execute(select(FollowUp.status).where(  # a merged lead's replies still wait on it, and its deal is here
+            FollowUp.lead_id.in_(replying), FollowUp.channel == "email",
             or_(FollowUp.kind.is_(None), FollowUp.kind == "response")).order_by(FollowUp.id.desc())).scalars().all()
         if set(emails) & set(OPEN):
             true_now = opp.next_step if opp.next_step in ASKS_FOR_APPROVAL else REPLY_WAITING
+        elif session.execute(select(InboundEmail.id).where(InboundEmail.lead_id.in_(replying), InboundEmail.status == "needs_review").limit(1)).first():
+            true_now = READ_THEIR_REPLY  # "no reply is waiting" means our draft, and theirs is unread
         else:  # the newest decides: an earlier reply that went out says nothing about the one rejected after it
             true_now = REPLY_SENT if emails and emails[0] == "sent" else NO_REPLY
         if true_now != opp.next_step:
             session.execute(update(Opportunity).where(Opportunity.id == opp.id).values(next_step=true_now, updated_at=opp.updated_at))
+
+
+def reached_address(session: Session, lead_id: int, to: str | None) -> bool:
+    """A sent email on this lead went to this address and really reached it: a rehearsal in test mode went to our own."""
+    return bool(to) and session.execute(select(FollowUp.id).where(
+        FollowUp.lead_id == lead_id, FollowUp.channel == "email", FollowUp.status == "sent",
+        func.lower(FollowUp.to_email) == to.lower(), REACHED_PROSPECT).limit(1)).first() is not None
 
 
 def pipeline_checks(session: Session, settings, now: datetime, actor: str) -> dict:
@@ -121,6 +145,13 @@ def pipeline_checks(session: Session, settings, now: datetime, actor: str) -> di
                      "Decide: follow up, change the stage, or close as lost."):
                 stats["stalled_tasks"] += 1
 
+    for lead in session.execute(select(Lead).where(Lead.outreach_status.in_(RUNNING_STAGES))).scalars().all():
+        contact = lead.contact
+        if contact and (contact.consent_status == "opted_out" or is_suppressed(session, contact.email, lead.company.domain)):
+            # "stopped", not "unsubscribed": no opt-out was received. An answer to someone who wrote to us has its own gate at send.
+            answers = session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.kind == "response")).scalars().all()
+            stop_sequence(session, lead, "stopped", "on the do-not-contact list", actor, keep=tuple(answers))
+
     max_touches = policy(settings)["max_touches"]
     for lead in session.execute(select(Lead).where(Lead.outreach_status == "contacted")).scalars().all():
         sent = session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.kind == "outreach",
@@ -137,6 +168,8 @@ def pipeline_checks(session: Session, settings, now: datetime, actor: str) -> di
             how = "the last email; a person rejected the next one"
         elif lead.status == "nurture":
             how = "the last email; the lead was parked"
+        elif not settings.test_recipients and not reached_address(session, lead.id, lead.contact.email if lead.contact else None):
+            how = f"the last email; {NOBODY_TO_WRITE_TO}"  # its task is the sales agent's: nothing more is drafted
         else:
             continue  # the next step is still to come
         set_status(session, lead, "no_response", actor, f"no reply {wait_days} days after {how}")

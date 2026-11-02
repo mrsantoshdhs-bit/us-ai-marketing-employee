@@ -101,4 +101,4 @@ def calendly_verified(session, settings, from_email: str | None, auth_results: s
         if any(_within(d, sender_domain) or _within(sender_domain, d) for d in domains):
             return True, f"forwarded by {sender}, signed by its domain"
         return False, f"forwarded from {sender} without a passing signature for {sender_domain}"
-    return False, f"{sender or 'the sender'} is neither Calendly nor a trusted forwarder"
+    return False, f"{sender or 'the sender'} is neither Calendly nor a trusted forwarder (if this address is yours, add it to CALENDLY_FORWARDERS)"

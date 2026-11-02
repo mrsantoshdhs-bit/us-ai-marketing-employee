@@ -82,14 +82,15 @@ crm.example.com {
 - [ ] `COMPANY_POSTAL_ADDRESS` is set before enabling outbound email (CAN-SPAM)
 - [ ] LinkedIn app has the correct redirect URL; `LINKEDIN_API_VERSION` is a currently supported month
 - [ ] `PUBLISHING_ENABLED=true` only after reviewing the approval queue
-- [ ] Back up `data/aime.db` (copy the file while no tick is running, or use `sqlite3 data/aime.db ".backup backup.db"`)
+- [ ] Back up `data/aime.db` (`sqlite3 data/aime.db ".backup backup.db"`). To bring a backup back, use `python -m aime restore --from <file> --confirm` as described in `docs/OPERATIONS.md`, never a file copy
 
 ## Rollback
 
 - Stop automation: `python -m aime scheduler uninstall` (or `systemctl disable --now aime-tick.timer`).
 - Stop publishing immediately: set `PUBLISHING_ENABLED=false` (checked on every run).
 - Stop email immediately: set `OUTBOUND_EMAIL_ENABLED=false`.
-- Restore data: replace `data/aime.db` with a backup.
+- Restore data: `python -m aime restore --from <file> --confirm`, as described in `docs/OPERATIONS.md`. Do not copy
+  `aime.db` by hand: the `-wal` file a running dashboard leaves can damage it.
 - With the dashboard task installed (`scheduler install-dashboard`), turn maintenance on before stopping the
   dashboard: the task does not restart it during a maintenance window, and does after `maintenance off`.
 - Roll back the code (data kept): `python -m aime maintenance on`, stop the dashboard, then in the production

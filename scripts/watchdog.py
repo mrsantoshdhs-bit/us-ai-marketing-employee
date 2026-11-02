@@ -153,14 +153,14 @@ def free_space_problem(data_dir: Path) -> str | None:
 def main() -> int:
     from aime import maintenance
 
-    problems = check(DATA)
+    problems = [p for p in [free_space_problem(DATA)] if p]  # first: on a full disk it is the one thing that can still tell the owner
+    problems += check(DATA)
     if not maintenance.active(DATA):
         problems += [p for p in [dashboard_problem(wait_seconds=DASHBOARD_GRACE_SECONDS)] if p]
-    problems += [p for p in [free_space_problem(DATA)] if p]
     if problems:
         from aime.notify import TITLE, toast
 
-        toast(f"{TITLE}: scheduler", problems[0])  # first: on a full disk it is the one thing that can still tell the owner
+        toast(f"{TITLE}: scheduler", problems[0])
         log = DATA / "logs" / "watchdog.log"
         try:
             log.parent.mkdir(parents=True, exist_ok=True)

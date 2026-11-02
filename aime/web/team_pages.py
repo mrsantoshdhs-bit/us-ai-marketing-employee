@@ -15,8 +15,10 @@ from typing import Annotated
 from fastapi import Form, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import func, select
+from sqlalchemy.orm import object_session
 
 from aime.automation import audit
+from aime.agents.sales_workflow import SalesWorkflowAgent
 from aime.db import take_write_lock
 from aime.knowledge.services import SERVICES
 from aime.models import Activity, Assignment, CustomRole, FollowUp, Lead, Opportunity, Team, User
@@ -25,6 +27,7 @@ from aime.permissions import BUILTIN_ROLES, PERMISSIONS, all_roles, can_grant, p
 from aime.timeutil import as_aware_utc, local_tz, to_naive_utc, utcnow
 from aime.visibility import Scope
 from aime.web.auth import form_id
+from aime.workflows import mailbox_read_failed
 
 SETUP_HOURS = 48
 UNUSABLE_HASH = "setup-pending"  # matches no password: the account works once its owner sets one
@@ -60,6 +63,10 @@ def next_email(settings, lead: Lead, fups: list[FollowUp]) -> dict:
         return {"text": f"Next email: none, all {len(intervals)} emails of the sequence were sent", "at": None}
     if any(f.status == "rejected" and (f.step or 0) > last.step for f in emails):
         return {"text": "Next email: none, a person rejected the next step", "at": None}
+    # what the sales workflow asks before drafting the next one (_progress_sequences)
+    session = object_session(lead)
+    if lead.status != "qualified" and (last.kind == "outreach" or session is None or not SalesWorkflowAgent._may_answer(session, lead)):
+        return {"text": f"Next email: none while this lead is {lead.status}", "at": None}
     gap = timedelta(days=intervals[last.step] - intervals[last.step - 1])
     return {"text": f"Next email: step {last.step + 1} is drafted for approval around", "at": last.sent_at + gap}
 
@@ -324,12 +331,16 @@ def register(app, C, render, back, who) -> None:
         return back("/admin/roles", f"Saved role {role.name}")
 
     # ------------------------------------------------------------------ assigning leads and deals
-    def _assignable(s, request, owner: str) -> str | None:
-        """Why this user may not give a record to `owner`, or None. Managers assign within their team."""
+    def _assignable(s, request, owner: str, current: str | None) -> str | None:
+        """Why this user may not give a record to `owner`, or None. Managers assign within their team. Whoever holds it now may keep
+        it; a new owner must be able to work it, the rule the list of names already follows (assignment.owner_choices)."""
         if not owner:
             return None
-        if not s.execute(select(User.id).where(User.username == owner, User.active.is_(True))).first():
+        person = s.execute(select(User).where(User.username == owner, User.active.is_(True))).scalars().first()
+        if person is None:
             return f"{owner} is not an active user"
+        if owner != current and "edit_records" not in permissions_of(s, person.role):
+            return f"{owner} has a read-only role and cannot work this"
         sc = getattr(request.state, "scope", None)
         if sc is not None and not sc.all and owner not in sc.usernames:
             return f"{owner} is not in your team"
@@ -343,7 +354,7 @@ def register(app, C, render, back, who) -> None:
             take_write_lock(s)  # a double click: the second one finds the owner the first one set
             lead = s.get(Lead, lead_id) or _404()
             target = owner.strip().lower() or None
-            if why := _assignable(s, request, target or ""):
+            if why := _assignable(s, request, target or "", lead.owner):
                 return back(f"/leads/{lead_id}", why)
             note = reassign(s, to_owner=target, actor=who(request), reason=" ".join(reason.split())[:200], lead=lead)
         return back(f"/leads/{lead_id}", note)
@@ -356,7 +367,7 @@ def register(app, C, render, back, who) -> None:
             take_write_lock(s)
             opp = s.get(Opportunity, opp_id) or _404()
             target = owner.strip().lower() or None
-            if why := _assignable(s, request, target or ""):
+            if why := _assignable(s, request, target or "", opp.owner):
                 return back("/pipeline", why)
             note = reassign(s, to_owner=target, actor=who(request), reason=" ".join(reason.split())[:200], opp=opp)
         return back("/pipeline", note)
@@ -435,6 +446,7 @@ def register(app, C, render, back, who) -> None:
             own_lead = s.execute(select(Lead).where(lead_condition(own), Lead.owner == name if name else mine, working)
                                  .order_by(Lead.score.desc()).limit(1)).scalars().first()
             may_approve = not user or "approve_outbound" in user.get("perms", ())
+            mail_held = may_approve and mailbox_read_failed(settings, s)
             if replies:
                 next_step = (f"Read the {replies} repl{'ies' if replies != 1 else 'y'} waiting for a person.", "/inbox")
             elif approvals and may_approve:
@@ -455,7 +467,7 @@ def register(app, C, render, back, who) -> None:
         return render(request, "my.html", leads=lead_rows, lead_total=lead_total, unassigned=unassigned, deals=deals,
                       approvals=approvals, tasks=tasks, task_total=task_total, replies=replies, meetings=meetings,
                       meeting_total=meeting_total, report=report, view=view, has_team=has_team, handed=handed_rows,
-                      first_day=first_day, next_step=next_step,
+                      first_day=first_day, next_step=next_step, may_approve=may_approve, mail_held=mail_held,
                       who_label="you" if view == "mine" or not has_team else team_label,
                       pipeline_value=sum(d.est_value or 0 for d in deals), today=today)
 

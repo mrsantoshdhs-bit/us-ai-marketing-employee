@@ -28,6 +28,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from aime.automation import audit
 from aime.db import kv_set
 from aime.models import User
 from aime.permissions import BUILTIN_ROLES, permissions_of
@@ -158,6 +159,9 @@ def authenticate(session: Session, username: str, password: str) -> tuple[User |
         user.failed_logins = (user.failed_logins or 0) + 1
         if user.failed_logins >= MAX_FAILED:
             user.locked_until, user.failed_logins = now + timedelta(minutes=LOCK_MINUTES), 0
+            log.warning("Sign-in locked for %s minutes after %s wrong passwords: %s", LOCK_MINUTES, MAX_FAILED, user.username)
+            audit(session, "system", "sign_in_locked", user.username,
+                  f"{MAX_FAILED} wrong passwords in a row; locked for {LOCK_MINUTES} minutes")
         return None, SIGN_IN_FAILED
     if user.last_login_at:  # for "since you last signed in" on Manager Today: this sign-in is about to replace it
         kv_set(session, f"signin.previous.{user.id}", user.last_login_at.isoformat())
@@ -199,7 +203,7 @@ def current_username(request: Request) -> str:
 ADMIN_ONLY_PREFIXES = ("/jobs/", "/agents/", "/integrations/linkedin/connect", "/integrations/linkedin/disconnect",
                        "/integrations/oauth/",
                        "/inbound/process", "/automation/mode", "/automation/authorizations",
-                       "/automation/state/start", "/automation/state/resume")  # pausing and stopping: anyone signed in
+                       "/automation/state/start", "/automation/state/resume", "/suppressions/")  # pausing and stopping: anyone signed in
 
 
 # Mailbox configuration (servers, passwords, which mailbox sends): `configure_system` (Super Admin), viewing too.

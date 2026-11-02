@@ -523,7 +523,9 @@ def test_a_strangers_opt_out_under_our_subject_suppresses_only_them_until_a_pers
 def test_only_the_whole_subject_counts(make_ctx, subject):
     ctx, _, sent = contacted(make_ctx)
     deliver(ctx, mail("S <s@other.example>", subject.format(sent.subject), "See attached."))
-    assert latest_reply(ctx) is None and lead_of(ctx).outreach_status == "contacted"
+    # Our subject names the company, so a person sees this email (the owner's decision of 1 Nov 2026). Only the whole subject ties one to a lead.
+    r = latest_reply(ctx)
+    assert r.lead_id is None and not r.holds_sending and lead_of(ctx).outreach_status == "contacted"
 
 
 def test_the_subject_of_a_reply_we_sent_is_not_ours(make_ctx):

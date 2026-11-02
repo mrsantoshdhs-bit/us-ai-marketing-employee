@@ -519,7 +519,7 @@ def test_the_suppression_refusal_promises_nothing_that_does_not_exist(make_ctx):
     with ctx.db.session() as s:
         s.add(Suppression(value="acme.example", kind="domain", reason="opt-out"))
     where = _set_status(ctx, lead_id, "qualified")
-    assert "suppression list" in where and "no way to take" in where and "administrator" not in where
+    assert "suppression list" in where and "Only an administrator can take" in where
 
 
 @pytest.mark.parametrize("text, services", [

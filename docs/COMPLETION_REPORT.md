@@ -17,7 +17,7 @@ test address.
 | Scheduler | every 15 min; 297 job runs and 243 agent runs, **0 failures** |
 | Switches | `OUTBOUND_EMAIL_ENABLED=false`, `PUBLISHING_ENABLED=false`, `REQUIRE_HUMAN_APPROVAL=true` |
 | Sent / published | 0 emails ever, 0 posts ever |
-| Waiting for approval | 6 LinkedIn posts; 2 outreach drafts (to company inboxes `hello@meetyogi.com` and `info@balerion.ai`, held by quality checks: no postal address yet). Balerion AI is a competitor (see #25): reject that draft |
+| Waiting for approval | 6 LinkedIn posts; 2 outreach drafts (to the company inboxes of leads #3 and #43, held by quality checks: no postal address yet). Lead #43 is a competitor (see #25): reject that draft |
 | Ollama | `llama3.2:latest` up. It was unreachable after the 21:03 restart until started by hand; `OLLAMA_AUTOSTART=true` would avoid that |
 
 ## Open PRs (not merged; each needs your approval)

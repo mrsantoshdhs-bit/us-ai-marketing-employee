@@ -342,6 +342,7 @@ def recipient(f: FollowUp) -> str:
 def campaign_for(session: Session, f: FollowUp, mode: str, now: datetime,
                  pending: dict[int, int] | None = None) -> tuple[CampaignAuthorization | None, str]:
     """The authorization that lets `f` go out without a person, or (None, why a person must approve it)."""
+    from aime.outreach import company_opted_out
     from aime.reply_intel import QUESTION_PLACEHOLDER
 
     if f.purpose == "reengage":
@@ -391,6 +392,8 @@ def campaign_for(session: Session, f: FollowUp, mode: str, now: datetime,
         return None, f"its quality checks {qc}"
     if (f.contact and f.contact.consent_status == "opted_out") or is_suppressed(session, to):
         return None, "the recipient opted out or is suppressed"
+    if f.lead is not None and company_opted_out(session, f.lead.company):
+        return None, "someone at this company said not to contact them: a person decides"
     if later_reply_waiting(session, f):
         return None, "they wrote again after this draft, and no person has read it yet"
     for a in camps:

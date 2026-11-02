@@ -51,7 +51,7 @@ def test_discovery_verification_qualification_crm(ctx):
         emails = _count(s, FollowUp, FollowUp.channel == "email")
     assert csv_companies == 45  # past the old 40-record research cap
     assert total > 45 and competitors >= 1
-    assert leads == total - competitors and graded == leads  # competitors are flagged, never made leads
+    assert leads == total and graded == leads  # a flagged company has a lead too: scoring closes it with a reason
     assert checked == ctx.settings.section("research").get("website_checks_per_run", 25)  # polite per-run cap
     assert tasks >= 1 and emails == 0  # research leads become review tasks, never outreach
     assert not path.exists() and (ctx.settings.imports_dir / "processed").exists()

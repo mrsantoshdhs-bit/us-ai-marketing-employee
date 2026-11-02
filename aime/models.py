@@ -148,6 +148,7 @@ class Contact(Timestamped, Base):
     email_confidence: Mapped[str | None] = mapped_column(String(10))  # high: next to the name | medium: name match
     email_evidence: Mapped[str | None] = mapped_column(Text)
     email_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    erased_name_hash: Mapped[str | None] = mapped_column(String(64))  # one-way, on an erased row: research does not collect them again
 
     company: Mapped[Company | None] = relationship(back_populates="contacts")
 
@@ -423,6 +424,10 @@ class Suppression(Base):
     kind: Mapped[str] = mapped_column(String(10))  # email | domain
     reason: Mapped[str] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # The owner's lift (crm_ops.lift_suppression). The row stays for good: whatever does not read these keeps blocking.
+    lifted_at: Mapped[datetime | None] = mapped_column(DateTime)
+    lifted_by: Mapped[str | None] = mapped_column(String(80))
+    lift_reason: Mapped[str | None] = mapped_column(String(300))
 
 
 class InboundInquiry(Base):
@@ -867,8 +872,8 @@ class CampaignAuthorization(Timestamped, Base):
 
 
 class AuditEvent(Base):
-    """Who changed an operating mode, the automation state or a campaign authorization, and every email a campaign
-    approved instead of a person. Append-only."""
+    """Who changed an operating mode, the automation state or a campaign authorization, every email a campaign
+    approved instead of a person, and each sign-in lockout. Append-only."""
 
     __tablename__ = "audit_events"
 

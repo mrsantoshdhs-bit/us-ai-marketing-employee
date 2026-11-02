@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Literal
 
 import httpx
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent
-from aime.agents.qualification import NOT_A_PERSON
+from aime.agents.qualification import NOT_A_PERSON, say_moved
+from aime.competitor_guard import give_flagged_companies_a_lead, leave_to_a_person, live_lead_on_company
 from aime.crm_ops import (add_signal, ensure_lead, is_suppressed, log_activity, merge_companies, upsert_company,
                           upsert_contact, us_location_evidence)
+from aime.db import kv_get, kv_set
 from aime.dedupe import clean_company_name, domain_from_email, domain_from_url, name_from_title, normalize_name
 from aime.inbound import InboundPayload, load_inbox_files, validate_inquiry
 from aime.knowledge.geo import normalize_state
@@ -25,7 +27,7 @@ from aime.models import Activity, Alert, Company, FollowUp, InboundInquiry, Lead
 from aime.monitoring import alert_once
 from aime.sources.base import CompanyCandidate
 from aime.timeutil import utcnow
-from aime.website_check import check_website, site_answers
+from aime.website_check import OUTAGE_WITNESSES, WebsiteResult, check_website, known_sites_still_prove, page_names_company, site_answers
 
 Operation = Literal["ingest_inbound", "verify_websites", "dedupe", "hygiene", "stale", "lifecycle", "competitors"]
 RECHECK_AFTER = timedelta(days=30)
@@ -36,8 +38,13 @@ RECHECK_NO_ANSWER = timedelta(hours=20)
 RECHECK_IN_OUTAGE = timedelta(hours=1)
 OUTAGE_STOP_AFTER = 5  # this many with no answer and none with one: the rest of the run would only wait for timeouts
 OUTAGE_MIN_WITHOUT_WITNESS = 3  # no site that answered before to ask: this many silent ones are read as an outage
-OUTAGE_WITNESSES = 2
 OUTAGE_ALERT = "website_check:outage"
+# Verdicts held back because witnesses failed too wait this many runs, so witnesses that really changed cannot hold them forever. Runs, not
+# hours: a PC that was shut asked nothing, so a sign-in page days later is still its second sighting. At most one run counts per
+# RECHECK_IN_OUTAGE, as runs come every 30 minutes and more often by hand: this is about 60 hours with the PC on.
+HELD_RUNS_AT_MOST = 60
+HELD_SINCE_KEY = "website_check:held_since"
+HELD_RUNS_KEY = "website_check:held_runs"
 US_NAMES = {"us", "usa", "u.s.", "u.s.a.", "united states", "united states of america", "america"}
 
 
@@ -132,6 +139,10 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             alert_once(session, "warning", self.name, f"LinkedIn leads not synced: could not reach LinkedIn "
                        f"({type(exc).__name__})", self.settings, key="linkedin_leads:down")
             return
+        except (ValueError, KeyError, TypeError, AttributeError):  # a 200 that is not what the API documents: website inquiries still go on
+            alert_once(session, "warning", self.name, "LinkedIn leads not synced: LinkedIn's answer could not be read",
+                       self.settings, key="linkedin_leads:down")
+            return
         if not res.ran:  # switched on, but not connected or no Page chosen yet
             alert_once(session, "warning", self.name, f"LinkedIn leads not synced: {res.reason}", self.settings,
                        key="linkedin_leads:down")
@@ -213,43 +224,116 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         todo = session.execute(stmt.order_by(Company.website_checked_at.is_not(None), Company.id).limit(limit)).scalars().all()
         session.commit()  # no write lock is held during network calls
         silent: list[Company] = []
+        held: list[tuple[Company, WebsiteResult]] = []
         answered = 0
+        proven = False
         for company in todo:
             result = check_website(self.ctx, company.domain, company.name)
             out.websites_checked += 1
-            said = "no answer" if result.no_answer else result.status
+            said = "no answer" if result.no_answer and not result.error_answer else result.status
             out.website_results[said] = out.website_results.get(said, 0) + 1
-            if result.no_answer:  # judged when the run is over: only then can it tell a dead site from a lost network
+            if said == "no answer":  # judged when the run is over: only then can it tell a dead site from a lost network
                 silent.append(company)
                 if not answered and len(silent) >= OUTAGE_STOP_AFTER:
                     break
                 continue
             answered += 1
-            company.website_no_answer, company.website_retry_at = None, None
-            company.website_status = result.status
-            company.website_checked_at = utcnow()
-            company.website_title = result.title
-            better = name_from_title(result.title, company.domain)
-            if better and not company.name_set_by and " " not in company.name.strip() and "." in company.name:  # still named after its domain
-                company.validation = {**(company.validation or {}), "name": f"from the homepage title: {result.title[:120]}"}
-                company.name, company.normalized_name = better, normalize_name(better)
-            company.validation = {**(company.validation or {}), "website": result.note}
-            if result.status == "redirected" and result.final_domain and result.final_domain != company.domain:
-                owner = session.execute(select(Company).where(
-                    Company.merged_into_id.is_(None), Company.domain == result.final_domain,
-                    Company.id != company.id)).scalars().first()
-                if owner:
-                    merge_companies(session, owner, company, self.name)
-                    out.merged += 1
-                else:
-                    log_activity(session, f"Website {company.domain} redirects to {result.final_domain}; domain updated",
-                                 self.name, type_="data_quality", company_id=company.id)
-                    company.domain = result.final_domain
-                    company.website = f"https://{result.final_domain}"
-            session.commit()
+            if result.proven:
+                proven = True
+                self._record_website(session, out, company, result)
+            else:  # also judged when the run is over: a sign-in page in front of the internet answers for every site, and a merge has no undo
+                held.append((company, result))
             if self.settings.polite_delay:
                 time.sleep(self.settings.polite_delay)
-        self._judge_silent_sites(session, silent, answered)
+        judged = self._judge_held_verdicts(session, held, proven, todo)
+        errors: dict[int, WebsiteResult] = {}
+        if judged:  # nothing was learned about these sites: no write at all, they are looked at again soon
+            silent += [company for company, _ in held]
+        else:
+            for company, result in held:
+                if self._one_error_does_not_judge(company, result):
+                    silent.append(company)
+                    errors[company.id] = result
+                else:
+                    self._record_website(session, out, company, result)
+            if held and judged is None and not proven:  # the hold ran out while witnesses still fail: an outage's alert stays open, saying so
+                answered = 0
+                alert_once(session, "warning", self.name, f"Sites confirmed before still could not be confirmed after {HELD_RUNS_AT_MOST} checks, so "
+                           f"{len(held)} company website result(s) that were waiting are now recorded as they answered. If this PC is behind a "
+                           "sign-in page, some may be wrong: they are checked again once the sites answer.", self.settings, key=OUTAGE_ALERT)
+        self._judge_silent_sites(session, silent, answered, errors, judged)
+
+    def _one_error_does_not_judge(self, company: Company, result: WebsiteResult) -> bool:
+        """A site known to be good keeps its status through a first error answer, and any known status through a passing 5xx or
+        429: the answer counts after repeats, as silence does. A first check is recorded as it answered."""
+        if not result.error_answer or result.plain_redirect:
+            return False
+        return company.website_status in ("verified", "redirected") or (result.no_answer and company.website_status is not None)
+
+    def _record_website(self, session: Session, out: CRMOutput, company: Company, result: WebsiteResult) -> None:
+        company.website_no_answer, company.website_retry_at = None, None
+        company.website_checked_at = utcnow()
+        if result.plain_redirect:  # only plain HTTP answered, and it points elsewhere: a sign-in page can say that, so nothing moves
+            note = f"Plain HTTP redirects to {result.final_domain}, not confirmed over HTTPS: domain and status kept"
+            company.validation = {**(company.validation or {}), "website": note}
+            log_activity(session, f"Website {company.domain}: {note}", self.name, type_="data_quality", company_id=company.id)
+            session.commit()
+            return
+        company.website_status = result.status
+        if result.title:  # an answer with no title says nothing of the old one, which may be all that shows a competitor
+            company.website_title = result.title
+        better = name_from_title(result.title, company.domain)
+        if better and not company.name_set_by and " " not in company.name.strip() and "." in company.name:  # still named after its domain
+            company.validation = {**(company.validation or {}), "name": f"from the homepage title: {result.title[:120]}"}
+            company.name, company.normalized_name = better, normalize_name(better)
+        company.validation = {**(company.validation or {}), "website": result.note}
+        if result.status == "redirected" and result.final_domain and result.final_domain != company.domain:
+            owner = session.execute(select(Company).where(
+                Company.merged_into_id.is_(None), Company.domain == result.final_domain,
+                Company.id != company.id)).scalars().first()
+            if owner and page_names_company(company.name, owner.name):  # a merge has no undo, so the names must agree too
+                merge_companies(session, owner, company, self.name)
+                out.merged += 1
+            elif owner:
+                log_activity(session, f"Website {company.domain} redirects to {result.final_domain}, on file as a company whose name "
+                             "does not match: not merged, a person decides", self.name, type_="data_quality", company_id=company.id)
+            else:
+                log_activity(session, f"Website {company.domain} redirects to {result.final_domain}; domain updated",
+                             self.name, type_="data_quality", company_id=company.id)
+                company.domain = result.final_domain
+                company.website = f"https://{result.final_domain}"
+        session.commit()
+
+    def _judge_held_verdicts(self, session: Session, held: list[tuple[Company, WebsiteResult]], proven: bool, todo: list[Company]) -> bool | None:
+        """No site in this run was proven good: do sites known to be good still prove good? True: they do not, so a sign-in
+        page or a lost network answered, and the verdicts wait. False: they do, so the verdicts stand. None: nothing to judge,
+        or the hold has run out; the verdicts stand. Any proof ends a hold, with or without verdicts waiting: its count left
+        running would make the next sign-in page look long overdue."""
+        if not held and not proven:
+            return None
+        if proven or not self._witnesses_fail(session, held, todo):
+            if kv_get(session, HELD_SINCE_KEY):
+                kv_set(session, HELD_SINCE_KEY, None)
+                kv_set(session, HELD_RUNS_KEY, None)
+            return None if proven else False
+        now = utcnow()
+        if not kv_get(session, HELD_SINCE_KEY):
+            kv_set(session, HELD_SINCE_KEY, now.isoformat())
+        held_runs = kv_get(session, HELD_RUNS_KEY)
+        if not held_runs:  # also a hold begun before runs were counted
+            kv_set(session, HELD_RUNS_KEY, {"runs": 1, "counted_at": now.isoformat()})
+            return True
+        runs = held_runs["runs"]
+        if now - datetime.fromisoformat(held_runs["counted_at"]) >= RECHECK_IN_OUTAGE:
+            runs += 1
+            kv_set(session, HELD_RUNS_KEY, {"runs": runs, "counted_at": now.isoformat()})
+        return True if runs < HELD_RUNS_AT_MOST else None
+
+    def _witnesses_fail(self, session: Session, held: list[tuple[Company, WebsiteResult]], todo: list[Company]) -> bool:
+        """With no witness outside this run to ask, the run's own known sites are the witnesses, and this many all failing reads as an outage."""
+        known = sum(1 for company, _ in held if company.website_status in ("verified", "redirected"))
+        prove = known_sites_still_prove(self.ctx, session, [c.id for c in todo])
+        return known >= OUTAGE_MIN_WITHOUT_WITNESS if prove is None else not prove
 
     def _network_looks_down(self, session: Session, silent: list[Company], answered: int) -> bool | None:
         """Most checks got no answer: a lost network, or a run of dead sites? Sites that answered before are asked, so dead
@@ -265,11 +349,15 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             return not any(site_answers(self.ctx, domain) for domain in witnesses)
         return True if len(silent) >= OUTAGE_MIN_WITHOUT_WITNESS else None
 
-    def _judge_silent_sites(self, session: Session, silent: list[Company], answered: int) -> None:
+    def _judge_silent_sites(self, session: Session, silent: list[Company], answered: int,
+                            errors: dict[int, WebsiteResult], judged: bool | None = None) -> None:
         from aime.monitoring import alert_once, resolve_alerts
 
-        # nothing asked, nothing learned: an outage's alert stays open until something has answered
-        down = self._network_looks_down(session, silent, answered) if silent else (False if answered else None)
+        quiet = [c for c in silent if c.id not in errors]
+        if judged is not None:
+            down = judged
+        else:  # nothing asked, nothing learned: an outage's alert stays open until something has answered
+            down = self._network_looks_down(session, quiet, answered) if quiet else (False if answered else None)
         now = utcnow()
         for company in silent:
             if down:  # nothing was learned about these sites: no count, no change
@@ -279,12 +367,21 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             company.website_retry_at = now + RECHECK_NO_ANSWER
             if company.website_no_answer >= NO_ANSWERS_TO_UNREACHABLE:
                 checks = company.website_no_answer
-                company.website_status, company.website_checked_at = "unreachable", now
+                real = errors.get(company.id)
+                company.website_status, company.website_checked_at = real.status if real else "unreachable", now
                 company.website_no_answer, company.website_retry_at = None, None
-                company.validation = {**(company.validation or {}), "website": f"No answer on {checks} checks over several days"}
-                log_activity(session, f"Website {company.domain} gave no answer on {checks} checks over several days, while "
-                             "other sites answered: now marked unreachable", self.name, type_="data_quality", company_id=company.id)
-        if down:
+                company.validation = {**(company.validation or {}), "website": (
+                    f"{real.note}, on {checks} checks over several days" if real else f"No answer on {checks} checks over several days")}
+                log_activity(session, (
+                    f"Website {company.domain} answered with an error on {checks} checks over several days ({real.note}): now marked {real.status}"
+                    if real else f"Website {company.domain} gave no answer on {checks} checks over several days, while "
+                    "other sites answered: now marked unreachable"), self.name, type_="data_quality", company_id=company.id)
+        if judged:
+            alert_once(session, "warning", self.name, "The internet connection looks down, or a sign-in page is answering in place of "
+                       f"websites: none of the {len(silent)} company websites checked could be confirmed, and neither could sites "
+                       "confirmed before. Nothing changes for those companies or their leads; they are checked again soon.",
+                       self.settings, key=OUTAGE_ALERT)
+        elif down:
             alert_once(session, "warning", self.name, f"The internet connection looks down: {len(silent)} of "
                        f"{len(silent) + answered} company websites gave no answer, and neither did sites that answered before. "
                        "Nothing changes for those companies or their leads; they are checked again once the connection is back.",
@@ -298,12 +395,17 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         """Companies already on file get the check new ones get: research reads a company's site only every month, and one
         whose site could not be read never gets it. What it says about itself decides; its hiring post only when nothing
         else is on record. A person's "not a competitor" stands, and a lead already emailed keeps its sequence: only a
-        person ends that, so it is left as it is."""
+        person ends that, so it is left as it is, and so is any other lead on its company, since the flag sits on the company."""
+        give_flagged_companies_a_lead(session, self.name)
         flagged = 0
         rows = session.execute(select(Lead, Company).join(Company, Lead.company_id == Company.id).where(
             Lead.status.in_(("new", "qualified", "nurture")), or_(Lead.outreach_status.is_(None), Lead.outreach_status.in_(("drafted", "approved"))),
             Company.merged_into_id.is_(None), Company.is_competitor.is_(False), Company.competitor_cleared_by.is_(None))).all()
+        judged = set()
         for lead, company in rows:
+            if company.id in judged:
+                continue
+            judged.add(company.id)
             snap = session.execute(select(ResearchSnapshot).where(ResearchSnapshot.company_id == company.id)
                                    .order_by(ResearchSnapshot.id.desc())).scalars().first()
             description = snap.description if snap else None
@@ -312,7 +414,10 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
             else:
                 posts = session.execute(select(Signal.text).where(Signal.company_id == company.id, Signal.signal_type == "hiring"))
                 phrase = next((p for p in map(competitor_in_post, posts.scalars()) if p), None) or competitor_evidence(company.website_title)
-            if phrase:
+            live = live_lead_on_company(session, company.id) if phrase else None
+            if live:
+                leave_to_a_person(session, company, live, phrase, self.name, self.settings)
+            elif phrase:
                 company.is_competitor = True
                 flagged += 1
                 log_activity(session, f'Marked as a possible competitor: it says "{phrase}"', self.name, type_="data_quality",
@@ -438,22 +543,32 @@ class CRMManagementAgent(BaseAgent[CRMInput, CRMOutput]):
         }
 
     def _stale(self, session: Session) -> int:
+        from aime.workflows import mailbox_hold  # here, not at import time: the workflows import the agents
+
+        if mailbox_hold(self.ctx):  # a reply may be waiting in a mailbox nobody has just read: tomorrow's run judges, after a read
+            return 0
         days = int(self.settings.section("followup").get("stale_lead_days", 30))
         cutoff = utcnow() - timedelta(days=days)
-        moved = 0
+        newest_post = dict(session.execute(select(Signal.company_id, func.max(Signal.created_at)).where(Signal.signal_type == "hiring")
+                                           .group_by(Signal.company_id)).all())
+        moved: list[tuple[str, int]] = []
         for lead in session.execute(select(Lead).where(Lead.status.in_(("new", "qualified")))).scalars():
-            last = lead.last_activity_at or lead.created_at
+            last = max(filter(None, (lead.last_activity_at or lead.created_at, newest_post.get(lead.company_id))), default=None)
             if last and last < cutoff:
                 open_items = session.execute(select(FollowUp.id).where(
                     FollowUp.lead_id == lead.id,
                     FollowUp.status.in_(("pending", "awaiting_approval", "approved", "sending", "uncertain")))).first()
-                if open_items:
+                open_deal = session.execute(select(Opportunity.id).where(Opportunity.lead_id == lead.id,
+                                                                         Opportunity.stage.not_in(("won", "lost")))).first()
+                if open_items or open_deal:
                     continue
                 lead.status = "nurture"
                 log_activity(session, f"No activity for {days}+ days: moved to nurture", self.name,
                              type_="status_change", company_id=lead.company_id, lead_id=lead.id)
-                moved += 1
-        return moved
+                moved.append(("nurture", lead.id))
+        count = len(moved)
+        say_moved(session, moved, self.settings)
+        return count
 
     def _lifecycle(self, session: Session) -> int:
         updates = 0

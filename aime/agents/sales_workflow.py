@@ -29,16 +29,17 @@ from aime.agents.qualification import LeadQualificationAgent
 from aime.calendar_slots import holiday_on
 from aime.crm_ops import WROTE_AGAIN, is_suppressed, later_reply_waiting, log_activity, suppress
 from aime.email_templates import draft_reply
-from aime.integrations.email_smtp import EmailNotReady, EmailSender, compliance_problem, new_message_id
+from aime.integrations.email_smtp import EmailNotReady, EmailSender, MailServerNotReached, compliance_problem, new_message_id
 from aime.knowledge.content_bank import BRAND_LINES
 from aime.knowledge.services import service_name
-from aime.models import (Activity, Alert, Contact, FollowUp, InboundEmail, InboundInquiry, Lead, Opportunity, ResearchSnapshot,
-                         Signal)
+from aime.models import (Activity, Alert, Contact, FollowUp, InboundEmail, InboundInquiry, Lead, Meeting, MeetingProposal, Opportunity,
+                         ResearchSnapshot, Signal)
 from aime.monitoring import alert_once, resolve_alerts
-from aime.outreach import (OPEN, RUNNING_STAGES, STOP_STATUSES, TOPICS, draft_outreach, draft_reengage, eligible, gather_evidence, sent_earlier,
-                           record_delivery, set_status, stop_sequence)
+from aime.outreach import (ALREADY_CUSTOMER, COMPANY_OPTED_OUT, MEETING_BOOKED, OPEN, REACHED_PROSPECT, RUNNING_STAGES, STOP_STATUSES, TEST_SENT, TOPICS,
+                           _emailed_address_closed, _merged_family, company_opted_out, draft_outreach, draft_reengage, eligible, gather_evidence, has_live_meeting, sent_earlier, record_delivery,
+                           set_status, stop_sequence)
 from aime.people import looks_like_name
-from aime.pipeline import pipeline_checks
+from aime.pipeline import NOBODY_TO_WRITE_TO, pipeline_checks, reached_address
 from aime.outreach import policy as outreach_policy
 from aime.qc.email_checks import run_email_checks
 from aime.reply_intel import QUESTION_PLACEHOLDER, lead_on_hold
@@ -58,7 +59,12 @@ DEAD_ADDRESS = re.compile(r"\b5\.1\.(0|1|2|3|6|10)\b|no such|user unknown|unknow
                           r"no mailbox|mailbox not found|recipient not found|invalid recipient", re.I)
 SIGN_IN_ALERT = "mail:sign_in"
 MAILBOX_ALERT = "mail:not_read"
+UNREACHABLE_ALERT = "mail:unreachable"
 REVIEW_MARK = "Why no email was drafted:"  # in every review task written since this note was added
+HAND_TASK = "Decide by hand: "  # the one task for a lead whose next email has nobody it may go to; never "Review ", whose bodies get rewritten
+# no_response is how the lead of such a task gets parked, unanswered: only an answer or a stop ends the task.
+HAND_TASK_STOPS = tuple(s for s in STOP_STATUSES if s != "no_response")
+NEVER_REACHED = "this address never received the earlier emails of this sequence"
 # Between two looks in one send run a slow mail server takes seconds. More than this: the PC slept, or its clock was changed.
 SEND_RUN_JUMP = timedelta(minutes=5)
 TIME_JUMPED = ("Waiting: the PC slept or its clock changed during the send run, so the rest of that run stopped. It goes out on "
@@ -158,13 +164,14 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         return out
 
     def _draft(self, session: Session, inp: SalesInput, now: datetime, cfg: dict, out: SalesOutput) -> None:
+        self._close_tasks_of_stopped_leads(session)
         stmt = select(Lead).where(Lead.status == "qualified").order_by(Lead.score.desc(), Lead.id)
         if inp.lead_ids:
             stmt = stmt.where(Lead.id.in_(inp.lead_ids))
         budget = outreach_policy(self.settings)["drafts_per_run"]
         for lead in session.execute(stmt).scalars().all():
             contact = lead.contact
-            if contact and contact.consent_status in CONSENTED and contact.email:
+            if contact and contact.consent_status in CONSENTED and contact.email and contact.email_status != "bounced":
                 self._ensure_opportunity(session, lead, out)
                 self._ensure_sequence(session, lead, now, cfg, out)
                 continue
@@ -203,13 +210,16 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         log_activity(session, f"Opportunity created: {opp.name}", self.name, type_="opportunity",
                      company_id=lead.company_id, lead_id=lead.id, opportunity_id=opp.id)
 
-    def _may_answer(self, session: Session, lead: Lead) -> bool:
+    @staticmethod
+    def _may_answer(session: Session, lead: Lead) -> bool:
         """Whether the inquiry sequence may write to this lead: a qualified one, or a person who asked us (an
         inquiry, a LinkedIn form or event registration, with consent) whom only the score put in nurture. Never a
         disqualified lead, nor one that a person, a "not interested" reply or the stale-lead rule parked."""
+        contact = lead.contact
+        if contact and contact.email_status == "bounced":  # a bounce leaves their consent as it was, and nobody is answered at a dead address
+            return False
         if lead.status == "qualified":
             return True
-        contact = lead.contact
         if (lead.status != "nurture" or lead.source != "inbound" or not contact or not contact.email
                 or contact.consent_status not in CONSENTED):
             return False
@@ -253,6 +263,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         if session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
                                                      FollowUp.status != "cancelled")).first():
             return "exists"
+        if self._already_emailed_elsewhere(session, lead):
+            return "exists"
         if budget <= 0:
             return "budget"
         evidence = gather_evidence(session, lead)
@@ -264,6 +276,49 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             task.status, task.blocked_reason = "done", "Outreach email drafted; it is waiting for your approval"
         set_status(session, lead, "drafted", self.name)
         return "created"
+
+    def _already_emailed_elsewhere(self, session: Session, lead: Lead) -> bool:
+        """This person really got an email on another lead (a merge, or two records of one company): no second first email.
+        A person is told once on the lead's history; a task would only invite them to write by hand."""
+        contact = lead.contact
+        other = session.execute(select(FollowUp.lead_id).where(
+            FollowUp.channel == "email", FollowUp.lead_id != lead.id, FollowUp.status.in_(COUNTS_AS_SENT), REACHED_PROSPECT,
+            or_(FollowUp.contact_id == contact.id, func.lower(FollowUp.to_email) == contact.email.lower()))).scalars().first()
+        if other is None:
+            return False
+        note = f"No first email drafted: this address was already emailed on lead {other}"
+        if not session.execute(select(Activity.id).where(Activity.lead_id == lead.id, Activity.subject == note)).first():
+            log_activity(session, note, self.name, type_="outreach", company_id=lead.company_id, lead_id=lead.id)
+        return True
+
+    def _wrote_to(self, session: Session, lead: Lead, to: str | None) -> bool:
+        """Whether a follow-up to this address follows anything: an earlier email on this lead really reached it. While
+        test mode is on the email goes to our own address, so a rehearsal walks on."""
+        return bool(self.sender.settings.test_recipients) or reached_address(session, lead.id, to)
+
+    def _leave_to_a_person(self, session: Session, lead: Lead, out: SalesOutput) -> None:
+        """Once per lead, and it stays closed once closed. The stage stays as it is: nothing restarts by itself."""
+        if self._no_hand_task_because(session, lead):
+            return
+        if session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task",
+                                                     FollowUp.subject.startswith(HAND_TASK, autoescape=True))).first():
+            return
+        to = lead.contact.email if lead.contact else None
+        session.add(FollowUp(lead_id=lead.id, company_id=lead.company_id, channel="task", step=1, due_at=utcnow(), status="pending",
+                             subject=f"{HAND_TASK}{lead.company.name}"[:300],
+                             body=(f"No further email is drafted for {lead.company.name}: {to or 'its current contact'} never received the "
+                                   "earlier emails of this sequence. They went to another address, or only to our own test address "
+                                   "while test mode was on. Nothing goes out by itself: write by hand if you think it right, or leave it.")))
+        log_activity(session, "No further email drafted: the current address never received the earlier ones; a task asks a person",
+                     self.name, type_="outreach", company_id=lead.company_id, lead_id=lead.id)
+        out.tasks_created += 1
+
+    def _parked_with_nobody_to_write_to(self, session: Session, lead: Lead) -> bool:
+        """pipeline_checks parked it because its next step had nobody to go to. Nothing else looks at it until the re-engagement date, months on."""
+        if lead.status != "nurture" or lead.outreach_status != "no_response" or not eligible(session, self.settings, lead, reengage=True)[0]:
+            return False
+        return not self._wrote_to(session, lead, lead.contact.email) and session.execute(select(Activity.id).where(
+            Activity.lead_id == lead.id, Activity.type == "outreach", Activity.subject.contains(NOBODY_TO_WRITE_TO, autoescape=True)).limit(1)).first() is not None
 
     def _new_outreach(self, session: Session, lead: Lead, step: int, due: datetime, evidence_dicts: list[dict],
                       evidence, out: SalesOutput, in_reply_to: str | None = None) -> None:
@@ -303,11 +358,15 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 continue
             if session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, or_(
                     FollowUp.purpose == "reengage",
-                    and_(FollowUp.channel == "email", FollowUp.status.in_(OPEN_FOLLOWUP))))).first():
-                continue  # re-engaged once already, or an email is still open
+                    and_(FollowUp.channel == "email", FollowUp.status.in_(OPEN_FOLLOWUP)),
+                    and_(FollowUp.kind == "outreach", FollowUp.status == "rejected")))).first():
+                continue  # re-engaged once already, an email is still open, or a person said no to a step of this sequence
             if not eligible(session, self.settings, lead, reengage=True)[0]:
                 continue  # opted out, suppressed, bounced, competitor, or the address is no longer published
             contact = lead.contact
+            if not self._wrote_to(session, lead, contact.email):  # "A few months ago I wrote" would not be true
+                self._leave_to_a_person(session, lead, out)
+                continue
             subject, body = draft_reengage(self.settings, lead, contact)
             step = pol["max_touches"] + 1
             qc = run_email_checks(subject, body, [], contact, is_suppressed(session, contact.email, lead.company.domain),
@@ -323,7 +382,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
 
     def _ensure_sequence(self, session: Session, lead: Lead, now: datetime, cfg: dict, out: SalesOutput) -> None:
         exists = session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email")).first()
-        if not exists:
+        if not exists and not has_live_meeting(session, lead):
             self._new_draft(session, lead, 1, now, out)
 
     def _progress_sequences(self, session: Session, now: datetime, cfg: dict, out: SalesOutput) -> None:
@@ -336,9 +395,15 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         for lead_id, last in latest.items():
             lead = session.get(Lead, lead_id)
             outreach = last.kind == "outreach"
+            if lead is not None and outreach and self._parked_with_nobody_to_write_to(session, lead):
+                self._leave_to_a_person(session, lead, out)
+                continue
             intervals = list(pol["intervals"] if outreach else cfg.get("intervals_days", [0, 3, 7]))
             max_touches = min(pol["max_touches"] if outreach else int(cfg.get("max_touches", 3)), len(intervals))
             if lead is None or last.step >= max_touches:
+                if (lead is not None and outreach and lead.outreach_status == TEST_SENT and eligible(session, self.settings, lead, running=True)[0]
+                        and not self._wrote_to(session, lead, lead.contact.email)):  # the whole sequence was a rehearsal, and that has ended
+                    self._leave_to_a_person(session, lead, out)
                 continue
             if outreach:
                 if (lead.status != "qualified" or lead.outreach_status not in RUNNING_STAGES
@@ -347,6 +412,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             elif (not self._may_answer(session, lead) or not lead.contact
                     or lead.contact.consent_status not in CONSENTED or lead.outreach_status in STOP_STATUSES):
                 continue  # they replied, booked, unsubscribed, bounced, or a person stopped the sequence
+            elif self._deal_lost(session, lead_id):
+                continue  # "lost" is a person's word on the deal: nobody is chased after it
             has_open = session.execute(select(FollowUp.id).where(
                 FollowUp.lead_id == lead_id, FollowUp.channel == "email", FollowUp.status.in_(OPEN_FOLLOWUP))).first()
             if has_open:
@@ -359,13 +426,67 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             gap = timedelta(days=intervals[last.step] - intervals[last.step - 1])
             if last.sent_at and now >= last.sent_at + gap:
                 # The next step answers the last one we sent, so it stays in the same conversation.
-                if outreach:
+                if outreach and not self._wrote_to(session, lead, lead.contact.email):
+                    self._leave_to_a_person(session, lead, out)
+                elif outreach:
                     self._new_outreach(session, lead, last.step + 1, now, list(last.evidence or []), [], out,
                                        in_reply_to=last.message_id)
                 else:
                     self._new_draft(session, lead, last.step + 1, now, out, in_reply_to=last.message_id)
 
+    @staticmethod
+    def _deal_lost(session: Session, lead_id: int) -> bool:
+        """A lost deal and no open one."""
+        stages = set(session.execute(select(Opportunity.stage).where(Opportunity.lead_id == lead_id)).scalars())
+        return "lost" in stages and not stages - {"lost", "won"}
+
+    def _no_task_because(self, session: Session, lead: Lead, stages: tuple[str, ...] = STOP_STATUSES) -> str | None:
+        """Why a person must not be told to write to this lead by hand: it answered or said no, or it is closed for us."""
+        contact = lead.contact
+        if lead.outreach_status in stages:
+            return f"outreach stopped ({lead.outreach_status})"
+        if has_live_meeting(session, lead):
+            return MEETING_BOOKED
+        if (contact and contact.consent_status == "opted_out") or is_suppressed(session, contact.email if contact else None, lead.company.domain):
+            return "on the do-not-contact list"
+        if company_opted_out(session, lead.company):
+            return COMPANY_OPTED_OUT
+        # Asked here, not of eligible(): it answers "no published business email" or the grade first, the usual reasons for a task.
+        if session.execute(select(Lead.id).where(Lead.company_id.in_(_merged_family(session, lead.company)), Lead.id != lead.id,
+                                                 Lead.status == "converted").limit(1)).first():
+            return ALREADY_CUSTOMER
+        return None
+
+    def _no_hand_task_because(self, session: Session, lead: Lead) -> str | None:
+        """As above, and its emails went to an earlier address, which counts too."""
+        if lead.status not in ("qualified", "nurture"):
+            return f"lead is {lead.status}"
+        if _emailed_address_closed(session, lead):
+            return "an address this lead was emailed at is on the do-not-contact list"
+        return self._no_task_because(session, lead, HAND_TASK_STOPS)
+
+    def _close_tasks_of_stopped_leads(self, session: Session) -> None:
+        """Those in nurture or converted never reach the qualified loop. Cancelled with a reason, never done: a task closed
+        with no reason reads as a person's, blocks a fresh one for good and counts as work by hand."""
+        tasks = session.execute(select(FollowUp, Lead.outreach_status).join(Lead, FollowUp.lead_id == Lead.id).where(
+            FollowUp.channel == "task", FollowUp.status == "pending", FollowUp.subject.startswith("Review "),
+            Lead.outreach_status.in_(STOP_STATUSES))).all()
+        for task, stage in tasks:
+            task.status, task.blocked_reason = "cancelled", f"outreach stopped ({stage})"
+        # Any kind of lead: a hand task invites an email, so what closes the lead's address closes it too.
+        for task in session.execute(select(FollowUp).where(FollowUp.channel == "task", FollowUp.status == "pending",
+                                                           FollowUp.subject.startswith(HAND_TASK, autoescape=True))).scalars().all():
+            why = self._no_hand_task_because(session, task.lead)
+            if why:
+                task.status, task.blocked_reason = "cancelled", why[:300]
+
     def _ensure_task(self, session: Session, lead: Lead, out: SalesOutput) -> None:
+        stop = self._no_task_because(session, lead)
+        if stop:
+            for task in session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "task", FollowUp.status == "pending",
+                                                               FollowUp.subject.startswith("Review "))).scalars():
+                task.status, task.blocked_reason = "cancelled", stop[:300]
+            return
         if session.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
                                                      FollowUp.status.in_(OPEN))).first():
             return  # an email is waiting: that is the next step
@@ -376,7 +497,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 task.body = self._review_body(session, lead)  # written before the task said why: bring it up to date
         # A cancelled task (lead dropped below the threshold) does not block a fresh one if it re-qualifies, nor does one
         # the drafting closed, if that email later fell away. One a person closed stays closed.
-        if any(t.status == "pending" or not t.blocked_reason or lead.outreach_status in STOP_STATUSES for t in tasks):
+        if any(t.status == "pending" or not t.blocked_reason for t in tasks):
             return
         session.add(FollowUp(lead_id=lead.id, company_id=lead.company_id, channel="task", step=1, due_at=utcnow(),
                              status="pending", subject=f"Review {lead.company.name}", body=self._review_body(session, lead)))
@@ -472,10 +593,11 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             return
         if hold:  # read first, send second: every kind waits, including replies, and no campaign approves anything
             held = session.execute(due).scalars().all()
+            in_window = self._in_send_window(now, cfg)  # outside it nothing could leave anyway, whatever a read says
             for f in held:
-                f.blocked_reason = hold[:300]
+                f.blocked_reason = hold[:300] if in_window else LEFT_THE_WINDOW
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
-            if held:
+            if held and in_window:
                 alert_once(session, "error", self.name, f"{len(held)} approved email(s) are waiting. {hold.removeprefix('Held: ')}",
                            self.settings, key=MAILBOX_ALERT)
             return
@@ -485,6 +607,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         by_campaign = (ready and not self.settings.require_human_approval and automation.get_mode(session) != "approval"
                        and self._in_send_window(now, cfg) and bool(automation.active_authorizations(session, now)))
         if not by_campaign and not session.execute(due.limit(1)).first():
+            resolve_alerts(session, (UNREACHABLE_ALERT,), set())  # nothing is waiting on the mail server any more
             return
         from aime.scheduler.runner import FileLock  # here, not at import time: the runner imports the agents
 
@@ -567,7 +690,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         in_window = self._in_send_window(now + (utcnow() - self.run_began), cfg)
         limits = self._outreach_limits(session, now, cfg)
         replies_sent, replies_per_run = 0, int(cfg.get("replies_per_run", 10))
-        sign_in_failed = False
+        sign_in_failed = unreachable = False
         try:
             journal = send_journal.read(self.settings.data_dir)  # once: this run's own sends are other emails
         except OSError as exc:
@@ -611,11 +734,19 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 automation.return_to_person(f, f"it was approved {aged} days ago and never went out; read it again")
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
                 continue
+            if self._meeting_time_passed(session, f):  # a person decides: a note about a past call says nothing true
+                automation.return_to_person(f, "the meeting time has passed")
+                out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+                continue
             if f.kind == "response":
                 why = self._response_problem(session, f)
                 if why:
                     f.status, f.blocked_reason = "cancelled", f"Not sent: {why}"[:300]
                     out.cancelled += 1
+                    continue
+                if lead.company.is_competitor and not lead.company.competitor_cleared_by:  # flagged since approval: not lost, and not sent
+                    automation.return_to_person(f, "this company was flagged a possible competitor; a person clears the flag or rejects this")
+                    out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
                     continue
                 if later_reply_waiting(session, f):  # held, not cancelled: it goes out once a person has read what came after it
                     f.blocked_reason = WROTE_AGAIN
@@ -636,6 +767,14 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                                        running=f.step > 1 and lead.outreach_status == "contacted")
                     if ok and (lead.contact_id != f.contact_id or (f.to_email or "").lower() != (contact.email or "").lower()):
                         ok, why = False, "the contact or address changed after approval; draft a new email"
+                    if ok and (f.step > 1 or f.purpose == "reengage") and not self._wrote_to(session, lead, f.to_email):
+                        ok, why = False, NEVER_REACHED  # cancelled: approving it again would meet this same check
+                    if ok and f.step == 1:
+                        twin = self._same_address_on_another_lead(session, f)
+                        if twin:  # both may be open: the older one goes first, and a person decides about this one
+                            automation.return_to_person(f, f"this address also has an email on lead {twin}")
+                            out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+                            continue
                     if not ok and why.startswith("B2B outreach is turned off"):  # a pause, not a decision about this email
                         f.blocked_reason = f"Held: {why}; it goes out when outreach is turned on again"[:300]
                         out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
@@ -643,6 +782,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 if not ok:
                     f.status, f.blocked_reason = "cancelled", f"Not sent: {why}"[:300]
                     out.cancelled += 1
+                    if why.startswith(("grade ", "the contact or address changed")) or why == NEVER_REACHED:
+                        self._say_approval_fell_away(session, f, lead, why)
                     continue
                 wait = self._over_limit(f, limits)
                 if wait:
@@ -729,7 +870,12 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                 f.status, f.send_started_at = "approved", None
                 f.blocked_reason = redact(f"Send failed (not delivered): {exc}")[:300]
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
-                if isinstance(exc, smtplib.SMTPAuthenticationError) or (isinstance(exc, EmailNotReady) and "oauth" in str(exc).lower()):
+                if isinstance(exc, MailServerNotReached):
+                    # Each email would wait its minute for the same answer. The rest of the run still passes the gates, so an opt-out still cancels.
+                    unreachable, ready, reason = True, False, f.blocked_reason
+                    alert_once(session, "warning", self.name, "The mail server could not be reached, so approved emails are waiting; nothing "
+                               f"was delivered and they go out on a later run: {f.blocked_reason}"[:500], self.settings, key=UNREACHABLE_ALERT)
+                elif isinstance(exc, smtplib.SMTPAuthenticationError) or (isinstance(exc, EmailNotReady) and "oauth" in str(exc).lower()):
                     # Every other email would fail the same way, and repeated refused sign-ins can lock the mailbox.
                     sign_in_failed, ready, reason = True, False, f.blocked_reason
                     alert_once(session, "error", self.name, "The sales mailbox refused the sign-in, so approved emails are "
@@ -761,7 +907,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             if f.kind == "outreach":
                 limits["sent_today"] += 1
                 limits["run"] += 1
-                domain = (f.to_email or "").split("@")[-1]
+                domain = (f.to_email or "").split("@")[-1].lower()
                 limits["domains"][domain] = limits["domains"].get(domain, 0) + 1
             out.emails_sent += 1
             log_activity(session, f"Email sent: {f.subject}", self.name, type_="email_sent", body=f.body,
@@ -769,6 +915,42 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             session.commit()
         if out.emails_sent and not sign_in_failed:
             resolve_alerts(session, (SIGN_IN_ALERT,), set())
+        if out.emails_sent and not unreachable:
+            resolve_alerts(session, (UNREACHABLE_ALERT,), set())
+
+    def _say_approval_fell_away(self, session: Session, f: FollowUp, lead: Lead, why: str) -> None:
+        """The gate is right to stop it, but a person approved this email and a cancelled one leaves the open list."""
+        said = f"Follow-up #{f.id} on lead {lead.id} ({lead.company.name}) was approved and not sent: {why}. The lead's grade is now {lead.grade or 'none'}."
+        alert_once(session, "warning", self.name, said[:500], self.settings)
+        log_activity(session, said[:300], self.name, type_="outreach", company_id=lead.company_id, lead_id=lead.id)
+
+    @staticmethod
+    def _same_address_on_another_lead(session: Session, f: FollowUp) -> int | None:
+        """Another lead's outreach that reached this address, may have, or is open and older than this one. A rehearsal went to our own."""
+        return session.execute(select(FollowUp.lead_id).where(
+            FollowUp.kind == "outreach", FollowUp.lead_id != f.lead_id, func.lower(FollowUp.to_email) == (f.to_email or "").lower(),
+            or_(and_(FollowUp.status.in_(COUNTS_AS_SENT), REACHED_PROSPECT), and_(FollowUp.status.in_(OPEN_FOLLOWUP), FollowUp.id < f.id)))).scalars().first()
+
+    @staticmethod
+    def _meeting_time_passed(session: Session, f: FollowUp) -> bool:
+        """A note about a meeting whose time has gone with no later one on the lead, or an offer whose times have all gone.
+        A cancelled meeting is no later meeting, except to its own cancel note. Read from the real clock: `now` may be a run's own time."""
+        if f.purpose in automation.MEETING_NOTES:
+            meetings = session.execute(select(Meeting.starts_at, Meeting.status).where(Meeting.lead_id == f.lead_id)).all()
+            times = [m.starts_at for m in meetings]
+            later = [m.starts_at for m in meetings if f.purpose == "meeting_cancel" or m.status != "cancelled"]
+            offered = [datetime.fromisoformat(slot) for p in session.execute(select(MeetingProposal).where(
+                MeetingProposal.lead_id == f.lead_id, MeetingProposal.status.in_(("draft", "offered")))).scalars() for slot in p.slots or []]
+            times += offered
+            later += offered
+        elif f.purpose == "meeting_offer":
+            times = [datetime.fromisoformat(slot) for p in session.execute(select(MeetingProposal).where(
+                MeetingProposal.offer_followup_id == f.id)).scalars() for slot in p.slots or []]
+            later = times
+        else:
+            return False
+        clock = as_aware_utc(utcnow())
+        return any(as_aware_utc(t) <= clock for t in times) and not any(as_aware_utc(t) > clock for t in later)
 
     def _recipient_refused(self, session: Session, f: FollowUp, exc: smtplib.SMTPRecipientsRefused, out: SalesOutput) -> None:
         """The mail server said no at RCPT TO. Temporary (4xx): tried again later. Permanent (5xx): asking again every run
@@ -787,7 +969,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             f.blocked_reason = f"Not sent: the mail server says this address does not exist ({said})"[:300]
             for c in session.execute(select(Contact).where(func.lower(Contact.email) == to.lower())).scalars():
                 c.email_status = "bounced"
-            suppress(session, to, "Bounced (refused by the mail server)")
+            suppress(session, to, "Bounced (refused by the mail server)", bounce=True)
             if f.lead and f.lead.outreach_status:
                 stop_sequence(session, f.lead, "bounced", "Email refused: the address does not exist", self.name)
             out.cancelled += 1
@@ -808,7 +990,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             func.coalesce(FollowUp.sent_at, FollowUp.send_started_at) >= start)).scalars().all()
         domains: dict[str, int] = {}
         for addr in sent:
-            d = (addr or "").split("@")[-1]
+            d = (addr or "").split("@")[-1].lower()
             domains[d] = domains.get(d, 0) + 1
         mailbox_sent = session.execute(select(func.count(FollowUp.id)).where(
             FollowUp.channel == "email", FollowUp.status.in_(COUNTS_AS_SENT),
@@ -824,7 +1006,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             return f"Daily outreach limit reached ({limits['daily']}); it will go out on the next business day"
         if limits["run"] >= limits["per_run"]:
             return f"Sending at most {limits['per_run']} outreach emails per run; it will go out on the next run"
-        domain = (f.to_email or "").split("@")[-1]
+        domain = (f.to_email or "").split("@")[-1].lower()
         if limits["domains"].get(domain, 0) >= limits["per_domain"]:
             return f"Already emailed {domain} today (limit {limits['per_domain']}); it will go out tomorrow"
         return None

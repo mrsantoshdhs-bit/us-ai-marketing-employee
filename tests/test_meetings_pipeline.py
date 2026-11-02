@@ -48,7 +48,7 @@ def test_booking_and_cancellation_move_the_pipeline(make_ctx):
         m = s.execute(select(Meeting)).scalar_one()
         assert m.status == "scheduled" and m.lead_id and m.source == "calendly_email" and not m.is_simulated
         opp = s.get(Opportunity, m.opportunity_id)
-        assert opp.stage == "discovery" and opp.probability == 30 and "Meeting 2026-10-29" in opp.next_step
+        assert opp.stage == "discovery" and opp.probability == 30 and "Meeting Thu Oct 29, 10:00 AM EDT" in opp.next_step
         assert s.execute(select(Alert).where(Alert.source == "meetings")).scalars().first()
     assert lead_of(ctx).outreach_status == "meeting"
     FakeIMAP.messages[2] = calendly(BOOKED_SUBJECT.replace("New Event", "Canceled"), BOOKED_BODY)
