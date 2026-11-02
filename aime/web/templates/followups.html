@@ -34,6 +34,7 @@
   {% endif %}
   {% set card = cards.get(f.id) or {} %}
   {% if card.reply %}<div class="small" style="margin-top:8px"><b>What they wrote</b> <span class="muted">{{ card.reply.at|local }}</span><div class="post small">{{ card.reply.text }}</div></div>{% endif %}
+  {% if card.company_said_no %}<div class="small" style="margin-top:6px"><span class="pill warn">{{ card.company_said_no }}</span></div>{% endif %}
   {% if card.away %}<div class="small" style="margin-top:6px"><span class="pill warn">They replied that they are away</span></div>{% endif %}
   {% if card.emailed %}<div class="small" style="margin-top:6px"><span class="pill warn">This address was already emailed on {{ card.emailed.at|local(None, '%Y-%m-%d') }} (lead #{{ card.emailed.lead_id }})</span></div>{% endif %}
   {% if card.ai_seller %}<div class="small" style="margin-top:6px"><span class="pill warn">{{ card.ai_seller }}</span></div>{% endif %}
@@ -54,6 +55,7 @@
     <textarea name="body">{{ f.body }}</textarea>
     {% if can_approve and f.quality and f.quality.qc and f.quality.qc.status in ['held', 'failed'] %}
     <label class="small"><input type="checkbox" name="qc_override" value="yes"> I reviewed the quality findings</label>{% endif %}
+    {% if can_approve and card.company_said_no %}<label class="small"><input type="checkbox" name="company_said_no" value="yes"> I read that someone at this company said not to contact them, and this should still go</label>{% endif %}
     <div class="row-actions" style="margin-top:8px"><button {{ 'disabled' if not can_approve or later.get(f.id) }} {% if not can_approve %}title="A Sales Manager approves what goes out to customers"{% elif later.get(f.id) %}title="They wrote again after this draft: read it on Replies first"{% endif %}>Approve{% if not email_ready %} (send when enabled){% endif %}</button>
       {% if f.kind == 'outreach' %}<button class="secondary" formaction="/followups/{{ f.id }}/save">Save changes</button>{% endif %}
       {% if can_reject %}<button class="danger" formaction="/followups/{{ f.id }}/reject">Reject</button>{% endif %}</div>

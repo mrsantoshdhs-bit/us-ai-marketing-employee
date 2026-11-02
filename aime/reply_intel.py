@@ -89,9 +89,9 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
         r"(stop|quit|cease) (all |the |these |those |your )?(e-?mails?|messages?|spam)|(stop|quit|cease) (these|writing)\b|"
         r"no (more|further) (e-?mails?|messages?|contact|mail)|no more of (these|this|your)\b|"
         r"(do not|don'?t|never)( ever)? (e-?mail|contact|message|write|reach out|send)( to)?( (me|us))? (again|any ?more)|"
-        r"please (remove|delete)(?=\W*($|[.!]))|"
+        r"please (remove|delete|go away)(?=\W*($|[.!]))|"
         rf"(remove|delete|take)( off| from) {_LIST}|"
-        r"(remove|delete|erase) \S+ from (your|all) (records?|systems?)|"
+        r"(remove|delete|erase) (\S+|(this|my|that|our) (e-?mail )?address) from (your|all) (records?|systems?)|"
         r"(do not|don'?t|never)( ever)? (e-?mail|contact|message|write to|reach out to) (me|us)|do not (email|contact)(?! (the|this|that|a|an|our|my)\b)|"
         r"(do not|don'?t|never)( ever)? send(ing)? (me |us )?(any |anymore )?((more|further|other) )?(e-?mails?|messages?|mail)|"
         # Only when nothing follows: "don't send me more info" and "don't send more details, just call me" stop nothing.
@@ -147,13 +147,13 @@ ELSEWHERE_OPT_OUT = re.compile(
     rf"\b(elim[ií]n(en|e|a)me|elim[ií]nenos|eliminarme {_ES_LIST}|qu[ií]t(en|e|a)me {_ES_LIST}|s[aá]qu(en|e|a)me {_ES_LIST}|"
     rf"b[oó]rr(en|e|a)me {_ES_LIST}|darme de baja|darnos de baja|d[eé]n(me)? de baja|"
     rf"no me (env[ií]en|mand(en|e)|escriban|contacten) m[aá]s|no me (env[ií]en|mand(en|e)) {_ES_MAIL}|"
-    rf"(?<!si )no me (escriban|contacten)|no quiero recibir (m[aá]s )?((sus|tus|estos|esos|vuestros) )?{_ES_MAIL}|"
+    rf"(?<!si )no me (escriban|contacten?)|no quiero recibir (m[aá]s )?((sus|tus|estos|esos|vuestros) )?{_ES_MAIL}|"
     rf"aus (ihrem|eurem|dem|ihrer|der) (verteiler|liste|e-?mail-?verteiler)|tragen sie (mich|uns) aus|"
     rf"(mich|uns)\b[^.?!]{{0,40}}\baustragen|keine weiteren? {_DE_MAIL}(?! \w* ?(erhalten|bekommen))|keine {_DE_MAIL} mehr|bitte keine {_DE_MAIL}|"
     rf"(vom newsletter|von (ihrem|dem|der|ihrer) \w+|aus (ihrem|dem) \w+) abmelden|(bitte|m[oö]chte|will)\b[^.?!]{{0,40}}\babbestellen|"
-    r"(mich|uns)\b[^.?!]{0,30}\bnicht mehr (kontaktieren|anschreiben|schreiben|anrufen)|nicht mehr (kontaktieren|anschreiben)|l[oö]schen sie (mich|meine)|"
+    r"entfernen sie (mich|uns)|(mich|uns)\b[^.?!]{0,30}\bnicht mehr (kontaktieren|anschreiben|schreiben|anrufen)|nicht mehr (kontaktieren|anschreiben)|l[oö]schen sie (mich|meine)|"
     rf"me (retirer|supprimer) {_FR_LIST}|me d[eé]sabonner|me d[eé]sinscrire|retirez[- ]moi|d[eé]sabonnez[- ]moi|d[eé]sinscrivez[- ]moi|supprimez[- ]moi|"
-    r"ne m'envoyez plus|ne (plus recevoir|souhaite plus recevoir|veux plus recevoir) (vos|ces|de|d'|des|votre)|ne me contactez plus|"
+    r"ne m'envoyez plus|ne plus me contacter|ne (plus recevoir|souhaite plus recevoir|veux plus recevoir) (vos|ces|de|d'|des|votre)|ne me contactez plus|"
     rf"{_HI_MAIL}( \w+)? (mat|na|nahi|nahin) bhej(o|iye|ein|en|e|na)|(mujhe|humein|hume) (mat|na) bhej(o|iye|ein|en|e|na)|"
     rf"{_HI_MAIL} band kar(o|do|iye|en|dein)?|bhejna band|(list|suchi) se hata\w*)\b", re.I)
 # The same, only when it is all the message says: on its own it can mean nothing else ("Baja", but not "Baja California").
@@ -177,6 +177,8 @@ FOOTER_LINE = re.compile(
     r"\bnewsletter abbestellen|\bwenn sie\b.{0,60}\b(erhalten|bekommen) m[oö]chten|\bklicken sie hier|"
     r"\bsi no desea recibir|\bdarse de baja|\b(para|puede) dar de baja su|\bhaga clic aqu[ií]|"
     r"\bpour ne plus recevoir|\bcliquez ici|\bvous d[eé]sabonner", re.I)
+SIGN_OFF = re.compile(r"^\W*(thanks|thank you|thx|regards|kind regards|best|best regards|cheers|sincerely|gracias|saludos|atentamente|danke|gr[uü](ß|ss)e?|"
+                      r"mit freundlichen gr[uü](ß|ss)en|mfg|merci|cordialement|grazie|cordiali saluti|obrigad[oa]|atenciosamente)\W*$", re.I)
 WRITER_SPEAKS = re.compile(r"\?|\b(please|pls|plz|kindly|i|i'm|i've|we|me|bitte|ich|por favor|quiero|je|merci de|svp|mujhe)\b", re.I)
 BARE_OPT_OUT = re.compile(r"^\W*(unsubscribe|opt[- ]?out)( here)?\W*$", re.I)
 # Someone angry at US is not good news, whatever single word matched. Anger at their spreadsheets or their vendor is why they
@@ -382,16 +384,18 @@ _MONTH_WORD = rf"(?:{'|'.join(_MONTHS)}|jan|feb|mar|apr|jun|jul|aug|sept?|oct|no
 # An opt-out's words with a date after them: "don't email me until April", "stop emailing me until the new year". Not for good: the sequence
 # stops, nothing is suppressed, and a person gets a reminder for the date. "until I contact you", "until further notice" name no date and stay
 # opt-outs, and so does a date with "ever" or "at all" anywhere behind it ("until April. Actually never."). A date in another sentence is not
-# this: it has to follow the words.
+# this: it has to follow the words. "Don't email me after January" asks for silence from that date on: that is no date to write on, so it stays an
+# opt-out, and so does "before Q3, none after either".
 NOT_UNTIL = re.compile(
     r"\b((do not|don'?t)( ever)? (e-?mail|contact|message|write( to)?|reach out( to)?|send)( (me|us))?( any| anything| any more)?( more| further| other)?( e-?mails?| messages?| mail)?|"
     r"(stop|quit|cease) (e-?mailing|contacting|sending|messaging|mailing|writing( to)?)( (me|us))?( all| the| these| those| your| any)?( e-?mails?| messages?| mail)?|"
     r"(stop|quit|cease)( all| the| these| those| your)? (e-?mails?|messages?)|no (more|further) (e-?mails?|messages?|contact|mail)( please)?)"
-    r"( again| any ?more)?,? (?P<prep>((until|till|til) )?after|until|till|til|before)( (?P<part>early|mid|late|the start of|the end of))?( the)?[ -]"
+    r"( again| any ?more)?,? (?P<prep>(until|till|til) after|until|till|til|before)( (?P<part>early|mid|late|the start of|the end of))?( the)?[ -]"
     rf"(?:(?P<month>{_MONTH_WORD})\b( (?P<day>\d{{1,2}})(st|nd|rd|th)?\b)?(,? (?P<year>20\d\d)\b)?|"
     rf"(?P<dayfirst>\d{{1,2}})(st|nd|rd|th)?( of)? (?P<month2>{_MONTH_WORD})\b|(?P<numeric>0?[1-9]|1[0-2])/(?P<numday>\d{{1,2}})(/\d{{2,4}})?\b|"
     r"(?P<quarter>q[1-4])\b( (?P<qyear>20\d\d)\b)?|(?P<coming>(the )?new year|next quarter|next year)\b)"
-    r"(?![\s\S]*\b(ever|never|at all|for good|not even|on second thought|actually,? (no|not|do not|don'?t))\b)", re.I)
+    r"(?![\s\S]*\b(ever|never|at all|for good|not even|on second thought|actually,? (no|not|do not|don'?t)|none after|n?or after|after either|"
+    r"(no|not|don'?t) [^.!?]{0,40}\bafter (it|that))\b)", re.I)
 # Someone else will write, or they will: "Our CFO will get back to you in March", "Sam can reach out in March". Not "you can", not "can we".
 _SOMEONE_WILL = re.compile(r"\b(?!you\b|we\b)[\w']+('ll| will| shall| would| might| may| is going to| are going to| can| could)( \w+){0,2} $|"
                            r"\b(i|we)('ll| will| shall| am going to| are going to)( \w+){0,2} $", re.I)
@@ -491,9 +495,11 @@ ALL_IT_SAYS = "is all it says"
 WEAK_NO = re.compile(r"\b(we'?re good|we'?re all set|no need)\b", re.I)
 # A legal notice about this very email, addressed to whoever got it by mistake: "If you received this in error, delete it from your system."
 # Only that phrase is blanked, only in a paragraph (hard wraps and all) that is such a notice and in which nobody speaks for themselves: "This
-# is my old address. Remove it from your system." and "I am not the intended recipient, please remove me" stay what they are.
+# is my old address. Remove it from your system." and "I am not the intended recipient, please remove me" stay what they are. A notice sits below
+# what the writer says or names itself one: "If you got this address by mistake, remove it from your records" as all they say is them asking.
 NOTICE_TO_YOU = re.compile(r"\b(if|should|in case) you\b.{0,200}?\b(in error|by mistake|intended|addressee)\b|\byou are not the (intended|addressee)\b", re.I)
 NOTICE_SPEAKER = re.compile(r"\b(i|i'm|i've|i'd|me|my|mine|we are|we were|we received|we got|we're)\b", re.I)
+NOTICE_LEGAL = re.compile(r"\b(confidential\w*|privileged?|proprietary|disclaimer|recipients?|addressee)\b", re.I)
 NOTICE_REMOVAL = re.compile(r"\b(remove|delete|erase)\s+(it|this|them|these|that|same|copies|e-?mails?|messages?)\s+from\s+(your|all)\s+(records?|systems?)\b", re.I)
 # Their own business in opt-out words: "we need to stop sending invoices by hand", "our unsubscribe rate", "get us off our old ERP". Taken out
 # of the text before reading it again, and only here: the opt-out wording itself is not narrowed, and any other opt-out in the email still counts.
@@ -507,14 +513,16 @@ _THEIR_PRODUCT = r"(sms|texts?|text messages?|reminders?|apps?|forms?|checkout|p
 _NOT_ABOUT_US = r"(?! (team|staff|people|department))(?![^.!?\n]*\b(you|your|e-?mails?|list)\b)"
 _ANOTHER_WAY = (r"\b((bring|hand|print|post|upload|share|fax|send|mail|drop|give|show) (it|them|that|those|copies|a copy|me a copy)|use (the|our|my)|instead|yet|until|"
                 r"(at|on|in|for) the (call|meeting|portal|drive|office)|in person)\b")
+_A_LIST = r"(lists?|databases?|rosters?|director(y|ies)|registers?|records?|mail\w*|e-?mails?)"  # "take us off our vendor list" is an opt-out
+_STOP_BESIDE = r"(?![\s\S]*[.!?]\s+(please |just )?stop\W*($|[.!]))"  # "Unsubscribe rate on this must be awful. Stop."
 OWN_BUSINESS = re.compile(
     r"\b(we|i)( really| just)?( need| want| have| would like|'d like| are trying|'re trying) to (stop|quit|cease) (e-?mailing|sending|writing) "
     rf"((out|our|the|all|all our|these|those) )*{_THEIR_PAPERWORK}\b(?![^.!?\n]*\b(to|with|from|at) (you|your)\b)|"
-    r"\b(our|their|customers'?)( newsletter)? unsubscribe (rates?|pages?|links?)\b(?![^.!?\n]*\b(your|still)\b)|(?<!your )(?<!your newsletter )\bunsubscribe rates?\b|"
+    rf"\b(our|their|customers'?)( newsletter)? unsubscribe (rates?|pages?|links?)\b(?![^.!?\n]*\b(your|still)\b){_STOP_BESIDE}|(?<!your )(?<!your newsletter )\bunsubscribe rates?\b{_STOP_BESIDE}|"
     rf"\ban opt[- ]?out (on|for) (our|their)( \w+){{0,2}}? {_THEIR_PRODUCT}\b{_NOT_ABOUT_US}|"
     rf"\b(build|add|adding|offer|offering) an opt[- ]?out (on|for) (our|their)( \w+){{0,2}}? (customers?|clients?|users?|subscribers?|members?|sites?|websites?)\b{_NOT_ABOUT_US}|"
-    r"\bopt[- ]?out of (the|our)( (?!e-?mails?\b|mail\w*\b|marketing\b|contact\w*\b|list\b)\w+){0,3} (plan|contract|trial|renewal)s?\b|"
-    r"\b(take|get) us off ((our|old)( \w+){0,2}? (erps?|software|excel|platforms?|tools?|vendors?|providers?|process(es)?|stack|paper\w*|spreadsheets?)|our old( \w+)? systems?|spreadsheets?)\b|"
+    r"\bopt[- ]?out of (the|our)( (?!e-?mails?\b|mail\w*\b|marketing\b|contact\w*\b|list\b)\w+){0,3} (plan|contract|trial|renewal)s?\b(?![\s\S]*\b(e-?mails?|mail\w*|contact\w*|you|your)\b)|"
+    rf"\b(take|get) us off ((our|old)( (?!{_A_LIST}\b)\w+){{0,2}}? (erps?|software|excel|platforms?|tools?|vendors?|providers?|process(es)?|stack|paper\w*|spreadsheets?)|our old( (?!{_A_LIST}\b)\w+)? systems?|spreadsheets?)\b(?! (mailing |e-?mail |vendor |contact |\w+ )?{_A_LIST}\b)|"
     r"\bhad no further contact with (our|their|the)\b|"  # an account of the past; "no further contact with the CEO" asks for it
     rf"\b(do not|don'?t) e-?mail (me|us) (the|that|those) {_THEIR_PAPERWORK}\b(?=[^\n]{{0,60}}?{_ANOTHER_WAY})"
     r"(?![\s\S]*\b(anything|ever|again|any ?more|at all|stop|you keep|keep (sending|pushing)|(did not|didn'?t|never) ask|not a customer|hint)\b)", re.I)
@@ -535,7 +543,22 @@ def _blank_notice_phrase(paragraph: str) -> str:
 
 def _without_notice(text: str) -> str:
     """The text with the phrase of a legal notice blanked that asks whoever got this email by mistake to remove it (see NOTICE_TO_YOU)."""
-    return "".join(_blank_notice_phrase(part) for part in re.split(r"(\n\s*\n)", text))
+    parts = re.split(r"(\n\s*\n)", text)
+    return "".join(_blank_notice_phrase(part) if NOTICE_LEGAL.search(part) or any(p.strip() for p in parts[:i]) else part for i, part in enumerate(parts))
+
+
+def _is_signature(paragraph: str) -> bool:
+    """A sign-off, or lines of nothing but a name, a title and an address: "Thanks,\\nA Person\\nVP Operations\\nwww.co.example"."""
+    lines = [line.strip() for line in paragraph.split("\n") if line.strip()]
+    return len(lines) <= 8 and not any("?" in line or WRITER_SPEAKS.search(line) for line in lines) and all(
+        SIGN_OFF.match(line) or all(not word[0].islower() or re.search(r"[.@\d]", word) for word in line.split()) for line in lines)
+
+
+def _all_it_says_over_signature(text: str) -> str | None:
+    """The first line, when all below it is a signature or a legal notice: "Abmelden", signed, over a gateway's notice, is still all they say."""
+    first, _, below = text.strip().partition("\n")
+    parts = [part for part in re.split(r"\n\s*\n", below) if part.strip()]
+    return first.strip() if parts and all(_is_notice(part) or _is_signature(part) for part in parts) else None
 
 
 def _without_footer(text: str, bare_too: bool = False) -> str:
@@ -619,6 +642,8 @@ def _classify(row: InboundEmail, text: str | None = None, *, own_addresses: froz
     beside_notice = "".join(part for part in re.split(r"(\n\s*\n)", raw_text) if not _is_notice(part)).strip()
     if not complaint and beside_notice != raw_text.strip() and ELSEWHERE_WHOLE.fullmatch(beside_notice):
         return "unsubscribe", "medium", [f'"{beside_notice}" (not in English: a person checks)']
+    if not complaint and (first := _all_it_says_over_signature(raw_text)) and ELSEWHERE_WHOLE.fullmatch(first):
+        return "unsubscribe", "medium", [f'"{first}" (not in English: a person checks)']
     if "unsubscribe" in hits and not (complaint or just_stop or elsewhere):
         opt_out = dict(PATTERNS)["unsubscribe"]
         until = NOT_UNTIL.search(said)

@@ -147,6 +147,28 @@ def record_new_pc(data_dir: Path) -> str:
     return at
 
 
+def take_from_copy(data_dir: Path, copied: Path) -> None:
+    """The journal of a copy, for a PC that has none, with its new_pc line: whole or not at all. A journal with claims and no such line reads as
+    this PC's own, so a restore stopped here and run again would forget what it is and let the copy's approved emails go."""
+    path = journal_path(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    held = copied.read_bytes()
+    if held and not held.endswith(b"\n"):  # a power cut cut its last line short: it must not swallow this one
+        held += b"\n"
+    text = held + (json.dumps({"event": "new_pc", "at": utcnow().isoformat(timespec="seconds")}) + "\n").encode("utf-8")
+    partial = path.with_name(path.name + ".partial")
+    with _one_writer(data_dir):
+        try:
+            with partial.open("wb") as fh:
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+            partial.replace(path)
+        except OSError:
+            partial.unlink(missing_ok=True)
+            raise
+
+
 def record_unknown(data_dir: Path, rows: list[tuple[int, str | None, str | None]]) -> None:
     """(follow-up, address, message id) of emails that may have gone out from a PC this journal never heard from."""
     if rows:

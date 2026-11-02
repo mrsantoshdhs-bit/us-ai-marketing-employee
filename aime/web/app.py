@@ -59,7 +59,7 @@ from aime.monitoring import agent_stats, alert_key, read_heartbeat
 from aime.policy import agreement, environment_blockers, evaluate_shadow, policy_config
 from aime.qc import summary as qc_summary
 from aime.reply_intel import skipped_mail as reply_skipped_mail
-from aime.outreach import REACHED_PROSPECT, STOPPABLE_STAGES, after_reopen, cancel_queued, record_delivery, reopen_refusal, reopen_stopped, sent_earlier
+from aime.outreach import REACHED_PROSPECT, STOPPABLE_STAGES, after_reopen, cancel_queued, company_opted_out, record_delivery, reopen_refusal, reopen_stopped, sent_earlier
 from aime.outreach import set_status as set_outreach_status
 from aime.outreach import outreach_footer, stop_sequence
 from aime.pipeline import clear_stage, settle_next_steps
@@ -342,6 +342,8 @@ _SELLS_AGENTS = re.compile(r"\b(?:builds?|building|sells?|selling|offers?|provid
                            r"|\bour AI[- ]agents?\b", re.I)
 _PITCHES_AGENTS = re.compile(r"\bwe (?:build|design|develop|sell)\b[^.\n]{0,60}\b(?:AI agents?|multi-agent)\b", re.I)
 AI_SELLER_WARNING = "This company sells AI agents itself; check the pitch line"
+COMPANY_SAID_NO = "Someone at this company said not to contact them."
+COMPANY_SAID_NO = "Someone at this company said not to contact them."
 _GAP_RECORD = re.compile(r"No scheduled check-in for ([\d.]+) h, from (.+?) to (.+?) UTC")
 GAP_SHOWN_FOR = timedelta(days=7)
 
@@ -1404,6 +1406,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     note["reply"] = {"text": (reply.new_text or reply.body_text or "")[:1500], "at": reply.received_at}
             if s.execute(select(InboundEmail.id).where(InboundEmail.lead_id == f.lead_id, InboundEmail.category == "out_of_office").limit(1)).first():
                 note["away"] = True
+            if company_opted_out(s, f.lead.company):
+                note["company_said_no"] = COMPANY_SAID_NO
             if f.kind == "outreach" and f.step == 1:
                 to = f.to_email or (f.contact.email if f.contact else None)
                 before = s.execute(select(FollowUp).where(FollowUp.id != f.id, FollowUp.channel == "email", REACHED_PROSPECT,
@@ -1460,7 +1464,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     @app.post("/followups/{fid}/{action}")
     def followup_action(request: Request, fid: int, action: str, subject: str = Form(""), body: str = Form(""),
-                        qc_override: str = Form("")):
+                        qc_override: str = Form(""), company_said_no: str = Form("")):
         with C().db.session() as s:
             # Take the database write lock before reading the email: one person's Reject and another's Approve, or the
             # two requests of a double click, then run one after the other, and the second sees what the first decided.
@@ -1502,6 +1506,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     return back(f"/followups#f{f.id}", "Write your answer in place of the placeholder before approving")
                 elif suppressed:  # checked on every approval, edited or not
                     return back(f"/followups#f{f.id}", "Cannot approve: this address is on the do-not-contact list")
+                elif (said_no := company_opted_out(s, f.lead.company)) and company_said_no != "yes":  # as a booking is held: a person decides
+                    return back(f"/followups#f{f.id}", f"Cannot approve yet: {COMPANY_SAID_NO} Tick the box on the email if a person has read that and this should still go")
                 elif f.kind == "outreach" and f.lead.status in ("disqualified", "merged"):  # an answer to someone who wrote is a person's call
                     return back(f"/followups#f{f.id}", f"Cannot approve: this lead is {f.lead.status}, so outreach to it has ended")
                 elif problem := compliance_problem(C().settings, f.body or ""):
@@ -1534,6 +1540,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                         if qc_status in ("held", "failed"):
                             log_activity(s, f"Outreach email #{f.id} approved despite {qc_status} quality checks",
                                          who(request), type_="override", company_id=f.company_id, lead_id=f.lead_id)
+                    if said_no:
+                        log_activity(s, f"Email #{f.id} approved although someone at this company said not to contact them",
+                                     who(request), type_="override", company_id=f.company_id, lead_id=f.lead_id)
                     msg = "Approved. It will be sent by the follow-ups job if outbound email is enabled."
             elif action == "back_to_draft" and f.channel == "email" and f.status == "approved":
                 # its own button: a Save from a page left open must not undo a manager's approval without a word

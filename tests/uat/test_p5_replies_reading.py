@@ -234,7 +234,7 @@ def test_not_until_a_date_is_no_opt_out_for_good(make_ctx, text):
 
 @pytest.mark.parametrize("text, month", [
     ("Don't email me until April.", 4), ("Do not contact me until next year.", 1), ("Please stop emailing me until the new year.", 1), ("No more emails until April.", 4),
-    ("Don't email me again until Q3.", 7), ("Don't contact us before January.", 1), ("Don't email me after Q1.", 3), ("Stop sending me emails until April 15.", 4),
+    ("Don't email me again until Q3.", 7), ("Don't contact us before January.", 1), ("Don't email me until after Q1.", 3), ("Stop sending me emails until April 15.", 4),
     ("Do not contact me until 15 March 2027.", 3),
 ])
 def test_a_date_after_the_opt_out_words_is_an_objection_with_a_reminder(text, month):

@@ -147,7 +147,7 @@ def _journals_beside_the_bundle(settings, bundle: Path, new_pc: bool) -> None:
     """A bundle also holds the journals. What is already here is newer and stays: only what is missing (a new PC) is taken
     from the bundle. A sent record that has seen nothing, from a command run before this one, counts as missing."""
     if new_pc and (bundle / "sent_journal.jsonl").exists():
-        shutil.copyfile(bundle / "sent_journal.jsonl", send_journal.journal_path(settings.data_dir))
+        send_journal.take_from_copy(settings.data_dir, bundle / "sent_journal.jsonl")
     if (bundle / "publish_journal.jsonl").exists() and not (settings.data_dir / "publish_journal.jsonl").exists():
         shutil.copyfile(bundle / "publish_journal.jsonl", settings.data_dir / "publish_journal.jsonl")
 
