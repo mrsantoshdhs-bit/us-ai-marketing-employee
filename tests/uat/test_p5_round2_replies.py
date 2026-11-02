@@ -108,6 +108,45 @@ def test_a_refusal_that_only_counted_above_a_notice_still_does(words):
     assert reading(f"{words}\n\nThanks,\nPat Ruiz\n\nThis message is confidential. If you received it in error, please delete it from your system.")[0] == "unsubscribe"
 
 
+NOTICE = "\n\nCONFIDENTIALITY NOTICE: This e-mail is for the sole use of the intended recipient. If you have received this e-mail in error, please notify the sender immediately and delete it from your system."
+
+
+@pytest.mark.parametrize("below", ["", NOTICE])
+@pytest.mark.parametrize("text", ["No need to write again, just call me on Tuesday.", "No need to email me again, I booked on your link.", "Enough emails for today, let's call.", "Stop with the emails, let's meet.",
+                                  "Enough of this back and forth, let's meet."])
+def test_a_request_to_talk_in_the_same_message_keeps_a_soft_wording_from_suppressing(text, below):
+    assert reading(text + below)[0] != "unsubscribe"
+
+
+@pytest.mark.parametrize("below", ["", NOTICE])
+@pytest.mark.parametrize("text", ["No need to write again.", "Enough emails from you.", "Stop with the emails.", "Stop with the emails, don't call me.", "Stop with these emails and get off my back."])
+def test_the_soft_wordings_alone_stay_opt_outs(text, below):
+    assert reading(text + below)[0] == "unsubscribe"
+
+
+@pytest.mark.parametrize("below", ["", NOTICE])
+@pytest.mark.parametrize("text", ["Stop the emails and call off your team.", "Stop the emails and talk to someone else.", "Don't you dare call or email me again.", "Please don't try to call or email me again.",
+                                  "Please discontinue your emails to our team.", "Discontinue emailing our staff.", "Don't send more, I mean it.", "Don't send more, we are not interested.",
+                                  "Remove rates@lead.example from your list.", "Don't bother calling or emailing me again.", "Don't call or text me again or email me again.", "If possible please stop.", "Yes, stop.",
+                                  "We never got your emails asking, and do not want any.", "Do not contact our company yet again.", "Don't send anything else. Best, Pat"])
+def test_a_real_opt_out_counts_by_its_own_words_plain_and_above_a_notice(text, below):
+    assert reading(text + below)[0] == "unsubscribe"
+
+
+@pytest.mark.parametrize("text", ["Don't email me until April. I'm done with you.", "Don't email me until April. We're done here.", "Don't email me until April, I am sick of this.", "Stop sending me these until April. Because I hate them."])
+def test_a_hostile_tail_after_a_date_is_a_refusal_with_no_reminder(make_ctx, text):
+    ctx, _s, sent = contacted(make_ctx)
+    reply(ctx, sent, text)
+    assert latest_reply(ctx).category == "unsubscribe"
+    with ctx.db.session() as s:
+        assert is_suppressed(s, DAVID)
+        assert not s.execute(select(FollowUp).where(FollowUp.channel == "task", FollowUp.subject.like("%check back%"))).first()
+
+
+def test_a_plain_reason_after_a_date_stays_a_date():
+    assert reading("Don't email me until April, I'm travelling.")[0] == "objection"
+
+
 def test_a_notice_alone_with_nothing_said_suppresses_nothing_and_someone_speaking_for_themselves_counts():
     assert reading("If you are not the intended recipient of this confidential message, delete it from your system.")[0] != "unsubscribe"
     assert reading("This is my old address. Remove it from your system.")[0] == "unsubscribe"
