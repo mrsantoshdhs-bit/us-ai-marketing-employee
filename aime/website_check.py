@@ -47,6 +47,9 @@ MAX_META_TAGS, MAX_TAG_CHARS = 200, 2000
 _META_CHARSET_RE = re.compile(rb"""<meta[^>]{0,200}?charset\s*=\s*["']?\s*([a-z0-9_.:-]{1,40})""", re.I)
 
 
+OUTAGE_WITNESSES = 2  # known good sites asked whether the internet itself is what failed
+
+
 @dataclass
 class WebsiteResult:
     status: str  # verified | redirected | mismatch | parked | unreachable | blocked | robots_disallowed
@@ -214,6 +217,23 @@ def site_answers(ctx, domain: str) -> bool:
     """Does this site give any HTTP answer at all? One small request, to tell a dead site from a lost network."""
     with ctx.http(public_only=True, timeout=12) as client:
         return _robots(client, domain)[0] != "unreachable"
+
+
+def known_sites_still_prove(ctx, session, not_these: list[int]) -> bool | None:
+    """Do sites known to be good still prove good? site_answers cannot tell, as a sign-in page answers it: a witness must prove good.
+    None: there is no other known site to ask."""
+    from sqlalchemy import select
+
+    from aime.models import Company
+
+    witnesses = session.execute(select(Company.domain, Company.name).where(
+        Company.merged_into_id.is_(None), Company.domain.is_not(None), Company.website_status == "verified",
+        Company.website_retry_at.is_(None), Company.id.not_in(not_these))
+        .order_by(Company.website_checked_at.desc()).limit(OUTAGE_WITNESSES)).all()
+    session.commit()  # no write lock is held during network calls
+    if not witnesses:
+        return None
+    return any(check_website(ctx, domain, name).proven for domain, name in witnesses)
 
 
 def check_website(ctx, domain: str, company_name: str) -> WebsiteResult:

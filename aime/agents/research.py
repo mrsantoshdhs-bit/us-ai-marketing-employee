@@ -145,6 +145,8 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                 msg = f"stale: the API gave no answer, using a saved one {stale_hours / 24:.1f} days old"
                 if stale_hours > STALE_ALERT_HOURS:
                     stale_alerts.append(f"{src.name} ({msg})")
+            if getattr(src, "unreadable_feeds", 0):
+                msg = f"{msg}; {src.unreadable_feeds} state and industry pair(s) could not be read and were skipped"
             out.sources.append(SourceReport(name=src.name, configured=True, ok=True, records=len(found), message=msg))
             candidates.extend(found)
             if hasattr(src, "finish_intake"):
