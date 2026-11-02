@@ -4,6 +4,8 @@
 {% set c = lead.company %}
 <h1>{{ tier(lead) }} {{ grade(lead.grade) }} {{ c.name }} <span class="muted small">lead #{{ lead.id }} · {{ lead.source }}</span> {{ status_pill(lead.status) }}
   {% if lead.is_sample %}<span class="pill">sample data</span>{% endif %}</h1>
+{% if company_said_no %}<div class="flash"><span class="pill warn">{{ company_said_no }}</span></div>{% endif %}
+{% if write_yourself %}<div class="flash small">No answer is on its way to someone who replied. If they still need one, write to them from the mailbox yourself, then log it here as a note.</div>{% endif %}
 <div class="two">
   <div class="card">
     <h2 style="margin-top:0">Company</h2>

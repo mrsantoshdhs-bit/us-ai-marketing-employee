@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import OperationalError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -331,6 +331,55 @@ def answers_to_keep(s, lead: Lead) -> set[int]:
     return kept
 
 
+def sender_company_said_no(s, row: InboundEmail) -> bool:
+    """Display only, on Replies: a person's mail at a company that said no, matched to a lead or known only by its address's domain."""
+    if row.category not in ANSWERED_REPLIES:
+        return False
+    if row.lead is not None:
+        return company_opted_out(s, row.lead.company)
+    labels = (row.from_email or "").rsplit("@", 1)[-1].lower().split(".")
+    domains = [".".join(labels[i:]) for i in range(max(len(labels) - 1, 1))]
+    return any(company_opted_out(s, c) for c in s.execute(select(Company).where(func.lower(Company.domain).in_(domains))).scalars())
+
+
+def answer_is_left_to_a_person(s, row: InboundEmail) -> bool:
+    """Someone said yes or asked, the draft answer was rejected or cancelled, and nothing else is on its way or has gone since: back
+    to draft cannot bring such a draft back. Never where nobody may write: a closed stage, a closed lead, a company that said no."""
+    if row.category not in ("interested", "question", "objection") or row.is_simulated or row.lead is None or not row.suggested_followup_id:
+        return False
+    draft = s.get(FollowUp, row.suggested_followup_id)
+    lead = row.lead
+    if draft is None or draft.status not in ("rejected", "cancelled"):
+        return False
+    if (lead.outreach_status in CLOSED_ON_REPLY or lead.status in ("disqualified", "merged") or lead.company.is_competitor
+            or company_opted_out(s, lead.company) or is_suppressed(s, row.from_email)):
+        return False
+    return not s.execute(select(FollowUp.id).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email", or_(
+        and_(FollowUp.kind == "response", FollowUp.status.in_(("awaiting_approval", "approved", "sending", "uncertain"))),
+        FollowUp.sent_at >= row.received_at)).limit(1)).first()
+
+
+def earlier_unanswered_question(s, lead_id: int, reply: InboundEmail, draft_id: int) -> InboundEmail | None:
+    """The newest earlier question from this lead that nothing sent since has answered and this draft does not answer."""
+    asked = s.execute(select(InboundEmail).where(
+        InboundEmail.lead_id == lead_id, InboundEmail.id != reply.id, InboundEmail.received_at <= reply.received_at,
+        InboundEmail.is_simulated == reply.is_simulated, or_(InboundEmail.category == "question", InboundEmail.intent.in_(_UNANSWERED_ASKS)),
+    ).order_by(InboundEmail.received_at.desc(), InboundEmail.id.desc()).limit(1)).scalars().first()
+    if asked is None or asked.suggested_followup_id == draft_id:
+        return None
+    answered = s.execute(select(FollowUp.id).where(FollowUp.lead_id == lead_id, FollowUp.channel == "email", FollowUp.sent_at >= asked.received_at).limit(1)).first()
+    return None if answered else asked
+
+
+def old_names_on_card(s, f: FollowUp, company_id: int, name: str) -> list[str]:
+    """Names this company was corrected from that this draft's subject, words or evidence still use."""
+    said = " ".join([f.subject or "", f.body or "", *(str(e.get("fact", "")) for e in f.evidence or [] if isinstance(e, dict))]).replace(name, " ").lower()
+    corrected = s.execute(select(Activity.subject).where(Activity.company_id == company_id, Activity.type == "override",
+                                                         Activity.subject.like(_NAME_CORRECTED))).scalars()
+    old = {line.split(": ", 1)[1].rsplit(" \u2192 ", 1)[0] for line in corrected if ": " in line and " \u2192 " in line}
+    return sorted(o for o in old if o and o != name and o.lower() in said)
+
+
 # Reports are files written when they ran, read later on any screen: a wide table scrolls inside itself on a phone.
 REPORT_STYLE = ("@media (max-width:700px){body{margin:12px}table{display:block;overflow-x:auto;max-width:100%}"
                 "h1{font-size:20px}}a.report-back{display:inline-block;margin-bottom:8px}")
@@ -343,7 +392,8 @@ _SELLS_AGENTS = re.compile(r"\b(?:builds?|building|sells?|selling|offers?|provid
 _PITCHES_AGENTS = re.compile(r"\bwe (?:build|design|develop|sell)\b[^.\n]{0,60}\b(?:AI agents?|multi-agent)\b", re.I)
 AI_SELLER_WARNING = "This company sells AI agents itself; check the pitch line"
 COMPANY_SAID_NO = "Someone at this company said not to contact them."
-COMPANY_SAID_NO = "Someone at this company said not to contact them."
+_NAME_CORRECTED = "Company name corrected by %"
+_UNANSWERED_ASKS = ("pricing_request", "more_info")
 _GAP_RECORD = re.compile(r"No scheduled check-in for ([\d.]+) h, from (.+?) to (.+?) UTC")
 GAP_SHOWN_FOR = timedelta(days=7)
 
@@ -663,6 +713,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             drafts = dict(s.execute(select(FollowUp.id, FollowUp.status).where(
                 FollowUp.id.in_([i for i in (*(r.suggested_followup_id for r in rows), *kept.values()) if i] or [0]))).all())
             notes = {r.id: reply_note_now(r.action_note, drafts.get(r.suggested_followup_id), drafts.get(kept[r.id])) for r in rows}
+            said_no = {r.id for r in rows if sender_company_said_no(s, r)}
+            write_yourself = {r.id for r in rows if answer_is_left_to_a_person(s, r)}
             counts = dict(s.execute(select(InboundEmail.category, func.count(InboundEmail.id))
                                     .where(record_condition(scope(request), InboundEmail.lead_id))
                                     .group_by(InboundEmail.category)).all())
@@ -674,7 +726,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             user = getattr(request.state, "user", None)
             skipped = (reply_skipped_mail(s) if show == "skipped" and (user is None or "view_all" in user.get("perms", ()))
                        else [])
-        return render(request, "mailbox.html", rows=rows, notes=notes, show=show, counts=counts, state=state, skipped=skipped,
+        return render(request, "mailbox.html", rows=rows, notes=notes, said_no=said_no, company_said_no=COMPANY_SAID_NO, write_yourself=write_yourself, show=show, counts=counts, state=state, skipped=skipped,
                       mailbox=where.removesuffix(", read-only") if reading else None)
 
     @app.post("/inbox/{eid}/{action}")
@@ -682,6 +734,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         with C().db.session() as s:
             take_write_lock(s)
             row = s.get(InboundEmail, eid) or _404()
+            user = getattr(request.state, "user", None)
+            if (action == "reviewed" and row.category == "calendly" and C().settings.dashboard_auth
+                    and not (user and "approve_outbound" in user.get("perms", ()))):
+                raise HTTPException(403, "A Sales Manager applies a Calendly notice or marks it reviewed")
             if action == "reviewed":
                 row.status = "reviewed"
                 release_answers(s, row)
@@ -801,6 +857,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             for sig in s.execute(select(Signal).where(Signal.company_id.in_({r.company_id for r in rows} or {0}))).scalars():
                 posts[sig.company_id].append(sig)
             industries = {r.company_id: read_company(r.company, posts[r.company_id])["industry"] for r in rows}
+            said_no = {c.id for c in {r.company for r in rows} if company_opted_out(s, c)}
             for r in rows:
                 _ = r.company, r.contact
             # whose leads one may ask for: everyone (view_all), else the people this user may see; someone deactivated who still holds leads too
@@ -808,7 +865,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                       if sc.all or u in sc.usernames]
             deactivated = [u for u in s.execute(select(User.username).where(User.active.is_(False), User.username.in_(select(Lead.owner)))
                                                 .order_by(User.username)).scalars() if sc.all or u in sc.usernames]
-        return render(request, "leads.html", rows=rows, total=total, page=page, people=people + deactivated, deactivated=deactivated, industries=industries,
+        return render(request, "leads.html", rows=rows, said_no=said_no, company_said_no=COMPANY_SAID_NO, total=total, page=page, people=people + deactivated, deactivated=deactivated, industries=industries,
                       f=dict(grade=grade, status=status, state=state, industry=industry, source=source, q=q, owner=owner,
                              group=group, outreach=outreach, ready=ready))
 
@@ -873,13 +930,15 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             coming = next_email(C().settings, lead, fups)
             stage_why = stage_reason(s, lead)
             reopen_why = reopen_refusal(s, lead) if lead.outreach_status == "stopped" else None
+            said_no = company_opted_out(s, lead.company)
+            write_yourself = any(answer_is_left_to_a_person(s, r) for r in replies)
         user = getattr(request.state, "user", None)
         can_assign = not C().settings.dashboard_auth or bool(user and "assign_leads" in user.get("perms", ()))
         return render(request, "lead_detail.html", lead=lead, signals=signals, acts=acts, fups=fups, opps=opps,
                       people=people, research=research, meetings=meetings, withdrawn=withdrawn, thread=thread,
                       assignments=assignments, assignees=assignees, can_assign=can_assign, coming=coming, stage_why=stage_why,
                       reopen_why=reopen_why, not_mine=not_mine, more_activity=more_activity, elsewhere=elsewhere, shown_industry=shown_industry,
-                      on_the_list=on_the_list)
+                      on_the_list=on_the_list, company_said_no=COMPANY_SAID_NO if said_no else None, write_yourself=write_yourself)
 
     @app.get("/contacts", response_class=HTMLResponse)
     def contacts_page(request: Request, confidence: str = "", role: str = "", reachable: str = "", contact: str = ""):
@@ -1235,6 +1294,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     def not_competitor(request: Request, company_id: int):
         """A person overrides the automatic competitor flag; research does not set it again."""
         with C().db.session() as s:
+            take_write_lock(s)
             company = s.get(Company, company_id) or _404()
             from aime.crm_ops import primary_lead
 
@@ -1404,10 +1464,14 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                                                         .limit(1)).scalars().first() if f.in_reply_to else None)
                 if reply is not None:
                     note["reply"] = {"text": (reply.new_text or reply.body_text or "")[:1500], "at": reply.received_at}
+                    if (asked := earlier_unanswered_question(s, f.lead_id, reply, f.id)) is not None:
+                        note["asked"] = {"text": (asked.new_text or asked.body_text or "")[:1500], "at": asked.received_at}
             if s.execute(select(InboundEmail.id).where(InboundEmail.lead_id == f.lead_id, InboundEmail.category == "out_of_office").limit(1)).first():
                 note["away"] = True
             if company_opted_out(s, f.lead.company):
                 note["company_said_no"] = COMPANY_SAID_NO
+            if old_names := old_names_on_card(s, f, f.lead.company_id, f.lead.company.name):
+                note["old_names"] = old_names
             if f.kind == "outreach" and f.step == 1:
                 to = f.to_email or (f.contact.email if f.contact else None)
                 before = s.execute(select(FollowUp).where(FollowUp.id != f.id, FollowUp.channel == "email", REACHED_PROSPECT,
@@ -1886,8 +1950,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             take_write_lock(s)
             row = s.get(Suppression, sid) or _404()
             refused = lift_suppression(s, row, who(request), " ".join(reason.split()))
-            value = row.value
-        return back("/automation#suppressions", f"Not lifted: {refused}" if refused else f"{value} lifted. Nothing was drafted or sent, "
+        return back("/automation#suppressions", f"Not lifted: {refused}" if refused else "The entry was lifted. Nothing was drafted or sent, "
                     "a closed lead stays closed until a person reopens it, and the entry is kept")
 
     # ------------------------------------------------------------------ agents, jobs, reports

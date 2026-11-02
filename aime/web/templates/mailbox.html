@@ -26,7 +26,8 @@
     {% if r.in_junk %}<span class="pill warn" title="The mail server filtered this as spam">Found in junk</span>{% endif %}
     <span class="pill {{ 'ok' if r.category == 'interested' else 'warn' if r.category in ['objection', 'question', 'referral', 'other'] else '' }}">{{ (r.category or 'new')|replace('_', ' ') }}</span>{% if r.intent %} <span class="pill {{ 'warn' if r.intent == 'pricing_request' else 'ok' }}">{{ r.intent|intent_label }}</span>{% endif %}{% if r.confidence == 'low' %} <span class="pill warn">uncertain</span>{% endif %}
     <span class="small muted">{{ r.confidence }} confidence</span> {{ status_pill(r.status) }}{% if r.sentiment %} <span class="pill {{ 'ok' if r.sentiment == 'positive' else 'warn' if r.sentiment == 'negative' else '' }}">{{ r.sentiment }}</span>{% endif %}</div>
-    {% if r.recommended_status %}<div class="small">Recommended: {{ r.recommended_status }}</div>{% endif %}
+    {% if r.id in said_no %}<div class="small"><span class="pill warn">{{ company_said_no }} No deal is recommended: a person decides.</span></div>
+    {% elif r.recommended_status %}<div class="small">Recommended: {{ r.recommended_status }}</div>{% endif %}
   <div class="small muted">From {{ r.from_name or '' }} &lt;{{ r.from_email }}&gt; · {{ r.received_at|local }}
     {% if r.lead %} · lead <a href="/leads/{{ r.lead_id }}">{{ r.lead.company.name }}</a>{% else %} · not matched to a lead{% endif %}
     {% if r.reply_to %} · they ask for answers to go to {{ r.reply_to }} (nothing goes there unless a person decides){% endif %}</div>
@@ -34,6 +35,7 @@
   {% if r.body_text and r.new_text and r.body_text.strip() != r.new_text.strip() %}<details class="small" style="margin-top:4px"><summary>The whole email, with what it quotes or forwards</summary><div class="post small">{{ r.body_text[:6000] }}</div></details>{% endif %}
   {% if r.reasons %}<div class="small muted">Why: {{ r.reasons|join('; ') }}</div>{% endif %}
   {% if r.action_note %}<div class="small">Done: {{ notes[r.id] }}{% if r.suggested_followup_id %} · <a href="/followups#f{{ r.suggested_followup_id }}">suggested reply</a>{% endif %}</div>{% endif %}
+  {% if r.id in write_yourself %}<div class="small">No answer is on its way. If they still need one, write to them from the mailbox yourself, then log it on <a href="/leads/{{ r.lead_id }}">the lead</a>.</div>{% endif %}
   {% if r.status == 'needs_review' and can_edit and not can_approve and r.category == 'calendly' %}
   <div class="small muted" style="margin-top:8px">A Sales Manager applies this.</div>
   {% elif r.status == 'needs_review' and can_edit and not can_approve %}

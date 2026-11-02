@@ -261,7 +261,7 @@ def _setup_checks(ctx: AppContext, add) -> None:
                                                 ctx.settings.backup_passphrase) is False:
         add("Older off-machine copies open", False, f"The copy {key_changed['file']} and those before it do not open with the backup "
             "passphrase in use now: it was changed, or that copy is damaged. Keep the old passphrase until those copies have aged "
-            "out, about 30 days.", "warning")
+            "out, about 30 days. Deal document copies never age out: see the deal documents check.", "warning")
     if off_ready and off_drill:
         days = (utcnow() - datetime.fromisoformat(off_drill)).days
         add("Off-machine copy restored recently", days <= OFFSITE_DRILL_MAX_AGE_DAYS,
