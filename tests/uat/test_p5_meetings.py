@@ -125,7 +125,7 @@ def _sent_after_booking(ctx, sender):
     return len(FakeSMTP.sent) - before
 
 
-@pytest.mark.parametrize("url", ["", pytest.param("https://cal.example/owner/30min", marks=pytest.mark.xfail(strict=True, reason="a link that is not Calendly's has no purpose set: a known gap, reported"))])
+@pytest.mark.parametrize("url", ["", "https://cal.example/owner/30min"])
 def test_a_booking_stops_the_draft_that_asks_for_a_meeting(make_ctx, url):
     ctx, _sender, fid = _reply_draft(make_ctx, "Sounds good, can we schedule a call?", url)
     deliver(ctx, notice("booked", A))

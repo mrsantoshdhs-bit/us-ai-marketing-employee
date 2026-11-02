@@ -27,6 +27,7 @@ from aime.timeutil import utcnow
 
 DRAFTS_ALERT = "drafts:waiting"
 READ_AGAIN = "Written "  # how the note below starts, so a later run can bring its day count up to date
+NOBODY_TO_WRITE_TO = "the next step has nobody it may go to"  # in the stage's record: the sales agent opens the hand task from it
 
 
 def _task(session: Session, lead_id: int, company_id: int | None, subject: str, body: str) -> bool:
@@ -168,7 +169,7 @@ def pipeline_checks(session: Session, settings, now: datetime, actor: str) -> di
         elif lead.status == "nurture":
             how = "the last email; the lead was parked"
         elif not settings.test_recipients and not reached_address(session, lead.id, lead.contact.email if lead.contact else None):
-            how = "the last email; the next step has nobody it may go to"  # its task is the sales agent's: nothing more is drafted
+            how = f"the last email; {NOBODY_TO_WRITE_TO}"  # its task is the sales agent's: nothing more is drafted
         else:
             continue  # the next step is still to come
         set_status(session, lead, "no_response", actor, f"no reply {wait_days} days after {how}")

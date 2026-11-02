@@ -10,7 +10,8 @@ to go out are cancelled, and the Sales Manager is notified. Cancellations reopen
 follow-up next step, unless another meeting with it is still booked. Reschedules ("Rescheduled:"/"Updated:", or a
 "New Event:" that names its former time) move the recorded meeting instead of adding a second one; Calendly's
 cancellation of the former time then changes nothing. A cancellation or reschedule whose time matches nothing
-applies to the invitee's only upcoming meeting; otherwise it goes to review. Two upcoming meetings for one lead
+applies to the invitee's only upcoming meeting; otherwise it goes to review. A notice dated before the newest one
+applied for that invitee and event changes nothing and goes to review: the record has moved on. Two upcoming meetings for one lead
 (the same person booking twice) raise a warning until one is cancelled; overlapping meetings with different people
 raise an alert (Calendly itself prevents double booking on the calendar it manages). Unmatched or unparseable
 notifications go to review, and an unmatched booking can be linked to a lead on the Meetings page. A time whose zone
@@ -63,6 +64,7 @@ OFFSET_LABEL = re.compile(r"\b(?:utc|gmt)\s*[-+\u2212\u2013]\s*\d")  # "GMT+5:30
 HELD_NOTE = "meeting recorded, nothing moved"  # how record_meeting says the lead waits for a person
 HAS_OUTCOME_NOTE = "this meeting already has an outcome"
 UNKNOWN_CANCEL = "cancellation for an unknown meeting"
+OUT_OF_DATE = "out of date"
 FORMER_TIME = "former time"
 APPLIED_NOTES = ("meeting recorded", "recorded but not matched", "meeting rescheduled", "meeting cancelled", "already recorded", "already cancelled")  # what record_meeting says when it acted on a notice
 OPTED_OUT_HOLD = "they opted out or are on the do-not-contact list"
@@ -260,6 +262,8 @@ def record_meeting(session: Session, settings, info: dict, actor: str, row: Inbo
     if info["kind"] == "rescheduled":
         if scheduled is not None:
             return scheduled, "already recorded"
+        if (newer := _dated_after(session, settings, info, row)) is not None:
+            return None, _out_of_date_note(newer)
         moved = _the_meeting(session, info["invitee_email"], info.get("previous_starts_at"))
         if moved is None:
             info = {**info, "kind": "booked"}  # nothing to move: record it as a booking
@@ -291,6 +295,8 @@ def record_meeting(session: Session, settings, info: dict, actor: str, row: Inbo
             return existing, "already cancelled"
         if existing.status in ("completed", "no_show"):  # a person recorded what happened: a late notice does not undo it
             return existing, f"{HAS_OUTCOME_NOTE} ({existing.status.replace('_', ' ')}), so the cancellation changed nothing: check it in Calendly"
+        if (newer := _dated_after(session, settings, info, row)) is not None:
+            return None, _out_of_date_note(newer)
         existing.status = "cancelled"
         reopen_after_cancel(session, existing, actor)
         close_outcome_tasks(session, existing.lead_id)
@@ -305,6 +311,8 @@ def record_meeting(session: Session, settings, info: dict, actor: str, row: Inbo
     if _cancel_read_first(session, settings, info, row):
         return None, ("not recorded: a cancellation of this time, dated after this notice, was read first. Check it in Calendly; "
                       "if the meeting is live, log it on the lead's page")
+    if (newer := _dated_after(session, settings, info, row)) is not None:
+        return None, _out_of_date_note(newer)
     meeting = Meeting(lead_id=lead.id if lead else None, company_id=lead.company_id if lead else None,
                       contact_id=contact.id if contact else None, invitee_email=info["invitee_email"],
                       invitee_name=info.get("invitee_name"), title=info.get("event") or "Meeting",
@@ -327,7 +335,7 @@ def record_meeting(session: Session, settings, info: dict, actor: str, row: Inbo
             from aime.handover import handover
             handover(session, settings, session.get(Opportunity, meeting.opportunity_id),
                      f"meeting booked for {_when_label(meeting)} ({info['invitee_email']})", actor)
-    closed = close_open_emails(session, lead, f"Meeting booked for {_when_label(meeting)}: not needed")
+    closed = close_open_emails(session, lead, f"Meeting booked for {_when_label(meeting)}: not needed", settings)
     if source == "calendly_email":
         close_open_proposals(session, lead)
     overlap = session.execute(select(Meeting.id).where(Meeting.id != meeting.id, Meeting.status == "scheduled",
@@ -445,7 +453,8 @@ def _read_notice(settings, row: InboundEmail) -> dict | None:
 
 def older_waiting_notice(session: Session, settings, row: InboundEmail) -> InboundEmail | None:
     """An older notice about the same invitee that still waits for a person, whoever may see it, or None. Notices must apply in the order
-    Calendly sent them, and Replies lists the newest first. One that cannot be read blocks nothing."""
+    Calendly sent them, and Replies lists the newest first. One that cannot be read blocks nothing, and neither does one already applied:
+    a notice with no lead keeps its row waiting even then."""
     info = _read_notice(settings, row)
     invitee = (info or {}).get("invitee_email")
     if not invitee:
@@ -454,7 +463,8 @@ def older_waiting_notice(session: Session, settings, row: InboundEmail) -> Inbou
     for other in session.execute(select(InboundEmail).where(InboundEmail.category == "calendly", InboundEmail.status == "needs_review",
                                                             InboundEmail.id != row.id).order_by(InboundEmail.received_at, InboundEmail.id)).scalars():
         said = _read_notice(settings, other)
-        if said and said.get("invitee_email") and canonical_address(said["invitee_email"]) == canonical_address(invitee) and (other.received_at or datetime.min, other.id) < here:
+        if said and said.get("invitee_email") and canonical_address(said["invitee_email"]) == canonical_address(invitee) \
+                and (other.received_at or datetime.min, other.id) < here and not notice_applied(other):
             return other
     return None
 
@@ -505,6 +515,24 @@ def _cancel_read_first(session: Session, settings, info: dict, row: InboundEmail
         for r, other in _notices(session, settings, info["invitee_email"], row))
 
 
+def _dated_after(session: Session, settings, info: dict, row: InboundEmail | None) -> InboundEmail | None:
+    """The notice already applied for this invitee and event that is dated after this one, or None: acting on this one would take the
+    record back in time. A notice that names no event type reads "Meeting" and is compared with any. A person logging a meeting has no notice."""
+    if row is None or row.received_at is None:
+        return None
+    event = (info.get("event") or "Meeting").lower()
+    for other, said in _notices(session, settings, info["invitee_email"], row):
+        theirs = (said.get("event") or "Meeting").lower()
+        if other.received_at and other.received_at > row.received_at and notice_applied(other) and (event == theirs or "meeting" in (event, theirs)):
+            return other
+    return None
+
+
+def _out_of_date_note(newer: InboundEmail) -> str:
+    return (f"{OUT_OF_DATE}: notice #{newer.id}, dated after this one, was already applied, so this one changed nothing. "
+            "Check it in Calendly; if it still matters, change the meeting on Meetings")
+
+
 def _already_moved(session: Session, settings, info: dict, row: InboundEmail | None) -> Meeting | None:
     """The live meeting a reschedule moved away from this time, when that reschedule is dated at or after this booking."""
     if row is None:
@@ -524,7 +552,7 @@ def _an_earlier_notice_names(session: Session, settings, info: dict, row: Inboun
         for r, other in _notices(session, settings, info["invitee_email"], row))
 
 
-def close_open_emails(session: Session, lead: Lead, reason: str) -> int:
+def close_open_emails(session: Session, lead: Lead, reason: str, settings=None) -> int:
     """A lead who booked gets no more sequence emails, and nothing still waiting that asks for a meeting: a booking
     link, however a person has edited it, an offer of times, a request for times. An answer to a question being written
     to them stays, and says that a booking arrived; so does every other reply, and every note about the meeting.
@@ -532,7 +560,7 @@ def close_open_emails(session: Session, lead: Lead, reason: str) -> int:
     n = 0
     for f in session.execute(select(FollowUp).where(FollowUp.lead_id == lead.id, FollowUp.channel == "email",
                                                     FollowUp.status.in_(OPEN))).scalars():
-        ends = f.kind == "outreach" or (f.kind == "response" and _asks_for_a_meeting(f))
+        ends = f.kind == "outreach" or (f.kind == "response" and _asks_for_a_meeting(f, settings))
         if ends and f.kind == "response" and _answers_a_question(session, f):
             if BOOKING_ARRIVED not in (f.blocked_reason or "") and f.blocked_reason != WROTE_AGAIN:
                 f.blocked_reason = "; ".join(x for x in (f.blocked_reason, BOOKING_ARRIVED) if x)[:300]
@@ -542,12 +570,19 @@ def close_open_emails(session: Session, lead: Lead, reason: str) -> int:
     return n
 
 
-def _asks_for_a_meeting(f: FollowUp) -> bool:
+def has_booking_link(settings, text: str | None) -> bool:
+    """This text carries a booking link: Calendly's, or the one in settings, wherever that is hosted."""
+    low = (text or "").lower()
+    ours = re.sub(r"^https?://", "", (getattr(settings, "calendly_url", "") or "").strip().lower()).rstrip("/")
+    return "calendly.com/" in low or bool(ours and ours in low)
+
+
+def _asks_for_a_meeting(f: FollowUp, settings=None) -> bool:
     from aime.automation import MEETING_NOTES
 
     if f.purpose in MEETING_NOTES:
         return False
-    return f.purpose in ("meeting_offer", "ask_times", "booking_link") or "calendly.com/" in (f.body or "").lower()
+    return f.purpose in ("meeting_offer", "ask_times", "booking_link") or has_booking_link(settings, f.body)
 
 
 def _answers_a_question(session: Session, f: FollowUp) -> bool:
@@ -637,7 +672,7 @@ def close_waiting_alerts(session: Session, settings) -> None:
     from aime.monitoring import resolve_alerts
 
     waiting = session.execute(select(InboundEmail).where(InboundEmail.category == "calendly", InboundEmail.status == "needs_review")).scalars()
-    resolve_alerts(session, (WAITING_ALERT,), {_waiting_key(row, _read_notice(settings, row)) for row in waiting})
+    resolve_alerts(session, (WAITING_ALERT,), {_waiting_key(row, _read_notice(settings, row)) for row in waiting if not notice_applied(row)})
 
 
 def _the_meeting(session: Session, email: str, starts_at: datetime | None) -> Meeting | None:
@@ -671,7 +706,7 @@ def link_meeting(session: Session, meeting: Meeting, lead: Lead, actor: str, set
             from aime.handover import handover
             handover(session, settings, session.get(Opportunity, meeting.opportunity_id),
                      f"meeting booked for {_when_label(meeting)} ({meeting.invitee_email})", actor)
-        close_open_emails(session, lead, f"Meeting booked for {_when_label(meeting)}: not needed")
+        close_open_emails(session, lead, f"Meeting booked for {_when_label(meeting)}: not needed", settings)
         close_open_proposals(session, lead)
     log_activity(session, f"Meeting with {meeting.invitee_name or meeting.invitee_email} linked to this lead by {actor}",
                  actor, type_="meeting", company_id=lead.company_id, lead_id=lead.id, opportunity_id=meeting.opportunity_id)
@@ -773,6 +808,8 @@ def handle_calendly_email(session: Session, settings, row: InboundEmail, actor: 
         _say(row, "neutral", "Meeting recorded, lead not moved: a person decides")
     elif decided:
         _say(row, "neutral", "This meeting already has an outcome: check the cancellation in Calendly")
+    elif note.startswith(OUT_OF_DATE):
+        _say(row, "neutral", "Out of date, nothing changed: check it in Calendly")
     elif info["kind"] == "cancelled":
         _say(row, "neutral", "Cancellation for an unknown meeting: check it in Calendly" if note.startswith(UNKNOWN_CANCEL)
              else "Former time cancelled: nothing to do" if note.startswith(FORMER_TIME) else "Meeting cancelled: see the lead's next step")

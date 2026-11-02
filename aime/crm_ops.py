@@ -346,7 +346,7 @@ def lift_suppression(session: Session, suppression_or_value: Suppression | str, 
             c.email_status = "unchecked"  # the mail-server check reads it again before any gate counts it as usable
     audit(session, actor, "suppression_lifted", f"suppression #{row.id}", f"{row.kind}; it was: {row.reason}; why: {reason}")
     for company_id in {c.company_id for c in contacts} or {None}:
-        log_activity(session, f"Do-not-contact entry lifted by {actor}: {row.value}. No email follows from this, and a closed lead stays closed",
+        log_activity(session, f"Do-not-contact entry lifted by {actor}: {row.value}. Nothing goes out by itself: a closed lead stays closed, and a lead never closed may get a new draft on the next run, which a person still approves",
                      actor, body=reason, company_id=company_id)
     return None
 

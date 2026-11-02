@@ -348,7 +348,7 @@ def book(session: Session, settings, calendar, p: MeetingProposal, index: int, a
     from aime.meetings import OPTED_OUT_HOLD, book_on_lead, close_open_emails
 
     hold = book_on_lead(session, settings, lead, contact, existing, actor, f"{start:%Y-%m-%d %H:%M} UTC (booked from proposal #{p.id})")
-    close_open_emails(session, lead, f"Meeting booked for {label(start, p.prospect_tz)}: not needed")
+    close_open_emails(session, lead, f"Meeting booked for {label(start, p.prospect_tz)}: not needed", settings)
     p.status, p.chosen_slot, p.meeting_id, p.approved_by = "booked", start, existing.id, actor
     if hold != OPTED_OUT_HOLD:  # someone who opted out is not written to, even to confirm: a person decides
         _draft(session, settings, lead, p.prospect_email, f"Confirmed: our call on {label(start, p.prospect_tz)}",

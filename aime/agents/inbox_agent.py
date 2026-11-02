@@ -327,7 +327,7 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         if state.get("no_address_search"):
             alert_once(session, "warning", self.name, f"The mail server will not search for the addresses AIME has written to ({state_key}), so an "
                        "opt-out sent from another address under a new subject can be read as not sales. Please look through \"Mail read as "
-                       "not sales\" on Replies now and then.", self.settings, key=refused_search)
+                       "not sales\" on Replies now and then. AIME asks the server again each day, and this closes when it answers.", self.settings, key=refused_search)
         resolve_alerts(session, (refused_search,), {refused_search} if state.get("no_address_search") else set())
         session.commit()
         if connection_lost is not None:  # what was read is handled; the run is a failed read, and tried again at once

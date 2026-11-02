@@ -1888,7 +1888,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             refused = lift_suppression(s, row, who(request), " ".join(reason.split()))
             value = row.value
         return back("/automation#suppressions", f"Not lifted: {refused}" if refused else f"{value} lifted. Nothing was drafted or sent, "
-                    "a closed lead stays closed until a person reopens it, and the entry is kept")
+                    "a closed lead stays closed until a person reopens it, and the entry is kept. A lead never closed may get a new draft on the next run, which a person still approves")
 
     # ------------------------------------------------------------------ agents, jobs, reports
     @app.get("/agents", response_class=HTMLResponse)

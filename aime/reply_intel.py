@@ -1711,7 +1711,9 @@ def act(session: Session, settings, row: InboundEmail, actor: str) -> None:
             session.flush()
             written = body
             row.suggested_followup_id = draft.id
-            if "calendly.com/" in body.lower():
+            from aime.meetings import has_booking_link
+
+            if has_booking_link(settings, body):
                 draft.purpose = "booking_link"
             elif row.category == "interested" and booked is None and not settings.calendly_url and row.intent not in ("pricing_request", "more_info"):
                 draft.purpose = "ask_times"  # the same request for times in other words: a booking ends it (meetings.close_open_emails)
