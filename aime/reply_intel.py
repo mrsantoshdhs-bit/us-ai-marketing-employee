@@ -76,7 +76,7 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
     # "drop me a line", "take us through it" and "one from the list you sent" are not opt-outs.
     ("unsubscribe", re.compile(
         r"\b(un-?su[bs]{1,2}c?r?i?b?e?d?|un su[bs]{1,2}cri?b\w*|un?s?c?u?s?b?s?cri?be?d?|"
-        rf"(remove|delete|erase|unlist) {_OBJECT}|"
+        rf"(remove|remoev|remvoe|delete|erase|unlist) {_OBJECT}|"
         rf"drop {_OBJECT}(?! (a|an|the|some|any|your|our|my|one|in|by|at|to)\b)|"
         rf"(take|get) {_OBJECT} (off|out( of| from)?)(?! (topic|guard|to|for|on|and)\b)|"
         rf"{_OBJECT} (off|from|out of) (your|the|this|all|any) ({_LIST}|crm|system|records?)|"
@@ -85,32 +85,38 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
         rf"from (your|this) {_LIST}\W+(please )?(remov|delet|drop|unsub)\w*|"
         rf"(off|out of) (your|the|this) {_LIST}(?! of\b)|"
         r"from (your|the|this) (mailing|e-?mail|marketing|distribution) list|"
-        r"(stop|quit|cease) (e-?mailing|contacting|sending|messaging|mailing|writing to|spamming|bothering|pestering)|"
-        r"(stop|quit|cease) (all |the |these |those |your )?(e-?mails?|messages?|spam)|(stop|quit|cease) (these|writing)\b|"
-        r"no (more|further) (e-?mails?|messages?|contact|mail)|no more of (these|this|your)\b|"
+        r"(stop|quit|cease) (e-?maili?ng|contacti?ng|sending|messaging|mailing|writing to|spamming|bothering|pestering)|"
+        r"(stop|quit|cease) (with )?(all |the |these |those |your )?(e-?mails?|messages?|spam)|(stop|quit|cease) (these|writing)\b|"
+        r"discontinue (all |the |these |those |your )?(e-?mails?|messages?|mail(ings?)?)|discontinue (e-?mailing|contacting|messaging|mailing|sending (me|us)\b)|"
+        r"no (more|further) (e-?mails?|messages?|contact|mails?)|no more of (these|this|your)\b|"
         r"(do not|don'?t|never)( ever)? (e-?mail|contact|message|write|reach out|send)( to)?( (me|us))? (again|any ?more)|"
-        r"please (remove|delete|go away)(?=\W*($|[.!]))|"
+        r"please (remove|delete|go away|stop)(?=\W*($|[.!]))|(i|we) need you to stop(?=\W*($|[.!]))|"
         rf"(remove|delete|take)( off| from) {_LIST}|"
-        r"(remove|delete|erase) (\S+|(this|my|that|our) (e-?mail )?address) from (your|all) (records?|systems?)|"
+        r"(remove|delete|erase) (\S+|(this|my|that|our) (e-?mail )?address) from (your|all) (records?|systems?)|(remove|delete|erase) (this|my|our) (e-?mail )?address(?=\W*($|[.!]))|"
         r"(do not|don'?t|never)( ever)? (e-?mail|contact|message|write to|reach out to) (me|us)|do not (email|contact)(?! (the|this|that|a|an|our|my)\b)|"
-        r"(do not|don'?t|never)( ever)? send(ing)? (me |us )?(any |anymore )?((more|further|other) )?(e-?mails?|messages?|mail)|"
+        r"(do not|don'?t|never)( ever)? send(ing)? (me |us )?(any |anymore )?((more|further|other) )?(e-?mails?|messages?|mail|correspondence)|"
+        # "Don't hesitate to call or contact me again" invites them.
+        r"(do not|don'?t|never)(?! hesitate)( \w+){1,5} or (e-?mail|contact|message|write to) (me|us) (again|any ?more)|"
         # Only when nothing follows: "don't send me more info" and "don't send more details, just call me" stop nothing.
         r"(do not|don'?t|never) send (me |us )?(any |anything )?(more|further|else)( of (these|this|them|your \w+))?(?=\s*($|[.!,;]\s*($|thanks?\b|thank you\b|please\b)))|"
         r"(not interested|no thanks|no, thank you)\W+(please |pls |just )?stop(?=\W*($|[.!]))|"
         r"forget (this|my|our) (e-?mail )?address|never (want to |wish to |to )hear from (you|your|anyone)\b(?![^.!?\n]*\?)|never hear from (you|your)\b[^.?!]{0,30}\bagain(?![^.!?\n]*\?)|"
         r"(do not|don'?t|no longer)( \w+)? (wish|want|like|need) to (receive|get)( \w+){0,3} "
         r"(e-?mails?|messages?|mail|communications?|newsletters?)|"
+        r"(do not|don'?t|no longer)( \w+)? (wish|want|like|need) to (receive|get) (any )?(more|further) of (these|this|those|them)(?=\W*($|[.!,]))|"
         r"(do not|don'?t|no longer)( \w+)? (wish|want|like|need) to hear (back )?from (you|your)|"
         r"(do not|don'?t|no longer)( \w+)? (wish|want) to be (contacted|e-?mailed|on your)|"
         r"(do not|don'?t|no longer)( \w+)? (want|need) (any |your |these |those |more |further ){1,3}(e-?mails|messages)|"
         r"(do not|don'?t|never)( ever)? (e-?mail|contact|message|write to) (this (address|e-?mail|mailbox|account)|anyone)|"
-        r"(stop|cease|end|halt|quit) (all |any |further |these |your )*(communications?|contact|correspondence|outreach|solicitations?)|"
+        r"(stop|cease|end|halt|quit|discontinue) (all |any |further |these |your )*(communications?|contact|correspondence|outreach|solicitations?)|"
         r"refrain from (contacting|e-?mailing|messaging|writing)|stop following up|"
         r"(do not|don'?t) follow[- ]?up(?! (on|with|until|till|before|after|next|this|in|today|tomorrow|monday|tuesday|wednesday|thursday|friday)\b)|"
+        r"(do not|don'?t|never) follow[- ]?up with (me|us) (again|any ?more)|"
         r"cancel (my|our|this) (subscription|membership)|lose (my|our) (e-?mail|address|number|details|contact)|"
         r"(remove|take) (me|us) (from|off) (all )?(future )?(correspondence|mailings?|communications?|the distribution)|"
         r"take (me|us) off the distribution|(me|us) out of your system|"
         r"(kindly |please )?desist|(do not|don'?t) solicit|no solicit(ation|ing)|"
+        r"leave (me|us) out of (your|these|those|all) (\w+ )?(e-?mails?|mailings?|messages?|lists?)|"
         r"opt (me |us )?out|opt[- ]?out|leave (me|us) alone)\b", re.I)),
     # The three weak ones only when they end their sentence: "We're good to go" and "No need for a long call" say no such thing.
     ("not_interested", re.compile(r"\b(not interested|no thanks|no, thank you|not a (good )?fit|"
@@ -143,19 +149,30 @@ _ES_MAIL = r"(correos?|e-?mails?|mensajes?|publicidad|comunicaciones)"
 _DE_MAIL = r"(e-?mails?|mails?|nachrichten|newsletter|werbung)"
 _FR_LIST = r"(de|du) (votre|vos|la|cette|ce|votre) (liste|listes|base|fichier|mailing)"
 _HI_MAIL = r"(e-?mails?|mails?|msgs?|messages?)"
+_PT_MAIL = r"(e-?mails?|mensagens|correspond[eê]ncias?)"
 ELSEWHERE_OPT_OUT = re.compile(
     rf"\b(elim[ií]n(en|e|a)me|elim[ií]nenos|eliminarme {_ES_LIST}|qu[ií]t(en|e|a)me {_ES_LIST}|s[aá]qu(en|e|a)me {_ES_LIST}|"
     rf"b[oó]rr(en|e|a)me {_ES_LIST}|darme de baja|darnos de baja|d[eé]n(me)? de baja|"
     rf"no me (env[ií]en|mand(en|e)|escriban|contacten) m[aá]s|no me (env[ií]en|mand(en|e)) {_ES_MAIL}|"
-    rf"(?<!si )no me (escriban|contacten?)|no quiero recibir (m[aá]s )?((sus|tus|estos|esos|vuestros) )?{_ES_MAIL}|"
-    rf"aus (ihrem|eurem|dem|ihrer|der) (verteiler|liste|e-?mail-?verteiler)|tragen sie (mich|uns) aus|"
+    rf"dej(en|e|a) de (escribir|contactar)(me|nos)|dej(en|e|a) de (enviar|mandar)(me|nos) (\w+ )?{_ES_MAIL}|(?<!si )no me (escriban|contacten?)|no quiero recibir (m[aá]s )?((sus|tus|estos|esos|vuestros) )?{_ES_MAIL}|"
+    rf"aus (ihrem|eurem|dem|ihrer|der) (verteiler|liste|e-?mail-?verteiler)|tragen sie (mich|uns)( bitte)? aus|nehmen sie (mich|uns)( bitte)? (von|aus) (ihrer|ihrem|der|dem) (\w*liste|\w*verteiler)|"
     rf"(mich|uns)\b[^.?!]{{0,40}}\baustragen|keine weiteren? {_DE_MAIL}(?! \w* ?(erhalten|bekommen))|keine {_DE_MAIL} mehr|bitte keine {_DE_MAIL}|"
     rf"(vom newsletter|von (ihrem|dem|der|ihrer) \w+|aus (ihrem|dem) \w+) abmelden|(bitte|m[oö]chte|will)\b[^.?!]{{0,40}}\babbestellen|"
     r"entfernen sie (mich|uns)|(mich|uns)\b[^.?!]{0,30}\bnicht mehr (kontaktieren|anschreiben|schreiben|anrufen)|nicht mehr (kontaktieren|anschreiben)|l[oö]schen sie (mich|meine)|"
     rf"me (retirer|supprimer) {_FR_LIST}|me d[eé]sabonner|me d[eé]sinscrire|retirez[- ]moi|d[eé]sabonnez[- ]moi|d[eé]sinscrivez[- ]moi|supprimez[- ]moi|"
     r"ne m'envoyez plus|ne plus me contacter|ne (plus recevoir|souhaite plus recevoir|veux plus recevoir) (vos|ces|de|d'|des|votre)|ne me contactez plus|"
+    r"arr[eê]tez de (m'|nous )envoyer (\w+ )?(e-?mails?|mails?|messages?|courriels?)|arr[eê]tez de (me contacter|nous contacter|m'[eé]crire|nous [eé]crire)|"
+    r"non (contattatemi|contattateci|scrivetemi|scriveteci) pi[uù]|"
+    rf"parem de (me|nos) (enviar|mandar) (\w+ )?{_PT_MAIL}|n[aã]o me (enviem|mandem) mais (\w+ )?{_PT_MAIL}|"
+    r"verwijder (mij|me|ons) (van|uit) (uw|jullie|je|de|deze) (\w*lijst|bestand|database)|stuur (mij|me|ons) geen (\w+ )?(e-?mails?|mails?|berichten)|schrijf (mij|me|ons) uit|"
+    r"avregistrera (mig|oss)|avmeld (meg|oss)|afmeld (mig|os)|"
+    r"usu[nń]\w* (mnie|nas) z (\w+ )?(listy|bazy)|wypisz(cie)? (mnie|nas)|"
+    r"удалите (меня|нас) из (\w+ )?(списка|рассылки|базы)|не пишите (мне|нам) больше|больше не пишите (мне|нам)|отпишите (меня|нас)|"
+    r"لا ترسل(وا)? (لي|لنا) (\w+ )?رسائل|"
     rf"{_HI_MAIL}( \w+)? (mat|na|nahi|nahin) bhej(o|iye|ein|en|e|na)|(mujhe|humein|hume) (mat|na) bhej(o|iye|ein|en|e|na)|"
-    rf"{_HI_MAIL} band kar(o|do|iye|en|dein)?|bhejna band|(list|suchi) se hata\w*)\b", re.I)
+    rf"{_HI_MAIL} band kar(o|do|iye|en|dein)?|bhejna band|(list|suchi) se hata\w*)\b|"
+    # Written without spaces, so with no word edge to look for.
+    r"メール配信を停止|配信を停止して|メールを送らないで|不要再(给|給|向)(我们|我們|我)(发|發|寄)(送)?(邮件|郵件|电邮|電郵)", re.I)
 # The same, only when it is all the message says: on its own it can mean nothing else ("Baja", but not "Baja California").
 ELSEWHERE_WHOLE = re.compile(r"\W*((por favor,? )?baja( por favor)?|(bitte )?abmelden( bitte)?|bitte abbestellen|keine werbung( bitte)?|"
                              r"band karo|(por favor,? )?no me escriba( m[aá]s)?( por favor)?|cancelar (mi )?(suscripci[oó]n|subscripci[oó]n)|"
@@ -163,7 +180,7 @@ ELSEWHERE_WHOLE = re.compile(r"\W*((por favor,? )?baja( por favor)?|(bitte )?abm
                              r"(per favore,? )?(cancellatemi|rimuovetemi|cancellami|rimuovimi)( dalla (vostra |sua |tua )?lista)?(,? (per favore|grazie))?|"
                              r"non scrivetemi pi[uù]|disiscrizione|"
                              r"((por )?favor,? )?(remover|remova|removam|retirar)( o| a)? (meu|minha)( e-?mail| endere[cç]o)?( da (sua |vossa )?lista)?(,? obrigad[oa])?|"
-                             r"descadastrar|cancelar (a )?(minha )?inscri[cç][aã]o)\W*", re.I)
+                             r"descadastrar|cancelar (a )?(minha )?inscri[cç][aã]o|(bitte )?austragen( bitte)?|uitschrijven|配信停止|退订|退訂|取消订阅|取消訂閱|수신거부)\W*", re.I)
 # A company's own footer, not the writer speaking: "click here to unsubscribe", "unsubscribe from our newsletter", "you may
 # opt out", "if you no longer wish to receive ...", an opt-out among a line of links, or the same in another language. A line
 # in which someone speaks ("please", "I", a question) is theirs: see WRITER_SPEAKS.
@@ -199,9 +216,9 @@ ROBOT_GREETING = re.compile(r"\b(how can we help|do you need (urgent )?help|need
 # A robot offering something ("Interested in a demo?"), not someone interested.
 ROBOT_OFFER = re.compile(r"\binterested in [^.?!]{0,60}\?", re.I)
 TICKET_REASON = "an automatic confirmation from their helpdesk or office: no one has answered yet, and a person checks"
-# The whole message, or a line of its own: "Just stop.", "I said stop", "STOP STOP STOP", "Stop this.", "No. Stop.", "Remove pls".
+# The whole message, or a line of its own: "Just stop.", "I said stop", "STOP STOP STOP", "Stop this.", "No. Stop.", "Remove pls", or a line's last word: "What is this? STOP".
 JUST_STOP = re.compile(r"(?im)^\s*((please|pls|plz|just|i said|no)[ \t,.!]+){0,2}(stop|remove|delete)([ \t,.!]+stop)*([ \t]+(it|me|us|now)|(?<=stop)[ \t]+this)?"
-                       r"([ \t,.!]+(please|pls|plz|thanks|thank you))*[\s.!,]*$")
+                       r"([ \t,.!]+(please|pls|plz|thanks|thank you))*[\s.!,]*$|(?<=[.!?])[ \t]+stop[ \t.!]*$")
 # "my spam folder", "it went to spam", "anti-spam": a mention, not an accusation (taken out before reading for one).
 SPAM_ASIDE = re.compile(r"\bspam[ -](folders?|filters?|box(es)?|traps?|checks?|checkers?|score|blockers?|protection|settings)\b|"
                         r"\banti-?spam\b|"
@@ -385,17 +402,19 @@ _MONTH_WORD = rf"(?:{'|'.join(_MONTHS)}|jan|feb|mar|apr|jun|jul|aug|sept?|oct|no
 # stops, nothing is suppressed, and a person gets a reminder for the date. "until I contact you", "until further notice" name no date and stay
 # opt-outs, and so does a date with "ever" or "at all" anywhere behind it ("until April. Actually never."). A date in another sentence is not
 # this: it has to follow the words. "Don't email me after January" asks for silence from that date on: that is no date to write on, so it stays an
-# opt-out, and so does "before Q3, none after either".
+# opt-out, and so does "before Q3, none after either", and a refusal or threat behind the date ("and after that also no", "and then stop again", "or we
+# will report it"). "until April, and after that feel free" is a date.
 NOT_UNTIL = re.compile(
-    r"\b((do not|don'?t)( ever)? (e-?mail|contact|message|write( to)?|reach out( to)?|send)( (me|us))?( any| anything| any more)?( more| further| other)?( e-?mails?| messages?| mail)?|"
-    r"(stop|quit|cease) (e-?mailing|contacting|sending|messaging|mailing|writing( to)?)( (me|us))?( all| the| these| those| your| any)?( e-?mails?| messages?| mail)?|"
-    r"(stop|quit|cease)( all| the| these| those| your)? (e-?mails?|messages?)|no (more|further) (e-?mails?|messages?|contact|mail)( please)?)"
+    r"\b((do not|don'?t)( ever)? (e-?mail|contact|message|write( to)?|reach out( to)?|send)( (me|us))?( any| anything| any more)?( more| further| other)?( e-?mails?| messages?| mails?| correspondence)?|"
+    r"(stop|quit|cease|discontinue) (e-?maili?ng|contacti?ng|sending|messaging|mailing|writing( to)?)( (me|us))?( all| the| these| those| your| any)?( e-?mails?| messages?| mail)?|"
+    r"(stop|quit|cease|discontinue)( with)?( all| the| these| those| your)? (e-?mails?|messages?)|no (more|further) (e-?mails?|messages?|contact|mails?)( please)?)"
     r"( again| any ?more)?,? (?P<prep>(until|till|til) after|until|till|til|before)( (?P<part>early|mid|late|the start of|the end of))?( the)?[ -]"
     rf"(?:(?P<month>{_MONTH_WORD})\b( (?P<day>\d{{1,2}})(st|nd|rd|th)?\b)?(,? (?P<year>20\d\d)\b)?|"
     rf"(?P<dayfirst>\d{{1,2}})(st|nd|rd|th)?( of)? (?P<month2>{_MONTH_WORD})\b|(?P<numeric>0?[1-9]|1[0-2])/(?P<numday>\d{{1,2}})(/\d{{2,4}})?\b|"
     r"(?P<quarter>q[1-4])\b( (?P<qyear>20\d\d)\b)?|(?P<coming>(the )?new year|next quarter|next year)\b)"
     r"(?![\s\S]*\b(ever|never|at all|for good|not even|on second thought|actually,? (no|not|do not|don'?t)|none after|n?or after|after either|"
-    r"(no|not|don'?t) [^.!?]{0,40}\bafter (it|that))\b)", re.I)
+    r"(no|not|don'?t) [^.!?]{0,40}\bafter (it|that)|after that\W+(\w+ ){0,2}(no|never|none|nothing|stop|remove|don'?t|do not|not either)|"
+    r"stop again|then stop|or else|report (it|this|you|them)|(i|we)('ll| will| shall) (report|block|complain|escalate))\b)", re.I)
 # Someone else will write, or they will: "Our CFO will get back to you in March", "Sam can reach out in March". Not "you can", not "can we".
 _SOMEONE_WILL = re.compile(r"\b(?!you\b|we\b)[\w']+('ll| will| shall| would| might| may| is going to| are going to| can| could)( \w+){0,2} $|"
                            r"\b(i|we)('ll| will| shall| am going to| are going to)( \w+){0,2} $", re.I)
@@ -516,7 +535,7 @@ _ANOTHER_WAY = (r"\b((bring|hand|print|post|upload|share|fax|send|mail|drop|give
 _A_LIST = r"(lists?|databases?|rosters?|director(y|ies)|registers?|records?|mail\w*|e-?mails?)"  # "take us off our vendor list" is an opt-out
 _STOP_BESIDE = r"(?![\s\S]*[.!?]\s+(please |just )?stop\W*($|[.!]))"  # "Unsubscribe rate on this must be awful. Stop."
 OWN_BUSINESS = re.compile(
-    r"\b(we|i)( really| just)?( need| want| have| would like|'d like| are trying|'re trying) to (stop|quit|cease) (e-?mailing|sending|writing) "
+    r"\b(we|i)( really| just)?( need| want| have| would like|'d like| are trying|'re trying) to (stop|quit|cease|discontinue) (e-?mailing|sending|writing) "
     rf"((out|our|the|all|all our|these|those) )*{_THEIR_PAPERWORK}\b(?![^.!?\n]*\b(to|with|from|at) (you|your)\b)|"
     rf"\b(our|their|customers'?)( newsletter)? unsubscribe (rates?|pages?|links?)\b(?![^.!?\n]*\b(your|still)\b){_STOP_BESIDE}|(?<!your )(?<!your newsletter )\bunsubscribe rates?\b{_STOP_BESIDE}|"
     rf"\ban opt[- ]?out (on|for) (our|their)( \w+){{0,2}}? {_THEIR_PRODUCT}\b{_NOT_ABOUT_US}|"

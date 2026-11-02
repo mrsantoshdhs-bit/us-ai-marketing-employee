@@ -11,7 +11,8 @@ from sqlalchemy import select
 from aime import restore, send_journal
 from aime.context import create_context
 from aime.crm_ops import is_suppressed
-from aime.reply_intel import reply_footer
+from aime.inbox import new_text
+from aime.reply_intel import classify, reply_footer
 from aime.models import Activity, FollowUp, InboundEmail, Lead
 from aime.restore import RestoreRefused, restore_database
 from aime.timeutil import utcnow
@@ -67,6 +68,68 @@ def test_their_own_business_still_suppresses_nothing(make_ctx, words):
     ctx = read(make_ctx, words)
     with ctx.db.session() as s:
         assert not is_suppressed(s, DAVID)
+
+
+def category_of(words):
+    row = InboundEmail(from_email=DAVID, subject="Re: A question", body_text=words, new_text=new_text(words), auto_submitted=False, bounced_addresses=[])
+    return classify(row)[0]
+
+
+# They only ever counted because a company's legal notice below them tripped the opt-out wording. The notice no longer does, so the wording has to.
+OWN_WORDS = ["pls remoev me", "stop emailng me", "stop contactng us", "No more mails from you pls", "I do not want to receive any more of these.",
+             "Please leave me out of your emails.", "Please stop. I have asked twice already.", "I left this company in 2022. Remove this address.", "Stop with the emails.",
+             "Please discontinue these emails.", "Please discontinue sending me mail.", "Do not send any further correspondence.", "Please don't follow up with me again.",
+             "Please do not reply to this or contact me again.", "What is this? STOP", "We're good. Stop.", "We need you to stop.",
+             "Bitte nehmen Sie mich von Ihrer Liste.", "Bitte austragen.", "Tragen Sie mich bitte aus.", "Dejen de enviarme correos.", "Deja de escribirme.",
+             "Arrêtez de m'envoyer des emails.", "Non contattatemi più.", "Parem de me enviar emails.", "Não me enviem mais emails.", "Verwijder mij van uw lijst.",
+             "Stuur mij geen e-mails meer.", "Uitschrijven", "Avregistrera mig.", "Avmeld meg.", "Afmeld mig.", "Proszę usunąć mnie z listy.", "Wypisz mnie.",
+             "Удалите меня из списка.", "Не пишите мне больше.", "Отпишите меня.", "メール配信を停止してください。", "配信停止", "请不要再给我发邮件。", "退订", "取消订阅", "수신거부",
+             "لا ترسل لي رسائل بعد الآن"]
+
+
+@pytest.mark.parametrize("words", OWN_WORDS)
+def test_an_opt_out_is_read_alone_and_above_a_legal_notice(words):
+    assert category_of(words) == "unsubscribe"
+    assert category_of(words + NOTICE) == "unsubscribe"
+    assert category_of(words + SIGNED + NOTICE) == "unsubscribe"
+
+
+@pytest.mark.parametrize("words", ["Please discontinue these emails.", "Do not send any further correspondence.", "Dejen de enviarme correos.", "退订"])
+def test_an_opt_out_above_a_legal_notice_is_suppressed(make_ctx, words):
+    ctx = read(make_ctx, words + NOTICE)
+    with ctx.db.session() as s:
+        assert is_suppressed(s, DAVID)
+
+
+@pytest.mark.parametrize("words", [
+    "We will discontinue sending paper invoices next month. Can you help?", "We need to discontinue emailing invoices. Can you help?",
+    "Don't hesitate to call or contact me again.", "Don't follow up with me, I'll follow up with you next week.", "We need you to stop by on Friday.",
+    "Please leave me out of the invoice thread, Sam handles it.", "Please remove this address and write to newname@firm.example from now on.",
+    "Stop with the discounts, what is the real price?", "We don't want to get more of these leads wrong. Can you help?", "Should we start or stop?",
+    "Deja de preocuparte, escríbeme el lunes.", "Dejen de enviarme facturas en papel, ¿pueden ayudar?", "Stuur mij de offerte.", "Wypisz fakturę proszę.", "请给我发邮件。", "取消订阅功能可以做吗？",
+])
+def test_the_same_words_about_something_else_are_no_opt_out(words):
+    assert category_of(words) != "unsubscribe"
+    assert category_of(words + NOTICE) != "unsubscribe"
+
+
+@pytest.mark.parametrize("words", ["No more emails until April, and after that also no.", "Stop emailing me until January and then stop again.",
+                                   "Stop emailing us before Q2 or we will report it.", "Stop emailing me until March or else.", "Don't contact us until June. After that, don't either."])
+def test_a_refusal_behind_the_date_is_an_opt_out_with_no_reminder(make_ctx, words):
+    ctx = read(make_ctx, words)
+    with ctx.db.session() as s:
+        assert is_suppressed(s, DAVID)
+    assert not check_backs(ctx)
+
+
+@pytest.mark.parametrize("words", ["Stop emailing me until January, and after that feel free.", "Don't email me until April, I'm buried in the quarterly report.", "Don't email me until April or May.",
+                                   "Stop emailing me until January and then try again.", "Do not send any further correspondence until April.", "Please discontinue these emails until April.",
+                                   "Stop with the emails until Q2.", "No more mails until January."])
+def test_any_other_words_behind_the_date_are_still_a_date(make_ctx, words):
+    ctx = read(make_ctx, words)
+    with ctx.db.session() as s:
+        assert not is_suppressed(s, DAVID)
+    assert check_backs(ctx)
 
 
 @pytest.mark.parametrize("words", ["Don't email me until April.", "Do not contact me until after January.", "Stop emailing me before Q3.",
