@@ -548,6 +548,36 @@ def test_approving_an_answer_a_second_reply_replaced_says_why(make_ctx):
         assert now.status == "cancelled" and secret not in now.body
 
 
+@pytest.mark.parametrize("words", ["their boss wrote to pat@w.example to say no", "she replied by phone, a private matter"])
+def test_a_persons_note_says_neither_they_wrote_nor_reaches_the_url(make_ctx, words):
+    ctx = make_ctx(**SENDING)
+    lid = add_lead(ctx, "note", "pat@note.example", "note.example")
+    fid = answer_draft(ctx, lid, "pat@note.example")
+    assert approve(ctx, fid).status_code == 303
+    c = web(ctx)
+    c.post(f"/leads/{lid}/status", headers=ORIGIN, data={"status": "disqualified", "note": words}, follow_redirects=False)
+    with ctx.db.session() as s:
+        f = s.get(FollowUp, fid)
+        assert f.status == "cancelled" and words in f.blocked_reason
+    r = c.post(f"/followups/{fid}/approve", headers=PAGE, follow_redirects=False)
+    assert r.status_code == 303 and "wrote again" not in where(r) and "lead was disqualified" in where(r)
+    assert words not in where(r) and "pat@w.example" not in where(r)
+    with ctx.db.session() as s:
+        assert s.get(FollowUp, fid).status == "cancelled"
+
+
+@pytest.mark.parametrize("reason", ["Reply received (question)", "SIMULATED reply received (question)", "Reply received from someone at this company",
+                                    "Reply received on a merged lead", "Contact replied; sequence stopped", "They wrote again after this draft: read it on Replies"])
+def test_every_reason_a_reply_cancels_a_draft_says_they_wrote_again(make_ctx, reason):
+    ctx = make_ctx(**SENDING)
+    lid = add_lead(ctx, "rep", "pat@rep.example", "rep.example")
+    fid = answer_draft(ctx, lid, "pat@rep.example")
+    with ctx.db.session() as s:
+        f = s.get(FollowUp, fid)
+        f.status, f.blocked_reason = "cancelled", reason
+    assert "wrote again" in where(web(ctx).post(f"/followups/{fid}/approve", headers=PAGE, follow_redirects=False))
+
+
 def test_a_draft_cancelled_for_another_reason_does_not_say_they_wrote(make_ctx):
     ctx = make_ctx(**SENDING)
     lid = add_lead(ctx, "stop", "pat@stop.example", "stop.example")
@@ -777,6 +807,56 @@ def test_mark_reviewed_does_not_take_away_apply(signed_only):
     assert f"/inbox/{rid}/apply_calendly" in c.get("/inbox?show=all").text
     assert apply(c, rid).status_code == 303
     assert live(signed_only) == ["08 15:00"]
+
+
+def test_a_reviewed_cancellation_cannot_undo_the_rebooking_applied_after_it(signed_only):
+    """Booked, cancelled, booked again; the cancellation was marked reviewed. Once the rebooking is applied, the old cancellation refuses and changes nothing."""
+    ctx = signed_only
+    deliver(ctx, notice("booked", A), notice("cancelled", A), notice("booked", A))
+    booked, cancelled, rebooked = notice_ids(ctx)
+    c = web(ctx)
+    apply(c, booked)
+    c.post(f"/inbox/{cancelled}/reviewed", headers=ORIGIN, follow_redirects=False)
+    assert "Applied" in where(apply(c, rebooked))
+    assert live(ctx) == ["08 15:00"]
+    with ctx.db.session() as s:
+        before = s.get(InboundEmail, cancelled).action_note
+        stage = s.execute(select(Lead.status)).scalars().first()
+    r = apply(c, cancelled)
+    assert "Not applied" in where(r) and f"newer Calendly notice #{rebooked}" in where(r)
+    assert live(ctx) == ["08 15:00"]
+    with ctx.db.session() as s:
+        row = s.get(InboundEmail, cancelled)
+        assert row.status == "reviewed" and row.action_note == before
+        assert s.execute(select(Lead.status)).scalars().first() == stage
+
+
+def test_a_reviewed_notice_is_refused_after_a_newer_one_recorded_for_an_unmatched_invitee(signed_only):
+    """A booking with no lead keeps its row waiting, then reviewed, yet it was applied: the older notice still refuses."""
+    ctx = signed_only
+    who = "stranger@unknown-co.example"
+    deliver(ctx, notice("cancelled", A, who=who), notice("booked", A, who=who))
+    cancelled, booked = notice_ids(ctx)
+    c = web(ctx)
+    c.post(f"/inbox/{cancelled}/reviewed", headers=ORIGIN, follow_redirects=False)
+    apply(c, booked)
+    c.post(f"/inbox/{booked}/reviewed", headers=ORIGIN, follow_redirects=False)
+    assert live(ctx) == ["08 15:00"]
+    assert f"newer Calendly notice #{booked}" in where(apply(c, cancelled))
+    assert live(ctx) == ["08 15:00"]
+
+
+def test_a_newer_notice_not_applied_or_about_someone_else_does_not_refuse_a_reviewed_one(signed_only):
+    ctx = signed_only
+    deliver(ctx, notice("booked", A), notice("booked", B), notice("booked", B, who="other@elsewhere.example"))
+    first, waiting, other = notice_ids(ctx)
+    c = web(ctx)
+    apply(c, other)
+    c.post(f"/inbox/{first}/reviewed", headers=ORIGIN, follow_redirects=False)
+    assert "Applied" in where(apply(c, first))
+    assert "08 15:00" in live(ctx)
+    with ctx.db.session() as s:
+        assert s.get(InboundEmail, waiting).status == "needs_review"
 
 
 def test_apply_stays_for_those_who_may_approve(make_ctx):

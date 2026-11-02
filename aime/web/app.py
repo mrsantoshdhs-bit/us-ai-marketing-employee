@@ -219,6 +219,8 @@ def plain(text: str | None) -> str:
     return _SETTING.sub(word, _STATE_WORD.sub("", text or ""))
 
 
+# The fixed reasons a reply cancels a draft with (reply_intel, lead_replied, WROTE_AGAIN), never words matched inside a free-text reason.
+_REPLY_CANCELLED = re.compile(r"(?:Reply|SIMULATED reply) received\b|Contact replied;|" + re.escape(WROTE_AGAIN))
 # How a follow-up's Activity line is stored ("Follow-up #76 reject"; the send journal reads the word) and how a person reads it.
 _FOLLOWUP_LINE = re.compile(r"(Follow-up #\d+) ([a-z_]+)")
 _FOLLOWUP_WORDS = {"approve": "approved", "reject": "rejected", "save": "edited and saved", "reconfirm": "confirmed again",
@@ -683,7 +685,12 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 release_answers(s, row)
                 msg = "Marked reviewed"
             elif action == "apply_calendly" and row.category == "calendly" and row.status in ("needs_review", "reviewed"):
-                from aime.meetings import handle_calendly_email, older_waiting_notice
+                from aime.meetings import handle_calendly_email, newer_applied_notice, notice_applied, older_waiting_notice
+                # marked reviewed earlier, and the invitee's record has moved on since: this notice must not undo what came after it
+                newer = newer_applied_notice(s, C().settings, row) if row.status == "reviewed" else None
+                if newer is not None:
+                    return back("/inbox", f"Not applied: newer Calendly notice #{newer.id} for this invitee was already applied, so this one is out of date. "
+                                          "Check it in Calendly; if it still matters, change the meeting on Meetings.")
                 # one notice at a time, oldest first: a person's confirmation of one never applies another, which may be forged
                 older = older_waiting_notice(s, C().settings, row)
                 if older is not None:
@@ -692,7 +699,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 note = handle_calendly_email(s, C().settings, row, who(request), confirmed_by=who(request))
                 row.action_note = f"{note} (confirmed by {who(request)})"
                 # a booking with no lead is recorded, and its row waits for the link on Meetings
-                applied = row.status != "needs_review" or (row.recommended_status or "").startswith("Meeting recorded")
+                applied = notice_applied(row)
                 log_activity(s, f"Calendly notice #{row.id} confirmed and {'applied' if applied else 'not applied'}", who(request), type_="override",
                              company_id=row.company_id, lead_id=row.lead_id)
                 check_double_bookings(s, C().settings)
@@ -1583,7 +1590,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 return back("/followups", f"Already approved by {f.approved_by}{wait}: nothing changed")
             elif action in ("approve", "save") and f.status == "cancelled" and wants_page(request):
                 why = f.blocked_reason or ""
-                if re.search(r"\b(?:received|replied|wrote)\b", why, re.I):
+                if why.startswith("Lead disqualified"):  # may hold a person's own note: it stays off the page's address
+                    return back("/followups", "Not approved: this draft was cancelled because the lead was disqualified; what you typed here was not saved.")
+                if _REPLY_CANCELLED.match(why):
                     return back("/followups", "Not approved: they wrote again, so this draft was replaced. Read their reply on Replies; "
                                               "what you typed here was not saved.")
                 return back("/followups", f"Not approved: this draft was cancelled ({plain(why) or 'no reason recorded'}); what you typed here was not saved.")
