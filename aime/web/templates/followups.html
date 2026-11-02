@@ -34,6 +34,8 @@
   {% endif %}
   {% set card = cards.get(f.id) or {} %}
   {% if card.reply %}<div class="small" style="margin-top:8px"><b>What they wrote</b> <span class="muted">{{ card.reply.at|local }}</span><div class="post small">{{ card.reply.text }}</div></div>{% endif %}
+  {% if card.asked %}<div class="small" style="margin-top:8px"><b>Asked earlier, not answered yet</b> <span class="muted">{{ card.asked.at|local }}</span><div class="post small">{{ card.asked.text }}</div></div>{% endif %}
+  {% if card.old_names %}<div class="small" style="margin-top:6px"><span class="pill warn">The company name was corrected: the subject and evidence here may still say {{ card.old_names|join(', ') }}. Check them before this goes.</span></div>{% endif %}
   {% if card.company_said_no %}<div class="small" style="margin-top:6px"><span class="pill warn">{{ card.company_said_no }}</span></div>{% endif %}
   {% if card.away %}<div class="small" style="margin-top:6px"><span class="pill warn">They replied that they are away</span></div>{% endif %}
   {% if card.emailed %}<div class="small" style="margin-top:6px"><span class="pill warn">This address was already emailed on {{ card.emailed.at|local(None, '%Y-%m-%d') }} (lead #{{ card.emailed.lead_id }})</span></div>{% endif %}

@@ -306,9 +306,24 @@ def _document_copy(folder: Path, stored_as: str) -> Path:
     return folder / DOCUMENTS / f"{Path(stored_as).name}.aimebak"
 
 
-def _copy_documents_offsite(settings, folder: Path) -> list[str]:
-    """Each deal document once, encrypted: they never change, and each name is new. Returns the names that could not be
-    copied (a file another program holds, too little memory): they are tried again with the next copy."""
+def _document_digests(db_path: Path) -> dict[str, str]:
+    """What each stored document should hold, from its row. Nothing readable means nothing is vouched for."""
+    try:
+        con = sqlite3.connect(f"file:{db_path.resolve().as_posix()}?mode=ro", uri=True)
+        try:
+            return {Path(stored_as).name: digest for stored_as, digest in con.execute("SELECT stored_as, sha256 FROM attachments")}
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return {}
+
+
+def _copy_documents_offsite(settings, folder: Path, digests: dict[str, str]) -> list[str]:
+    """Each deal document once, encrypted: they never change, and each name is new. A copy that does not open with today's
+    passphrase (damaged, or the passphrase changed) is written again, only from an original that still matches its row: until
+    then it may be the only way back to the real document. A copy whose original is gone is never touched, and one that cannot
+    be judged without a download stays. Returns the names that could not be copied (a file another program holds, too little
+    memory): they are tried again with the next copy."""
     here = settings.data_dir / DOCUMENTS
     if not here.is_dir():
         return []
@@ -319,9 +334,14 @@ def _copy_documents_offsite(settings, folder: Path) -> list[str]:
         target = _document_copy(folder, path.name)
         partial = target.with_suffix(".partial")
         try:
-            if not path.is_file() or target.exists():
+            if not path.is_file():
+                continue
+            again = target.exists()
+            if again and copy_opens(target, settings.backup_passphrase) is not False:
                 continue
             data = path.read_bytes()
+            if again and _sha256(data) != digests.get(path.name):
+                continue
             partial.write_bytes(encrypt_bytes(data, settings.backup_passphrase))
             if decrypt_bytes(partial.read_bytes(), settings.backup_passphrase) != data:
                 raise BackupError("encrypted copy did not decrypt to the same document")
@@ -367,24 +387,40 @@ def bring_back_documents(settings, rows, source_folder: Path | None = None) -> t
 
 
 def document_problem(settings, rows, now: datetime) -> str | None:
-    """Deal documents missing here or, a day after they were added, from the off-machine folder. By name and size only:
-    this runs routinely, and must neither read every document nor download one."""
-    gone, not_copied = [], []
+    """Deal documents missing here or, a day after they were added, from the off-machine folder, and copies there that do not
+    open. The originals by name and size only; each copy is decrypted, as the newest bundle is, and a cloud-only one is not
+    downloaded for this."""
+    gone, not_copied, unopened, only_copy = [], [], [], []
     folder = Path(settings.backup_offsite_dir).expanduser() if offsite_status(settings)[0] else None
     for stored_as, size, filename, created_at in rows:
         path = settings.data_dir / DOCUMENTS / Path(stored_as).name
         try:
-            if not path.is_file() or path.stat().st_size != size:
+            whole = path.is_file() and path.stat().st_size == size
+            if not whole:
                 gone.append(filename)
-            elif folder and (now - created_at).total_seconds() > DOCUMENT_COPY_HOURS * 3600 and not _document_copy(folder, stored_as).exists():
-                not_copied.append(filename)
-        except OSError:  # another program has it for a moment
+            if not folder:
+                continue
+            copy = _document_copy(folder, stored_as)
+            if not copy.exists():
+                if whole and (now - created_at).total_seconds() > DOCUMENT_COPY_HOURS * 3600:
+                    not_copied.append(filename)
+            elif copy_opens(copy, settings.backup_passphrase) is False:
+                unopened.append(filename)
+                if not whole:
+                    only_copy.append(filename)
+        except (OSError, MemoryError):  # another program has it for a moment, or too little memory just now
             continue
     words = []
     if gone:
         words.append(f"{len(gone)} missing or changed on this PC ({', '.join(gone[:5])})")
     if not_copied:
         words.append(f"{len(not_copied)} with no off-machine copy ({', '.join(not_copied[:5])})")
+    if unopened:
+        words.append(f"{len(unopened)} whose off-machine copy does not open with the backup passphrase in use now ({', '.join(unopened[:5])}): it is "
+                     "damaged, or the passphrase changed. Document copies never age out, so waiting does not help; the next off-machine copy "
+                     "writes each again if its original on this PC is whole")
+    if only_copy:
+        words.append(f"{len(only_copy)} of those have no whole original here ({', '.join(only_copy[:5])}): keep the old passphrase, that copy may be the only way back")
     return "; ".join(words) or None
 
 
@@ -616,7 +652,7 @@ def write_offsite(settings, db_path: Path) -> dict:
     result = {"status": "ok", "file": target.name, "bytes": len(encrypted), "pruned": 0,
               "key_changed_after": _first_copy_the_passphrase_cannot_open(earlier, settings.backup_passphrase)}
     try:
-        result["documents_skipped"] = _copy_documents_offsite(settings, folder)
+        result["documents_skipped"] = _copy_documents_offsite(settings, folder, _document_digests(db_path))
     except Exception:  # today's copy stands: the documents go next time
         result["documents_skipped"] = ["the documents folder"]
     try:
