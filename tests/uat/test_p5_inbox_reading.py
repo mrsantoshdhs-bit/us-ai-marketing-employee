@@ -563,7 +563,7 @@ def test_after_a_few_refused_ticks_it_is_tried_hourly_and_mail_stays_held(make_c
         workflows.job_followups(ctx)
     assert len(Refused.tries) == ia.REFUSED_TICKS, "tried on each of the first ticks only"
     assert status_of(ctx, fid)[0] == "approved" and FakeSMTP.sent == [], "mail stays held"
-    clock(now + TICK * (ia.REFUSED_TICKS - 1) + timedelta(hours=1))
+    clock(now + TICK * (ia.REFUSED_TICKS - 1) + timedelta(hours=1, minutes=1))  # the last try was stamped a moment after the clock was set
     assert workflows.job_inbox(ctx).failed
     assert len(Refused.tries) == ia.REFUSED_TICKS + 1, "one try an hour"
     clock(now + TICK * (ia.REFUSED_TICKS - 1) + timedelta(hours=1, minutes=15))
@@ -670,7 +670,7 @@ def test_the_alert_stays_while_another_mailbox_waits_out_its_refusals(make_ctx, 
     assert Refused.tries.count("a@us.example") == asked, "a waits, b signed in again"
     assert len(sign_in_alerts(ctx)) == 1, "mail is still held, so the alert still says why"
     Two.refusing = set()
-    clock(now + TICK * (ia.REFUSED_TICKS - 1) + ia.REFUSED_WAIT)
+    clock(now + TICK * (ia.REFUSED_TICKS - 1) + ia.REFUSED_WAIT + timedelta(minutes=1))  # the last try was stamped a moment after the clock was set
     assert InboxAgent(ctx, imap_factory=Two).run({}).ok
     assert sign_in_alerts(ctx) == [], "closed once the last of them signs in"
 

@@ -21,7 +21,7 @@ ORIGIN = {"origin": "http://testserver"}
                                             ("Dana Fox", "Hi Dana,"), ("Salesforce Admin", "Hi there,")])
 def test_ok_a_mailbox_name_is_not_a_first_name(make_ctx, name, greeting):
     ctx = make_ctx()
-    row = SimpleNamespace(from_name=name, subject="Question", new_text="Tell me more", body_text="", intent=None)
+    row = SimpleNamespace(from_name=name, subject="Question", new_text="Tell me more", body_text="", intent=None, reasons=[])
     assert suggest(ctx.settings, "objection", row, None)[1].startswith(greeting)
 
 
