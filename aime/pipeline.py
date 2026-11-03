@@ -185,9 +185,14 @@ def pipeline_checks(session: Session, settings, now: datetime, actor: str) -> di
                  f"Meeting {m.starts_at:%Y-%m-%d %H:%M} UTC ({m.title}). On the Meetings page mark it held or no-show, "
                  "then set the opportunity's next step."):
             stats["meeting_tasks"] += 1
-    from aime.assignment import close_manual_notices, escalations
+    from aime.assignment import close_manual_notices, escalations, handover_sla
+    from aime.handover_package import periodic_check
 
     stats["escalated"] = escalations(session, settings, now, actor)  # untouched deals: the owner's manager is told
+    if handed := periodic_check(session, settings, actor, now):  # the conversation engine's leads and the VIP accounts
+        stats["handed_over"] = handed
+    if late := handover_sla(session, settings, now, actor):  # handovers nobody accepted in time
+        stats["handover_escalated"] = late
     close_manual_notices(session)
     _close_finished_stages(session, actor)
     _remind_about_drafts(session, settings, actor)
