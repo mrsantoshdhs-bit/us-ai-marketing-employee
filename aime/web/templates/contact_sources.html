@@ -1,0 +1,50 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}Contact sources · System settings · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+  <h1>{{ icon('users') }} Contact sources <span class="pill">Super Admin</span></h1>
+  <p class="subtitle">Every source of people and their business contact details: where it has records, what it gives, the licence and lawful basis it is used under, what it costs and whether it can run. <a href="/admin/settings/system">All system settings</a></p>
+</div></div>
+
+<div class="card small">Email addresses are never guessed (such as firstname@company): that stays prohibited until the owner decides otherwise. Licence and lawful-basis tags and terms marked "to be confirmed by owner" have not been reviewed. Switching a registry or paid source on, its countries, price and monthly budget are in <a href="/admin/settings/section/contact_sources">Contact sources settings</a>; the sources AIME already had keep their own switches, named under each one.
+  {% if legacy_pending %}<br>{{ legacy_pending }} contact(s) from before provenance existed are still to be marked "legacy" (the company research run does it, 500 at a time).{% endif %}</div>
+
+<div class="card table-wrap"><table>
+  <tr><th>Source</th><th>Status</th><th>Countries</th><th>Gives</th><th>Licence · lawful basis</th><th>Cost</th><th>Credentials</th><th>This month</th><th>Last run</th></tr>
+  {% for r in rows %}
+  <tr><td><strong>{{ r.title }}</strong><div class="small muted">{{ r.name }}</div><div class="small">{{ r.description }}</div>
+        <div class="small muted">Switched by: {% if r.controlled_by == 'settings' %}Contact sources settings ({{ 'on' if r.setting and r.setting.enabled else 'off' }}{% if r.setting and r.setting.countries %}, for {{ r.setting.countries|join(', ') }}{% endif %}){% else %}{{ r.controlled_by }}{% endif %}</div>
+        <div class="small muted">Terms: {{ r.terms_url }} · rate limit: {{ r.rate_limit }}</div></td>
+      <td><span class="pill {{ '' if r.status == 'ready' else 'warn' }}">{{ r.status }}</span>{% if r.reason %}<div class="small">{{ r.reason }}</div>{% endif %}
+        {% if r.requires_owner_approval %}<div class="small">{% if r.approval %}Approved by {{ r.approval.approved_by }}, {{ r.approval.approved_at }}{% else %}No owner approval recorded{% endif %}</div>{% endif %}
+        {% if r.cooldown_until %}<div class="small">Waiting (too many requests) until {{ r.cooldown_until }} UTC</div>{% endif %}</td>
+      <td class="small">{{ r.countries }}</td>
+      <td class="small">{{ r.fields }}</td>
+      <td class="small">{{ r.licence }}<div class="muted">{{ r.lawful_basis }}</div></td>
+      <td class="small">{{ r.cost }}{% if r.paid %}<div class="muted">budget ${{ '%.2f'|format(r.setting.monthly_budget_usd if r.setting else 0) }} a month</div>{% endif %}</td>
+      <td class="small">{{ r.credentials }}</td>
+      <td class="small">{{ r.month_calls }} call(s){% if r.paid %}, ${{ '%.2f'|format(r.month_cost) }}{% endif %}{% if r.month_refused %}<div class="muted">{{ r.month_refused }} refused</div>{% endif %}</td>
+      <td class="small">{% if r.last_call_at %}{{ r.last_call_at|local }}{% else %}<span class="muted">never through the guard</span>{% endif %}{% if r.last_result %}<div class="muted">{{ r.last_result }}</div>{% endif %}</td></tr>
+  {% endfor %}
+</table></div>
+
+<h2>{{ icon('shield') }} Record the owner's approval of a paid source</h2>
+<form class="card form-grid" method="post" action="/admin/settings/contact-sources/approval">
+  <input type="hidden" name="{{ form_mark }}" value="1">
+  <label>Source<select name="name">{% for r in rows if r.requires_owner_approval %}<option value="{{ r.name }}">{{ r.title }}</option>{% endfor %}</select></label>
+  <label>Approved by (name)<input name="approved_by" maxlength="80"></label>
+  <label style="grid-column:1/-1">Note (provider, quote, licence reviewed, date)<input name="note" maxlength="300"></label>
+  <label style="grid-column:1/-1"><span><input type="checkbox" name="confirm" value="yes"> The owner approved this source, its licence for email outreach and its cost.</span></label>
+  <div style="grid-column:1/-1"><button name="do" value="record">Record the approval</button> <button name="do" value="withdraw" class="secondary">Withdraw the approval</button></div>
+</form>
+<p class="small muted">An approval does not switch anything on and buys nothing. A paid source still refuses every call until its key is in .env, its price per call and a monthly budget above 0 are saved in the settings, and a vendor integration has been built.</p>
+
+<h2>{{ icon('chart') }} Lead funnel</h2>
+<p class="small">One definition of each stage, used here and by the Sales Manager's report. "Reached" counts the companies that pass a stage's own test; "in the funnel" those that pass it and every stage before it. {{ funnel.companies }} compan{{ 'y' if funnel.companies == 1 else 'ies' }} discovered.</p>
+<div class="card table-wrap"><table>
+  <tr><th>Stage</th><th>Definition</th><th>Reached</th><th>In the funnel</th></tr>
+  {% for st in funnel.stages %}
+  <tr><td><strong>{{ st.label }}</strong></td><td class="small">{{ st.definition }}</td><td>{{ st.reached }}</td><td>{{ st.in_funnel }}</td></tr>
+  {% endfor %}
+</table></div>
+{% endblock %}

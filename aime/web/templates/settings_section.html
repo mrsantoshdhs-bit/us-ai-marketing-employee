@@ -87,6 +87,21 @@
     {% endfor %}
   </table></div>
 
+  {% elif section == 'contact_sources' %}
+  <p class="small">Each source here is off by default and used only for the countries listed that it covers and that are target countries. A paid source also needs the owner's recorded approval, its key in .env, its price per call (the owner's quote) and a monthly budget above 0: with a budget of 0 every paid call is refused. Status, licence and usage are on the <a href="/admin/settings/contact-sources">Contact sources</a> page.</p>
+  <div class="table-wrap"><table>
+    <tr><th>Source</th><th>On</th><th>Priority</th><th>Used for countries</th><th>Price per call (USD)</th><th>Monthly budget (USD)</th><th>Covers</th></tr>
+    {% for a in data.adapters %}{% set m = adapter_meta[a.name] %}
+    <tr><td><strong>{{ m.title }}</strong><div class="small muted">{{ a.name }}</div></td>
+        <td><input type="checkbox" name="{{ a.name }}.enabled" value="yes" {{ 'checked' if a.enabled }}></td>
+        <td><input type="number" name="{{ a.name }}.priority" value="{{ a.priority }}" min="1" max="100"></td>
+        <td><input name="{{ a.name }}.countries" value="{{ a.countries|join(', ') }}" size="10"></td>
+        <td>{% if m.paid %}<input type="number" step="any" name="{{ a.name }}.cost_per_call_usd" value="{{ a.cost_per_call_usd }}" min="0">{% else %}<span class="muted">free</span><input type="hidden" name="{{ a.name }}.cost_per_call_usd" value="0">{% endif %}</td>
+        <td>{% if m.paid %}<input type="number" step="any" name="{{ a.name }}.monthly_budget_usd" value="{{ a.monthly_budget_usd }}" min="0">{% else %}<span class="muted">free</span><input type="hidden" name="{{ a.name }}.monthly_budget_usd" value="0">{% endif %}</td>
+        <td class="small">{{ m.covers }}</td></tr>
+    {% endfor %}
+  </table></div>
+
   {% elif section == 'schedules' %}
   <p class="small">A job can be switched off, or run less often than <code>config/schedule.toml</code> says (never more often). The health monitor and the database backup always run.</p>
   <div class="table-wrap"><table>
