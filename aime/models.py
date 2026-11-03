@@ -977,3 +977,46 @@ class AIDecision(Base):
     edit_distance: Mapped[int | None] = mapped_column(Integer)
     tokens: Mapped[int] = mapped_column(Integer, default=0)
     ms: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Conversation(Base):
+    """The sales conversation with one lead (Option B): where it stands and a rolling summary of it. Written by the
+    conversation engine (aime.ai.conversation) through the policy engine; read by the handover package and the reports.
+    The thread itself stays in inbound_emails and followups: nothing here replaces them."""
+
+    __tablename__ = "conversations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id"), unique=True, index=True)
+    # aime.ai.state: new | contacted | engaged | discovering | qualified | scheduling | handed_over | nurture | closed_lost | opted_out
+    state: Mapped[str] = mapped_column(String(20), default="new", index=True)
+    summary: Mapped[str | None] = mapped_column(Text)  # the latest rolling summary, every fact in it cited in conversation_facts
+    summary_version: Mapped[int] = mapped_column(Integer, default=0)
+    last_inbound_id: Mapped[int | None] = mapped_column(Integer)  # the newest inbound_emails row taken into account
+    last_ai_turn_at: Mapped[datetime | None] = mapped_column(DateTime)
+    unanswered_ai_turns: Mapped[int] = mapped_column(Integer, default=0)
+    language: Mapped[str | None] = mapped_column(String(10))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class ConversationFact(Base):
+    """One thing the prospect told us, with the message it came from: a requirement, budget, timeline, stakeholder,
+    objection, question or meeting wish. Never inferred as fact: what the AI only estimates says so in `confidence`
+    and `source`, and a person can confirm or correct it."""
+
+    __tablename__ = "conversation_facts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id"), index=True)
+    # requirement | budget | timeline | stakeholder | authority | objection | question | meeting_intent | concern
+    kind: Mapped[str] = mapped_column(String(20), index=True)
+    value: Mapped[str] = mapped_column(String(500))
+    evidence_inbound_id: Mapped[int | None] = mapped_column(Integer, index=True)  # inbound_emails.id it was said in
+    evidence_quote: Mapped[str | None] = mapped_column(String(500))  # the prospect's own words
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    source: Mapped[str] = mapped_column(String(10), default="ai")  # rule | ai | human
+    status: Mapped[str] = mapped_column(String(12), default="open")  # open | confirmed | corrected | withdrawn | answered
+    confirmed_by: Mapped[str | None] = mapped_column(String(80))
+    ai_decision_id: Mapped[int | None] = mapped_column(Integer)  # the ai_decisions row that proposed it
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
