@@ -7,6 +7,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -76,6 +77,21 @@ class OllamaProvider(LLMProvider):
             return False
 
     def generate(self, prompt: str, system: str | None = None, max_tokens: int = 500, temperature: float = 0.7) -> str:
+        return self._call(prompt, system, max_tokens, temperature)
+
+    def generate_json(self, prompt: str, schema: dict[str, Any], system: str | None = None, max_tokens: int = 600,
+                      temperature: float = 0.0) -> str:
+        """Ollama's constrained decoding: `format` holds the JSON schema, so the model's tokens are limited to JSON of
+        that shape (Ollama 0.5 and later), with every field required so a small model does not skip the ones that have
+        a default. The schema is not repeated in the prompt: measured on llama3.2 on this PC, the schema text doubled
+        the prompt (about 830 tokens against 450) and cost some 16 seconds a call on the CPU, while the prompt's own
+        label descriptions already say what each field means. aime.llm.structured still validates every answer."""
+        fmt = dict(schema)
+        if isinstance(fmt.get("properties"), dict):
+            fmt["required"] = list(fmt["properties"])
+        return self._call(f"{prompt}\n\nAnswer with one JSON object only.", system, max_tokens, temperature, fmt=fmt)
+
+    def _call(self, prompt: str, system: str | None, max_tokens: int, temperature: float, fmt: dict | None = None) -> str:
         body = {
             "model": self.model,
             "prompt": prompt,
@@ -84,6 +100,8 @@ class OllamaProvider(LLMProvider):
         }
         if system:
             body["system"] = system
+        if fmt is not None:
+            body["format"] = fmt
         t0 = time.perf_counter()
         try:
             with self._client(self.timeout) as client:
