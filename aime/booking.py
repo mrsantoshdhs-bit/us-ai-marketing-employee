@@ -63,8 +63,34 @@ def ready(session: Session, settings) -> tuple[bool, str]:
     return True, ""
 
 
-def prospect_zone(lead: Lead | None, default: str = "America/New_York") -> str:
-    state = ((lead.company.state if lead and lead.company else None) or "").upper()
+# Where a country has one business time zone (or one most of its business keeps). A country with several (CA, AU, BR, MX)
+# is listed by the zone of its largest business centre; the countries registry (Settings > Countries), once a person has
+# saved it, says otherwise for the countries it lists.
+COUNTRY_ZONES = {
+    "IN": "Asia/Kolkata", "GB": "Europe/London", "IE": "Europe/Dublin", "DE": "Europe/Berlin", "FR": "Europe/Paris",
+    "NL": "Europe/Amsterdam", "ES": "Europe/Madrid", "IT": "Europe/Rome", "SE": "Europe/Stockholm", "DK": "Europe/Copenhagen",
+    "NO": "Europe/Oslo", "FI": "Europe/Helsinki", "BE": "Europe/Brussels", "CH": "Europe/Zurich", "AT": "Europe/Vienna",
+    "PL": "Europe/Warsaw", "PT": "Europe/Lisbon", "SG": "Asia/Singapore", "AE": "Asia/Dubai", "JP": "Asia/Tokyo",
+    "IL": "Asia/Jerusalem", "ZA": "Africa/Johannesburg", "NZ": "Pacific/Auckland", "AU": "Australia/Sydney",
+    "CA": "America/Toronto", "MX": "America/Mexico_City", "BR": "America/Sao_Paulo",
+}
+
+
+def prospect_zone(lead: Lead | None, default: str = "America/New_York", settings=None) -> str:
+    """The prospect's time zone from their company: a US company by its state; a company elsewhere by its country, from the
+    countries registry when a person saved one that lists it, else COUNTRY_ZONES. Unknown: `default`."""
+    company = lead.company if lead is not None else None
+    code = ((company.country if company is not None else None) or "US").upper()
+    if code != "US":
+        if settings is not None:
+            from aime import settings_store
+            from aime.countries import country
+
+            entry = country(settings, code) if settings_store.stored(settings, "countries") else None
+            if entry and entry.get("timezone"):
+                return entry["timezone"]
+        return COUNTRY_ZONES.get(code, default)
+    state = ((company.state if company is not None else None) or "").upper()
     return STATE_ZONE.get(state, default)
 
 
@@ -140,7 +166,7 @@ def propose(session: Session, settings, calendar, row: InboundEmail, actor: str,
     if session.execute(select(Meeting).where(Meeting.lead_id == lead.id, Meeting.status == "scheduled",
                                              Meeting.ends_at >= now)).first():
         return "a meeting is already booked"
-    c, tz = cfg(settings), prospect_zone(lead)
+    c, tz = cfg(settings), prospect_zone(lead, settings=settings)
     busy = calendar.busy(now, now + timedelta(days=c["days"] + 9))
     slots = free_slots(busy, now, tz, settings)
     if not slots:
@@ -335,6 +361,11 @@ def book(session: Session, settings, calendar, p: MeetingProposal, index: int, a
     contact = session.get(Contact, p.contact_id) if p.contact_id else None
     existing = session.execute(select(Meeting).where(Meeting.lead_id == lead.id, Meeting.status == "scheduled",
                                                      Meeting.starts_at == start)).scalars().first()
+    if existing is None:  # a meeting the CRM knows but the calendar may not (a Calendly booking, one logged by hand)
+        clash = session.execute(select(Meeting.id).where(Meeting.status == "scheduled", Meeting.is_simulated.is_(False),
+                                                         Meeting.starts_at < end, Meeting.ends_at > start)).scalar()
+        if clash is not None:
+            raise ValueError(f"Not booked: meeting #{clash} is already booked at that time; propose new times")
     if existing is None:
         event_id = calendar.create_event(f"p{p.id}", f"Call with {lead.company.name}",
                                          f"Booked by the AI Sales Employee from proposal #{p.id}.", start, end,
