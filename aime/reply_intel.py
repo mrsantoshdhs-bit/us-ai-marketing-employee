@@ -44,6 +44,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from aime.crm_ops import BOUNCED_REASON, OPEN_LEAD_STATUSES, _entries_covering, WROTE_AGAIN, came_with_the_merges, is_suppressed, later_reply_waiting, lead_with_the_deals, log_activity, primary_lead, suppress
+from aime.db import kv_get, kv_set
 from aime.dedupe import company_to_address
 from aime.inbox import unprefixed_quote, AUTO_SUBJECT, BOUNCE_SENDERS, LARGE_MARK, below_header_copy, between_header_copies, is_address, own_text, rest_of_reply
 from aime.llm.base import LLMError
@@ -1975,6 +1976,7 @@ def _conversation_turn(session: Session, settings, row: InboundEmail, llm, run: 
         if conversation.mode(settings) == "off":
             return
         conversation.on_reply(session, settings, row, llm=llm, run=run)
+        _turn_taken(session, row.id)  # in the engine's own commit: a turn is never taken twice
         session.commit()
     except Exception:  # noqa: BLE001 -- the engine is an addition: the inbox carries on without it
         try:
@@ -1982,12 +1984,54 @@ def _conversation_turn(session: Session, settings, row: InboundEmail, llm, run: 
         except Exception:  # noqa: BLE001
             pass
         log.exception("Reply %s: the conversation engine failed; the rules' outcome stands", getattr(row, "id", None))
+        try:  # a failure is final (the rules' outcome stands); only a process killed in between leaves the mark
+            _turn_taken(session, row.id)
+            session.commit()
+        except Exception:  # noqa: BLE001 -- the mark stays and the turn is tried at the next run
+            session.rollback()
+
+
+# The emails whose rules' outcome is committed and whose conversation turn has not been taken yet. Written in the rules'
+# own commit and cleared in the engine's, so a process killed between the two takes the turn at its next run, once.
+PENDING_TURNS = "conversation.pending_turns"
+
+
+def _turn_pending(session: Session, settings, row_id: int) -> None:
+    from aime.ai import conversation
+
+    if conversation.mode(settings) == "off":
+        return
+    waiting = list(kv_get(session, PENDING_TURNS) or [])
+    if row_id not in waiting:
+        kv_set(session, PENDING_TURNS, [*waiting, row_id])
+
+
+def _turn_taken(session: Session, row_id: int) -> None:
+    waiting = list(kv_get(session, PENDING_TURNS) or [])
+    if row_id in waiting:
+        kv_set(session, PENDING_TURNS, [i for i in waiting if i != row_id])
+
+
+def _take_pending_turns(session: Session, settings, llm, run: dict) -> None:
+    from aime.ai import conversation
+
+    if conversation.mode(settings) == "off":  # switched off since: nothing is taken (or read) while it is off
+        return
+    for row_id in list(kv_get(session, PENDING_TURNS) or []):
+        row = session.get(InboundEmail, row_id)
+        if row is None or row.status == "new":  # gone, or not handled yet: its turn comes after the rules, as usual
+            if row is None:
+                _turn_taken(session, row_id)
+                session.commit()
+            continue
+        _conversation_turn(session, settings, row, llm, run)
 
 
 def process_pending(session: Session, settings, actor: str, llm=None, conversation_llm=None) -> dict:
     stats: dict[str, int] = {}
     ai_budget = AI_PER_RUN
     conversation_run: dict = {}  # the conversation engine's model budget for this run
+    _take_pending_turns(session, settings, conversation_llm, conversation_run)
     for row in session.execute(select(InboundEmail).where(InboundEmail.status == "new").order_by(InboundEmail.id)).scalars().all():
         read = None
         try:
@@ -2017,6 +2061,7 @@ def process_pending(session: Session, settings, actor: str, llm=None, conversati
                        f"from {row.from_email}{where}: the AI reads it so, the rules were unsure. Please review it on Replies.")
                 session.add(Alert(level="info", source="inbox", message=msg[:500]))
                 notify_event(settings, msg)
+            _turn_pending(session, settings, row.id)
             session.commit()
         except Exception as exc:  # noqa: BLE001 -- one email must never stop the ones behind it, opt-outs included
             _hold_for_a_person(session, row, read, exc, actor)
