@@ -608,3 +608,19 @@ def test_a_sales_manager_opens_the_stored_report_but_no_other_report(org):
     assert "Daily Sales Manager Report" in manager.get(f"/sales-manager/reports/{rid}").text
     assert manager.get(f"/sales-manager/reports/{other}").status_code == 404
     assert client_for(org, "bde").get(f"/sales-manager/reports/{rid}").status_code == 403
+
+
+def test_the_ai_section_counts_the_decision_log_by_policy_verdict(make_ctx):
+    from aime.models import AIDecision
+
+    ctx = make_ctx()
+    period = mr.latest_period("manager_daily", mr.local_today(mr.DEFAULTS), mr.DEFAULTS)
+    at = period.start_utc + timedelta(hours=2)
+    with ctx.db.session() as s:
+        for verdict, esc in (("auto_internal", []), ("human_review", ["pricing"]), ("human_review", []), ("block", ["injection"])):
+            s.add(AIDecision(agent="conversation", task="reply", provider="fake", verdict=verdict, escalations=esc, created_at=at))
+        s.add(AIDecision(agent="conversation", task="reply", provider="fake", verdict="block", created_at=period.end_utc))
+        s.commit()
+        got = mr._ai_decisions(s, period)
+    assert got["total"] == 4 and got["by"] == {"auto_internal": 1, "human_review": 2, "block": 1}
+    assert (got["blocked"], got["human_review"], got["escalated"], got["escalated_or_blocked"]) == (1, 2, 2, 2)

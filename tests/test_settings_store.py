@@ -9,6 +9,7 @@ import copy
 from urllib.parse import unquote
 
 import pytest
+from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
@@ -568,3 +569,13 @@ def test_the_deliverability_section_holds_exactly_the_keys_the_deliverability_mo
     defaults = ss.DeliverabilitySection().model_dump(mode="json")
     assert set(defaults) == set(deliverability.DEFAULTS)
     assert defaults == {k: [list(x) for x in v] if k == "warmup_schedule" else v for k, v in deliverability.DEFAULTS.items()}
+
+
+def test_the_ai_section_holds_only_keys_the_model_router_reads_and_never_the_cloud_switch():
+    from aime.llm.router import AI_DEFAULTS
+
+    defaults = ss.AISection().model_dump(mode="json")
+    assert set(defaults) <= set(AI_DEFAULTS) and "cloud" not in defaults
+    assert {k: AI_DEFAULTS[k] for k in defaults} == defaults
+    with pytest.raises(ValidationError):
+        ss.AISection(provider="cloud")

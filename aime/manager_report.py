@@ -59,7 +59,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jinja2 import Environment, select_autoescape
-from sqlalchemy import and_, func, inspect, or_, select, text, update
+from sqlalchemy import and_, func, inspect, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -458,27 +458,22 @@ def _target_for(goals: dict, metric: str) -> float | None:
 
 
 def _ai_decisions(session: Session, period: Period) -> dict | None:
-    """The AI decisions log (table ai_decisions, added by the AI core), when this database has it: how many decisions
-    in the period, by outcome. None when the table does not exist. Read-only."""
-    insp = inspect(session.get_bind())
-    if not insp.has_table("ai_decisions"):
+    """The AI decisions log (aime.models.AIDecision, written by aime.ai): how many proposals in the period, by policy
+    verdict, how many were blocked, sent to a person, or escalated. None when this database predates the table. Read-only."""
+    from aime.models import AIDecision
+
+    if not inspect(session.get_bind()).has_table("ai_decisions"):
         return None
-    cols = [c["name"] for c in insp.get_columns("ai_decisions")]
-    at = next((c for c in ("created_at", "decided_at", "at", "timestamp") if c in cols), None)
-    by = next((c for c in ("outcome", "decision", "status", "action", "kind") if c in cols), None)
-    if at is None or not re.fullmatch(r"[a-z_]+", at) or (by and not re.fullmatch(r"[a-z_]+", by)):
-        return {"total": None, "by": {}, "note": "the ai_decisions table has no time column this report can read"}
-    where = f"WHERE {at} >= :s AND {at} < :e"
-    params = {"s": period.start_utc, "e": period.end_utc}
-    if by:
-        rows = session.execute(text(f"SELECT {by}, COUNT(*) FROM ai_decisions {where} GROUP BY {by}"), params).all()  # noqa: S608 - names from the schema
-        counted = {str(k): int(n) for k, n in rows}
-    else:
-        counted = {"all": int(session.execute(text(f"SELECT COUNT(*) FROM ai_decisions {where}"), params).scalar_one())}  # noqa: S608
-    flagged = sum(n for k, n in counted.items() if re.search(r"escalat|block|refus|reject|hold|error|fail", k, re.I))
-    return {"total": sum(counted.values()), "by": counted, "escalated_or_blocked": flagged,
-            "definition": f"Rows of ai_decisions with {at} in the period, by {by or 'nothing'}; "
-                          "escalated or blocked: an outcome naming an escalation, block, refusal, rejection, hold, error or failure."}
+    rows = session.execute(select(AIDecision.verdict, AIDecision.escalations)
+                           .where(AIDecision.created_at >= period.start_utc, AIDecision.created_at < period.end_utc)).all()
+    counted: dict[str, int] = {}
+    for verdict, _ in rows:
+        counted[str(verdict)] = counted.get(str(verdict), 0) + 1
+    escalated = sum(1 for _, esc in rows if esc)
+    return {"total": len(rows), "by": counted, "blocked": counted.get("block", 0), "human_review": counted.get("human_review", 0),
+            "escalated": escalated, "escalated_or_blocked": len([1 for v, esc in rows if v == "block" or esc]),
+            "definition": "Rows of ai_decisions created in the period, by policy verdict (auto_internal, human_review, block); "
+                          "escalated: a proposal that named at least one escalation rule."}
 
 
 def build(session: Session, settings, period: Period, now: datetime | None = None, full_ids: bool = False) -> dict:

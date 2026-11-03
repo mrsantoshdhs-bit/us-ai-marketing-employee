@@ -374,8 +374,11 @@ class DeliverabilitySection(Strict):
 class AISection(Strict):
     """Read by the AI core later. LLM_PROVIDER in .env still decides today."""
 
-    provider: Literal["auto", "template", "ollama"] = "auto"
+    provider: Literal["auto", "template", "ollama", "none"] = "auto"  # "cloud" is not offered here: a paid model is an owner decision
     model: str = Field(default="", max_length=80)
+    timeout_seconds: float = Field(default=0, ge=0, le=600)  # 0: LLM_TIMEOUT from .env
+    temperature: float = Field(default=0.0, ge=0, le=1.5)
+    max_tokens: int = Field(default=600, ge=50, le=4000)
     monthly_spend_cap_usd: float = Field(default=0.0, ge=0, le=1000)  # 0: no paid model; anything above is an owner decision
 
 

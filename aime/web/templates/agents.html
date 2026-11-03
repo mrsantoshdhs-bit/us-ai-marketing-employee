@@ -1,7 +1,7 @@
 {% extends "base.html" %}{% from "_macros.html" import status_pill %}
 {% block title %}Agents · AI Sales Employee{% endblock %}
 {% block content %}
-<h1>AI employee team</h1>
+<h1>AI employee team <span class="muted small"><a href="/agents/ai-quality">AI quality</a></span></h1>
 <div class="two">
   {% for a in team %}{% set st = stats.get(a.name) %}
   <div class="card">
