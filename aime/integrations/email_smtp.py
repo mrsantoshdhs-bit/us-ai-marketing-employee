@@ -8,6 +8,7 @@ import ssl
 from collections.abc import Callable
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
+from html import escape as html_escape
 
 from aime.config import Settings
 
@@ -115,10 +116,12 @@ class EmailSender:
         return sorted(tests)[0], True
 
     def send(self, to: str, subject: str, body: str, in_reply_to: str | None = None,
-             message_id: str | None = None, references: str | None = None, last_look=None) -> str:
+             message_id: str | None = None, references: str | None = None, last_look=None, html: str | None = None) -> str:
         """Returns the Message-ID. Pass `message_id` (stored before sending) so it is known even if the send fails
         midway, and replies to a delivered-but-unconfirmed email still match by In-Reply-To. `last_look` is called at the last
-        moment before the message is handed over, after the sign-in: raising EmailNotReady there means nothing left."""
+        moment before the message is handed over, after the sign-in: raising EmailNotReady there means nothing left.
+        `html`: an HTML version of the same body, sent beside the plain text (multipart/alternative). Sales emails send
+        none; the Sales Manager's report does. Test mode puts its notice at the top of both."""
         ready, reason = self.status()
         if not ready:
             raise EmailNotReady(reason)
@@ -131,6 +134,10 @@ class EmailSender:
             subject = marked_subject(subject, to)
             body = (f"TEST MODE: this email would have gone to {to}. Only addresses in OUTBOUND_TEST_RECIPIENTS "
                     f"receive email.\n\n{body}")
+            if html is not None:
+                notice = ('<p style="background:#fff4e5;border:1px solid #f0b46b;padding:8px 12px">TEST MODE: this email '
+                          f"would have gone to {html_escape(to)}. Only addresses in OUTBOUND_TEST_RECIPIENTS receive email.</p>")
+                html = html.replace("<body>", "<body>" + notice, 1) if "<body>" in html else notice + html
         msg = EmailMessage()
         msg["From"] = formataddr((s.sender_name or s.company_name, s.smtp_from))
         msg["To"] = actual
@@ -144,6 +151,8 @@ class EmailSender:
             msg["In-Reply-To"] = in_reply_to
             msg["References"] = references or in_reply_to
         msg.set_content(body)
+        if html is not None:
+            msg.add_alternative(html, subtype="html")
         bearer = ""
         if s.mail_auth == "oauth":  # before connecting: without a token nothing is sent, and it is safe to retry
             from aime.integrations.oauth import OAuthError
