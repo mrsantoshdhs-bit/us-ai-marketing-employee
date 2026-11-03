@@ -885,6 +885,25 @@ class AuditEvent(Base):
     detail: Mapped[str | None] = mapped_column(Text)
 
 
+# --------------------------------------------------------------------------- settings control plane (aime.settings_store)
+
+class SettingsVersion(Base):
+    """One saved version of a settings section (countries, targets, sources, schedules ...): the whole section as validated
+    JSON, who saved it and why. Exactly one version per section is active; an older one is restored by saving a copy of it
+    as the new active version, so the history only ever grows. Code before Option B ignores this table."""
+
+    __tablename__ = "settings_versions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    section: Mapped[str] = mapped_column(String(40), index=True)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    note: Mapped[str | None] = mapped_column(String(300))
+    active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+
 # --------------------------------------------------------------------------- indexes for the hot paths
 # Reply and bounce matching, the tick's "is anything running" checks, pipeline checks, dashboard counts. Built on
 # existing databases by aime.migrations.ensure_indexes (CREATE INDEX IF NOT EXISTS; no data changes).
