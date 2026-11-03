@@ -22,7 +22,7 @@ from aime.models import (Activity, AgentRun, Alert, Company, Contact, ContentIte
                          InboundInquiry, Meeting,
                          Lead, Opportunity, Report, Signal)
 from aime.monitoring import agent_stats
-from aime.outreach import OPEN, PUBLISHED_SOURCES
+from aime.outreach import OPEN, PUBLISHED_SOURCES, REACHED_PROSPECT
 from aime.timeutil import fmt_et, fmt_local, local_tz, utcnow
 
 PROBLEM_STATES = {"NOT CONFIGURED", "NOT CONNECTED", "BLOCKED", "DISABLED", "UNAVAILABLE", "NOT RUNNING", "STALE"}
@@ -56,7 +56,7 @@ def sales_kpis(count, since) -> dict:
     drafted = (FollowUp.kind == "outreach", or_(FollowUp.status != "cancelled", FollowUp.approved_at.is_not(None)))
     real = (InboundEmail.is_simulated.is_(False),)
     from_lead = (*real, InboundEmail.lead_id.is_not(None))  # mail nobody could match to a lead is no prospect's reply
-    contacted = Lead.id.in_(select(FollowUp.lead_id).where(FollowUp.kind == "outreach", FollowUp.status == "sent"))
+    contacted = Lead.id.in_(select(FollowUp.lead_id).where(FollowUp.kind == "outreach", FollowUp.status == "sent", REACHED_PROSPECT))
     replied = Lead.id.in_(select(InboundEmail.lead_id).where(*from_lead, InboundEmail.category.in_(REAL_REPLY)))
     interested = Lead.id.in_(select(InboundEmail.lead_id).where(*from_lead, InboundEmail.category == "interested"))
     booked = Lead.id.in_(select(Meeting.lead_id).where(Meeting.is_simulated.is_(False), Meeting.status != "cancelled"))
@@ -70,8 +70,8 @@ def sales_kpis(count, since) -> dict:
                                      Contact.consent_status != "opted_out", CONTACT_NOT_SUPPRESSED),
         "outreach_drafted_period": count(FollowUp, *drafted, FollowUp.created_at >= since),
         "outreach_drafted_total": count(FollowUp, *drafted),
-        "outreach_sent_period": count(FollowUp, FollowUp.kind == "outreach", FollowUp.status == "sent", FollowUp.sent_at >= since),
-        "outreach_sent_total": count(FollowUp, FollowUp.kind == "outreach", FollowUp.status == "sent"),
+        "outreach_sent_period": count(FollowUp, FollowUp.kind == "outreach", FollowUp.status == "sent", FollowUp.sent_at >= since, REACHED_PROSPECT),
+        "outreach_sent_total": count(FollowUp, FollowUp.kind == "outreach", FollowUp.status == "sent", REACHED_PROSPECT),
         "bounces_period": count(InboundEmail, *real, InboundEmail.category == "bounce", InboundEmail.received_at >= since),
         "bounces_total": count(InboundEmail, *real, InboundEmail.category == "bounce"),
         "unsubscribes_total": count(InboundEmail, *real, InboundEmail.category == "unsubscribe"),
@@ -284,8 +284,8 @@ class AnalyticsReportingAgent(BaseAgent[ReportInput, ReportOutput]):
             "opportunities_new_period": count(Opportunity, Opportunity.created_at >= since),
             "followups_awaiting_approval": count(FollowUp, FollowUp.status == "awaiting_approval"),
             "tasks_pending": count(FollowUp, FollowUp.channel == "task", FollowUp.status == "pending"),
-            "emails_sent_period": count(FollowUp, FollowUp.status == "sent", FollowUp.sent_at >= since),
-            "emails_sent_total": count(FollowUp, FollowUp.status == "sent"),
+            "emails_sent_period": count(FollowUp, FollowUp.status == "sent", FollowUp.sent_at >= since, REACHED_PROSPECT),
+            "emails_sent_total": count(FollowUp, FollowUp.status == "sent", REACHED_PROSPECT),
             "content_created_period": count(ContentItem, ContentItem.created_at >= since),
             "content_awaiting_approval": count(ContentItem, ContentItem.status == "awaiting_approval"),
             "content_approved_queued": count(ContentItem, ContentItem.status == "approved"),

@@ -112,7 +112,8 @@ def test_one_company_through_every_stage(make_ctx):
         assert meeting.lead_id == lead_id and s.get(Lead, lead_id).outreach_status == "meeting"
     # reporting from records
     k = AnalyticsReportingAgent(ctx).run({"kind": "daily"}).output.kpis
-    assert (k["outreach_sent_total"], k["replies_total"], k["interested_total"], k["meetings_booked_total"]) == (1, 1, 1, 1)
+    # the one email went to the owner's test inbox, so no prospect was reached yet
+    assert (k["outreach_sent_total"], k["replies_total"], k["interested_total"], k["meetings_booked_total"]) == (0, 1, 1, 1)
     # acceptance evidence
     with ctx.db.session() as s:
         rows = {r["test"]: r for r in acceptance_evidence(s, ctx.settings)}

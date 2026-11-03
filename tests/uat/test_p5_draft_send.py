@@ -486,13 +486,20 @@ def _merge_into_keeper(ctx, sent):
 
 def test_after_a_merge_the_keeper_does_not_send_a_second_first_email_to_the_same_address(make_ctx):
     ctx, _s, sent = contacted(make_ctx)
-    _merge_into_keeper(ctx, sent)
+    worked = _merge_into_keeper(ctx, sent)
+    with ctx.db.session() as s:  # the merge left the emailed lead as the open one: a second lead at that address is what the guard is for
+        first = s.get(Lead, worked)
+        second = Lead(company_id=first.company_id, contact_id=first.contact_id, source="manual", status="qualified", score=70, grade="B", primary_service="bpa")
+        s.add(second)
+        s.flush()
+        second_id = second.id
     for _ in range(2):
         assert SalesWorkflowAgent(ctx).run({"send": False}).ok
     with ctx.db.session() as s:
         again = s.execute(select(FollowUp).where(FollowUp.kind == "outreach", FollowUp.step == 1, FollowUp.status == "awaiting_approval",
                                                  FollowUp.to_email == sent.to_email)).scalars().all()
-    assert not again
+        said = s.execute(select(Activity.subject).where(Activity.lead_id == second_id, Activity.subject.like("No first email%"))).scalars().all()
+    assert not again and len(said) == 1
 
 
 def test_an_address_emailed_on_another_lead_is_said_once_with_no_review_task(make_ctx):

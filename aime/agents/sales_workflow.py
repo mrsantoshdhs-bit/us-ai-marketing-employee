@@ -27,7 +27,7 @@ from aime import automation, send_journal
 from aime.agents.contracts import BlockedItem
 from aime.agents.qualification import LeadQualificationAgent
 from aime.calendar_slots import holiday_on
-from aime.crm_ops import WROTE_AGAIN, is_suppressed, later_reply_waiting, log_activity, suppress
+from aime.crm_ops import WROTE_AGAIN, canonical_address, canonical_sql, is_suppressed, later_reply_waiting, log_activity, suppress
 from aime.email_templates import draft_reply
 from aime.integrations.email_smtp import EmailNotReady, EmailSender, MailServerNotReached, compliance_problem, new_message_id
 from aime.knowledge.content_bank import BRAND_LINES
@@ -283,7 +283,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         contact = lead.contact
         other = session.execute(select(FollowUp.lead_id).where(
             FollowUp.channel == "email", FollowUp.lead_id != lead.id, FollowUp.status.in_(COUNTS_AS_SENT), REACHED_PROSPECT,
-            or_(FollowUp.contact_id == contact.id, func.lower(FollowUp.to_email) == contact.email.lower()))).scalars().first()
+            or_(FollowUp.contact_id == contact.id, canonical_sql(FollowUp.to_email) == canonical_address(contact.email)))).scalars().first()
         if other is None:
             return False
         note = f"No first email drafted: this address was already emailed on lead {other}"
@@ -928,7 +928,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
     def _same_address_on_another_lead(session: Session, f: FollowUp) -> int | None:
         """Another lead's outreach that reached this address, may have, or is open and older than this one. A rehearsal went to our own."""
         return session.execute(select(FollowUp.lead_id).where(
-            FollowUp.kind == "outreach", FollowUp.lead_id != f.lead_id, func.lower(FollowUp.to_email) == (f.to_email or "").lower(),
+            FollowUp.kind == "outreach", FollowUp.lead_id != f.lead_id, canonical_sql(FollowUp.to_email) == canonical_address(f.to_email or ""),
             or_(and_(FollowUp.status.in_(COUNTS_AS_SENT), REACHED_PROSPECT), and_(FollowUp.status.in_(OPEN_FOLLOWUP), FollowUp.id < f.id)))).scalars().first()
 
     @staticmethod
@@ -1037,6 +1037,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             return "no email from this address to answer"
         if is_suppressed(session, f.to_email):
             return "on the do-not-contact list"
+        if f.contact and f.contact.consent_status == "opted_out":  # lifting a domain's entry leaves its contacts' marks, and a requeue skips the approve route
+            return "this contact opted out"
         if QUESTION_PLACEHOLDER in (f.body or ""):
             return "the answer placeholder was not filled in"
         return None

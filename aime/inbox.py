@@ -51,7 +51,8 @@ AUTO_SUBJECT = re.compile(r"^(auto(matic)?[- ]?reply|out of (the )?office|autore
 # A quote looks different in every mail program and language: "On ... wrote:", "El ... escribió:", "Am ... schrieb ...:",
 # or a copy of the earlier message's header lines ("De: ...", "Enviado: ...", "Von: ...").
 _WROTE = r"(?:wrote|escribi[oó]|escreveu|a [eé]crit|schrieb|ha scritto|schreef|skrev)"
-_QUOTED_BY = (rf"(?:on|el|em|le|am|il|op|den)\s.{{4,200}}\b{_WROTE}\b.{{0,100}}\s?:|"
+_QUOTED_BY = (r".{4,200}\sने लिखा\s?:|[\w .'-]{1,60} wrote:|"
+              rf"(?:on|el|em|le|am|il|op|den)\s.{{4,200}}\b{_WROTE}\b.{{0,100}}\s?:|"
               rf".{{0,200}}[@\d].{{0,200}}\b{_WROTE}\b.{{0,100}}\s?:")
 _COPY_LINE = (r"-{2,} ?(?:original message|forwarded message|mensaje original|mensaje reenviado|mensagem original|"
               r"mensagem encaminhada|message d'origine|message transf[eé]r[eé]|urspr[uü]ngliche nachricht|"
@@ -60,7 +61,7 @@ _COPY_LINE = (r"-{2,} ?(?:original message|forwarded message|mensaje original|me
 ATTACHED_MARK = "-----Attached message-----"  # stands above the words of an email attached to this one (not the writer's)
 _HEADER_COPY = (rf"{_COPY_LINE}|from: .+|(?:de|von|da|van)\s?:\s.{{0,300}}@.{{0,300}}|"
                 r"(?:enviado|gesendet|envoy[eé]|inviato|verzonden)\s?:\s.+|_{5,}")
-QUOTE_START = re.compile(rf"^(?:{_QUOTED_BY}|{_HEADER_COPY}|{ATTACHED_MARK}|sent from my \w+|>.*)$", re.I)
+QUOTE_START = re.compile(rf"^(?:{_QUOTED_BY}|{_HEADER_COPY}|{ATTACHED_MARK}|sent from my \w+|sent from yahoo mail.*|get outlook for \w+|begin forwarded message:|>.*)$", re.I)
 HEADER_COPY = re.compile(rf"^(?:{_HEADER_COPY})$", re.I)  # from here on it is all the earlier message
 
 
@@ -422,7 +423,17 @@ OUR_FOOTER = re.compile(r"(to stop receiving emails from us|receiving emails fro
 
 def _wrapped_quote_start(lines: list[str], i: int) -> bool:
     """A long "On ... <address> wrote:" that the mail program wrapped, leaving "wrote:" alone on the next line."""
-    return lines[i].strip().lower().startswith("on ") and i + 1 < len(lines) and lines[i + 1].strip().lower() == "wrote:"
+    return lines[i].strip().lower().startswith("on ") and i + 1 < len(lines) and bool(re.fullmatch(r"(\S+@\S+>? )?wrote:", lines[i + 1].strip().lower()))
+
+
+def unprefixed_quote(body: str) -> bool:
+    """A quote header with the earlier email below it without ">" (Yahoo, AOL): those lines cannot be told from theirs, so they are read for an opt-out only."""
+    lines = body.replace("\r\n", "\n").split("\n")
+    for i, line in enumerate(lines):
+        if re.match(rf"^(?:{_QUOTED_BY})$", line.strip(), re.I) or _wrapped_quote_start(lines, i):
+            rest = [x.strip() for x in lines[i + 1:] if x.strip()]
+            return bool(rest) and not rest[0].startswith(">")
+    return False
 
 
 def _split_reply(body: str) -> tuple[str, list[str]]:

@@ -1024,10 +1024,10 @@ def test_ok_home_cards_match_records(scenario):
     html = client_for(scenario).get("/").text
     # the big number is the chosen period (T03); the total stays beside it
     assert re.findall(r'class="kpi-value">([\d,]+)<', html) == ["4", "3", "3", "2"]
-    assert re.findall(r'class="kpi-total">Last 7 days · ([\d,]+) in total<', html) == ["7", "3", "3", "2"]
+    assert re.findall(r'class="kpi-total(?: no-prior)?">Last 7 days · ([\d,]+) in total[ <]', html) == ["7", "3", "3", "2"]
     stages = {st["label"]: st["value"] for st in view["pipeline_stages"]}
     # the disqualified lead is not among the new leads (T04)
-    assert stages == {"Open leads": 5, "Contacted": 2, "Interested": 1, "Meeting booked": 2, "Closed won": 1}
+    assert stages == {"Open leads": 4, "Contacted": 2, "Interested": 1, "Meeting booked": 2, "Closed won": 1}
 
 
 def test_ok_funnel_tiles_and_api_stats_match_records(scenario):
@@ -1115,7 +1115,7 @@ def test_defect_meetings_per_week_chart_counts_cancelled_bookings(scenario):
 
 
 def test_defect_home_chart_total_disagrees_with_card_near_the_period_edge(make_ctx, clock):
-    """The card counts a rolling 7x24 h; the chart buckets by calendar day and drops the part of the oldest day."""
+    """The card and the chart count the same whole owner days: a record just before the first day is in neither."""
     clock(datetime(2026, 10, 27, 14, 0))
     ctx = make_ctx()
     with ctx.db.session() as s:
@@ -1123,8 +1123,7 @@ def test_defect_home_chart_total_disagrees_with_card_near_the_period_edge(make_c
                       created_at=utcnow() - timedelta(days=6, hours=23)))
     cards, view = _cards(ctx)
     series = {name: total for name, total, _ in view["performance"][0]["series"]}
-    assert cards["Companies discovered"]["period"] == 1
-    assert series["Companies discovered"] == 1, "same period, same page, two different numbers"
+    assert cards["Companies discovered"]["period"] == series["Companies discovered"] == 0, "same period, same page, two different numbers"
 
 
 def test_defect_conversion_rate_on_home_can_exceed_100_percent(ctx):
@@ -1155,7 +1154,7 @@ def test_defect_home_day_labels_use_utc_not_the_owners_day(make_ctx, clock):
 def test_ok_empty_database_has_no_zero_division(ctx):
     cards, view = _cards(ctx)
     assert all(c["value"] == 0 and c["change"] == "—" for c in cards.values())
-    assert [st["rate"] for st in view["pipeline_stages"]] == ["all leads", "", "", "", ""]
+    assert [st["rate"] for st in view["pipeline_stages"]] == ["still in progress", "", "", "", ""]
     res = _report(ctx)
     assert res.ok, res.error
     md = Path(res.output.path_md).read_text(encoding="utf-8")

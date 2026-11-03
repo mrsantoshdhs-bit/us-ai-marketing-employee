@@ -3,6 +3,7 @@ an unanswered question and a corrected name. Synthetic data, temp folders, fake 
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -160,6 +161,10 @@ def test_the_older_copies_notice_says_documents_do_not_age_out(docs):
     from aime.db import kv_set
     ctx, _folder, _copies = docs
     made = write(ctx)
+    # copies are named by the second: a second write in the same second would replace the first rather than follow it
+    first = Path(ctx.settings.backup_offsite_dir) / made["file"]
+    made["file"] = f"{B.OFFSITE_PREFIX}{datetime.strptime(made['file'][len(B.OFFSITE_PREFIX):-8], '%Y%m%d-%H%M%S') - timedelta(minutes=1):%Y%m%d-%H%M%S}.aimebak"
+    first.rename(first.with_name(made["file"]))
     ctx.settings.backup_passphrase = OTHER
     write_again = write(ctx)
     assert write_again["key_changed_after"] == made["file"]

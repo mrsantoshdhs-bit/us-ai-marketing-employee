@@ -15,14 +15,21 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from aime.models import Assignment, FollowUp, InboundEmail, Lead, Meeting, Opportunity, Quote, User
+from aime.outreach import REACHED_PROSPECT
 from aime.visibility import EVERYTHING, Scope, lead_condition, record_condition
 
 POSITIVE = ("interested",)
 NEGATIVE = ("not_interested", "unsubscribe")
+# Leads whose only replies are `aime simulate-reply` tests: such a reply changes the lead but is never counted as business.
+SIMULATED_ONLY = select(InboundEmail.lead_id).where(
+    InboundEmail.is_simulated.is_(True), InboundEmail.lead_id.is_not(None),
+    InboundEmail.lead_id.not_in(select(InboundEmail.lead_id).where(InboundEmail.is_simulated.is_(False),
+                                                                   InboundEmail.lead_id.is_not(None))))
+NOT_SIMULATED_DEAL = or_(Opportunity.lead_id.is_(None), Opportunity.lead_id.not_in(SIMULATED_ONLY))
 
 
 @dataclass
@@ -101,7 +108,7 @@ def build(session: Session, start: datetime, end: datetime, people: list[str] | 
         if a.to_owner in rows and (in_source is None or a.lead_id in in_source):
             rows[a.to_owner].assigned += 1
     for lead_id, in session.execute(select(FollowUp.lead_id).where(
-            FollowUp.channel == "email", FollowUp.sent_at >= start, FollowUp.sent_at < end)).all():
+            FollowUp.channel == "email", FollowUp.sent_at >= start, FollowUp.sent_at < end, REACHED_PROSPECT)).all():
         if (r := row_for(lead_id)) is not None:
             r.emails_sent += 1
     for lead_id, category in session.execute(select(InboundEmail.lead_id, InboundEmail.category).where(
@@ -117,12 +124,12 @@ def build(session: Session, start: datetime, end: datetime, people: list[str] | 
             r.meetings += 1
     ai_opened = ai_won = 0
     no_value: list[dict] = []
-    for o in session.execute(select(Opportunity).where(Opportunity.created_at >= start, Opportunity.created_at < end)).scalars():
+    for o in session.execute(select(Opportunity).where(Opportunity.created_at >= start, Opportunity.created_at < end, NOT_SIMULATED_DEAL)).scalars():
         if (r := row_for(o.lead_id, o.owner)) is not None:
             r.deals_opened += 1
             ai_opened += o.origin == "ai"
     for o in session.execute(select(Opportunity).where(Opportunity.stage.in_(("won", "lost")),
-                                                       Opportunity.closed_at >= start, Opportunity.closed_at < end)).scalars():
+                                                       Opportunity.closed_at >= start, Opportunity.closed_at < end, NOT_SIMULATED_DEAL)).scalars():
         # the person who won it, whoever reads the report; a win by no person (an agent, sign-in off): its owner
         r = row_for(o.lead_id, o.won_by if o.stage == "won" and o.won_by in known else o.owner)
         if r is None:
@@ -185,7 +192,7 @@ def campaign_stats(session: Session, scope: Scope = EVERYTHING) -> dict[int, dic
             out[cid][key] += amount
 
     for (lead_id,) in session.execute(select(FollowUp.lead_id).where(FollowUp.channel == "email",
-                                                                     FollowUp.sent_at.is_not(None))).all():
+                                                                     FollowUp.sent_at.is_not(None), REACHED_PROSPECT)).all():
         add(lead_id, "emails_sent")
     for (lead_id,) in session.execute(select(InboundEmail.lead_id).where(InboundEmail.category.in_(POSITIVE),
                                                                          InboundEmail.is_simulated.is_(False))).all():
@@ -193,7 +200,7 @@ def campaign_stats(session: Session, scope: Scope = EVERYTHING) -> dict[int, dic
     for (lead_id,) in session.execute(select(Meeting.lead_id).where(Meeting.is_simulated.is_(False),
                                                                     Meeting.status != "cancelled")).all():
         add(lead_id, "meetings")
-    for o in session.execute(select(Opportunity).where(Opportunity.lead_id.is_not(None))).scalars():
+    for o in session.execute(select(Opportunity).where(Opportunity.lead_id.is_not(None), NOT_SIMULATED_DEAL)).scalars():
         add(o.lead_id, "deals")
         if o.stage == "won":
             add(o.lead_id, "won")

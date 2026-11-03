@@ -14,8 +14,8 @@
       <div class="menu"><a class="menu-item{{ ' on' if period_days == 7 }}" href="/?range=7">Last 7 days</a><a class="menu-item{{ ' on' if period_days == 30 }}" href="/?range=30">Last 30 days</a></div>
     </details>
     <a class="badge-card" href="/leads" title="Leads created in this period compared with the one before">
-      <span class="big">{{ leads_badge.change if leads_badge.change not in ('new', '—') else leads_badge.count }}</span>
-      {{ icon('chart') }}<span class="small-text">{% if leads_badge.change == 'new' %}new leads this period{% elif leads_badge.change == '—' %}no new leads this period{% else %}{{ 'more' if leads_badge.trend == 'up' else 'fewer' if leads_badge.trend == 'down' else 'same' }} leads than the period before{% endif %}</span>
+      <span class="big">{{ leads_badge.change if leads_badge.change not in ('new', '—', 'no full prior period') else leads_badge.count }}</span>
+      {{ icon('chart') }}<span class="small-text">{% if leads_badge.change == 'no full prior period' %}new leads this period, no full prior period{% elif leads_badge.change == 'new' %}new leads this period{% elif leads_badge.change == '—' %}no new leads this period{% else %}{{ 'more' if leads_badge.trend == 'up' else 'fewer' if leads_badge.trend == 'down' else 'same' }} leads than the period before{% endif %}</span>
     </a>
   </div>
 </div>
@@ -30,9 +30,9 @@
   <a class="kpi-card" href="{{ c.href }}">
     <span class="kpi-icon {{ c.tone }}">{{ icon(c.icon) }}</span>
     <span class="kpi-body"><span class="kpi-label">{{ c.label }}</span><b class="kpi-value">{{ '{:,}'.format(c.period) }}</b></span>
-    <span class="delta {{ c.trend }}" title="{{ c.period }} in the last {{ period_days }} days, against the {{ period_days }} days before">{% if c.trend == 'up' %}↑{% elif c.trend == 'down' %}↓{% endif %} {{ c.change }}</span>
+    <span class="delta {{ c.trend }}{{ ' no-prior' if c.change == 'no full prior period' }}" title="{{ c.period }} in the last {{ period_days }} days{% if c.change == 'no full prior period' %}; the {{ period_days }} days before began before the first record{% else %}, against the {{ period_days }} days before{% endif %}">{% if c.change == 'no full prior period' %}—{% else %}{% if c.trend == 'up' %}↑{% elif c.trend == 'down' %}↓{% endif %} {{ c.change }}{% endif %}</span>
     {{ c.spark }}
-    <small class="kpi-total">Last {{ period_days }} days · {{ '{:,}'.format(c.value) }} in total</small>
+    <small class="kpi-total{{ ' no-prior' if c.change == 'no full prior period' }}">Last {{ period_days }} days · {{ '{:,}'.format(c.value) }} in total{% if c.change == 'no full prior period' %} · no full prior period{% endif %}</small>
   </a>
   {% endfor %}
 </section>
@@ -55,12 +55,12 @@
     <div class="hero-copy">
       <div class="hero-tags"><span class="robot-chip">AI Employee</span><span class="state-chip {{ duty_tone }}"><i></i>{{ duty_label }}</span></div>
       <h2>{{ {'Working now': 'Working for your growth', 'On duty': 'Working for your growth', 'Off duty': 'Waiting for its next shift', 'Stopped': 'Stopped by you'}.get(duty_label, duty_label) }}</h2>
-      <p>Finding leads, drafting outreach, reading replies and booking meetings{% if employee.mode == 'approval' %}, with every email approved by you{% else %}, within the limits you authorize{% endif %}.</p>
+      <p>Finding leads, drafting outreach, reading replies and booking meetings{% if employee.effective_mode == 'approval' %}, with every email approved by you{% else %}, within the limits you authorize{% endif %}.</p>
       {% set issues = live.problems|length + live.blocked|length %}
       <dl class="workspace" aria-label="Live workspace">
         <div><dt>{{ icon('zap') }}Now</dt><dd>{% if live.running %}{% for r in live.running %}<span class="st-chip st-running"><i></i>Running</span> {{ r.agent }} · {{ r.job }} job, since {{ r.since|local(None, '%H:%M') }}{% if not loop.last %}<br>{% endif %}{% endfor %}{% else %}<span class="st-chip st-idle"><i></i>Idle</span> no job running{% if live.last_job %}; last: {{ live.last_job.job }} {{ live.last_job.status }} {{ live.last_job.ago }}{% endif %}{% endif %}</dd></div>
         <div><dt>{{ icon('clock') }}Next scheduled</dt><dd>{% if live.next_task %}{{ live.next_task.job|capitalize }} · {% if live.next_task.due %}due at the next check-in{% else %}{{ live.next_task.at|local(None, '%a %H:%M') }}{% endif %}{% else %}nothing scheduled{% endif %}</dd></div>
-        <div><dt>{{ icon('check-square') }}Waiting for you</dt><dd><a href="/approvals">{{ live.approvals }} approval{{ 's' if live.approvals != 1 }} and review{{ 's' if live.approvals != 1 }}</a></dd></div>
+        <div><dt>{{ icon('check-square') }}Waiting for you</dt><dd><a href="/approvals">{{ live.approvals }} approval{{ 's' if live.approvals != 1 }}</a>{% if live.reviews %} · <a href="/inbox">{{ live.reviews }} repl{{ 'ies' if live.reviews != 1 else 'y' }} to review</a>{% endif %}</dd></div>
         <div><dt>{{ icon('alert') }}Needs attention</dt><dd>{% if live.problems %}<a class="bad" href="/command-center#issues">{{ live.problems|length }} failed in 24 h</a>{% if live.blocked %} · {% endif %}{% endif %}{% if live.blocked %}<a class="warn-text" href="/command-center#issues">{{ live.blocked|length }} blocked by a switch</a>{% endif %}{% if not issues %}<span class="ok">nothing failed or blocked</span>{% endif %}</dd></div>
       </dl>
       <a class="btn-gradient" href="/command-center">View live progress {{ icon('arrow-right') }}</a>
@@ -87,7 +87,7 @@
 
 <section class="dash-bottom">
   <div class="panel pipeline-panel">
-    <div class="panel-head"><h2>{{ icon('kanban') }} Sales Pipeline</h2><a href="/pipeline" class="panel-link">View pipeline {{ icon('arrow-right') }}</a></div>
+    <div class="panel-head"><h2>{{ icon('kanban') }} Sales Pipeline <small class="small muted">all time</small></h2><a href="/pipeline" class="panel-link">View pipeline {{ icon('arrow-right') }}</a></div>
     <div class="stages">
       {% for stg in pipeline_stages %}
       {% if not loop.first %}<span class="stage-arrow" aria-hidden="true">{{ icon('arrow-right') }}</span>{% endif %}
@@ -112,7 +112,7 @@
     <div class="panel-head"><h2>{{ icon('sparkle') }} AI Insights</h2></div>
     <h3>{{ insight[0] }}</h3>
     <p>{{ insight[1] }}</p>
-    <a class="insight-btn" href="/approvals">View details {{ icon('arrow-right') }}</a>
+    <a class="insight-btn" href="{{ insight[2] }}">View details {{ icon('arrow-right') }}</a>
     <svg class="insight-bars" viewBox="0 0 60 40" aria-hidden="true"><rect x="2" y="26" width="8" height="14" rx="2"/><rect x="16" y="18" width="8" height="22" rx="2"/><rect x="30" y="10" width="8" height="30" rx="2"/><rect x="44" y="2" width="8" height="38" rx="2"/></svg>
   </div>
 </section>

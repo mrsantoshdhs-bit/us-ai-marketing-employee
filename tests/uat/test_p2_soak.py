@@ -353,7 +353,7 @@ def test_ok_reply_on_sunday_cancels_the_email_approved_on_saturday(world, clock,
     FakeIMAP.messages = {1: mail(f"Someone <{addr}>", "Re: Step 1", "Thanks, please call me next week.", in_reply_to=f"<lead{lead_id}-step1@us.example>")}
     clock(datetime(2026, 11, 8, 15, 0))
     runner.tick(world, trigger="scheduler")
-    assert followup(world, fid)[0] == "cancelled" and lead_state(world, lead_id)[1] == "replied"
+    assert followup(world, fid)[0] == "cancelled" and lead_state(world, lead_id)[1] in ("replied", "interested")  # "call me" reads as interest
     clock(datetime(2026, 11, 9, 14, 0))  # Monday, inside the window
     runner.tick(world, trigger="scheduler")
     assert FakeSMTP.sent == []

@@ -82,7 +82,8 @@ class LinkedInContentAgent(BaseAgent[ContentInput, ContentOutput]):
         n = min(capacity, len(slots), inp.count or int(cfg.get("max_posts_per_generation_run", 3)))
         if n <= 0:
             out.pending_total = pending
-            out.skipped_reason = ("Queue full: approve or reject pending posts" if capacity <= 0
+            waiting = session.execute(select(func.count(ContentItem.id)).where(ContentItem.status == "awaiting_approval")).scalar_one()
+            out.skipped_reason = (f"Queue full: {pending} posts in the queue, {waiting} waiting for your approval; nothing new written" if capacity <= 0
                                   else "No free calendar slots in the horizon")
             return out
 

@@ -78,7 +78,7 @@
       <span class="chip {{ 'ok' if sending_on else 'warn' }} hide-sm" title="Whether approved emails can go out"><span class="dot"></span>Sending {{ 'on' if sending_on else 'off' }}</span>
       {% if nav_s.mode %}
       <details class="menu-wrap mode-menu">
-        <summary class="mode-pill {{ 'ok' if nav_s.state == 'running' else 'bad' }}" title="Operating mode"><i></i>{{ nav_s.mode|title }} Mode{{ icon('chevron-down') }}</summary>
+        <summary class="mode-pill {{ 'ok' if nav_s.state == 'running' else 'bad' }}" title="{% if nav_s.effective_mode != nav_s.mode %}{{ nav_s.mode|title }} is chosen, but the human-approval switch is on: every email needs a person{% else %}Operating mode{% endif %}"><i></i>{{ nav_s.effective_mode|title }} Mode{{ icon('chevron-down') }}</summary>
         <form class="menu mode-options" method="post" action="/automation/mode">
           <input type="hidden" name="next" value="{{ nav_s.here }}">
           <div class="menu-head">Operating mode{% if not nav_s.admin %} · only an administrator can change it{% endif %}</div>

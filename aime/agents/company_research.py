@@ -242,7 +242,8 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             out.contacts_created += int(created)
         out.people_found += len(people)
         site_read = bool(pages) and pages[0].ok and any(map(has_real_text, pages))
-        if site_read:
+        # A filtering proxy can answer over HTTPS too: only a page that names the company says its people have gone.
+        if site_read and page_names_company(company.name, pages[0].title, pages[0].meta.get("og:site_name")):
             for c in withdraw_missing(session, company, people, pages):
                 out.contacts_withdrawn += 1
                 log_activity(session, f"Decision-maker withdrawn: {c.display_name} ({c.title}) is no longer found on "
