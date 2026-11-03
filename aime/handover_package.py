@@ -408,7 +408,11 @@ def compose(session: Session, settings, opp: Opportunity, conditions: list[dict]
     if lead is not None:
         s["links"].append(_line(f"Thread and lead: /leads/{lead.id}", crm("leads", lead.id, "id")))
         for e in list(emails.values())[-3:]:
-            s["links"].append(_line(f"Their email of {e.received_at:%Y-%m-%d}: /inbox/{e.id}", email_src(e)))
+            if e.category == "calendly":  # a booking notice is not their email; an unverified one is said to be held
+                what = "Calendly notice" + (" (not verified: held for review)" if e.status == "needs_review" else "")
+            else:
+                what = "Their email"
+            s["links"].append(_line(f"{what} of {e.received_at:%Y-%m-%d}: /inbox/{e.id}", email_src(e)))
     if company is not None:
         s["links"].append(_line(f"Company and research: /companies/{company.id}", crm("companies", company.id, "id")))
     s["links"].append(_line(f"Deal: /opportunities/{opp.id}", crm("opportunities", opp.id, "id")))

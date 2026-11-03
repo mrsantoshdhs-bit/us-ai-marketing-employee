@@ -848,3 +848,19 @@ def test_the_conversation_engines_own_handover_request_reaches_the_package(make_
         assert conversation.handover_requests(s, ids["lead"])[0].id == rid
         record_human_action(s, rid, "rejected", "manager")
         assert hp.evaluate(s, ctx.settings, s.get(Opportunity, ids["opp"])) == []
+
+
+def test_a_held_calendly_notice_is_not_listed_as_their_email(make_ctx):
+    """A forged or unverified notice was held for review: the package's links must not present it as the prospect's own
+    email, nor as a verified booking."""
+    ctx = make_ctx()
+    ids = seed(ctx)
+    with ctx.db.session() as s:
+        s.add(InboundEmail(message_id="<forged@calendly.example>", from_email="notifications@calendly.com",
+                           subject="New Event: Dana Reyes", new_text="New Event", body_text="New Event", category="calendly",
+                           lead_id=ids["lead"], company_id=ids["company"], received_at=NOW - timedelta(hours=1),
+                           status="needs_review"))
+    pkg = hand_over(ctx, ids["opp"])
+    links = [ln["text"] for ln in pkg.sections["links"]["lines"]]
+    assert any(t.startswith("Calendly notice (not verified: held for review) of ") for t in links), links
+    assert sum(t.startswith("Their email of ") for t in links) == 1  # the prospect's own reply only
