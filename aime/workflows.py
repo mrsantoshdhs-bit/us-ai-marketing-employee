@@ -13,6 +13,7 @@ from aime.agents import (AnalyticsReportingAgent, AuthorizedPublishingAgent, Com
                          InboxAgent,
                          LeadQualificationAgent, LinkedInContentAgent, MarketingManagerAgent, SalesWorkflowAgent,
                          USBusinessResearchAgent)
+from aime import retention
 from aime.agents.base import AgentResult, agent_enabled
 from aime.agents.sales_workflow import MAILBOX_ALERT
 from aime.backup import (OFFSITE_PROBLEM, PREDEPLOY_KEPT, backup_sqlite_file, checkpoint, integrity_check, prune_backups,
@@ -33,7 +34,7 @@ MAILBOX_HELD = ("Held: reading the sales mailbox", "Held: the sales mailbox", "H
 # The inbox job runs at every check-in and before followups, so a real run finds a read from seconds ago. This much
 # slack is for a followups run started by hand between two check-ins.
 MAILBOX_READ_FRESH = timedelta(minutes=20)
-RUN_HISTORY_DAYS = 90
+RUN_HISTORY_DAYS = retention.RUN_HISTORY_DAYS
 RETRY_KEEPS_COPY = timedelta(hours=12)  # a retry of a backup job that left a good copy this recently writes no second one
 
 
@@ -326,8 +327,10 @@ def job_db_maintenance(ctx: AppContext, job: str = "db_maintenance") -> JobOutco
         pruned += len(prune_manual_backups(s.backups_dir, int(getattr(s, "backup_keep_manual", 0) or 0),
                                            keep_predeploy=PREDEPLOY_KEPT))
     check = integrity_check(ctx.db)
-    # Only with a good backup of what is about to go, and a sound database.
-    history_pruned = prune_run_history(ctx) if check["ok"] and (verified is None or verified["ok"]) else 0
+    # Only with a good backup of what is about to go, and a sound database. Settings > Retention may keep the run history
+    # longer or shorter than 90 days, and resolved alerts for a set time; at its defaults this is the 90-day prune it always was.
+    retained = retention.apply(ctx.db, s) if check["ok"] and (verified is None or verified["ok"]) else None
+    history_pruned = retained["removed"]["job_runs"] + retained["removed"]["agent_runs"] if retained else 0
     checkpoint(ctx.db)
     problems = []
     if not check["ok"]:
@@ -340,6 +343,7 @@ def job_db_maintenance(ctx: AppContext, job: str = "db_maintenance") -> JobOutco
                                                      "tables": verified["tables"], "rows": verified["rows"]})
     step = {"agent": "db_maintenance", "status": "failed" if problems else "success",
             "output": {"backup": backup.name if backup else None, "pruned": pruned, "history_pruned": history_pruned, **check,
+                       "retention": retained,
                        "backup_verified": bool(verified and verified["ok"]), "copy_of_the_earlier_try": bool(kept),
                        "backup_rows": verified["rows"] if verified else None}}
     if problems:

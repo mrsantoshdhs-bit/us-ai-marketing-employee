@@ -128,6 +128,11 @@ no_response_days = 7
 companies_per_run = 15
 max_pages_per_site = 6
 recheck_days = 30
+# Companies beyond companies_per_run wait in the work queue, ranked as the scan ranked them, for the next run (the
+# Jobs page shows it). The ranking is renewed from a scan when the queue runs dry or is older than queue_rescan_hours,
+# so a daily run researches exactly what it did without the queue. false: every run scans.
+work_queue = true
+queue_rescan_hours = 20
 
 [publish_policy]
 # SHADOW MODE ONLY. The policy records what it WOULD do with each post ("would publish" or

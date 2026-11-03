@@ -940,6 +940,18 @@ Index("ix_leads_contact_id", Lead.contact_id)
 Index("ix_companies_domain_lower", func.lower(Company.domain))
 Index("ix_inbound_emails_from_email_lower", func.lower(InboundEmail.from_email))
 Index("ix_opportunities_owner_stage", Opportunity.owner, Opportunity.stage)
+# Option B Phase 8 (scripts/perf_bench.py): each was a full table scan once per lead in a run.
+Index("ix_companies_merged_into_id", Company.merged_into_id)  # _merged_family, for every qualified lead in each drafting run
+Index("ix_inbound_inquiries_lead_id", InboundInquiry.lead_id)  # qualification and the sales workflow, per lead
+Index("ix_inbound_emails_company_id", InboundEmail.company_id)  # what was said at a company (outreach._on_record)
+Index("ix_followups_company_id", FollowUp.company_id)
+# the report and target windows (aime.manager_report, aime.targets): a day or a week of a table, not the whole table
+Index("ix_companies_created_at", Company.created_at)
+Index("ix_contacts_created_at", Contact.created_at)
+Index("ix_leads_created_at", Lead.created_at)
+Index("ix_followups_sent_at", FollowUp.sent_at)
+# "under a listed domain" (crm_ops.CONTACT_NOT_SUPPRESSED) is asked for every contact: the few domain entries, not every entry
+Index("ix_suppressions_kind_lifted", Suppression.kind, Suppression.lifted_at)
 
 
 class ReportDelivery(Base):
@@ -1095,3 +1107,35 @@ class HandoverPackage(Base):
     notify_claimed_at: Mapped[datetime | None] = mapped_column(DateTime)
     notify_message_id: Mapped[str | None] = mapped_column(String(300))
     notify_error: Mapped[str | None] = mapped_column(String(500))
+
+
+# --------------------------------------------------------------------------- work queue (aime.work_queue, Option B Phase 8)
+
+class WorkItem(Base):
+    """One unit of chunked work that may take several ticks: company research of one company, later verification. The
+    (kind, key) pair is unique, so enqueueing the same work twice keeps one item. A worker claims items with a lease; one
+    whose worker died is claimed again once the lease ends, and an item claimed `max_attempts` times without finishing
+    goes to the dead letters (status "dead") for a person, instead of blocking the queue."""
+
+    __tablename__ = "work_items"
+    __table_args__ = (UniqueConstraint("kind", "key", name="uq_work_item_kind_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(40))
+    key: Mapped[str] = mapped_column(String(200))
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict)
+    priority: Mapped[int] = mapped_column(Integer, default=0)  # lower first, then the oldest
+    status: Mapped[str] = mapped_column(String(12), default="pending")  # pending | claimed | done | dead
+    attempts: Mapped[int] = mapped_column(Integer, default=0)  # claims so far
+    available_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)  # not claimed before this (retry backoff)
+    locked_by: Mapped[str | None] = mapped_column(String(80))
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    last_error: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+Index("ix_work_items_claim", WorkItem.kind, WorkItem.status, WorkItem.priority, WorkItem.id)

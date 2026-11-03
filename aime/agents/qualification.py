@@ -7,7 +7,7 @@ from datetime import timedelta
 
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from aime.catalogue import keep_enabled
 from aime.countries import target_countries
@@ -111,7 +111,8 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
         stmt = select(Lead).where(Lead.status.in_(("new", "qualified", "nurture")))
         if inp.lead_ids:
             stmt = stmt.where(Lead.id.in_(inp.lead_ids))
-        leads = session.execute(stmt).scalars().all()
+        # each lead's company and contact in two queries, not two per lead (Phase 8: perf_bench)
+        leads = session.execute(stmt.options(selectinload(Lead.company), selectinload(Lead.contact))).scalars().all()
 
         latest_signal = dict(session.execute(
             select(Signal.company_id, func.max(Signal.created_at)).group_by(Signal.company_id)).all())
