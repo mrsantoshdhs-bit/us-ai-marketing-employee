@@ -950,6 +950,8 @@ Index("ix_companies_created_at", Company.created_at)
 Index("ix_contacts_created_at", Contact.created_at)
 Index("ix_leads_created_at", Lead.created_at)
 Index("ix_followups_sent_at", FollowUp.sent_at)
+# "under a listed domain" (crm_ops.CONTACT_NOT_SUPPRESSED) is asked for every contact: the few domain entries, not every entry
+Index("ix_suppressions_kind_lifted", Suppression.kind, Suppression.lifted_at)
 
 
 class ReportDelivery(Base):

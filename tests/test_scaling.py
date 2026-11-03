@@ -278,7 +278,8 @@ def test_retention_never_names_a_crm_table():
 # ------------------------------------------------------------------ indexes and volume
 
 PHASE8_INDEXES = {"ix_companies_merged_into_id", "ix_inbound_inquiries_lead_id", "ix_inbound_emails_company_id", "ix_followups_company_id",
-                  "ix_companies_created_at", "ix_contacts_created_at", "ix_leads_created_at", "ix_followups_sent_at", "ix_work_items_claim"}
+                  "ix_companies_created_at", "ix_contacts_created_at", "ix_leads_created_at", "ix_followups_sent_at", "ix_work_items_claim",
+                  "ix_suppressions_kind_lifted"}
 
 
 def test_an_existing_database_gets_the_new_indexes_additively(ctx):
