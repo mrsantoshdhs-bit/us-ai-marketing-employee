@@ -112,6 +112,9 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "hn_source_enabled": ("HN_SOURCE_ENABLED", bool),
     "sec_user_agent": ("SEC_USER_AGENT", str),
     "census_api_key": ("CENSUS_API_KEY", str),
+    "companies_house_api_key": ("COMPANIES_HOUSE_API_KEY", str),
+    "contact_provider_api_key": ("CONTACT_PROVIDER_API_KEY", str),
+    "email_verifier_api_key": ("EMAIL_VERIFIER_API_KEY", str),
     "outbound_email_enabled": ("OUTBOUND_EMAIL_ENABLED", bool),
     "smtp_host": ("SMTP_HOST", str),
     "smtp_port": ("SMTP_PORT", int),
@@ -207,6 +210,12 @@ class Settings:
     hn_source_enabled: bool = True
     sec_user_agent: str = ""
     census_api_key: str = field(default="", repr=False)
+    # Contact-source adapters (aime.contact_sources). Companies House: a free key from its developer hub; the adapter stays
+    # blocked without it and is off by default. The paid provider and verifier keys are read only by adapters that also need
+    # the owner's recorded approval and a monthly budget above 0.
+    companies_house_api_key: str = field(default="", repr=False)
+    contact_provider_api_key: str = field(default="", repr=False)
+    email_verifier_api_key: str = field(default="", repr=False)
 
     outbound_email_enabled: bool = False
     smtp_host: str = ""

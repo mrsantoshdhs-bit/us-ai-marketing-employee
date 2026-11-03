@@ -176,11 +176,11 @@ def _record_checks(ctx: AppContext, add) -> None:
             f"email; {after_opt_out} emails sent after an opt-out; {bad_outreach} outreach emails without a published "
             "address or an approval record")
         other_sources = n(Contact, Contact.source.not_in(("inbound", "manual", "import", "website", "sec_filing",
-                                                          "website_withdrawn")))
+                                                          "website_withdrawn", "companies_house")))
         add("Contacts only from approved sources", other_sources == 0,
             f"{other_sources} contact(s) from a source other than inquiries, manual entry, your imports, "
             "companies' own websites or SEC filings")
-        researched = (Contact.source.in_(("website", "sec_filing")),)
+        researched = (Contact.source.in_(("website", "sec_filing", "companies_house")),)
         no_evidence = n(Contact, *researched, (Contact.evidence_url.is_(None)) | (Contact.evidence.is_(None)))
         unsourced_email = n(Contact, *researched, Contact.email.is_not(None), Contact.email_source_url.is_(None))
         add("Researched contacts have evidence", no_evidence == 0 and unsourced_email == 0,

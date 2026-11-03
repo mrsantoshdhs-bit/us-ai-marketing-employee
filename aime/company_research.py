@@ -146,7 +146,7 @@ def save_contact(session: Session, company: Company, finding: PersonFinding, ser
     if existing:
         if existing.source == WITHDRAWN:  # found again after a re-check withdrew it
             existing.source, existing.confidence = finding.source, None
-        if existing.source in ("website", "sec_filing") and rank[finding.confidence] >= rank[existing.confidence]:
+        if existing.source in ("website", "sec_filing", "companies_house") and rank[finding.confidence] >= rank[existing.confidence]:
             existing.title, existing.role_category, existing.relevance = finding.title, finding.role_category, score
             existing.confidence, existing.evidence, existing.evidence_url = (finding.confidence, finding.evidence[:2000],
                                                                              finding.evidence_url[:500])

@@ -21,6 +21,8 @@ from aime.agents.contracts import BlockedItem
 from aime.company_research import (WITHDRAWN, build_snapshot, cik_of, has_real_text, is_plausible_website, save_contact, was_erased,
                                    withdraw_missing)
 from aime.competitor_guard import leave_to_a_person, live_lead_on_company
+from aime.contact_sources.companies_house import company_number_of
+from aime.contact_sources.registry import registry_officers, registry_usable
 from aime.contact_validation import STATUS_OK, MailDomainChecker, address_was_erased, assign_published_emails, recheck_emails
 from aime.crm_ops import OPEN_LEAD_STATUSES, is_suppressed, log_activity, primary_lead
 from aime.matching import competitor_evidence
@@ -28,6 +30,7 @@ from aime.models import Company, Contact, FollowUp, Lead, ResearchSnapshot
 from aime.monitoring import alert_once, resolve_alerts
 from aime.outreach import REACHED_PROSPECT, company_opted_out
 from aime.people import extract_people, merge_findings
+from aime.provenance import backfill_legacy
 from aime.redact import redact
 from aime.site_reader import SiteReader
 from aime.sources.sec_officers import sec_officers
@@ -39,6 +42,7 @@ CONFIDENCE_RANK = {"high": 2, "medium": 1}
 FAILED_READS_BEFORE_WAITING = 3  # after this many in a row a company waits for the normal re-check
 ALL_FAILED_MEANS_FAILURE = 3  # this many failures and no success in a run: no longer about one site (the network?)
 HOLD_ALERT = "research:held"
+LEGACY_BACKFILL_PER_RUN = 500  # contacts given their "legacy: <source>" provenance per run, oldest first
 HELD_READS_STOP_RUN = 3  # this many held and nothing read: the rest of the run would only read the same sign-in page
 PERSON_FOUND_TASK = "Decision-maker found after the first email: "  # how the task starts, so later re-reads find it
 PERSON_FOUND_NOTE = "News of a person, not this lead's review"  # with a reason, ticking it closes no review (SalesWorkflowAgent._ensure_task)
@@ -56,6 +60,7 @@ class ResearchOutput(BaseModel):
     people_found: int = 0
     contacts_created: int = 0
     sec_officers: int = 0
+    registry_officers: int = 0  # from an official company register (aime.contact_sources), when one is switched on
     person_emails: int = 0
     inboxes: int = 0
     contacts_withdrawn: int = 0
@@ -92,6 +97,8 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             return out
         cfg = self.settings.section("enrichment")
         now = inp.now or utcnow()
+        backfill_legacy(session, LEGACY_BACKFILL_PER_RUN)  # contacts from before provenance existed: "legacy: <source>"
+        self._registers = registry_usable(self.ctx, session)
         limit = inp.limit or int(cfg.get("companies_per_run", 15))
         self._known_sites_failed = False
         for company in self._candidates(session, inp, now, int(cfg.get("recheck_days", 30)))[:limit]:
@@ -146,7 +153,9 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             stmt = stmt.where(Company.id.in_(inp.company_ids))
         else:
             stmt = stmt.where((Company.researched_at.is_(None)) | (Company.researched_at < now - timedelta(days=recheck_days)))
-        companies = [c for c in session.execute(stmt).scalars() if is_plausible_website(c) or cik_of(c)]
+        registers = getattr(self, "_registers", False)
+        companies = [c for c in session.execute(stmt).scalars()
+                     if is_plausible_website(c) or cik_of(c) or (registers and company_number_of(c))]
         leads = {lead.company_id: lead for lead in session.execute(select(Lead)).scalars()}
 
         def priority(c: Company) -> tuple:
@@ -228,6 +237,14 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                 status = "done"  # the website could not be read, but the filings name the officers
         elif not pages:
             status = "no_website"
+        registered, register_failure = registry_officers(self.ctx, session, company) if getattr(self, "_registers", False) else ([], None)
+        if registered:
+            out.registry_officers += len(registered)
+            people = merge_findings(people + registered)
+            if status != "done":
+                status = "done"  # the website could not be read, but the official register names the officers
+        if register_failure:
+            log_activity(session, f"Company register not read: {register_failure}", self.name, type_="research", company_id=company.id)
         people = [f for f in people if not was_erased(session, company, f)]  # or the snapshot would keep the name, and a Review task show it
         if status == "done" and not people:
             status = "no_people"
@@ -270,9 +287,10 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         if not company.phone and snapshot.phones:
             company.phone = snapshot.phones[0]["phone"][:40]  # as published on the company's own site
         researched = session.execute(select(Contact).where(Contact.company_id == company.id, Contact.source.in_(
-            ("website", "sec_filing")))).scalars().all()
+            ("website", "sec_filing", "companies_house")))).scalars().all()
         if lead and not self._contact_stays(session, lead):
-            if researched and (lead.contact_id is None or (lead.contact and lead.contact.source in ("website", "sec_filing", WITHDRAWN))):
+            if researched and (lead.contact_id is None or (lead.contact and lead.contact.source in ("website", "sec_filing", "companies_house",
+                                                                                                    WITHDRAWN))):
                 lead.contact_id = best_contact(researched).id
             elif lead.contact and lead.contact.source == WITHDRAWN:
                 lead.contact_id = None
