@@ -85,6 +85,7 @@ from aime.web.team_pages import register as register_team_pages
 from aime.countries import target_countries
 from aime.web.settings_pages import register as register_settings_pages
 from aime.web.deal_pages import register as register_deal_pages
+from aime.web.handover_pages import register as register_handover_pages
 from aime.web.deliverability_pages import register as register_deliverability_pages
 from aime.web.manager_pages import may_view as may_view_manager_report, register as register_manager_pages
 from aime.web.ai_pages import register as register_ai_pages
@@ -2670,6 +2671,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     register_team_pages(app, C, render, back, who)
     register_deal_pages(app, C, render, back, who)
+    register_handover_pages(app, C, render, back, who)
     register_deliverability_pages(app, C, render, back, who)
     register_settings_pages(app, C, render, back, who)
     register_manager_pages(app, C, render, back, who)

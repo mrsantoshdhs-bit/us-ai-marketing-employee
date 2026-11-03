@@ -9,6 +9,8 @@
     {% if opp.lead_id %} · <a href="/leads/{{ opp.lead_id }}">lead and conversation</a>{% endif %}</p>
 </div></div>
 
+{% if handover %}{% include "_handover.html" %}{% endif %}
+
 <div class="grid">
 <div>
   <h2>Stage</h2>

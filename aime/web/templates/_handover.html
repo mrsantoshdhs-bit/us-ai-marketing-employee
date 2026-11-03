@@ -1,0 +1,27 @@
+{# The handover package on a deal's page (aime.handover_package): every line with the record it was read from. #}
+<h2 id="handover">Handover package</h2>
+<div class="card small">
+  <p><b>Version {{ handover.version }}</b> · {{ handover.status }} · written {{ handover.created_at|local }} by {{ handover.created_by }}
+    {% if handover.accepted_by %} · accepted by {{ handover.accepted_by }} {{ handover.accepted_at|local }}{% endif %}
+    {% if handover.status == 'returned' %} · returned by {{ handover.returned_by }} {{ handover.returned_at|local }}: {{ handover.return_reason }}{% endif %}
+    {% if handover_paused %} · <b>AI drafting for this lead is paused</b>{% endif %}</p>
+  {% for key, sec in handover.sections.items() if key != 'unknown' %}
+  <div class="row-item"><b>{{ sec.title }}</b>
+    <ul>{% for ln in sec.lines %}<li>{{ ln.text }} <span class="muted">[{{ cite_label(ln.source) }}]</span></li>{% endfor %}</ul></div>
+  {% endfor %}
+  {% if handover.sections.unknown %}<div class="row-item"><b>Not known yet</b>
+    <ul>{% for u in handover.sections.unknown %}<li class="muted">{{ u }}</li>{% endfor %}</ul></div>{% endif %}
+  <p class="muted">Every line names the email, research snapshot or CRM field it was read from; a line that cannot be cited is not written. Budget and timeline are their own words.</p>
+  <p>Email to the owner: {% if handover.notify_status %}{{ handover.notify_status }}{% if handover.notify_to %} to {{ handover.notify_to }}{% endif %}{% if handover.notify_error %} ({{ handover.notify_error }}){% endif %}{% elif handover_blockers %}not sent: {{ handover_blockers|join('; ') }}{% else %}waiting for the next sending run{% endif %}</p>
+  {% if handover_may_act and can_edit and handover.status in ('open', 'accepted') %}
+    {% if handover.status == 'open' %}<form class="inline" method="post" action="/opportunities/{{ opp.id }}/handover/accept">
+      <input type="hidden" name="package_id" value="{{ handover.id }}"><button>Accept: I take it over</button></form>{% endif %}
+    <form class="filters" method="post" action="/opportunities/{{ opp.id }}/handover/return">
+      <input type="hidden" name="package_id" value="{{ handover.id }}">
+      <input name="reason" placeholder="Why it goes back to the AI" required minlength="3" maxlength="300" size="30">
+      <button class="secondary">Return to the AI</button></form>
+  {% elif handover.status in ('open', 'accepted') %}<p class="muted">The deal's owner or an administrator accepts or returns it.</p>{% endif %}
+  {% if handover_older %}<details><summary>Earlier versions</summary>
+    {% for p in handover_older %}<div>Version {{ p.version }} · {{ p.status }} · {{ p.created_at|local }}{% if p.return_reason %} · returned: {{ p.return_reason }}{% endif %}</div>{% endfor %}
+  </details>{% endif %}
+</div>
