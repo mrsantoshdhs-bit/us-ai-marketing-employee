@@ -8,10 +8,14 @@ verified email address). For each target country, today (in that country's time 
 
 - companies found: companies created today with that country (sample data and merged duplicates left out);
 - leads created: leads created today for those companies;
-- verified leads: of those, the ones not disqualified whose company is confirmed (its website checked live, or a record
-  verified from an official registry);
-- contactable leads: of the verified ones, those whose company has a contact with a usable email address (published by the
-  company, or its own published inbox) that is not on the suppression list;
+- confirmed companies: of those leads, the ones not disqualified whose company is confirmed (its website checked live, or a
+  record verified from an official registry). Shown for information only: a confirmed company is not a verified lead;
+- contactable leads: leads not disqualified whose company has a contactable email address (aime.funnel.contactable: not
+  opted out, not suppressed, not bounced; a company inbox counts here);
+- verified leads: leads not disqualified whose company has a verified decision-maker (aime.funnel.verified_decision_maker:
+  a named person with a deciding title, from a researched source, whose own address is verified and may be written to).
+  A role address (info@, sales@ ...) or an unverified company record never counts as a verified lead. The same definitions
+  are used by the Sales Manager report and dashboard (aime.funnel), so one number has one meaning everywhere;
 - qualified: leads created today that are qualified now.
 """
 
@@ -36,6 +40,7 @@ class Progress:
     goal_contactable: int
     companies_found: int = 0
     leads_created: int = 0
+    confirmed_companies: int = 0
     verified_leads: int = 0
     contactable_leads: int = 0
     qualified: int = 0
@@ -71,9 +76,7 @@ def _research_runs(session: Session, start: datetime, end: datetime) -> list:
 
 def progress(session: Session, settings, now: datetime | None = None) -> list[Progress]:
     """Today's progress for every target in the settings, each with the reasons it falls short."""
-    from aime import countries, settings_store
-    from aime.contact_validation import STATUS_OK
-    from aime.crm_ops import CONTACT_NOT_SUPPRESSED
+    from aime import countries, funnel, settings_store
     from aime.models import Company, Contact, Lead
     from aime.timeutil import utcnow
 
@@ -94,9 +97,12 @@ def progress(session: Session, settings, now: datetime | None = None) -> list[Pr
                                                    Lead.created_at < end, Lead.status != "merged")).scalars().all()
         p.leads_created = len(leads)
         by_id = {c.id: c for c in companies}
-        reachable = set(session.execute(select(Contact.company_id).where(
-            Contact.company_id.in_(ids or [-1]), Contact.email.is_not(None), Contact.email_status.in_(STATUS_OK),
-            CONTACT_NOT_SUPPRESSED)).scalars())
+        def with_contact(*conds, ids=ids) -> set[int]:
+            return set(session.execute(select(Contact.company_id).where(
+                Contact.company_id.in_(ids or [-1]), *funnel.real_contact(), *conds)).scalars())
+
+        reachable = with_contact(*funnel.contactable())
+        verified_people = with_contact(*funnel.verified_decision_maker())
         for lead in leads:
             company = by_id[lead.company_id]
             if lead.status == "disqualified":
@@ -105,9 +111,11 @@ def progress(session: Session, settings, now: datetime | None = None) -> list[Pr
             if lead.status == "qualified":
                 p.qualified += 1
             if company.website_status in VERIFIED_WEBSITE or company.verified:
+                p.confirmed_companies += 1
+            if company.id in reachable:
+                p.contactable_leads += 1
+            if company.id in verified_people:
                 p.verified_leads += 1
-                if company.id in reachable:
-                    p.contactable_leads += 1
         p.shortfall_verified = max(0, p.goal_verified - p.verified_leads)
         p.shortfall_contactable = max(0, p.goal_contactable - p.contactable_leads)
         p.reasons = _reasons(session, settings, p, start, end, cap)
@@ -148,8 +156,12 @@ def _reasons(session: Session, settings, p: Progress, start: datetime, end: date
             why.append(f"A research run ended {run.status}")
     if p.leads_created and p.disqualified:
         why.append(f"{p.disqualified} of {p.leads_created} new lead(s) were disqualified (competitor, suppression or location)")
-    if p.leads_created > p.verified_leads + p.disqualified:
-        why.append(f"{p.leads_created - p.verified_leads - p.disqualified} new lead(s) wait for their website check")
-    if p.shortfall_contactable and p.verified_leads > p.contactable_leads:
-        why.append(f"{p.verified_leads - p.contactable_leads} verified lead(s) have no usable, verified email address yet")
+    if p.leads_created > p.confirmed_companies + p.disqualified:
+        why.append(f"{p.leads_created - p.confirmed_companies - p.disqualified} new lead(s) wait for their website check")
+    open_leads = p.leads_created - p.disqualified
+    if p.shortfall_contactable and open_leads > p.contactable_leads:
+        why.append(f"{open_leads - p.contactable_leads} new lead(s) have no contactable email address yet")
+    if p.shortfall_verified and open_leads > p.verified_leads:
+        why.append(f"{open_leads - p.verified_leads} new lead(s) have no verified decision-maker yet (a named person with a "
+                   "deciding title and a verified address of their own; company inboxes do not count)")
     return list(dict.fromkeys(why)) or ["Fewer new companies than the goal were found today"]

@@ -340,13 +340,32 @@ def test_daily_progress_is_counted_from_the_records_with_reasons_for_a_shortfall
             s.add(Lead(company_id=c.id, source="research", status=status))
         s.add(Contact(company_id=live.id, email="sales@livecorp.example", email_status="published", source="website"))
         s.add(Contact(company_id=registry.id, email="x@registry.example", email_status="unverified", source="website"))
+        s.add(Contact(company_id=live.id, first_name="Dana", last_name="Reyes", title="CEO", email="dana@livecorp.example",
+                      email_status="published", source="website"))
     with ctx.db.session() as s:
         [p] = targets.progress(s, ctx.settings)
-    assert (p.companies_found, p.leads_created, p.verified_leads, p.contactable_leads, p.qualified, p.disqualified) == (4, 4, 2, 1, 1, 1)
-    assert (p.shortfall_verified, p.shortfall_contactable, p.pct_verified, p.pct_contactable) == (2, 1, 50, 50)
+    # A verified lead has a verified decision-maker (aime.funnel): Live Co's CEO. Registry Co is confirmed and contactable,
+    # but has no verified person, and a company inbox (sales@) never makes a lead verified.
+    assert (p.companies_found, p.leads_created, p.confirmed_companies, p.verified_leads, p.contactable_leads, p.qualified,
+            p.disqualified) == (4, 4, 2, 1, 2, 1, 1)
+    assert (p.shortfall_verified, p.shortfall_contactable, p.pct_verified, p.pct_contactable) == (3, 0, 25, 100)
     words = " | ".join(p.reasons)
     assert "Research has not run today yet" in words and "1 of 4 new lead(s) were disqualified" in words
-    assert "1 new lead(s) wait for their website check" in words and "1 verified lead(s) have no usable, verified email" in words
+    assert "1 new lead(s) wait for their website check" in words and "2 new lead(s) have no verified decision-maker yet" in words
+
+
+def test_a_company_inbox_alone_never_makes_a_verified_lead(ctx):
+    save(ctx, "targets", {"targets": [{"country": "US", "daily_verified_leads": 1, "daily_contactable_leads": 1}]})
+    with ctx.db.session() as s:
+        c = Company(name="Inbox Co", normalized_name="inbox co", country="US", source="csv_import", website_status="verified")
+        s.add(c)
+        s.flush()
+        s.add(Lead(company_id=c.id, source="research", status="qualified"))
+        s.add(Contact(company_id=c.id, first_name="Info", last_name="Desk", title="CEO", email="info@inboxco.example",
+                      email_status="published", source="website"))
+    with ctx.db.session() as s:
+        [p] = targets.progress(s, ctx.settings)
+    assert (p.verified_leads, p.contactable_leads) == (0, 1)
 
 
 def test_targets_are_goals_and_never_raise_a_cap(ctx):

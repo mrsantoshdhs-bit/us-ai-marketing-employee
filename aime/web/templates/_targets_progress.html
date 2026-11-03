@@ -1,12 +1,13 @@
 <div class="card table-wrap"><table>
-  <tr><th>Country</th><th>Day</th><th class="n">Companies found</th><th class="n">Leads created</th><th class="n">Verified leads</th><th class="n">Contactable leads</th><th class="n">Qualified</th><th>Why short</th></tr>
+  <tr><th>Country</th><th>Day</th><th class="n">Companies found</th><th class="n">Leads created</th><th class="n">Confirmed companies</th><th class="n">Contactable leads</th><th class="n">Verified leads<div class="small muted">verified decision-maker</div></th><th class="n">Qualified</th><th>Why short</th></tr>
   {% for p in progress %}
   <tr><td><strong>{{ p.country }}</strong></td><td class="small">{{ p.day }}<div class="muted">{{ p.timezone }}</div></td>
       <td class="n">{{ p.companies_found }}</td><td class="n">{{ p.leads_created }}</td>
-      <td class="n">{{ p.verified_leads }}{% if p.goal_verified %} / {{ p.goal_verified }} <span class="small muted">({{ p.pct_verified }}%)</span>{% endif %}</td>
+      <td class="n">{{ p.confirmed_companies }}</td>
       <td class="n">{{ p.contactable_leads }}{% if p.goal_contactable %} / {{ p.goal_contactable }} <span class="small muted">({{ p.pct_contactable }}%)</span>{% endif %}</td>
+      <td class="n">{{ p.verified_leads }}{% if p.goal_verified %} / {{ p.goal_verified }} <span class="small muted">({{ p.pct_verified }}%)</span>{% endif %}</td>
       <td class="n">{{ p.qualified }}</td>
       <td class="small">{% for r in p.reasons %}<div>{{ r }}</div>{% else %}<span class="pill">on target</span>{% endfor %}</td></tr>
-  {% else %}<tr><td colspan="8" class="muted">No targets set.</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="9" class="muted">No targets set.</td></tr>{% endfor %}
 </table></div>
 <p class="small muted">Targets are goals, not quotas: they never raise the discovery cap, a sending limit or any other cap, and no quality or compliance rule is relaxed to meet them. Counted from today's records in each country's time zone.</p>
