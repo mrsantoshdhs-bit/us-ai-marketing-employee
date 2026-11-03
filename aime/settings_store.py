@@ -399,6 +399,39 @@ class RetentionSection(Strict):
         return v
 
 
+class HandoverRulesSection(Strict):
+    """When a deal is handed to the Sales Manager with a handover package (aime.handover_package), and how long the manager
+    has to accept it. Each condition can be switched off; the package is internal and nothing here sends or books anything.
+    The internal notification email has its own switch and a Super Admin's authorization (aime.handover_notify)."""
+
+    enabled: bool = True  # off: handovers stay the alert and toast they were, with no package
+    interested_requirements_complete: bool = True  # an interested reply, and every kind in `required_facts` stated with its email
+    required_facts: list[str] = Field(default_factory=lambda: ["requirement", "budget", "timeline"], max_length=9)
+    meeting_booked: bool = True
+    pricing_asked: bool = True
+    human_requested: bool = True  # the prospect asked for a person
+    min_score: int = Field(default=0, ge=0, le=100)  # with a budget stated, a lead score at least this hands over; 0: off
+    vip_accounts: list[str] = Field(default_factory=list, max_length=200)  # company domains or names, always handed over
+    conversation_escalation: bool = True  # the conversation engine asked for a person
+    accept_within_hours: int = Field(default=24, ge=0, le=720)  # not accepted by then: escalated (0: never)
+
+    @field_validator("required_facts")
+    @classmethod
+    def check_facts(cls, v: list[str]) -> list[str]:
+        kinds = ("requirement", "budget", "timeline", "stakeholder", "authority", "objection", "question", "meeting_intent",
+                 "concern")
+        out = [str(x).strip().lower() for x in v if str(x).strip()]
+        bad = [x for x in out if x not in kinds]
+        if bad:
+            raise ValueError(f"{', '.join(bad)}: a required fact is one of {', '.join(kinds)}")
+        return out
+
+    @field_validator("vip_accounts")
+    @classmethod
+    def check_vips(cls, v: list[str]) -> list[str]:
+        return [str(x).strip().lower()[:200] for x in v if str(x).strip()]
+
+
 class SalesOverrides(BaseModel):
     """The sales settings' overrides as aime.admin_settings stores them; that module validates each field."""
 
@@ -559,6 +592,9 @@ for _spec in (
                 "How long records are kept (0 keeps everything). Nothing is deleted by these yet."),
     SectionSpec("sales", "Sales settings", SalesOverrides, lambda s: {"overrides": {}},
                 "The overrides saved on the Sales settings page, over config/business.toml.", editable=False),
+    SectionSpec("handover_rules", "Handover rules", HandoverRulesSection, lambda s: HandoverRulesSection().model_dump(mode="json"),
+                "When a deal goes to the Sales Manager with a cited handover package, and how long they have to accept it. "
+                "Nothing here sends an email or books a meeting."),
 ):
     _register(_spec)
 

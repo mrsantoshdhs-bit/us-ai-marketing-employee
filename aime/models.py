@@ -1020,3 +1020,41 @@ class ConversationFact(Base):
     confirmed_by: Mapped[str | None] = mapped_column(String(80))
     ai_decision_id: Mapped[int | None] = mapped_column(Integer)  # the ai_decisions row that proposed it
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class HandoverPackage(Base):
+    """One version of the handover package for a deal (aime.handover_package): who the prospect is, what they need, budget
+    and timeline as they stated them, stakeholders, objections, the meeting, risks and the recommended next step. Every line
+    in `sections` names the record it was read from; a line that cannot be cited is not written. A new version is written
+    only when the content changes. The Sales Manager accepts it (AI drafting for the lead pauses) or returns it with a reason.
+    The internal notification email is claimed here, once per version, before anything reaches the mail server."""
+
+    __tablename__ = "handover_packages"
+    __table_args__ = (UniqueConstraint("opportunity_id", "version", name="uq_handover_package_version"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    opportunity_id: Mapped[int] = mapped_column(ForeignKey("opportunities.id"), index=True)
+    lead_id: Mapped[int | None] = mapped_column(ForeignKey("leads.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    summary: Mapped[str] = mapped_column(Text, default="")  # the sections as plain text, each line with its citation
+    sections: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # {key: {"title", "lines": [{"text", "source"}]}, "unknown": [...]}
+    conditions: Mapped[list[Any]] = mapped_column(JSON, default=list)  # the handover conditions met, each cited
+    content_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(12), default="open", index=True)  # open | accepted | returned | superseded
+    waiting_since: Mapped[datetime] = mapped_column(DateTime, default=utcnow)  # when the manager was first asked (SLA clock)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    created_by: Mapped[str] = mapped_column(String(80))
+    owner: Mapped[str | None] = mapped_column(String(80))  # the deal's owner when the version was written
+    accepted_by: Mapped[str | None] = mapped_column(String(80))
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime)
+    returned_by: Mapped[str | None] = mapped_column(String(80))
+    returned_at: Mapped[datetime | None] = mapped_column(DateTime)
+    return_reason: Mapped[str | None] = mapped_column(String(300))
+    prior_state: Mapped[str | None] = mapped_column(String(20))  # the conversation state before acceptance, restored on return
+    sla_escalated_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # the internal email to the deal's owner: None (not tried) | sending | sent | failed (certainly left nothing) | uncertain
+    notify_status: Mapped[str | None] = mapped_column(String(12))
+    notify_to: Mapped[str | None] = mapped_column(String(200))
+    notify_claimed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    notify_message_id: Mapped[str | None] = mapped_column(String(300))
+    notify_error: Mapped[str | None] = mapped_column(String(500))
