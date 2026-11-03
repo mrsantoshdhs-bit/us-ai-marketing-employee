@@ -6,12 +6,12 @@ company's own are read; SEC-registered companies are also checked for officers. 
 re-researched after `recheck_days`. One company's failure is recorded and the batch continues; a failed read is
 tried again at the next run, after the companies not read yet (see `_note_failed_read`).
 
-With `[enrichment] work_queue` on (the default) the companies waiting beyond this run's `companies_per_run` are kept
+With `[enrichment] work_queue` on (off by default until the owner turns it on) the companies waiting beyond this run's `companies_per_run` are kept
 in the durable work queue (aime.work_queue, kind "company_research"), ranked exactly as the scan ranked them: the
 next run takes the next ones from there instead of scanning every company again, and the queue is ranked afresh
 from a new scan once it runs dry or is older than `queue_rescan_hours` (20). A daily run therefore researches the
 same companies, in the same order and number, as without the queue; more runs a day take the next chunk each.
-`work_queue = false` turns it off (each run scans, as before).
+`work_queue = false` (the default) keeps every run scanning, as before.
 """
 
 from __future__ import annotations
@@ -115,7 +115,7 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         limit = inp.limit or int(cfg.get("companies_per_run", 15))
         recheck_days = int(cfg.get("recheck_days", 30))
         self._known_sites_failed = False
-        queued = bool(cfg.get("work_queue", True)) and not inp.company_ids
+        queued = bool(cfg.get("work_queue", False)) and not inp.company_ids
         worker = work_queue.worker_id()
         if queued:
             batch, items = self._queued_batch(session, inp, now, recheck_days, limit, worker,
