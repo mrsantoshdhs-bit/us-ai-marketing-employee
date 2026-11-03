@@ -1276,10 +1276,14 @@ def test_the_lift_columns_are_added_to_a_database_that_has_entries_and_nothing_i
         suppress(s, "pat@firm-g.example", "asked")
     engine = ctx.db.engine
     with engine.begin() as conn:
+        # A database from before the lift columns has no index on them either
+        conn.execute(text('DROP INDEX IF EXISTS "ix_suppressions_kind_lifted"'))
         for column in ("lifted_at", "lifted_by", "lift_reason"):
             conn.execute(text(f'ALTER TABLE suppressions DROP COLUMN "{column}"'))
     assert {c.name for t, c in pending_columns(engine) if t == "suppressions"} == {"lifted_at", "lifted_by", "lift_reason"}
     migrate(engine)
     assert not pending_columns(engine)
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'ix_suppressions_kind_lifted'")).scalar_one() == 1
     with ctx.db.session() as s:
         assert s.execute(select(Suppression.lifted_at)).scalar_one() is None and is_suppressed(s, "pat@firm-g.example")
