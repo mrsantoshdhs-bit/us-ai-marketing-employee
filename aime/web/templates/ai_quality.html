@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}AI quality · AI Sales Employee{% endblock %}
+{% block content %}
+<h1>AI quality <span class="pill">shadow only</span></h1>
+<p class="muted small">What the AI reasoning core proposed and what the policy engine decided. In this phase nothing it proposes
+reaches a customer: every external action waits for a person{% if require_approval %} (REQUIRE_HUMAN_APPROVAL is on){% endif %},
+and the opt-out, complaint and bounce rules always win. <a href="/agents">AI Agents</a></p>
+<p class="small">Window:
+  {% for w in windows %}{% if w == window %}<strong>{{ w }} days</strong>{% else %}<a href="/agents/ai-quality?days={{ w }}">{{ w }} days</a>{% endif %}{% if not loop.last %} · {% endif %}{% endfor %}
+</p>
+
+<div class="two">
+  <div class="card">
+    <strong>Decisions</strong>
+    <div class="small">{{ q.total }} proposals in {{ q.days }} days · {{ q.escalated }} with an escalation · {{ '{:,}'.format(q.tokens) }} tokens</div>
+    <table>
+      <tr><th>Verdict</th><th class="n">Count</th><th class="n">Share</th></tr>
+      <tr><td>Automatic (internal CRM only)</td><td class="n">{{ q.verdicts.auto_internal }}</td><td class="n">{{ q.verdict_pct.auto_internal if q.verdict_pct.auto_internal is not none else '—' }}{% if q.verdict_pct.auto_internal is not none %}%{% endif %}</td></tr>
+      <tr><td>Human review</td><td class="n">{{ q.verdicts.human_review }}</td><td class="n">{{ q.verdict_pct.human_review if q.verdict_pct.human_review is not none else '—' }}{% if q.verdict_pct.human_review is not none %}%{% endif %}</td></tr>
+      <tr><td>Blocked</td><td class="n">{{ q.verdicts.block }}</td><td class="n">{{ q.verdict_pct.block if q.verdict_pct.block is not none else '—' }}{% if q.verdict_pct.block is not none %}%{% endif %}</td></tr>
+    </table>
+    <div class="small muted">Latency per decision: median {{ q.p50 if q.p50 is not none else '—' }} ms · 95th percentile {{ q.p95 if q.p95 is not none else '—' }} ms</div>
+  </div>
+  <div class="card">
+    <strong>Agreement with people</strong>
+    {% if q.human.judged %}
+    <div class="small">{{ q.human.judged }} proposals a person acted on: {{ q.human.accepted }} accepted, {{ q.human.edited }} edited, {{ q.human.rejected }} rejected
+      · agreement {{ q.human.agreement_pct }}%{% if q.human.avg_edit_distance is not none %} · average edit {{ q.human.avg_edit_distance }} characters{% endif %}</div>
+    {% else %}<div class="small muted">No person has acted on an AI proposal yet: in shadow mode proposals are logged, not shown as drafts.</div>{% endif %}
+    <strong>Model routing</strong>
+    <table>
+      <tr><th>Task</th><th>Provider</th><th>Model</th><th>Why</th></tr>
+      {% for r in routes %}<tr><td>{{ r.task }}</td><td>{{ r.provider }}</td><td>{{ r.model or '—' }}</td><td class="small">{{ r.why }}</td></tr>{% endfor %}
+    </table>
+    <div class="small muted">Monthly spend cap for paid AI: ${{ '%.2f'|format(spend_cap) }}{% if not spend_cap %} (every paid provider is refused){% endif %} · paid provider approved by the owner: {{ 'yes' if cloud_approved else 'no' }}</div>
+  </div>
+</div>
+
+<h2>Per agent</h2>
+<div class="card table-wrap"><table>
+  <tr><th>Agent</th><th class="n">Decisions</th><th class="n">Automatic</th><th class="n">Review</th><th class="n">Blocked</th><th class="n">Tokens</th><th class="n">Median ms</th><th class="n">95th ms</th></tr>
+  {% for a in q.agents %}
+  <tr><td>{{ a.agent }}</td><td class="n">{{ a.total }}</td><td class="n">{{ a.auto }}</td><td class="n">{{ a.review }}</td><td class="n">{{ a.block }}</td>
+      <td class="n">{{ '{:,}'.format(a.tokens) }}</td><td class="n">{{ a.p50 if a.p50 is not none else '—' }}</td><td class="n">{{ a.p95 if a.p95 is not none else '—' }}</td></tr>
+  {% else %}<tr><td colspan="8" class="muted">No AI decisions in this window.</td></tr>{% endfor %}
+</table></div>
+
+<div class="two">
+  <div class="card">
+    <strong>Escalations by rule</strong>
+    <table>
+      <tr><th>Rule</th><th class="n">Decisions</th></tr>
+      {% for code, n in q.escalations %}<tr><td>{{ code.replace('_', ' ') }}</td><td class="n">{{ n }}</td></tr>
+      {% else %}<tr><td colspan="2" class="muted">None.</td></tr>{% endfor %}
+    </table>
+  </div>
+  <div class="card">
+    <strong>Model health</strong>
+    <table>
+      <tr><th>Model</th><th class="n">Asked</th><th class="n">Valid answers</th><th class="n">Failed</th><th class="n">Median ms</th><th class="n">95th ms</th></tr>
+      {% for m in q.health %}<tr><td>{{ m.model }}</td><td class="n">{{ m.asked }}</td><td class="n">{{ m.valid_pct }}%</td><td class="n">{{ m.failed }}</td>
+        <td class="n">{{ m.p50 if m.p50 is not none else '—' }}</td><td class="n">{{ m.p95 if m.p95 is not none else '—' }}</td></tr>
+      {% else %}<tr><td colspan="6" class="muted">No model was asked in this window (rules only).</td></tr>{% endfor %}
+    </table>
+    {% if q.prompts %}<div class="small muted">Prompt versions: {% for p, n in q.prompts %}<code>{{ p }}</code> ({{ n }}){% if not loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
+  </div>
+</div>
+
+<h2>Latest blocks</h2>
+<div class="card table-wrap"><table>
+  <tr><th>When</th><th>Agent</th><th>Proposal</th><th>Lead</th><th>Why</th></tr>
+  {% for b in q.blocks %}
+  <tr><td class="small">{{ b.created_at|local }}</td><td>{{ b.agent }}</td><td>{{ b.kind or '—' }}</td>
+      <td>{% if b.lead_id %}<a href="/leads/{{ b.lead_id }}">{{ b.lead_id }}</a>{% else %}—{% endif %}</td>
+      <td class="small">{{ ((b.reasons or [''])[-1])[:220] }}</td></tr>
+  {% else %}<tr><td colspan="5" class="muted">Nothing blocked in this window.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}
