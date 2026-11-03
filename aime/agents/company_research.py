@@ -5,6 +5,13 @@ Order: companies with qualified leads first, then by lead score. Only websites a
 company's own are read; SEC-registered companies are also checked for officers. Each company is
 re-researched after `recheck_days`. One company's failure is recorded and the batch continues; a failed read is
 tried again at the next run, after the companies not read yet (see `_note_failed_read`).
+
+With `[enrichment] work_queue` on (the default) the companies waiting beyond this run's `companies_per_run` are kept
+in the durable work queue (aime.work_queue, kind "company_research"), ranked exactly as the scan ranked them: the
+next run takes the next ones from there instead of scanning every company again, and the queue is ranked afresh
+from a new scan once it runs dry or is older than `queue_rescan_hours` (20). A daily run therefore researches the
+same companies, in the same order and number, as without the queue; more runs a day take the next chunk each.
+`work_queue = false` turns it off (each run scans, as before).
 """
 
 from __future__ import annotations
@@ -13,7 +20,7 @@ from datetime import datetime, timedelta
 
 import httpx
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from aime.agents.base import AgentError, BaseAgent, RetryPolicy
@@ -34,6 +41,8 @@ from aime.provenance import backfill_legacy
 from aime.redact import redact
 from aime.site_reader import SiteReader
 from aime.sources.sec_officers import sec_officers
+from aime import work_queue
+from aime.db import kv_get, kv_set
 from aime.timeutil import utcnow
 from aime.website_check import known_sites_still_prove, page_names_company
 
@@ -46,6 +55,10 @@ LEGACY_BACKFILL_PER_RUN = 500  # contacts given their "legacy: <source>" provena
 HELD_READS_STOP_RUN = 3  # this many held and nothing read: the rest of the run would only read the same sign-in page
 PERSON_FOUND_TASK = "Decision-maker found after the first email: "  # how the task starts, so later re-reads find it
 PERSON_FOUND_NOTE = "News of a person, not this lead's review"  # with a reason, ticking it closes no review (SalesWorkflowAgent._ensure_task)
+QUEUE_KIND = "company_research"
+QUEUE_SCANNED = "work_queue.company_research.scanned_at"  # when the queue was last ranked from a full scan
+QUEUE_RESCAN_HOURS = 20  # a daily run always finds the ranking older than this, and so scans as before
+FAILED_LAST = 10 ** 9  # a failed read's place: after every company not read yet, as _candidates ranks it
 
 
 class ResearchInput(BaseModel):
@@ -100,19 +113,40 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         backfill_legacy(session, LEGACY_BACKFILL_PER_RUN)  # contacts from before provenance existed: "legacy: <source>"
         self._registers = registry_usable(self.ctx, session)
         limit = inp.limit or int(cfg.get("companies_per_run", 15))
+        recheck_days = int(cfg.get("recheck_days", 30))
         self._known_sites_failed = False
-        for company in self._candidates(session, inp, now, int(cfg.get("recheck_days", 30)))[:limit]:
+        queued = bool(cfg.get("work_queue", True)) and not inp.company_ids
+        worker = work_queue.worker_id()
+        if queued:
+            batch, items = self._queued_batch(session, inp, now, recheck_days, limit, worker,
+                                              float(cfg.get("queue_rescan_hours", QUEUE_RESCAN_HOURS)))
+            session.commit()  # the claims stand even if this run dies: their leases end and they are claimed again
+        else:
+            batch, items = self._candidates(session, inp, now, recheck_days)[:limit], {}
+        done: set[int] = set()
+        for company in batch:
             if len(out.held_back) >= HELD_READS_STOP_RUN and not out.companies_researched:
                 break
+            done.add(company.id)
+            item = items.get(company.id)
             try:
+                held = len(out.held_back)
                 self._research(session, company, out, int(cfg.get("max_pages_per_site", 6)))
+                if item is not None:
+                    if len(out.held_back) > held:  # nothing was learned: it keeps its place for the next run
+                        work_queue.release(session, [item], worker)
+                    else:
+                        work_queue.complete(session, item, worker, {"status": session.get(Company, company.id).research_status})
             except Exception as exc:  # one site must not stop the batch
                 session.rollback()
                 company = session.get(Company, company.id)
                 reason = redact(f"{type(exc).__name__}: {exc}")[:300]
                 session.add(build_snapshot(company, [], [], "failed", error=reason))
                 self._note_failed_read(session, company, out, reason)
+                if item is not None:  # tried again after the companies not read yet, as without the queue
+                    work_queue.fail(session, item, worker, reason, base=timedelta(0), priority=FAILED_LAST)
             session.commit()
+        work_queue.release(session, [i for cid, i in items.items() if cid not in done], worker)  # the run stopped early
         out.emails_rechecked = self._recheck_unknown_emails(session, int(cfg.get("email_rechecks_per_run", 20)))
         if out.held_back and not out.companies_researched:
             alert_once(session, "warning", self.name, f"Company research is waiting: {len(out.held_back)} website(s) answered with a page that does not "
@@ -125,6 +159,63 @@ class CompanyResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         if len(out.failed) >= ALL_FAILED_MEANS_FAILURE and not out.companies_researched:
             raise AgentError(f"None of the {len(out.failed)} companies could be researched; first: {out.failed[0].reason}")
         return out
+
+    def _due(self, company: Company | None, now: datetime, recheck_days: int) -> bool:
+        """Still what _candidates would pick: a queued company may have been merged, marked or researched since."""
+        if company is None or company.merged_into_id is not None or company.is_competitor:
+            return False
+        if company.researched_at is not None and company.researched_at >= now - timedelta(days=recheck_days):
+            return False
+        return bool(is_plausible_website(company) or cik_of(company) or (getattr(self, "_registers", False) and company_number_of(company)))
+
+    def _queued_batch(self, session: Session, inp: ResearchInput, now: datetime, recheck_days: int, limit: int, worker: str,
+                      rescan_hours: float) -> tuple[list[Company], dict[int, int]]:
+        """This run's companies from the work queue: the next ones in the ranking of the last scan, still due. The queue is
+        ranked afresh from a scan when it runs dry or its ranking is older than `rescan_hours`; the companies beyond this
+        run's share wait there for the next run. Returns the companies and each one's queue item."""
+        from aime.models import WorkItem
+
+        scanned = kv_get(session, QUEUE_SCANNED)
+        try:
+            at = datetime.fromisoformat(scanned)
+            stale = now - at >= timedelta(hours=rescan_hours) or at > now
+        except (TypeError, ValueError):
+            stale = True
+        batch: list[Company] = []
+        items: dict[int, int] = {}
+
+        def take(claimed: list) -> None:
+            for item in claimed:
+                company = session.get(Company, int(item.key)) if item.key.isdigit() else None
+                if company is not None and company.id not in items and self._due(company, now, recheck_days):
+                    batch.append(company)
+                    items[company.id] = item.id
+                else:
+                    work_queue.complete(session, item.id, worker, {"skipped": "no longer due"})
+
+        if work_queue.busy(session, QUEUE_KIND, worker, now):
+            return [], {}  # another run is working through the queue: nothing is read twice at once
+        if not stale:
+            take(work_queue.claim(session, QUEUE_KIND, limit, worker, now=now))
+        if len(batch) < limit:  # dry or stale: scan once, rank every waiting company again, take what is missing
+            ranked = self._candidates(session, inp, now, recheck_days)
+            mine = set(items)
+            waiting = {int(k) for k in session.execute(select(WorkItem.key).where(
+                WorkItem.kind == QUEUE_KIND, WorkItem.status == "pending")).scalars() if k.isdigit()}
+            for rank, company in enumerate(ranked):
+                if company.id not in mine:
+                    work_queue.enqueue(session, QUEUE_KIND, str(company.id), {"rank": rank}, priority=rank, now=now, reprioritize=True)
+            for cid in waiting - {c.id for c in ranked}:  # no longer due: they leave the queue
+                session.execute(update(WorkItem).where(WorkItem.kind == QUEUE_KIND, WorkItem.key == str(cid), WorkItem.status == "pending")
+                                .values(status="done", result={"skipped": "no longer due"}, finished_at=now))
+            kv_set(session, QUEUE_SCANNED, now.isoformat())
+            session.flush()
+            while len(batch) < limit:
+                claimed = work_queue.claim(session, QUEUE_KIND, limit - len(batch), worker, now=now)
+                if not claimed:
+                    break
+                take(claimed)
+        return batch, items
 
     def _note_failed_read(self, session: Session, company: Company, out: ResearchOutput, reason: str) -> None:
         """Nothing was read, so this is no research: researched_at stays as it was and the next run tries again, or

@@ -6,7 +6,7 @@ import hashlib
 import re
 from datetime import datetime
 
-from sqlalchemy import and_, case, exists, func, literal, or_, select
+from sqlalchemy import and_, bindparam, case, exists, func, literal, or_, select
 from sqlalchemy.orm import Session
 
 from aime.dedupe import _MULTI_PART_TLDS, HOSTED_PLATFORMS, clean_company_name, domain_from_email, find_duplicate, normalize_name, registrable_domain
@@ -246,11 +246,20 @@ def _entries_covering(email: str | None = None, domain: str | None = None):
     return select(Suppression).where(canonical_sql(Suppression.value).in_(values)) if values else None
 
 
+_STANDING_ENTRY = None  # built once (Phase 8: perf_bench): the same query as _entries_covering, for an id only
+
+
 def is_suppressed(session: Session, email: str | None = None, domain: str | None = None) -> bool:
-    entries = _entries_covering(email, domain)
-    if entries is None:
+    """An entry on the do-not-contact list, not lifted, speaks for this address or domain. The statement is built once with
+    the values as one expanding parameter: this runs for every lead in a drafting run."""
+    global _STANDING_ENTRY
+    values = _covering_values(email, domain)
+    if not values:
         return False
-    return session.execute(entries.where(Suppression.lifted_at.is_(None))).first() is not None
+    if _STANDING_ENTRY is None:
+        _STANDING_ENTRY = select(Suppression.id).where(canonical_sql(Suppression.value).in_(bindparam("values", expanding=True)),
+                                                       Suppression.lifted_at.is_(None)).limit(1)
+    return session.execute(_STANDING_ENTRY, {"values": values}).first() is not None
 
 
 def lift_time(session: Session, email: str | None = None, domain: str | None = None) -> datetime | None:

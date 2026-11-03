@@ -149,10 +149,12 @@ class CompanyFunnel:
         return last
 
 
-def _companies_with(session: Session, *conds, ids: list[int] | None = None) -> set[int]:
+def _companies_with(session: Session, *conds, ids=None) -> set[int]:
+    """`ids`: a list of company ids, or a SELECT of them (every real company: no list of tens of thousands of parameters,
+    which SQLite refuses past 32,766)."""
     stmt = select(Contact.company_id).where(Contact.company_id.is_not(None), *real_contact(), *conds)
     if ids is not None:
-        stmt = stmt.where(Contact.company_id.in_(ids or [-1]))
+        stmt = stmt.where(Contact.company_id.in_(ids if not isinstance(ids, list) else (ids or [-1])))
     return set(session.execute(stmt.distinct()).scalars())
 
 
@@ -162,13 +164,15 @@ def classify(session: Session, company_ids: list[int] | None = None) -> dict[int
     if company_ids is not None:
         stmt = stmt.where(Company.id.in_(company_ids or [-1]))
     companies = dict(session.execute(stmt).all())
-    ids = list(companies)
+    # every company: the same set as a subquery, not as one parameter per company (Phase 8: perf_bench at 100x)
+    ids = list(companies) if company_ids is not None else select(Company.id).where(*real_company()).scalar_subquery()
     dm = _companies_with(session, *decision_maker(), ids=ids)
     reach = _companies_with(session, *contactable(), ids=ids)
     verified = _companies_with(session, *contactable(), *verified_email(), ids=ids)
     verified_dm = _companies_with(session, *verified_decision_maker(), ids=ids)
     qualified = set(session.execute(select(Lead.company_id).where(Lead.status == "qualified", Lead.is_sample.is_(False),
-                                                                  Lead.company_id.in_(ids or [-1])).distinct()).scalars())
+                                                                  Lead.company_id.in_(ids if not isinstance(ids, list) else (ids or [-1])))
+                                    .distinct()).scalars())
     out = {}
     for cid, competitor in companies.items():
         out[cid] = CompanyFunnel(cid, {

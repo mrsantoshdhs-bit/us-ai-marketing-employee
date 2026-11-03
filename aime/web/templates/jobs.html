@@ -20,6 +20,18 @@
       <td>{% if can_run %}<form method="post" action="/jobs/{{ spec.name }}/run"><button class="secondary">Run now</button></form>{% endif %}</td></tr>
   {% endfor %}
 </table></div>
+<h2>Work queue</h2>
+<div class="card table-wrap">
+  <p class="small muted">Chunked work that takes several runs. Company research takes the next companies from here at each run
+  (at most companies_per_run), in the order the last scan ranked them{% if not queue_on %}; it is switched off now ([enrichment] work_queue = false), so every run scans instead{% endif %}.</p>
+  <table>
+  <tr><th>Kind</th><th class="n">Waiting</th><th class="n">Being worked</th><th class="n">Done</th><th class="n">Dead letters</th><th>Next available</th><th>Last finished</th><th>Held by</th></tr>
+  {% for q in queue %}
+  <tr><td><strong>{{ q.kind }}</strong></td><td class="n">{{ q.pending }}</td><td class="n">{{ q.claimed }}</td><td class="n">{{ q.done }}</td>
+      <td class="n">{{ q.dead }}</td><td class="small">{{ q.next_at|local }}</td><td class="small">{{ q.last_done_at|local }}</td>
+      <td class="small">{{ q.leased_by|join(', ') or '—' }}</td></tr>
+  {% else %}<tr><td colspan="8" class="muted">Nothing queued yet.</td></tr>{% endfor %}
+</table></div>
 <h2>History</h2>
 <div class="card table-wrap"><table>
   <tr><th>Started</th><th>Job</th><th>Trigger</th><th>Status</th><th class="n">Duration</th><th>Error</th></tr>

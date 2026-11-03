@@ -430,7 +430,10 @@ class AISection(Strict):
 
 
 class RetentionSection(Strict):
-    """How long records are kept, in days; 0 keeps everything (today's behaviour). Nothing deletes by these yet."""
+    """How long records are kept, in days; 0 is today's behaviour (aime.retention, applied by the daily db_maintenance job
+    after a verified backup): run history 90 days, every alert kept. job_runs_days / agent_runs_days > 0 keep that many
+    days of run history instead; alerts_days > 0 deletes alerts resolved longer ago. inbound_emails_days and
+    audit_events_days are recorded but not applied: replies belong to the CRM record and the audit log is append-only."""
 
     job_runs_days: int = Field(default=0, ge=0, le=3650)
     agent_runs_days: int = Field(default=0, ge=0, le=3650)

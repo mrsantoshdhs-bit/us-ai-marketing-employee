@@ -40,6 +40,9 @@ BASE = {"companies": 341, "leads": 341, "contacts": 372, "activities": 1100, "fo
 ASSUMED = ("agent_runs", "signals", "snapshots", "inbound_emails", "alerts", "audit_events", "opportunities", "suppressions")
 DEFAULT_OUT = Path(os.environ.get("AIME_PERF_OUT") or Path.home() / "Documents" / "AIME-OptionB-Logs")
 REPLIES = 20  # replies in the inbox run, the same at every volume: what one 15-minute read takes in at most today
+# Run after the morning research and enrich jobs, in the scheduler's order (the inbox job is the InboxAgent run above:
+# the real one would open an IMAP connection). crm_maintenance, manager_report and db_maintenance run at the end.
+INTERVAL_AND_DAILY_JOBS = ("plan", "content", "inbound", "followups", "publish", "daily_report", "weekly_report", "monitor")
 PAGES = ("/", "/sales-manager", "/pipeline", "/leads", "/admin/settings/system", "/jobs")
 INDUSTRIES = ("saas", "real_estate", "marketing_agencies", "smb", "healthcare", "logistics")
 STATES = ("TX", "NY", "CA", "CO", "FL", "WA", "IL", "OH", "GA", "NC")
@@ -47,8 +50,9 @@ STATES = ("TX", "NY", "CA", "CO", "FL", "WA", "IL", "OH", "GA", "NC")
 
 # ----------------------------------------------------------------------------------------------- offline guard
 
-def offline() -> None:
-    """No network in a benchmark: DNS answers "accepts mail" from a stub, every other socket connection is refused."""
+def offline(setattr_=setattr) -> None:
+    """No network in a benchmark: DNS answers "accepts mail" from a stub, every other socket connection is refused.
+    `setattr_`: pytest's monkeypatch.setattr in a test, so everything is put back afterwards."""
     import socket
 
     import dns.resolver
@@ -68,15 +72,14 @@ def offline() -> None:
             raise OSError(f"perf_bench: network refused ({address})")
         return real_connect(self, address)
 
-    socket.getaddrinfo = getaddrinfo  # type: ignore[assignment]
-    socket.socket.connect = connect  # type: ignore[assignment]
-
     def no_dns(*_a, **_k):
         raise dns.resolver.NoNameservers("perf_bench: no DNS")
 
-    dns.resolver.resolve = no_dns  # type: ignore[assignment]
-    dns.resolver.Resolver.resolve = no_dns  # type: ignore[assignment]
-    contact_validation.MailDomainChecker._lookup = lambda self, domain: True  # type: ignore[assignment]
+    setattr_(socket, "getaddrinfo", getaddrinfo)
+    setattr_(socket.socket, "connect", connect)
+    setattr_(dns.resolver, "resolve", no_dns)
+    setattr_(dns.resolver.Resolver, "resolve", no_dns)
+    setattr_(contact_validation.MailDomainChecker, "_lookup", lambda self, domain: True)
 
 
 def handler_factory():
@@ -148,21 +151,36 @@ class FakeIMAP:
 
 # ----------------------------------------------------------------------------------------------- seeding
 
+# Test mode, nothing sent or published, and a (fake) sales mailbox so the inbox work runs.
+BENCH_SETTINGS = dict(llm_provider="template", retry_base_delay=0.0, polite_delay=0.0, data_role="test", dashboard_auth=False,
+                      image_renderer="pillow", calendly_verified_only=False, outbound_email_enabled=False, publishing_enabled=False,
+                      imap_host="imap.example", smtp_host="smtp.example", smtp_username="sales@us.example", smtp_password="x" * 8,
+                      smtp_from="hello@us.example", company_postal_address="1 Sample St, Austin, TX 78701")
+
+
 def make_ctx(data_dir: Path):
     import httpx
 
     from aime.config import Settings
     from aime.context import create_context, set_context
 
-    settings = Settings.load(env_file=data_dir / "no.env", data_dir=data_dir, database_url="", llm_provider="template",
-                             retry_base_delay=0.0, polite_delay=0.0, data_role="test", dashboard_auth=False,
-                             image_renderer="pillow", calendly_verified_only=False, outbound_email_enabled=False,
-                             publishing_enabled=False, imap_host="imap.example", smtp_host="smtp.example",
-                             smtp_username="sales@us.example", smtp_password="x" * 8, smtp_from="hello@us.example",
-                             company_postal_address="1 Sample St, Austin, TX 78701")
+    settings = Settings.load(env_file=data_dir / "no.env", data_dir=data_dir, database_url="", **BENCH_SETTINGS)
     ctx = create_context(settings, http_transport=httpx.MockTransport(handler_factory()))
     set_context(ctx)
     return ctx
+
+
+def load_replies(ctx, sent_lead_ids: list[int]) -> None:
+    """REPLIES replies in the fake mailbox, to emails that were sent: interested, no, opt-out, a question, an absence."""
+    from aime.models import Lead
+
+    FakeIMAP.messages = {}
+    bodies = ("Sounds interesting. Could we talk Thursday afternoon?", "Not interested, thanks.", "Please unsubscribe me.",
+              "What does this cost?", "I am out of the office until Monday.")
+    with ctx.db.session() as s:
+        for uid, lid in enumerate(sent_lead_ids[:REPLIES], start=1):
+            lead = s.get(Lead, lid)
+            FakeIMAP.messages[uid] = reply_mail(lead.contact.email, lid, bodies[uid % len(bodies)])
 
 
 def seed(ctx, scale: int, rnd: random.Random) -> dict:
@@ -338,7 +356,7 @@ def run_scale(scale: int, work: Path) -> dict:
     from aime import funnel, manager_report, targets
     from aime.agents.inbox_agent import InboxAgent
     from aime.inbox import Mailbox
-    from aime.models import Company, Lead
+    from aime.models import Company
     from aime.scheduler.runner import run_job
     from aime.web.app import create_app
 
@@ -365,17 +383,14 @@ def run_scale(scale: int, work: Path) -> dict:
     out["enrich_job_status"] = job and job["status"]
     out["enrich_companies_researched"] = _step_output(ctx, job, "company_research", "companies_researched")
 
-    FakeIMAP.messages = {}
-    bodies = ("Sounds interesting. Could we talk Thursday afternoon?", "Not interested, thanks.", "Please unsubscribe me.",
-              "What does this cost?", "I am out of the office until Monday.")
-    with ctx.db.session() as s:
-        sent = seeded["sent_lead_ids"][:REPLIES]
-        for uid, lid in enumerate(sent, start=1):
-            lead = s.get(Lead, lid)
-            FakeIMAP.messages[uid] = reply_mail(lead.contact.email, lid, bodies[uid % len(bodies)])
+    load_replies(ctx, seeded["sent_lead_ids"])
     box = Mailbox(ctx.settings, imap_factory=FakeIMAP)
     res = timed(ops, f"inbox ({len(FakeIMAP.messages)} replies)", lambda: InboxAgent(ctx, mailbox=box).run({}))
     out["inbox_stored"] = getattr(getattr(res, "output", None), "stored", None)
+    # The interval jobs (every 15-60 minutes) and the rest of the daily set, as the scheduler runs them.
+    for name in INTERVAL_AND_DAILY_JOBS:
+        job = timed(ops, f"{name} job", lambda n=name: run_job(ctx, n))
+        out.setdefault("job_status", {})[name] = job and job["status"]
 
     def report(kind: str):
         with ctx.db.session() as s:
@@ -458,7 +473,8 @@ def main() -> None:
     store = out_dir / "perf_bench.json"
     results = json.loads(store.read_text(encoding="utf-8")) if store.exists() else {}
     results["machine"] = f"{platform.processor() or platform.machine()}, {os.cpu_count()} logical CPUs, Python {platform.python_version()}"
-    commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    commit = os.environ.get("AIME_PERF_COMMIT") or subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
+                                                                  capture_output=True, text=True).stdout.strip()
     work = Path(tempfile.mkdtemp(prefix="aime-perf-"))
     env = {**os.environ, "AIME_DATA_ROLE": "test", "OUTBOUND_EMAIL_ENABLED": "false", "PUBLISHING_ENABLED": "false",
            "LLM_PROVIDER": "template", "PYTHONIOENCODING": "utf-8"}

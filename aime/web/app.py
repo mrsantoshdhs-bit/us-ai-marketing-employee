@@ -2256,8 +2256,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         with ctx.db.session() as s:
             states = {st.job: st for st in s.execute(select(JobState)).scalars()}
             runs = s.execute(select(JobRun).order_by(JobRun.id.desc()).limit(60)).scalars().all()
+            from aime import work_queue
+            queue = work_queue.status(s)
         from aime.scheduler import windows
-        return render(request, "jobs.html", due=due_jobs(ctx), states=states, runs=runs,
+        return render(request, "jobs.html", due=due_jobs(ctx), states=states, runs=runs, queue=queue,
+                      queue_on=bool(ctx.settings.section("enrichment").get("work_queue", True)),
                       heartbeat=read_heartbeat(ctx.settings), task=windows.query())
 
     @app.post("/jobs/{name}/run")
