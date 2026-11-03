@@ -56,7 +56,10 @@ def _rate(part: int, whole: int) -> str:
 
 def sales_kpis(count, since) -> dict:
     """Sales pipeline counts from records only. Simulated replies and meetings are kept apart."""
+    from aime.funnel import DECISION_MAKER_SOURCES
+
     researched = (Contact.source.in_(("website", "sec_filing")),)
+    named = (Contact.source.in_(DECISION_MAKER_SOURCES),)  # the funnel's decision-makers (aime.funnel), as the manager's report counts them
     deciding = deciding_title()
     # a draft cancelled before any person approved it was never part of the work
     drafted = (FollowUp.kind == "outreach", or_(FollowUp.status != "cancelled", FollowUp.approved_at.is_not(None)))
@@ -70,8 +73,8 @@ def sales_kpis(count, since) -> dict:
     out = {
         "companies_researched_period": count(Company, read, Company.researched_at >= since),
         "companies_researched_total": count(Company, read, Company.researched_at.is_not(None)),
-        "decision_makers_period": count(Contact, *researched, Contact.last_name.is_not(None), deciding, Contact.created_at >= since),
-        "decision_makers_total": count(Contact, *researched, Contact.last_name.is_not(None), deciding),
+        "decision_makers_period": count(Contact, *named, Contact.last_name.is_not(None), deciding, Contact.created_at >= since),
+        "decision_makers_total": count(Contact, *named, Contact.last_name.is_not(None), deciding),
         "usable_emails_total": count(Contact, *researched, Contact.email_status.in_(("published", "role_address")),
                                      Contact.consent_status != "opted_out", CONTACT_NOT_SUPPRESSED),
         "outreach_drafted_period": count(FollowUp, *drafted, FollowUp.created_at >= since),

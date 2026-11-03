@@ -149,6 +149,15 @@ class Contact(Timestamped, Base):
     email_evidence: Mapped[str | None] = mapped_column(Text)
     email_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
     erased_name_hash: Mapped[str | None] = mapped_column(String(64))  # one-way, on an erased row: research does not collect them again
+    # Provenance (aime.provenance), stamped when the row is created: the contact-source adapter it came from, the
+    # licence and lawful basis that adapter declares, and the record or page it rests on. A row from before these
+    # columns reads "legacy: <source>" once backfilled. Who last checked the email, and when (aime.verification).
+    source_licence: Mapped[str | None] = mapped_column(String(120))
+    lawful_basis: Mapped[str | None] = mapped_column(String(120))
+    source_ref: Mapped[str | None] = mapped_column(String(500))
+    provenance: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    verified_by: Mapped[str | None] = mapped_column(String(40))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     company: Mapped[Company | None] = relationship(back_populates="contacts")
 
@@ -156,6 +165,14 @@ class Contact(Timestamped, Base):
     def display_name(self) -> str:
         parts = [p for p in (self.first_name, self.last_name) if p]
         return " ".join(parts) or (self.email or "Unknown contact")
+
+
+@event.listens_for(Contact, "before_insert")
+def _stamp_provenance(mapper, connection, target: Contact) -> None:
+    """Every new contact, whichever path creates it, records where it came from (aime.provenance)."""
+    from aime.provenance import stamp
+
+    stamp(target)
 
 
 class Lead(Timestamped, Base):
@@ -1020,3 +1037,23 @@ class ConversationFact(Base):
     confirmed_by: Mapped[str | None] = mapped_column(String(80))
     ai_decision_id: Mapped[int | None] = mapped_column(Integer)  # the ai_decisions row that proposed it
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class ContactSourceUsage(Base):
+    """Calls made to one contact-source adapter in one calendar month (UTC), and what they cost (aime.contact_sources.budget).
+    The budget guard reads it before every call and refuses a paid call that the month's cap would not cover; a refusal is
+    counted here and written to the audit log. A free adapter's calls are counted too, at no cost."""
+
+    __tablename__ = "contact_source_usage"
+    __table_args__ = (UniqueConstraint("adapter", "month", name="uq_contact_source_usage_month"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    adapter: Mapped[str] = mapped_column(String(60), index=True)
+    month: Mapped[str] = mapped_column(String(7))  # YYYY-MM
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    refused: Mapped[int] = mapped_column(Integer, default=0)
+    errors: Mapped[int] = mapped_column(Integer, default=0)
+    last_call_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_result: Mapped[str | None] = mapped_column(String(300))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)

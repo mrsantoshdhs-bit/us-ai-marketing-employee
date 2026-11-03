@@ -446,6 +446,9 @@ def erase_person(session: Session, email: str, actor: str) -> dict[str, int]:
         c.first_name = c.last_name = c.phone = c.title = c.evidence = c.evidence_url = None
         c.email, c.email_source_url, c.email_evidence = None, None, None
         c.consent_status, c.consent_source = "opted_out", ERASED
+        # where the record came from stays (adapter, licence, lawful basis: aime.provenance), not the page that named them
+        c.source_ref = None
+        c.provenance = {**(c.provenance or {}), "ref": None, "erased": True}
         counts["contacts"] += 1
     for f in session.execute(select(FollowUp).where(func.lower(FollowUp.to_email) == email)).scalars():  # a reply draft may link no contact
         erase_email(f)

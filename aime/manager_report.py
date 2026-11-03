@@ -64,10 +64,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from aime import automation as am
-from aime.agents.analytics import REAL_REPLY, deciding_title
+from aime import funnel
+from aime.agents.analytics import REAL_REPLY
 from aime.automation import COUNTS_AS_SENT, audit
-from aime.contact_validation import ROLE_LOCALS
-from aime.crm_ops import CONTACT_NOT_SUPPRESSED, is_suppressed
+from aime.crm_ops import is_suppressed
 from aime.db import kv_get, kv_set
 from aime.dedupe import FREE_EMAIL_DOMAINS
 from aime.knowledge.industries import industry_label
@@ -95,12 +95,10 @@ DOMAIN = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$")
 # A mailbox at one of these is a person's own account, not a company's: its domain says nothing about who is internal.
 PUBLIC_MAIL_DOMAINS = frozenset(FREE_EMAIL_DOMAINS | {"zoho.com", "yandex.com", "mail.com", "rediffmail.com", "outlook.in",
                                                       "yahoo.co.in", "hotmail.co.uk", "aol.co.uk", "pm.me", "fastmail.com"})
-# What "verified" means for an email address in this CRM. "published": printed on the company's own website, on its
-# own domain, next to the person it belongs to, and the domain takes mail (aime.contact_validation). "verified" and
-# "valid" are kept for a verification step that may be added later. Never "role_address" (a company inbox), "unchecked",
-# "no_mail_server" or "bounced".
-VERIFIED_EMAIL_STATUSES = ("published", "verified", "valid")
-NOT_CONTACTABLE_STATUSES = ("bounced", "no_mail_server")
+# What "verified" means for an email address, what may be written to and who is a decision-maker: defined once in
+# aime.funnel, the single source of truth for the funnel stages, and counted here with the same conditions.
+VERIFIED_EMAIL_STATUSES = funnel.VERIFIED_EMAIL_STATUSES
+NOT_CONTACTABLE_STATUSES = funnel.NOT_CONTACTABLE_STATUSES
 ID_CAP = 500  # ids kept per figure; the figure itself is always the full count
 STALE_CLAIM = timedelta(minutes=10)
 HELD_STATUSES = ("pending", "awaiting_approval", "approved", "uncertain")
@@ -482,22 +480,19 @@ def build(session: Session, settings, period: Period, now: datetime | None = Non
     now = now or utcnow()
     t = Tally(session, period)
     w = t.within
-    real_co = (Company.merged_into_id.is_(None), Company.is_sample.is_(False))
-    real_contact = (Contact.is_sample.is_(False),)
-    named = (Contact.source.in_(("website", "sec_filing")), Contact.last_name.is_not(None), deciding_title())
-    has_email = (Contact.email.is_not(None), Contact.email != "", Contact.consent_status != "opted_out",
-                 CONTACT_NOT_SUPPRESSED,
-                 or_(Contact.email_status.is_(None), Contact.email_status.not_in(NOT_CONTACTABLE_STATUSES)))
-    local_part = func.lower(func.substr(Contact.email, 1, func.instr(Contact.email, "@") - 1))
-    verified = (Contact.email_status.in_(VERIFIED_EMAIL_STATUSES), local_part.not_in(sorted(ROLE_LOCALS)))
+    real_co = funnel.real_company()
+    real_contact = funnel.real_contact()
+    named = funnel.decision_maker()
+    has_email = funnel.contactable()
+    verified = funnel.verified_email()
 
     # ---- discovery and contacts
     t.count("companies_discovered", "Companies discovered",
             "Companies added to the CRM in the period (merged duplicates and sample data left out).",
             Company.id, w(Company.created_at), *real_co)
     t.count("decision_makers", "Decision-makers identified (named people)",
-            "Contacts added in the period with a last name, found on the company's own website or in its SEC filings, "
-            "whose title decides (not a former employee, an assistant, an office manager or a social media role).",
+            "Contacts added in the period with a last name, found on the company's own website, in its SEC filings or on an "
+            "official company register, whose title decides (not a former employee, an assistant, an office manager or a social media role).",
             Contact.id, w(Contact.created_at), *real_contact, *named)
     t.count("contactable_prospects", "Contactable prospects (any email)",
             "Contacts added in the period with an email address that may be written to: not opted out, not on the "

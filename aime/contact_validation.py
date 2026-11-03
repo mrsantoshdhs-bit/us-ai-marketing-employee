@@ -39,6 +39,7 @@ EXCLUDED_LOCALS = {"noreply", "no-reply", "donotreply", "do-not-reply", "support
 PLACEHOLDER_DOMAINS = {"example.com", "domain.com", "yourdomain.com", "email.com", "company.com", "yourcompany.com",
                        "website.com", "sentry.io", "wixpress.com"}
 STATUS_OK = ("published", "role_address")
+MX_CHECK = "mx_check"  # Contact.verified_by for this module's mail-server check (aime.verification.MXVerifier)
 
 
 def fold(text: str) -> str:
@@ -155,6 +156,7 @@ def assign_published_emails(session: Session, company: Company, published: list[
             person.email, person.email_source_url = email, item["url"][:500]
             person.email_confidence, person.email_evidence = confidence, evidence
             person.email_status, person.email_checked_at = _status(checker, domain, role=False), now
+            person.verified_by, person.verified_at = MX_CHECK, now
             taken.add(email)
             stats["person_emails"] += 1
         elif person is None and local in ROLE_LOCALS:
@@ -163,7 +165,8 @@ def assign_published_emails(session: Session, company: Company, published: list[
                                 evidence=f"Published on {item['url']}: {email}", evidence_url=item["url"][:500],
                                 discovered_at=now, email_source_url=item["url"][:500], email_confidence="high",
                                 email_evidence=f"General business inbox published on {item['url']}",
-                                email_status=_status(checker, domain, role=True), email_checked_at=now))
+                                email_status=_status(checker, domain, role=True), email_checked_at=now,
+                                verified_by=MX_CHECK, verified_at=now))
             taken.add(email)
             stats["inboxes"] += 1
         else:
@@ -180,4 +183,5 @@ def recheck_emails(session: Session, company: Company, checker, only: tuple[str,
         if c.email_status in ("bounced", "invalid") or (only is not None and c.email_status not in only):
             continue
         c.email_status = _status(checker, c.email.split("@", 1)[1], role=c.role_category == "inbox")
-        c.email_checked_at = utcnow()
+        c.email_checked_at = c.verified_at = utcnow()
+        c.verified_by = MX_CHECK

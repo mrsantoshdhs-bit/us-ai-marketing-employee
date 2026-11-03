@@ -267,6 +267,53 @@ class SourcesSection(Strict):
         return self
 
 
+# --------------------------------------------------------------------------- contact sources
+
+class ContactSourceSetting(Strict):
+    name: str
+    enabled: bool = False
+    priority: int = Field(default=50, ge=1, le=100)  # 1 is asked first
+    countries: list[str] = Field(default_factory=list, max_length=60)  # within what the adapter covers
+    monthly_budget_usd: float = Field(default=0.0, ge=0, le=100000)  # 0: no paid call is ever made
+    cost_per_call_usd: float = Field(default=0.0, ge=0, le=1000)  # a paid adapter's price: the owner's quote
+
+    @field_validator("countries")
+    @classmethod
+    def check_countries(cls, v: list[str]) -> list[str]:
+        return list(dict.fromkeys("*" if str(c).strip() == "*" else _code(c) for c in v if str(c).strip()))
+
+
+class ContactSourcesSection(Strict):
+    """The adapters these settings control (aime.contact_sources.registry): official registers and the paid stubs. The
+    sources AIME already had keep their own switches and are only listed on the Contact sources page."""
+
+    adapters: list[ContactSourceSetting] = Field(default_factory=list, max_length=40)
+
+    @model_validator(mode="after")
+    def check_rules(self) -> "ContactSourcesSection":
+        from aime.contact_sources.registry import ADAPTER_CLASSES, managed
+
+        names = [a.name for a in self.adapters]
+        if len(set(names)) != len(names):
+            raise ValueError("each contact source may be listed once")
+        unknown = [n for n in names if n not in ADAPTER_CLASSES]
+        if unknown:  # a new source is a code change
+            raise ValueError(f"unknown contact source(s): {', '.join(unknown)}")
+        elsewhere = [n for n in names if n not in managed()]
+        if elsewhere:
+            raise ValueError(f"{', '.join(elsewhere)}: switched by its own control, not here")
+        for a in self.adapters:
+            cls = ADAPTER_CLASSES[a.name]
+            covers = tuple(cls.countries)
+            if "*" not in covers:
+                beyond = [c for c in a.countries if c not in covers]
+                if beyond:
+                    raise ValueError(f"{a.name} covers {', '.join(covers) or 'no country yet'}; it cannot be used for {', '.join(beyond)}")
+            if not cls.paid and (a.monthly_budget_usd or a.cost_per_call_usd):
+                raise ValueError(f"{a.name} is free: it has no price or budget")
+        return self
+
+
 # --------------------------------------------------------------------------- schedules
 
 class JobSchedule(Strict):
@@ -444,6 +491,12 @@ def _default_sources(settings) -> dict:
     return {"sources": default_source_settings()}
 
 
+def _default_contact_sources(settings) -> dict:
+    from aime.contact_sources.registry import default_adapter_settings
+
+    return {"adapters": default_adapter_settings()}
+
+
 def _default_schedules(settings) -> dict:
     base = schedule_base(settings).get("jobs", {})
     from aime.workflows import JOBS
@@ -545,6 +598,10 @@ for _spec in (
     SectionSpec("sources", "Lead sources", SourcesSection, _default_sources,
                 "Which authorized sources discovery reads, in which order, for which countries. The .env switches still turn "
                 "a source off whatever is set here."),
+    SectionSpec("contact_sources", "Contact sources", ContactSourcesSection, _default_contact_sources,
+                "Official registers and paid contact sources: on or off, priority, countries, and for a paid source its price and "
+                "monthly budget (0 refuses every paid call). Each is off by default; the sources AIME already had keep their own "
+                "switches."),
     SectionSpec("schedules", "Automation schedules", SchedulesSection, _default_schedules,
                 "Jobs on or off and how often they run, within safe bounds. The health monitor and the database backup "
                 "always run.", apply=_apply_schedules, preview_notes=_schedules_notes),

@@ -32,6 +32,14 @@ def _int(text, default=0):
         return text  # the model says what is wrong with it
 
 
+def _float(text, default=0.0):
+    raw = str(text if text is not None else default).strip()
+    try:
+        return float(raw)
+    except ValueError:
+        return raw  # the model says what is wrong with it
+
+
 def _on(form, name: str) -> bool:
     return (form.get(name) or "") in ("yes", "on", "true", "1")
 
@@ -71,6 +79,13 @@ def parse(name: str, form, settings) -> dict:
         return {"sources": [{"name": s["name"], "enabled": _on(form, f"{s['name']}.enabled"),
                              "priority": _int(form.get(f"{s['name']}.priority"), s["priority"]),
                              "countries": _csv(form.get(f"{s['name']}.countries"))} for s in current["sources"]]}
+    if name == "contact_sources":
+        return {"adapters": [{"name": a["name"], "enabled": _on(form, f"{a['name']}.enabled"),
+                              "priority": _int(form.get(f"{a['name']}.priority"), a["priority"]),
+                              "countries": _csv(form.get(f"{a['name']}.countries")),
+                              "monthly_budget_usd": _float(form.get(f"{a['name']}.monthly_budget_usd"), a["monthly_budget_usd"]),
+                              "cost_per_call_usd": _float(form.get(f"{a['name']}.cost_per_call_usd"), a["cost_per_call_usd"])}
+                             for a in current["adapters"]]}
     if name == "schedules":
         jobs = {}
         for job, js in current["jobs"].items():
@@ -166,6 +181,11 @@ def register(app, C, render, back, who) -> None:
         if name == "sources":
             view["covers"] = {n: ", ".join(getattr(c, "countries", ("US",))) for n, c in SOURCE_CLASSES.items()}
             view["titles"] = {n: getattr(c, "title", n) for n, c in SOURCE_CLASSES.items()}
+        if name == "contact_sources":
+            from aime.contact_sources.registry import ADAPTER_CLASSES
+
+            view["adapter_meta"] = {n: {"title": c.title, "covers": ", ".join(c.countries) or "none claimed", "paid": c.paid}
+                                    for n, c in ADAPTER_CLASSES.items()}
         if name == "schedules":
             view["always_on"] = ALWAYS_RUN_JOBS
             view["descriptions"] = {j: (ss.schedule_base(ctx.settings).get("jobs", {}).get(j) or {}).get("description", "")
@@ -259,6 +279,42 @@ def register(app, C, render, back, who) -> None:
         if not changes:
             return back(url, f"Version {vid} is what is in effect already")
         return back(url, f"Version {vid} restored{f' as version {row.id}' if row is not None else ''}: {len(changes)} change(s)")
+
+    @app.get("/admin/settings/contact-sources", response_class=HTMLResponse)
+    def contact_sources_page(request: Request):
+        from aime import funnel, provenance
+        from aime.contact_sources.registry import overview
+
+        ctx = C()
+        with ctx.db.session() as s:
+            rows = overview(s, ctx)
+            stages = funnel.summary(s)
+            legacy = provenance.pending_legacy(s)
+        return render(request, "contact_sources.html", rows=rows, funnel=stages, legacy_pending=legacy, form_mark=FORM_MARK)
+
+    @app.post("/admin/settings/contact-sources/approval")
+    async def contact_source_approval(request: Request):
+        from aime.contact_sources import budget
+
+        ctx = C()
+        url = "/admin/settings/contact-sources"
+        form = await request.form()
+        if form.get(FORM_MARK) != "1":
+            return back(url, "Not recorded: the form was incomplete")
+        name = (form.get("name") or "").strip()
+        with ctx.db.session() as s:
+            if form.get("do") == "withdraw":
+                done = budget.withdraw_approval(s, name, who(request))
+                return back(url, f"Approval of {name} withdrawn" if done else "There was no approval to withdraw")
+            if not _on(form, "confirm"):
+                return back(url, "Not recorded: tick the box to confirm the owner approved this source")
+            try:
+                budget.record_approval(s, name, form.get("approved_by") or "", who(request), form.get("note") or "")
+            except ValueError as exc:
+                s.rollback()
+                return back(url, f"Not recorded: {exc}")
+        return back(url, f"Approval of {name} recorded. Nothing is called until its credentials, price and monthly budget are "
+                         "set, and a vendor integration exists")
 
     @app.post("/admin/settings/countries/review")
     async def settings_country_review(request: Request):
