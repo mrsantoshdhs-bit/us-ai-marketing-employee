@@ -139,7 +139,12 @@ class EmailSender:
         msg_id = message_id or new_message_id(s)
         msg["Message-ID"] = msg_id
         unsub = s.unsubscribe_email or s.smtp_from
-        msg["List-Unsubscribe"] = f"<mailto:{unsub}?subject=unsubscribe>"
+        from aime.deliverability import one_click_url
+
+        one_click = one_click_url(s)  # RFC 8058, only with an https address configured: otherwise exactly as before
+        msg["List-Unsubscribe"] = f"<{one_click}>, <mailto:{unsub}?subject=unsubscribe>" if one_click else f"<mailto:{unsub}?subject=unsubscribe>"
+        if one_click:
+            msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
         if in_reply_to:  # keep the reply in the thread: References carries the whole chain, ending with its parent
             msg["In-Reply-To"] = in_reply_to
             msg["References"] = references or in_reply_to
