@@ -88,19 +88,22 @@ def ensure_indexes(engine: Engine) -> list[str]:
 def migrate(engine: Engine, backup_dir: Path | None = None, has_data: bool = False) -> list[str]:
     """Create missing tables, add missing columns and indexes. Returns the applied statements. After a deploy a tick and
     the dashboard start together: what the other process has just added is no failure."""
+    # The copy is taken before anything is created, so it is the database exactly as the earlier code left it (OB-017:
+    # taken after create_all, it already held the new release's tables and could not stand for the earlier state).
+    new_tables = {t.name for t in Base.metadata.sorted_tables} - set(inspect(engine).get_table_names())
+    todo = pending_columns(engine)
+    if (new_tables or todo) and has_data and backup_dir is not None and engine.url.database:
+        from aime.backup import backup_sqlite_file
+
+        backup_sqlite_file(Path(engine.url.database), backup_dir, label="pre-migration")
     try:
         Base.metadata.create_all(engine)
     except OperationalError as exc:
         if "already exists" not in str(exc):
             raise
         Base.metadata.create_all(engine)  # the other process created a table between the check and this one's
-    todo = pending_columns(engine)
     if not todo:
         return ensure_indexes(engine)
-    if has_data and backup_dir is not None and engine.url.database:
-        from aime.backup import backup_sqlite_file
-
-        backup_sqlite_file(Path(engine.url.database), backup_dir, label="pre-migration")
     applied = []
     with engine.begin() as conn:
         for table, col in todo:

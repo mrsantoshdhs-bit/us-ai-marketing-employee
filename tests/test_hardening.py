@@ -65,9 +65,38 @@ def test_migration_adds_columns_without_losing_rows(tmp_path):
     with ctx.db.session() as s:
         co = s.get(Company, 1)
         assert co.name == "Kept Co" and co.website_status is None
-    assert list((tmp_path / "backups").glob("aime-pre-migration-*.db"))  # backup before ALTER
+    (backup,) = (tmp_path / "backups").glob("aime-pre-migration-*.db")  # backup before ALTER
+    con = sqlite3.connect(backup)
+    # OB-017: the copy is the database as the earlier code left it, without the tables the new code creates
+    assert [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")] == ["companies"]
+    con.close()
     assert migrate(ctx.db.engine) == []  # idempotent
     ctx.db.dispose()
+
+
+def test_a_release_that_only_adds_tables_still_takes_the_pre_migration_copy_first(tmp_path):
+    """OB-017: new tables alone (no new column) also get a copy of the database from before they were made."""
+    from sqlalchemy import create_engine
+
+    from aime.models import Base, WorkItem
+
+    db_path = tmp_path / "only-tables.db"
+    engine = create_engine(f"sqlite:///{db_path.as_posix()}")
+    Base.metadata.create_all(engine)  # the earlier release: every table but the one this release adds
+    with engine.begin() as conn:
+        conn.exec_driver_sql(f"DROP TABLE {WorkItem.__tablename__}")
+        conn.exec_driver_sql("INSERT INTO companies (name, normalized_name, source, verified, is_competitor, is_sample, "
+                             "lifecycle_stage, country, created_at, updated_at) VALUES ('Kept Co', 'kept co', 'test', 0, 0, 0, 'prospect', 'US', "
+                             "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+    assert pending_columns(engine) == []
+    migrate(engine, tmp_path / "copies", has_data=True)
+    (copy,) = (tmp_path / "copies").glob("aime-pre-migration-*.db")
+    con = sqlite3.connect(copy)
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert WorkItem.__tablename__ not in tables and "companies" in tables
+    assert con.execute("SELECT name FROM companies").fetchall() == [("Kept Co",)]
+    con.close()
+    engine.dispose()
 
 
 def test_backup_prune_and_integrity(ctx):
