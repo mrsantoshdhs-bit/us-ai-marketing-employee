@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
+from aime import automation
 from aime import reply_intel
 from aime.db import kv_get
 from aime.models import AIDecision, Conversation, InboundEmail
@@ -86,3 +87,26 @@ def test_e2e1_an_engine_failure_is_final_and_not_retried(make_ctx, monkeypatch):
     assert calls["n"] == 1  # the rules' outcome stands; the failed turn is not tried at every run
     with ctx.db.session() as s:
         assert kv_get(s, reply_intel.PENDING_TURNS) == []
+
+
+@pytest.mark.parametrize("action", ["emergency_stop", "pause", "stop"])
+def test_e2e2_the_control_center_is_read_again_before_each_email(make_ctx, monkeypatch, network_attempts, action):
+    from tests.e2e_ob.helpers import FakeSMTP as OBSMTP
+    from tests.e2e_ob.helpers import World, drafted_and_approved, second_prospect
+
+    w = World(make_ctx, monkeypatch)
+    first = drafted_and_approved(w)
+    second = second_prospect(w)
+    w.job("inbox")
+    real = OBSMTP.send_message
+
+    def press(self, msg):
+        real(self, msg)
+        with w.ctx.db.session() as s:
+            if automation.get_state(s) == "running":
+                automation.change_state(s, action, "owner", "regression")
+    monkeypatch.setattr(OBSMTP, "send_message", press)
+    w.job("followups", ("success", "partial"))
+    assert len(OBSMTP.sent) == 1
+    left = [f for f in (w.followup(first.id), w.followup(second)) if f.status == "approved"]
+    assert len(left) == 1 and "Automation Control Center" in (left[0].blocked_reason or ""), left
