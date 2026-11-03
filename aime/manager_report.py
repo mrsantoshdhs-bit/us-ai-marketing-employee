@@ -922,13 +922,15 @@ def _note_delivery(session: Session, report_id: int, delivery: dict) -> None:
 
 def mailbox_sends_since(session: Session, since: datetime) -> int:
     """Report emails that count toward the mailbox's daily limit: every recipient of a delivery claimed since then,
-    except one that certainly left nothing."""
+    except one that certainly left nothing, and the handover emails (aime.handover_notify) claimed since then."""
     n = 0
     for results, recipients in session.execute(select(ReportDelivery.results, ReportDelivery.recipients).where(
             ReportDelivery.claimed_at >= since)).all():
         results = results or {}
         n += sum(1 for a in (recipients or []) if (results.get(a) or {}).get("status") != "not_sent")
-    return n
+    from aime.handover_notify import sends_since
+
+    return n + sends_since(session, since)  # the handover emails to the Sales Manager share the mailbox's limit
 
 
 def blockers(session: Session, settings, cfg: dict, now: datetime) -> list[str]:
