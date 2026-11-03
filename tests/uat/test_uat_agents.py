@@ -144,7 +144,7 @@ def test_ok_one_tick_runs_every_agent_and_a_second_tick_runs_nothing(make_ctx, m
         by_job = {j.job: {st["agent"] for st in (j.detail or {}).get("steps", [])}
                   for j in s.execute(select(JobRun)).scalars()}
     no_agent = {job for job, steps in by_job.items() if not steps & set(AGENTS)}
-    assert no_agent == {"db_maintenance", "monitor"}  # housekeeping, intended
+    assert no_agent == {"db_maintenance", "monitor", "manager_report"}  # housekeeping, and the report that counts records itself
     assert tick(ctx, trigger="uat")["ran"] == []  # nothing runs twice for the same slot or interval
 
 

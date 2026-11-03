@@ -28,7 +28,7 @@
   <tr><th>Date</th><th>Type</th><th>Generated</th><th>Highlights</th><th>Blockers</th></tr>
   {% for r in rows %}{% set k = r.summary.get('kpis', {}) %}
   <tr><td><a href="/reports/{{ r.id }}">{{ r.report_date }}</a></td><td>{{ r.kind }}</td><td class="small">{{ r.created_at|local }}</td>
-      <td class="small">{{ k.get('companies_new_period', 0) }} companies · {{ k.get('leads_new_period', 0) }} leads · {{ k.get('qualified_period', 0) }} qualified · {{ k.get('content_created_period', 0) }} posts drafted · {{ k.get('content_published_period', 0) }} published</td>
+      <td class="small">{% if r.kind.startswith('manager_') %}Sales Manager report: {{ r.summary.get('highlights') }}{% else %}{{ k.get('companies_new_period', 0) }} companies · {{ k.get('leads_new_period', 0) }} leads · {{ k.get('qualified_period', 0) }} qualified · {{ k.get('content_created_period', 0) }} posts drafted · {{ k.get('content_published_period', 0) }} published{% endif %}</td>
       <td class="n">{{ r.summary.get('blockers', [])|length }}</td></tr>
   {% else %}<tr><td colspan="5" class="muted">No reports yet. Daily reports are written every evening and weekly reports on Mondays.</td></tr>{% endfor %}
 </table></div>

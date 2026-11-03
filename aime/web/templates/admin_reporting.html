@@ -1,0 +1,36 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}Manager report · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+  <h1>{{ icon('mail') }} Manager report <span class="pill">Super Admin</span></h1>
+  <p class="subtitle">The Sales Manager's daily, weekly and monthly performance report. It is always written and stored on the <a href="/sales-manager">Sales Manager report</a> page; it is emailed only when everything below allows it.</p>
+</div></div>
+
+<div class="send-check {{ 'ok' if not send_blockers else 'warn' }}"><b>{{ icon('lock') }} {{ 'The report will be emailed' if not send_blockers else 'The report is not emailed' }}</b>
+  {% if send_blockers %}<ul class="small">{% for r in send_blockers %}<li>{{ r }}</li>{% endfor %}</ul>{% endif %}
+  <span class="small">Report emails are internal: they are not outreach and use none of the prospect limits, but each recipient counts toward the mailbox's daily limit. At most one email per report period.</span></div>
+
+<form class="card form-grid mbx-form" method="post" action="/admin/reporting">
+  <label style="grid-column:1/-1">Recipients (internal addresses, one per line or separated by commas)
+    <textarea name="recipients" rows="3">{{ cfg.recipients|join('\n') }}</textarea></label>
+  <label style="grid-column:1/-1">Allow-list: addresses or company domains that count as internal besides the sending mailbox's own domain{% if sender %} ({{ sender }}){% endif %}. A public mail service such as gmail.com never counts as a company's domain: list such an address itself.
+    <textarea name="allowlist" rows="2">{{ cfg.allowlist|join('\n') }}</textarea></label>
+  <label>Daily time<input name="daily_time" value="{{ cfg.daily_time }}"></label>
+  <label>Time zone<input name="timezone" value="{{ cfg.timezone }}"></label>
+  <label>Weekly report on<select name="weekly_day">{% for d in weekdays %}<option value="{{ d }}" {{ 'selected' if cfg.weekly_day == d }}>{{ d|title }}</option>{% endfor %}</select></label>
+  <label>Monthly report on day (1–28)<input type="number" min="1" max="28" name="monthly_day" value="{{ cfg.monthly_day }}"></label>
+  <label style="grid-column:1/-1"><span><input type="checkbox" name="email_enabled" value="yes" {{ 'checked' if cfg.email_enabled }}> Email the report (still needs the authorization below, OUTBOUND_EMAIL_ENABLED and a ready sending mailbox)</span></label>
+  <button style="grid-column:1/-1">Save</button>
+</form>
+
+<div class="card"><h2>Authorization</h2>
+  <p>{% if auth[0] %}<b>Authorized</b>: {{ auth[1] }}.{% else %}<b>Not authorized</b>: {{ auth[1] }}.{% endif %}</p>
+  {% if problems %}<ul class="small">{% for a, why in problems %}<li>{{ a }}: {{ why }}</li>{% endfor %}</ul>{% endif %}
+  <p class="small muted">Authorizing records your name and the time in the audit log, for exactly the recipients above. Changing the recipients or the allow-list withdraws it.</p>
+  <form method="post" action="/admin/reporting/authorize"><button {{ 'disabled' if not cfg.recipients or problems }}>Authorize emailing to {{ cfg.recipients|join(', ') or 'the recipients' }}</button></form>
+  {% if cfg.authorized_by %}<form method="post" action="/admin/reporting/revoke"><button class="secondary">Withdraw the authorization</button></form>{% endif %}
+</div>
+
+<form method="post" action="/admin/reporting/write"><button class="secondary">Write the due reports now (no email)</button></form>
+<p class="small muted">Every change is in the <a href="/audit">audit log</a>. Only Super Admin accounts see this page.</p>
+{% endblock %}

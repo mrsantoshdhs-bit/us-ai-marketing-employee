@@ -229,6 +229,27 @@ def job_daily_report(ctx: AppContext, job: str = "daily_report") -> JobOutcome:
     return out
 
 
+def job_manager_report(ctx: AppContext, job: str = "manager_report") -> JobOutcome:
+    """The Sales Manager's report (aime/manager_report.py): the daily one every day, the weekly and monthly ones on their
+    days, each stored on the dashboard. Each is emailed only when every gate is open, at most once per period; when a
+    gate is closed the report is still written and the reason it was not sent is recorded with it. The step fails only
+    when an email was tried and did not certainly go (so the scheduler's retry may try one that certainly left nothing)."""
+    from aime import manager_report
+
+    out = JobOutcome()
+    try:
+        result = manager_report.run(ctx)
+    except Exception as exc:  # recorded as the step's error; the scheduler retries the slot
+        out.steps.append({"agent": "manager_report", "status": "failed", "error": redact(f"{type(exc).__name__}: {exc}")[:500]})
+        out.failed = True
+        return out
+    out.steps.append({"agent": "manager_report", "status": "failed" if result["failed"] else "success", "output": result,
+                      "error": "; ".join(f"{r['kind']}: {r['status']} ({r.get('reason')})" for r in result["reports"]
+                                         if r["status"] in ("failed", "uncertain", "partial")) or None})
+    out.failed = result["failed"]
+    return out
+
+
 def job_weekly_report(ctx: AppContext, job: str = "weekly_report") -> JobOutcome:
     out = JobOutcome()
     out.add(AnalyticsReportingAgent(ctx).run({"kind": "weekly"}, job=job))
@@ -368,4 +389,5 @@ JOBS: dict[str, Callable[..., JobOutcome]] = {
     "daily_report": job_daily_report,
     "weekly_report": job_weekly_report,
     "monitor": job_monitor,
+    "manager_report": job_manager_report,
 }

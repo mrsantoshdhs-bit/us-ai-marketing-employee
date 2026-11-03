@@ -67,12 +67,9 @@ def enable(ctx, code="CA", **extra):
 @pytest.mark.parametrize("name,data,words", [
     ("ai", {"provider": "auto", "unknown_key": 1}, "Extra inputs are not permitted"),
     ("ai", {"provider": "auto", "outbound_email_enabled": True}, ".env only"),
-    ("reporting", {"manager_report": {"require_human_approval": False}}, ".env only"),
+    ("retention", {"publishing_enabled": True}, ".env only"),
     ("ai", {"provider": "cloud-paid"}, "provider"),
     ("ai", {"monthly_spend_cap_usd": 5000}, "less than or equal to 1000"),
-    ("reporting", {"manager_report": {"recipients": ["not-an-address"]}}, "not an email address"),
-    ("reporting", {"manager_report": {"time": "25:00"}}, "08:00"),
-    ("reporting", {"manager_report": {"timezone": "Mars/Base"}}, "time zone"),
     ("retention", {"audit_events_days": 30}, "at least a year"),
     ("deliverability", {"min_sends": 5}, "greater than or equal to 10"),
     ("deliverability", {"auth_gate": "loose"}, "'off', 'warn' or 'block'"),
@@ -122,27 +119,25 @@ def test_the_catalogue_keeps_its_built_in_keys(ctx):
 def test_every_section_has_defaults_that_pass_its_own_rules(ctx):
     for name in ss.SECTIONS:
         assert ss.validate_shape(name, ss.get(ctx.settings, name)) == ss.get(ctx.settings, name)
-    assert ss.get(ctx.settings, "reporting") == {"manager_report": {"enabled": False, "recipients": [], "time": "04:00",
-                                                                    "timezone": "Asia/Kolkata"}}
     assert ss.get(ctx.settings, "ai")["monthly_spend_cap_usd"] == 0
-    assert ctx.settings.section("reporting")["manager_report"]["time"] == "04:00"  # other modules read it as before
+    assert "reporting" not in ss.SECTIONS  # the manager report has its own page and authorization (aime.manager_report)
     assert ctx.settings.section("retention")["audit_events_days"] == 0
 
 
 # --------------------------------------------------------------------------- versions, audit, preview, revert
 
 def test_a_save_is_a_new_active_version_audited_with_old_and_new_values(ctx):
-    v1, changes = save(ctx, "reporting", {"manager_report": {"recipients": ["Boss@Example.com"]}}, note="first")
-    assert v1 and changes == ["manager_report.recipients: [] -> ['boss@example.com']"]
-    assert ctx.settings.section("reporting")["manager_report"]["recipients"] == ["boss@example.com"]
-    v2, _ = save(ctx, "reporting", {"manager_report": {"recipients": [], "time": "05:30"}})
+    v1, changes = save(ctx, "retention", {"job_runs_days": 400}, note="first")
+    assert v1 and changes == ["job_runs_days: 0 -> 400"]
+    assert ctx.settings.section("retention")["job_runs_days"] == 400
+    v2, _ = save(ctx, "retention", {"job_runs_days": 0, "alerts_days": 90})
     with ctx.db.session() as s:
-        rows = {r.id: r.active for r in s.execute(select(SettingsVersion).where(SettingsVersion.section == "reporting")).scalars()}
+        rows = {r.id: r.active for r in s.execute(select(SettingsVersion).where(SettingsVersion.section == "retention")).scalars()}
     assert rows == {v1: False, v2: True}
-    assert save(ctx, "reporting", {"manager_report": {"time": "05:30"}}) == (None, [])  # nothing changed: nothing saved
+    assert save(ctx, "retention", {"alerts_days": 90}) == (None, [])  # nothing changed: nothing saved
     saved = audits(ctx, "settings_saved")
-    assert [a.target for a in saved] == ["settings:reporting", "settings:reporting"]
-    assert f"version {v2}" in saved[-1].detail and "'04:00' -> '05:30'" in saved[-1].detail and "owner" == saved[-1].actor
+    assert [a.target for a in saved] == ["settings:retention", "settings:retention"]
+    assert f"version {v2}" in saved[-1].detail and "alerts_days: 0 -> 90" in saved[-1].detail and "owner" == saved[-1].actor
 
 
 def test_preview_shows_the_change_and_writes_nothing(ctx):
@@ -506,15 +501,15 @@ def test_only_a_super_admin_reaches_the_settings_pages(web):
 def test_the_pages_preview_save_restore_and_record_a_review(web):
     ctx, client = web
     boss = client("boss")
-    form = {"settings_form": "1", "manager_report.enabled": "", "manager_report.recipients": "sm@example.com",
-            "manager_report.time": "04:30", "manager_report.timezone": "Asia/Kolkata"}
-    r = boss.post("/admin/settings/section/reporting", data={**form, "do": "preview"})
-    assert r.status_code == 200 and "nothing was saved" in r.text and "&#39;04:00&#39; -&gt; &#39;04:30&#39;" in r.text
+    form = {"settings_form": "1", "job_runs_days": "400", "agent_runs_days": "0", "alerts_days": "0",
+            "inbound_emails_days": "0", "audit_events_days": "0"}
+    r = boss.post("/admin/settings/section/retention", data={**form, "do": "preview"})
+    assert r.status_code == 200 and "nothing was saved" in r.text and "job_runs_days: 0 -&gt; 400" in r.text
     assert versions(ctx) == 0
-    r = boss.post("/admin/settings/section/reporting", data={**form, "do": "save", "note": "manager report"})
+    r = boss.post("/admin/settings/section/retention", data={**form, "do": "save", "note": "keep job runs"})
     assert r.status_code == 303 and "Saved as version" in unquote(r.headers["location"])
-    assert ctx.settings.section("reporting")["manager_report"]["recipients"] == ["sm@example.com"]
-    assert boss.post("/admin/settings/section/reporting", data={}).status_code == 303 and versions(ctx) == 1  # an empty post: nothing
+    assert ctx.settings.section("retention")["job_runs_days"] == 400
+    assert boss.post("/admin/settings/section/retention", data={}).status_code == 303 and versions(ctx) == 1  # an empty post: nothing
     assert boss.post("/admin/settings/section/agents", data={"settings_form": "1", "do": "save"}).status_code == 303
     r = boss.post("/admin/settings/countries/review", data={"settings_form": "1", "code": "CA", "confirmed_by": "Owner", "note": "CASL"})
     assert "tick the box" in unquote(r.headers["location"]) and countries.country(ctx.settings, "CA") is None
@@ -522,11 +517,11 @@ def test_the_pages_preview_save_restore_and_record_a_review(web):
     assert countries.cleared(countries.country(ctx.settings, "CA")) and countries.target_countries(ctx.settings) == ["US"]
     page = boss.get("/admin/settings/section/countries").text
     assert "by Owner" in page
-    first = ss.active_version_id(ctx.settings, "reporting")
-    boss.post("/admin/settings/section/reporting", data={**form, "manager_report.recipients": "", "do": "save"})
+    first = ss.active_version_id(ctx.settings, "retention")
+    boss.post("/admin/settings/section/retention", data={**form, "job_runs_days": "0", "do": "save"})
     r = boss.post(f"/admin/settings/versions/{first}/revert")
     assert r.status_code == 303 and "restored" in unquote(r.headers["location"])
-    assert ctx.settings.section("reporting")["manager_report"]["recipients"] == ["sm@example.com"]
+    assert ctx.settings.section("retention")["job_runs_days"] == 400
     assert boss.post("/admin/settings/versions/999999/revert").status_code == 404
     assert boss.get("/admin/settings/section/nonsense").status_code == 404
 

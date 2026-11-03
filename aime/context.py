@@ -204,6 +204,8 @@ def create_context(settings: Settings | None = None, http_transport: httpx.BaseT
     with db.session() as s:  # then the saved settings versions (countries, sources, schedules ...: aime.settings_store)
         from aime import settings_store
         settings_store.load(s, settings)
+        from aime import manager_report
+        manager_report.load_schedule(s, settings)  # the report's time and zone, as the Super Admin set them
     return AppContext(settings=settings, db=db, http_transport=http_transport)
 
 

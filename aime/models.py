@@ -923,3 +923,26 @@ Index("ix_leads_contact_id", Lead.contact_id)
 Index("ix_companies_domain_lower", func.lower(Company.domain))
 Index("ix_inbound_emails_from_email_lower", func.lower(InboundEmail.from_email))
 Index("ix_opportunities_owner_stage", Opportunity.owner, Opportunity.stage)
+
+
+class ReportDelivery(Base):
+    """One emailing of the Sales Manager's report for one period (aime/manager_report.py). The row is written and
+    committed before anything is handed to the mail server, and the unique (kind, period_start) lets only one exist,
+    so a job that runs twice, or crashes after the claim, never emails the same period's report again. These are
+    internal notifications: they are not outreach and use none of the prospect limits, but each recipient counts
+    toward the mailbox's own daily limit."""
+
+    __tablename__ = "report_deliveries"
+    __table_args__ = (UniqueConstraint("kind", "period_start", name="uq_report_delivery_period"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20))  # manager_daily | manager_weekly | manager_monthly
+    period_start: Mapped[date] = mapped_column(Date)  # the first day the report covers, on the report's clock
+    report_id: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="sending")  # sending | sent | partial | uncertain
+    recipients: Mapped[list[Any]] = mapped_column(JSON, default=list)  # the addresses as configured
+    results: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # address -> {"status", "message_id", "delivered_to", "error"}
+    claimed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    claimed_by: Mapped[str | None] = mapped_column(String(80))  # the job or person that started it
+    error: Mapped[str | None] = mapped_column(String(500))

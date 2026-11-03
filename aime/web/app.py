@@ -86,6 +86,7 @@ from aime.countries import target_countries
 from aime.web.settings_pages import register as register_settings_pages
 from aime.web.deal_pages import register as register_deal_pages
 from aime.web.deliverability_pages import register as register_deliverability_pages
+from aime.web.manager_pages import may_view as may_view_manager_report, register as register_manager_pages
 from aime.visibility import (EVERYTHING, ORG_PAGE_WORDS, can_see_lead, company_condition, contact_condition, lead_condition,
                              opportunity_condition, org_page, record_condition)
 from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username, form_id, make_cookie,
@@ -512,6 +513,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
         data.setdefault("can_reject", may("approve_outbound") or may("reject_outbound"))
         data.setdefault("can_assign", may("assign_leads"))
         data.setdefault("can_run", may("admin_ops"))
+        data.setdefault("can_manager_report", may_view_manager_report(C().settings, user))
         if "user_role" not in data:
             with C().db.session() as s:
                 data["user_role"] = role_label(s, user["role"]) if user else "Preview · no sign-in"
@@ -2669,6 +2671,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     register_deal_pages(app, C, render, back, who)
     register_deliverability_pages(app, C, render, back, who)
     register_settings_pages(app, C, render, back, who)
+    register_manager_pages(app, C, render, back, who)
 
     @app.get("/api/leads")
     def api_leads(request: Request, status: str = "qualified", limit: int = 50):

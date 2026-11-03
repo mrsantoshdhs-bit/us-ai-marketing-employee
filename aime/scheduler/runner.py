@@ -17,6 +17,7 @@ import traceback
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select, update
 from sqlalchemy.exc import OperationalError
@@ -50,14 +51,22 @@ class JobSpec:
     description: str
     enabled: bool = True
     weekdays: tuple[int, ...] | None = None  # set for weekly jobs (0 = Monday)
+    # The zone this job's `daily_at` is read in, when it is not the schedule's own (e.g. the manager's report at 04:00
+    # Asia/Kolkata on a PC set to another zone). None: the schedule's `timezone`.
+    timezone: str | None = None
+
+    def zone(self, default):
+        """The time zone this job's daily slot is counted in: its own when it has one, else the schedule's."""
+        return local_tz(self.timezone) if self.timezone else default
 
     @property
     def schedule_label(self) -> str:
         if self.every_minutes:
             return f"every {self.every_minutes} min"
+        zone = f" {self.timezone}" if self.timezone else ""
         if self.weekdays:
-            return f"weekly {'/'.join(WEEKDAYS[d] for d in self.weekdays)} {self.daily_at:%H:%M}"
-        return f"daily {self.daily_at:%H:%M}"
+            return f"weekly {'/'.join(WEEKDAYS[d] for d in self.weekdays)} {self.daily_at:%H:%M}{zone}"
+        return f"daily {self.daily_at:%H:%M}{zone}"
 
 
 def load_job_specs(settings: Settings) -> list[JobSpec]:
@@ -78,8 +87,15 @@ def load_job_specs(settings: Settings) -> list[JobSpec]:
             continue
         # Settings › Automation schedules writes `enabled` (and the cadence) over config/schedule.toml (aime.settings_store);
         # the health monitor and the database backup run whatever is set
+        zone = jc.get("timezone") or None
         enabled = bool(jc.get("enabled", True)) or name in automation.ALWAYS_RUN_JOBS
-        specs.append(JobSpec(name, every, daily, jc.get("description", ""), enabled, weekdays))
+        if zone and zone != "local":
+            try:
+                ZoneInfo(zone)
+            except (ZoneInfoNotFoundError, ValueError):  # a mistyped zone must not run the job at a wrong hour
+                log.error("Job '%s' names an unknown time zone %r in schedule.toml: it does not run until that is fixed", name, zone)
+                enabled = False
+        specs.append(JobSpec(name, every, daily, jc.get("description", ""), enabled, weekdays, zone))
     return specs
 
 
@@ -131,6 +147,7 @@ def is_due(spec: JobSpec, state: JobState | None, now: datetime, tz, tick_minute
             return True, f"interval elapsed ({int(elapsed.total_seconds() // 60)} min)"
         remaining = timedelta(minutes=spec.every_minutes) - elapsed
         return False, f"next in {int(remaining.total_seconds() // 60)} min"
+    tz = spec.zone(tz)
     last_slot = _last_slot(spec, as_aware_utc(now).astimezone(tz), tz)
     last_slot_utc = to_naive_utc(last_slot)
     if last_success and last_success >= last_slot_utc:
@@ -156,6 +173,7 @@ def next_run(spec: JobSpec, state: JobState | None, now: datetime, tz) -> dateti
         if last_attempt is None:
             return now
         return last_attempt + timedelta(minutes=spec.every_minutes)
+    tz = spec.zone(tz)
     last_slot = _last_slot(spec, as_aware_utc(now).astimezone(tz), tz)
     last_slot_utc = to_naive_utc(last_slot)
     if last_success and last_success >= last_slot_utc:
@@ -377,7 +395,7 @@ def _same_slot_failures(ctx: AppContext, name: str, state: JobState, started: da
     previous = state.consecutive_failures or 0
     if spec is None or spec.every_minutes or state.last_attempt_at is None:
         return previous
-    tz = local_tz(ctx.settings.schedule.get("timezone"))
+    tz = spec.zone(local_tz(ctx.settings.schedule.get("timezone")))
     slot = to_naive_utc(_last_slot(spec, as_aware_utc(started).astimezone(tz), tz))
     return previous if slot <= state.last_attempt_at <= started + CLOCK_SKEW else 0
 

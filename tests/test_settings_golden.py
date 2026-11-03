@@ -211,7 +211,10 @@ def test_default_settings_give_the_same_schedule_as_before(ctx):
     from aime.timeutil import local_tz, utcnow
 
     specs = load_job_specs(ctx.settings)
-    assert [(j.name, j.schedule_label, j.enabled) for j in specs] == EXPECTED_SCHEDULE
+    got = [(j.name, j.schedule_label, j.enabled) for j in specs]
+    # Option B adds exactly one job, the Sales Manager report (aime.manager_report); every job of 50b9172 is unchanged
+    assert [j for j in got if j[0] != "manager_report"] == EXPECTED_SCHEDULE
+    assert [j for j in got if j[0] == "manager_report"] == [("manager_report", "daily 04:00 Asia/Kolkata", True)]
     tz = local_tz(ctx.settings.schedule.get("timezone"))
     assert all(is_due(j, None, utcnow(), tz)[0] for j in specs)  # nothing has run: every job is due, none disabled
 

@@ -1,0 +1,87 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}Sales Manager report · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+  <h1>{{ icon('chart') }} Sales Manager report</h1>
+  <p class="subtitle">{{ period.label }} ({{ period.tz }}). Every figure is a count of records in the CRM: open a figure for its definition{% if show_ids %} and the records it counted{% endif %}. Test-mode deliveries, simulated replies and meetings, and sample data are never counted.</p>
+</div></div>
+
+<form class="filters card" method="get" action="/sales-manager">
+  <label class="small">Period<select name="period">{% for k, label in periods.items() %}<option value="{{ k }}" {{ 'selected' if choice == k }}>{{ label }}</option>{% endfor %}</select></label>
+  <button class="secondary">Show</button>
+</form>
+
+<div class="send-check {{ 'ok' if not send_blockers else 'warn' }}"><b>{{ icon('mail') }} Emailed report: {{ 'on' if not send_blockers else 'not sent' }}</b>
+  {% if send_blockers %}<span>The daily report is written and stored every day at {{ cfg.daily_time }} {{ cfg.timezone }}, but it is not emailed because:</span>
+  <ul class="small">{% for r in send_blockers %}<li>{{ r }}</li>{% endfor %}</ul>
+  {% else %}<span>Emailed every day at {{ cfg.daily_time }} {{ cfg.timezone }} to {{ cfg.recipients|join(', ') }} ({{ auth[1] }}).</span>{% endif %}
+</div>
+
+{% if not data.has_data %}<div class="card"><p><b>No data</b> for {{ period.label }}: nothing was recorded in this period. No figures, trends or targets are drawn from it.</p></div>{% endif %}
+
+<div class="grid">
+  {% for k in ['companies_discovered', 'verified_decision_makers', 'qualified_leads', 'disqualified_leads', 'outreach_sent', 'replies', 'engagement_rate', 'meetings_booked'] %}{% set x = m[k] %}
+  <div class="card kpi"><span class="small muted">{{ x.label }}</span><span class="v">{{ shown(x) if data.has_data else 'no data' }}</span></div>
+  {% endfor %}
+</div>
+
+<div class="card"><h2>Funnel</h2>{{ chart_funnel }}<p class="small muted">Each stage is counted on its own, from its own records; a stage is never inferred from another.</p></div>
+<div class="card"><h2>The last two weeks, per day</h2>{{ chart_trend }}</div>
+
+{% for heading, rows in sections %}
+<div class="card table-wrap"><h2>{{ heading }}</h2><table>
+  {% for x in rows %}<tr><td><details><summary>{{ x.label }}</summary>
+      <div class="small muted">{{ x.definition }}</div>
+      {% if x.sql %}<div class="small"><code>{{ x.sql[:1500] }}</code></div>{% endif %}
+      {% if show_ids and x.ids is defined and x.ids %}<div class="small">Records ({{ x.table }}): {{ x.ids[:100]|join(', ') }}{% if x.ids_total > 100 %} … and {{ x.ids_total - 100 }} more (the stored report keeps {{ x.ids|length }}){% endif %}</div>{% endif %}
+    </details></td>
+    <td class="n">{{ shown(x) if (data.has_data or x.snapshot) else 'no data' }}</td></tr>{% endfor %}
+</table></div>
+{% endfor %}
+
+<div class="card"><h2>Pipeline</h2>{{ chart_stages }}
+  <p class="small">Stage moves in this period: {% for r in data.pipeline.stage_moves %}<span class="pill">{{ r.stage }}: {{ r.value }}</span> {% else %}none{% endfor %}
+  · Won value entered on the deals: {{ '${:,.0f}'.format(data.pipeline.won_value) if data.pipeline.won_value else 'none' }}</p>
+  <p class="small muted">{{ data.pipeline.by_stage_definition }} {{ data.pipeline.stage_moves_definition }}</p></div>
+
+<div class="card table-wrap"><h2>Country: target and achievement</h2>
+  {% if data.countries %}<table><tr><th>Country</th>{% for k in data.breakdown_keys %}<th class="n">{{ labels[k] }}</th>{% endfor %}</tr>
+  {% for c in data.countries %}<tr><td>{{ c.country }}</td>{% for k in data.breakdown_keys %}{% set f = c.figures[k] %}
+    <td class="n">{{ f.value }} / {{ f.target|int if f.target is not none else 'no target set' }}{% if f.attainment is not none %} <span class="small muted">({{ f.attainment }}%)</span>{% endif %}</td>{% endfor %}</tr>{% endfor %}</table>
+  {% else %}<p class="muted">No data for this period.</p>{% endif %}
+  <p class="small muted">{% if data.targets_set %}Targets are daily goals from the settings (section targets), times the days in the period.{% else %}No targets are set: each figure shows "no target set".{% endif %} The country is the company's own (companies.country).</p></div>
+
+<div class="card table-wrap"><h2>Industry</h2>
+  {% if data.industries %}<table><tr><th>Industry</th>{% for k in data.breakdown_keys %}<th class="n">{{ labels[k] }}</th>{% endfor %}</tr>
+  {% for i in data.industries %}<tr><td>{{ i.label }}</td>{% for k in data.breakdown_keys %}<td class="n">{{ i.figures[k] }}</td>{% endfor %}</tr>{% endfor %}</table>
+  {% else %}<p class="muted">No data for this period.</p>{% endif %}</div>
+
+<div class="card table-wrap"><h2>Agent productivity</h2>
+  {% if data.agents %}<table><tr><th>Agent</th><th class="n">Runs</th><th class="n">Succeeded</th><th class="n">Failed</th><th class="n">Success rate</th><th class="n">Average s</th><th class="n">Longest s</th><th class="n">AI calls (failed)</th></tr>
+  {% for a in data.agents %}<tr><td>{{ a.agent }}</td><td class="n">{{ a.runs }}</td><td class="n">{{ a.success }}</td><td class="n">{{ a.failed }}</td><td class="n">{{ a.success_rate }}%</td>
+    <td class="n">{{ a.avg_s if a.avg_s is not none else '—' }}</td><td class="n">{{ a.max_s if a.max_s is not none else '—' }}</td><td class="n">{{ a.llm_calls }} ({{ a.llm_failures }})</td></tr>{% endfor %}</table>
+  {% else %}<p class="muted">No agent runs in this period.</p>{% endif %}</div>
+
+<div class="card"><h2>AI errors, escalations and blocked work</h2>
+  <p class="small">Automation: <b>{{ data.blocked.automation_state }}</b> (mode {{ data.blocked.automation_mode }}).
+    {% if data.blocked.failed_jobs_by_job %}Failed jobs in the period: {% for j, n in data.blocked.failed_jobs_by_job.items() %}<span class="pill">{{ j }}: {{ n }}</span> {% endfor %}{% else %}No failed jobs in the period.{% endif %}</p>
+  {% set ai = data.blocked.ai_decisions %}
+  {% if ai %}<p class="small">AI decisions in the period: <b>{{ ai.total if ai.total is not none else '—' }}</b>{% if ai.escalated_or_blocked %}, of them escalated or blocked: <b>{{ ai.escalated_or_blocked }}</b>{% endif %}
+    {% for k, n in ai.by.items() %}<span class="pill">{{ k }}: {{ n }}</span> {% endfor %}</p><p class="small muted">{{ ai.definition or ai.note }}</p>
+  {% else %}<p class="small muted">The AI decisions log is not in this database yet.</p>{% endif %}
+  <h3>Emails held, by reason (now)</h3>
+  {% if data.blocked.held_sends %}<ul class="small">{% for h in data.blocked.held_sends %}<li><b>{{ h.value }}</b> × {{ h.reason }}{% if show_ids %} <span class="muted">(follow-ups {{ h.ids[:20]|join(', ') }}{{ '…' if h.ids|length > 20 }})</span>{% endif %}</li>{% endfor %}</ul>
+  {% else %}<p class="small muted">No email is held.</p>{% endif %}
+  <p class="small muted">{{ data.blocked.held_definition }}</p></div>
+
+<div class="card"><h2>Deliverability</h2>
+  <p class="small">Mailbox use in the last 24 hours: <b>{{ mailbox.outreach + mailbox.reports }}</b> of {{ mailbox.limit }} (sales emails {{ mailbox.outreach }}, report emails {{ mailbox.reports }}).
+    Bounce rate: <b>{{ m.bounce_rate.text }}</b> · unsubscribes: <b>{{ m.unsubscribes.value }}</b> · on the do-not-contact list now: <b>{{ m.suppressions_active.value }}</b>.</p></div>
+
+<div class="card table-wrap"><h2>Stored reports</h2>
+  <table><tr><th>Period</th><th>Type</th><th>Written</th><th>Highlights</th><th>Email</th></tr>
+  {% for row in reports %}{% set r = row.r %}<tr><td><a href="/sales-manager/reports/{{ r.id }}">{{ r.summary.get('manager_report', {}).get('period', {}).get('label', r.report_date) }}</a></td>
+    <td>{{ r.kind|replace('manager_', '') }}</td><td class="small">{{ r.created_at|local }}</td><td class="small">{{ row.highlights }}</td>
+    <td class="small">{% if row.delivery %}{{ row.delivery.status }}{% if row.delivery.status == 'sent' %} to {{ row.delivery.recipients|join(', ') }}{% endif %}{% elif row.note.reasons %}not sent: {{ row.note.reasons[0] }}{% if row.note.reasons|length > 1 %} (+{{ row.note.reasons|length - 1 }}){% endif %}{% else %}not emailed{% endif %}</td></tr>
+  {% else %}<tr><td colspan="5" class="muted">No reports yet: the first is written at {{ cfg.daily_time }} {{ cfg.timezone }}.</td></tr>{% endfor %}</table></div>
+{% endblock %}

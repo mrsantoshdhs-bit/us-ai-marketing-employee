@@ -371,35 +371,6 @@ class DeliverabilitySection(Strict):
         return v
 
 
-class ManagerReport(Strict):
-    enabled: bool = False
-    recipients: list[str] = Field(default_factory=list, max_length=10)
-    time: str = "04:00"
-    timezone: str = "Asia/Kolkata"
-
-    @field_validator("time")
-    @classmethod
-    def check_clock(cls, v: str) -> str:
-        return _clock(v)
-
-    @field_validator("timezone")
-    @classmethod
-    def check_zone(cls, v: str) -> str:
-        return _zone(v)
-
-    @field_validator("recipients")
-    @classmethod
-    def check_emails(cls, v: list[str]) -> list[str]:
-        bad = [x for x in v if not EMAIL.match(str(x).strip())]
-        if bad:
-            raise ValueError(f"not an email address: {', '.join(bad)}")
-        return list(dict.fromkeys(str(x).strip().lower() for x in v))
-
-
-class ReportingSection(Strict):
-    manager_report: ManagerReport = Field(default_factory=ManagerReport)
-
-
 class AISection(Strict):
     """Read by the AI core later. LLM_PROVIDER in .env still decides today."""
 
@@ -579,8 +550,6 @@ for _spec in (
                 "page.", editable=False),
     SectionSpec("deliverability", "Deliverability", DeliverabilitySection, lambda s: DeliverabilitySection().model_dump(mode="json"),
                 "Placeholders for the deliverability safeguards: not used yet, and they cannot raise a sending limit."),
-    SectionSpec("reporting", "Reporting", ReportingSection, lambda s: ReportingSection().model_dump(mode="json"),
-                "The Sales Manager report (not sent yet: the reporting work will use these)."),
     SectionSpec("ai", "AI", AISection, lambda s: AISection().model_dump(mode="json"),
                 "The AI provider and spending cap for the AI core (LLM_PROVIDER in .env still decides today)."),
     SectionSpec("retention", "Retention", RetentionSection, lambda s: RetentionSection().model_dump(mode="json"),

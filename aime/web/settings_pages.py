@@ -99,7 +99,7 @@ def parse(name: str, form, settings) -> dict:
 
 
 def _parse_simple(current: dict, form, prefix: str = "") -> dict:
-    """Sections of plain values (deliverability, reporting, ai, retention): each value has a field named by its path."""
+    """Sections of plain values (deliverability, ai, retention): each value has a field named by its path."""
     out = {}
     for key, value in current.items():
         path = f"{prefix}{key}"
@@ -152,7 +152,7 @@ def register(app, C, render, back, who) -> None:
         data = ss.get(ctx.settings, name)
         view = {"section": name, "spec": spec, "data": data, "stored": ss.stored(ctx.settings, name),
                 "active_id": ss.active_version_id(ctx.settings, name), "history": ss.history(s, name),
-                "form_mark": FORM_MARK, "simple": simple_fields(data) if name in ("deliverability", "reporting", "ai", "retention") else []}
+                "form_mark": FORM_MARK, "simple": simple_fields(data) if name in ("deliverability", "ai", "retention") else []}
         if name == "countries":
             view["targets"] = countries.target_countries(ctx.settings)
             view["coverage"] = {c["code"]: countries.sources_for(ctx.settings, c["code"]) for c in data["countries"]}
@@ -217,7 +217,7 @@ def register(app, C, render, back, who) -> None:
                 view = section_view(s, ctx, name)
                 if result.ok:  # the page shows what was typed, not saved, beside what would change
                     view["data"] = ss.validate_shape(name, data)
-                    if name in ("deliverability", "reporting", "ai", "retention"):
+                    if name in ("deliverability", "ai", "retention"):
                         view["simple"] = simple_fields(view["data"])
                 return render(request, "settings_section.html", **view, preview=result)
             try:

@@ -58,3 +58,8 @@ description = "Analytics and Reporting Agent: weekly summary with trends and seg
 [jobs.monitor]
 every_minutes = 30
 description = "Health monitor: failed or stale jobs, agent error rates, self-checks (doctor)"
+
+[jobs.manager_report]
+daily_at = "04:00"
+timezone = "Asia/Kolkata"
+description = "Sales Manager's report: daily (and weekly, monthly) performance from CRM records; emailed only once authorized"
