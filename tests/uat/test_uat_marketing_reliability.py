@@ -1024,7 +1024,7 @@ def test_ok_home_cards_match_records(scenario):
     html = client_for(scenario).get("/").text
     # the big number is the chosen period (T03); the total stays beside it
     assert re.findall(r'class="kpi-value">([\d,]+)<', html) == ["4", "3", "3", "2"]
-    assert re.findall(r'class="kpi-total">Last 7 days · ([\d,]+) in total<', html) == ["7", "3", "3", "2"]
+    assert re.findall(r'class="kpi-total(?: no-prior)?">Last 7 days · ([\d,]+) in total[ <]', html) == ["7", "3", "3", "2"]
     stages = {st["label"]: st["value"] for st in view["pipeline_stages"]}
     # the disqualified lead is not among the new leads (T04)
     assert stages == {"Open leads": 4, "Contacted": 2, "Interested": 1, "Meeting booked": 2, "Closed won": 1}
