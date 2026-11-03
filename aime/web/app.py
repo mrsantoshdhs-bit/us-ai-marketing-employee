@@ -88,6 +88,7 @@ from aime.web.deal_pages import register as register_deal_pages
 from aime.web.deliverability_pages import register as register_deliverability_pages
 from aime.web.manager_pages import may_view as may_view_manager_report, register as register_manager_pages
 from aime.web.ai_pages import register as register_ai_pages
+from aime.web.conversation_pages import register as register_conversation_pages
 from aime.visibility import (EVERYTHING, ORG_PAGE_WORDS, can_see_lead, company_condition, contact_condition, lead_condition,
                              opportunity_condition, org_page, record_condition)
 from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username, form_id, make_cookie,
@@ -1526,7 +1527,10 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                        for f in first if f.status == "awaiting_approval" and f.in_reply_to}
             later = later_replies(s, first)
             cards = approval_card_notes(s, [f for f in first if f.status == "awaiting_approval"], answers)
-        return render(request, "followups.html", cards=cards, rows=rows, show=show, email_ready=ready, email_reason=reason, sent_total=total,
+            from aime.ai.conversation import approval_cards  # the AI's reasoning, the facts it used and its risk flags
+
+            ai_cards = approval_cards(s, [f.id for f in first if f.status == "awaiting_approval"])
+        return render(request, "followups.html", cards=cards, ai_cards=ai_cards, rows=rows, show=show, email_ready=ready, email_reason=reason, sent_total=total,
                       hidden=total - len(rest), page_size=FOLLOWUPS_PAGE, reconfirm=reconfirm, simulated=simulated,
                       reply_to=reply_to, earlier=earlier, later=later)
 
@@ -1552,7 +1556,13 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 if body.strip() and body.replace("\r\n", "\n") != f.body:
                     f.body, edited = body.replace("\r\n", "\n"), True
                 if edited:
-                    f.generator = f"template, edited by {who(request)}"[:80]
+                    from aime.ai.conversation import record_review
+
+                    if action == "approve":
+                        record_review(s, f, "edited", who(request))  # an AI draft a person changed: kept for the agreement figures
+                    ai_draft = (f.generator or "").startswith("AI") and "conversation" in (f.generator or "")
+                    f.generator = (f"AI conversation draft, edited by {who(request)}" if ai_draft
+                                   else f"template, edited by {who(request)}")[:80]
                 address = C().settings.company_postal_address
                 if address and POSTAL_PLACEHOLDER in (f.body or ""):  # any email kind drafted before it was set
                     f.body, edited = f.body.replace(POSTAL_PLACEHOLDER, address), True
@@ -1593,6 +1603,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                     # on is not asked to "Confirm again" because the follow-ups job had not run since the switch.
                     am.observe_sending(s, C().settings.outbound_email_enabled, now)
                     f.status, f.approved_by, f.approved_at = "approved", who(request), now
+                    from aime.ai.conversation import record_review
+
+                    record_review(s, f, "accepted", who(request))  # only an AI draft not already recorded as edited
                     lead = f.lead
                     # whoever approves the first email to a lead (outreach or a reply to someone who contacted us)
                     # works it from then on, if their role receives leads (an administrator approving does not)
@@ -1632,6 +1645,9 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
                 msg = "Confirmed again: it goes out on the next follow-ups run"
             elif action == "reject" and f.status in ("awaiting_approval", "approved", "pending"):
                 f.status = "rejected"
+                from aime.ai.conversation import record_review
+
+                record_review(s, f, "rejected", who(request))
                 if f.kind == "outreach" and f.step == 1 and f.lead.outreach_status in ("drafted", "approved"):
                     set_outreach_status(s, f.lead, "stopped", who(request), "first email rejected")
                 if f.purpose == "reengage" and f.lead.outreach_status == "reengage":  # parked again; never redrafted
@@ -2674,6 +2690,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     register_settings_pages(app, C, render, back, who)
     register_manager_pages(app, C, render, back, who)
     register_ai_pages(app, C, render, back, who)
+    register_conversation_pages(app, C, render, back, who)
 
     @app.get("/api/leads")
     def api_leads(request: Request, status: str = "qualified", limit: int = 50):
