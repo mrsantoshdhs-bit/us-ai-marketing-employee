@@ -6,6 +6,10 @@ The file stays the default. Changes are stored as overrides in the database (kv 
 over the file wherever the settings are loaded: the dashboard at once, the scheduled jobs on their next run. "Reset"
 removes every override. Each field is validated, and every change is in the audit log with the old and new value.
 Switches that release email (OUTBOUND_EMAIL_ENABLED, REQUIRE_HUMAN_APPROVAL) are deliberately not here.
+
+Each save and reset is also kept as a version of settings section "sales" (aime.settings_store), so an earlier set of
+overrides can be compared and restored. The industries and services offered are the enabled entries of the editable
+catalogue (Settings › Industries and services), which starts as the code's own lists.
 """
 
 from __future__ import annotations
@@ -158,18 +162,21 @@ def current(settings) -> dict:
     return {f"{s}.{k}": settings.section(s).get(k) for s, k, *_ in FIELDS}
 
 
-def _choice_check(session: Session, kind: str, raw):
+def _choice_check(session: Session, kind: str, raw, settings=None):
+    from aime.catalogue import enabled
     from aime.knowledge.industries import INDUSTRIES
     from aime.knowledge.services import SERVICES
     from aime.models import User
 
     if kind == "multi_industries":
-        picked = [x for x in raw if x in INDUSTRIES]
+        offered = enabled(settings, "industries") if settings is not None else INDUSTRIES
+        picked = [x for x in raw if x in offered]
         if not picked:
             raise ValueError("choose at least one industry")
         return picked
     if kind == "multi_services":
-        picked = [x for x in raw if x in SERVICES]
+        offered = enabled(settings, "services") if settings is not None else SERVICES
+        picked = [x for x in raw if x in offered]
         if not picked:
             raise ValueError("choose at least one service")
         return picked
@@ -198,7 +205,7 @@ def save(session: Session, settings, actor: str, form) -> list[str]:
         name = f"{section}.{key}"
         try:
             if kind.startswith("multi") or kind == "users":
-                value = _choice_check(session, kind, getlist(name))
+                value = _choice_check(session, kind, getlist(name), settings)
             elif kind == "grade":
                 value = _choice_check(session, kind, (form.get(name) or "").strip())
             elif kind == "bool":
@@ -227,7 +234,59 @@ def save(session: Session, settings, actor: str, form) -> list[str]:
     changes = [f"{k}: {before[k]!r} -> {after[k]!r}" for k in after if before[k] != after[k]]
     if changes:
         audit(session, actor, "settings_changed", "sales settings", "; ".join(changes)[:2000])
+        from aime import settings_store
+        settings_store.record_sales_version(session, settings, actor, stored, "saved on the Sales settings page")
     return changes
+
+
+def _rebuild(session: Session, settings) -> None:
+    """config/business.toml with the stored overrides, then the saved settings versions, in place."""
+    from aime import settings_store
+    from aime.config import DEFAULT_BUSINESS, _deep_merge, _load_toml
+
+    fresh = _deep_merge(DEFAULT_BUSINESS, _load_toml(settings.base_dir / "config" / "business.toml"))
+    settings.business.clear()
+    settings.business.update(fresh)
+    load(session, settings)
+    settings_store.load(session, settings)
+
+
+def restore(session: Session, settings, actor: str, stored: dict, version_id: int) -> tuple[None, list[str]]:
+    """Make an earlier set of overrides (a "sales" settings version) the stored one again, audited (aime.settings_store.revert).
+    Each value is checked as on a save: a stored override that no longer passes is left out, and the change list says so."""
+    from aime import settings_store
+    from aime.automation import audit
+
+    checks = {(sec, key): (check, kind) for sec, key, _, check, kind in FIELDS}
+    kept: dict[str, dict] = {}
+    dropped = []
+    for section, keys in (stored or {}).items():
+        for key, value in (keys or {}).items():
+            check, kind = checks.get((section, key), (None, None))
+            try:
+                if kind is None:
+                    raise ValueError("not a sales setting")
+                if kind.startswith("multi") or kind == "users":
+                    value = _choice_check(session, kind, list(value or []), settings)
+                elif kind == "grade":
+                    value = _choice_check(session, kind, value, settings)
+                elif kind == "bool":
+                    value = bool(value)
+                else:
+                    value = check(", ".join(map(str, value)) if isinstance(value, list) else value)
+            except (ValueError, TypeError):
+                dropped.append(f"{section}.{key}")
+                continue
+            kept.setdefault(section, {})[key] = value
+    before = current(settings)
+    kv_set(session, KEY, kept)
+    _rebuild(session, settings)
+    after = current(settings)
+    changes = [f"{k}: {before[k]!r} -> {after[k]!r}" for k in after if before[k] != after[k]]
+    changes += [f"{name}: left out, it no longer passes its check" for name in dropped]
+    audit(session, actor, "settings_reverted", "settings:sales", (f"restored version {version_id}: " + "; ".join(changes))[:2000])
+    settings_store.record_sales_version(session, settings, actor, kept, f"restored version {version_id}")
+    return None, changes
 
 
 def reset(session: Session, settings, actor: str) -> None:
@@ -235,8 +294,12 @@ def reset(session: Session, settings, actor: str) -> None:
     from aime.automation import audit
     from aime.config import DEFAULT_BUSINESS, _deep_merge, _load_toml
 
+    from aime import settings_store
+
     kv_set(session, KEY, {})
     fresh = _deep_merge(DEFAULT_BUSINESS, _load_toml(settings.base_dir / "config" / "business.toml"))
     settings.business.clear()
     settings.business.update(fresh)
+    settings_store.load(session, settings)  # the saved settings versions (countries, sources ...) stay in effect
     audit(session, actor, "settings_reset", "sales settings", "overrides removed: back to config/business.toml")
+    settings_store.record_sales_version(session, settings, actor, {}, "reset to config/business.toml")

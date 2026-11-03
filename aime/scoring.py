@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
+from aime.countries import outside_reason
 from aime.knowledge.geo import STATES, parse_location
 from aime.knowledge.industries import INDUSTRIES
 from aime.knowledge.services import service_name
@@ -59,6 +60,8 @@ class LeadFacts:
     contact_title: str | None = None
     page_names_it: bool = True  # the homepage title we keep names the company; False: only its domain spells the name
     now: datetime | None = None
+    # The enabled target countries (aime.countries.target_countries); before Option B always the US alone.
+    target_countries: tuple[str, ...] = ("US",)
 
 
 @dataclass
@@ -201,6 +204,9 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
         reasons.append(f"+{US_STATED_POINTS} fit: US presence stated, state unknown")
     elif f.country == "US":
         reasons.append("+0 fit: nothing it says places it in the US")
+    elif f.country in f.target_countries:  # another enabled country (legal review recorded): its record names the country
+        fit += US_STATED_POINTS
+        reasons.append(f"+{US_STATED_POINTS} fit: located in target country {f.country} (its source names the country)")
     if f.has_website:
         if f.website_status in ("verified", "redirected"):
             fit += 5
@@ -310,8 +316,8 @@ def score_lead(f: LeadFacts, thresholds: dict | None = None) -> ScoreResult:
 
     total = max(0, min(100, fit + need + intent + data))
     disqualify = None
-    if f.country != "US":
-        disqualify = "Outside US target market"
+    if f.country not in f.target_countries:
+        disqualify = outside_reason(f.target_countries)
     elif f.is_competitor:
         disqualify = "Company appears to sell software or AI work to clients (possible competitor)"
     elif f.suppressed or f.contact_consent == "opted_out":

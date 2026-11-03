@@ -201,6 +201,9 @@ def create_context(settings: Settings | None = None, http_transport: httpx.BaseT
     with db.session() as s:  # the Super Admin's sales settings, laid over config/business.toml
         from aime import admin_settings
         admin_settings.load(s, settings)
+    with db.session() as s:  # then the saved settings versions (countries, sources, schedules ...: aime.settings_store)
+        from aime import settings_store
+        settings_store.load(s, settings)
     return AppContext(settings=settings, db=db, http_transport=http_transport)
 
 

@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from aime.catalogue import keep_enabled
+from aime.countries import target_countries
 from aime.agents.base import BaseAgent
 from aime.crm_ops import is_suppressed, log_activity
 from aime.db import kv_get, kv_set
@@ -102,7 +104,9 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
 
     def execute(self, inp: QualifyInput, session: Session) -> QualifyOutput:
         now = utcnow()
-        targets = list(self.settings.section("targeting").get("industries", []))
+        # a catalogue entry a Super Admin disabled is no longer a target (aime.catalogue); nothing else changes
+        targets = keep_enabled(self.settings, "industries", list(self.settings.section("targeting").get("industries", [])))
+        countries = tuple(target_countries(self.settings))
         thresholds = self.settings.section("qualification")
         stmt = select(Lead).where(Lead.status.in_(("new", "qualified", "nurture")))
         if inp.lead_ids:
@@ -155,6 +159,7 @@ class LeadQualificationAgent(BaseAgent[QualifyInput, QualifyOutput]):
                 contact_title=contact.title if contact else None,
                 page_names_it=name_matches(company.name, company.website_title),
                 now=now,
+                target_countries=countries,
             )
             result = score_lead(facts, thresholds)
             prev_status = lead.status

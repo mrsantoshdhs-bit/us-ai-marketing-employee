@@ -76,7 +76,10 @@ def load_job_specs(settings: Settings) -> list[JobSpec]:
             weekdays = tuple(sorted(WEEKDAYS.index(n[:3].title()) for n in names))
         if not daily and not every:
             continue
-        specs.append(JobSpec(name, every, daily, jc.get("description", ""), bool(jc.get("enabled", True)), weekdays))
+        # Settings › Automation schedules writes `enabled` (and the cadence) over config/schedule.toml (aime.settings_store);
+        # the health monitor and the database backup run whatever is set
+        enabled = bool(jc.get("enabled", True)) or name in automation.ALWAYS_RUN_JOBS
+        specs.append(JobSpec(name, every, daily, jc.get("description", ""), enabled, weekdays))
     return specs
 
 
@@ -106,8 +109,15 @@ def _recorded(stamp: datetime | None, now: datetime) -> datetime | None:
     return stamp if stamp is not None and stamp <= now + CLOCK_SKEW else None
 
 
+def switched_off(spec: JobSpec, state: JobState | None) -> bool:
+    """Off in its schedule or in job_state (Settings › Automation schedules writes both). Never the always-on jobs."""
+    if spec.name in automation.ALWAYS_RUN_JOBS:
+        return False
+    return not spec.enabled or (state is not None and not state.enabled)
+
+
 def is_due(spec: JobSpec, state: JobState | None, now: datetime, tz, tick_minutes: int = 15) -> tuple[bool, str]:
-    if not spec.enabled or (state is not None and not state.enabled):
+    if switched_off(spec, state):
         return False, "disabled"
     last_attempt = _recorded(state.last_attempt_at, now) if state else None
     last_success = _recorded(state.last_success_at, now) if state else None
@@ -138,7 +148,7 @@ def is_due(spec: JobSpec, state: JobState | None, now: datetime, tz, tick_minute
 def next_run(spec: JobSpec, state: JobState | None, now: datetime, tz) -> datetime | None:
     """When the scheduler will next run this job (naive UTC), read from the same rules as `is_due`: a time at or
     before `now` means it runs at the next check-in. None when the job is disabled."""
-    if not spec.enabled or (state is not None and not state.enabled):
+    if switched_off(spec, state):
         return None
     last_attempt = _recorded(state.last_attempt_at, now) if state else None
     last_success = _recorded(state.last_success_at, now) if state else None

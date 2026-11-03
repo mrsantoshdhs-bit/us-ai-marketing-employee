@@ -31,5 +31,5 @@
   <button style="grid-column:1/-1">Save settings</button>
 </form>
 <form method="post" action="/admin/settings/reset"><button class="secondary">Reset to the defaults in config/business.toml</button></form>
-<p class="small muted">Every change is in the <a href="/audit">audit log</a> with the old and new value. Only Super Admin accounts see this page.</p>
+<p class="small muted">Every change is in the <a href="/audit">audit log</a> with the old and new value, and kept as a version you can restore under <a href="/admin/settings/section/sales">Sales settings history</a>. Countries, daily targets, lead sources, schedules, the industries and services catalogue and the agent matrix are on <a href="/admin/settings/system">System settings</a>. Only Super Admin accounts see this page.</p>
 {% endblock %}
