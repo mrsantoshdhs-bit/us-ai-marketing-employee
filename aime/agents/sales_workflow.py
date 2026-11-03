@@ -23,7 +23,7 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from aime.agents.base import BaseAgent, RetryPolicy
-from aime import automation, send_journal
+from aime import automation, deliverability, send_journal
 from aime.agents.contracts import BlockedItem
 from aime.agents.qualification import LeadQualificationAgent
 from aime.calendar_slots import holiday_on
@@ -109,6 +109,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         super().__init__(ctx)
         self.sender = sender or EmailSender(ctx.settings)
         self.read_hold = None  # the followups job's: asked before each email, why it must wait for a new read of the mailbox
+        self.mail_account_id = None  # the Mailboxes-panel mailbox that sends (None: .env), recorded with each send
 
     def _use_primary_mailbox(self, session: Session) -> None:
         """A primary mailbox from the Super Admin panel sends instead of the .env mailbox. Every switch and
@@ -118,6 +119,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         a = mail_accounts.primary(session)
         if a is None:
             return
+        self.mail_account_id = a.id
         self.sender.settings = mail_accounts.settings_for(self.settings, a)
         if a.auth == "oauth":
             from aime.integrations import oauth
@@ -591,6 +593,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                                     "in the Automation Control Center")
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
             return
+        if self._deliverability_held(session, due, now, out):
+            return
         if hold:  # read first, send second: every kind waits, including replies, and no campaign approves anything
             held = session.execute(due).scalars().all()
             in_window = self._in_send_window(now, cfg)  # outside it nothing could leave anyway, whatever a read says
@@ -625,6 +629,18 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             self._send_locked(session, session.execute(due).scalars().all(), now, cfg, out)
         finally:
             lock.release()
+
+    def _deliverability_held(self, session: Session, due, now: datetime, out: SalesOutput) -> bool:
+        """A bounce or complaint pause, or the authentication gate in block mode (aime.deliverability): every approved email
+        stays approved and waits, and no campaign approves anything. Reading the mailbox and every other job go on."""
+        why = deliverability.sending_hold(session, self.settings, now)
+        if not why:
+            return False
+        for f in session.execute(due).scalars():
+            f.blocked_reason = why[:300]
+            out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+        session.commit()
+        return True
 
     def _sending_held(self, session: Session, due, now: datetime, out: SalesOutput) -> bool:
         """A restored or damaged database: nothing goes out, and no campaign approves anything, until a person has looked."""
@@ -689,6 +705,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         ready, reason = self.sender.status()
         in_window = self._in_send_window(now + (utcnow() - self.run_began), cfg)
         limits = self._outreach_limits(session, now, cfg)
+        guard = deliverability.SendGuard(session, self.settings, now, self.mail_account_id, self.sender.settings.smtp_from)
         replies_sent, replies_per_run = 0, int(cfg.get("replies_per_run", 10))
         sign_in_failed = unreachable = False
         try:
@@ -834,11 +851,21 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
                                     "(its limit); it goes out when the count drops")
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
                 continue
+            wait = guard.wait(session)  # a pause raised by a bounce earlier in this run; this mailbox's own caps
+            if wait:
+                f.blocked_reason = wait
+                out.blocked.append(BlockedItem(id=f.id, reason=wait))
+                continue
             limited_reply = f.kind != "outreach" and f.purpose not in automation.MEETING_NOTES
             if limited_reply and replies_sent >= replies_per_run:  # still approved: only its turn comes later
                 f.blocked_reason = (f"Waiting: at most {replies_per_run} replies leave in one run, so that they do not all go "
                                     "at once. Nothing is lost: it goes out on the next run")
                 out.blocked.append(BlockedItem(id=f.id, reason=f.blocked_reason))
+                continue
+            wait = guard.pace()  # spacing between emails, when it is on
+            if wait:
+                f.blocked_reason = wait
+                out.blocked.append(BlockedItem(id=f.id, reason=wait))
                 continue
             if test_auth is not None:  # counts against, and is checked again with, the authorization
                 f.authorization_id = test_auth.id
@@ -850,7 +877,8 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             # stored with it, so a reply to an email whose delivery was never confirmed still finds its thread.
             claimed = session.execute(update(FollowUp).where(FollowUp.id == f.id, FollowUp.status == "approved")
                                       .values(status="sending", send_started_at=utcnow(),
-                                              message_id=f.message_id or new_message_id(self.settings))).rowcount
+                                              message_id=f.message_id or new_message_id(self.settings),
+                                              mail_account_id=self.mail_account_id)).rowcount
             session.commit()
             if claimed != 1:
                 continue
@@ -903,6 +931,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             f.message_id = msg_id
             record_delivery(session, f, utcnow(), self.sender.recipient_for(f.to_email or contact.email)[0], self.name)
             limits["mailbox_sent"] += 1
+            guard.sent()
             replies_sent += limited_reply
             if f.kind == "outreach":
                 limits["sent_today"] += 1
