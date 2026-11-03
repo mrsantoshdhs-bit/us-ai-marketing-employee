@@ -47,6 +47,21 @@ def lead_with_the_deals(session: Session, lead: Lead) -> Lead:
     return lead
 
 
+MOVED_BY_MERGE = "Deal moved by a merge from lead #"  # _merge_lead's line on the deal: whose it was
+
+
+def came_with_the_merges(session: Session, lead: Lead, opp: Opportunity) -> bool:
+    """The deal was moved where it is by merges, from this lead or one it went on to: it is this lead's person's own. One merged by an older
+    build has no such line, and a person decides about it."""
+    chain, seen = {lead.id}, set()
+    while lead.status == "merged" and lead.id not in seen:
+        seen.add(lead.id)
+        lead = lead_that_went_on(session, lead)
+        chain.add(lead.id)
+    moved = session.execute(select(Activity.subject).where(Activity.opportunity_id == opp.id, Activity.subject.startswith(MOVED_BY_MERGE))).scalars()
+    return any((m := re.match(r"\d+", s[len(MOVED_BY_MERGE):])) and int(m[0]) in chain for s in moved)
+
+
 def leads_replying_into(session: Session, opp: Opportunity) -> list[int]:
     """lead_with_the_deals seen from a deal: its own lead and the merged leads whose replies reach it."""
     merged = session.execute(select(Lead).where(Lead.company_id == opp.company_id, Lead.status == "merged", Lead.id != opp.lead_id)).scalars().all()
@@ -200,8 +215,13 @@ def _host_and_parents(host: str) -> list[str]:
     return found
 
 
-def _entries_covering(email: str | None = None, domain: str | None = None):
-    """The do-not-contact entries that speak for this address or domain, lifted ones included."""
+def address_ref(address: str) -> str:
+    """How the audit log names a person's address: it stays traceable and leaves nothing to erase."""
+    return f"address #{hashlib.sha256(address.strip().lower().encode()).hexdigest()[:12]}"
+
+
+def _covering_values(email: str | None = None, domain: str | None = None) -> list[str]:
+    """The do-not-contact values, canonical, that speak for this address or domain."""
     values = []
     if email:
         values.append(canonical_address(email))
@@ -210,6 +230,12 @@ def _entries_covering(email: str | None = None, domain: str | None = None):
             values += [host.lower(), *_host_and_parents(host)]  # the spelling as written too: an entry may keep a stray dot
     if domain:
         values += [domain.lower(), *_host_and_parents(domain)]
+    return values
+
+
+def _entries_covering(email: str | None = None, domain: str | None = None):
+    """The do-not-contact entries that speak for this address or domain, lifted ones included."""
+    values = _covering_values(email, domain)
     return select(Suppression).where(canonical_sql(Suppression.value).in_(values)) if values else None
 
 
@@ -311,7 +337,7 @@ def _records_an_erasure(session: Session, row: Suppression) -> bool:
     """erase_person's reason on the entry, or, for an address that was on the list before it, its audit line."""
     if row.reason == ERASURE_REASON:
         return True
-    target = f"address #{hashlib.sha256(row.value.encode()).hexdigest()[:12]}"
+    target = address_ref(row.value)
     return session.execute(select(AuditEvent.id).where(AuditEvent.action == "person_erased", AuditEvent.target == target)).first() is not None
 
 
@@ -320,7 +346,7 @@ def lift_suppression(session: Session, suppression_or_value: Suppression | str, 
     who, when and why, so a build that does not read those keeps blocking. Contacts at this address, with or without a +tag as suppress()
     marks them, go back to neutral once no spelling of it is listed; a domain's contacts stay as they are, since any of them may have said no themselves. It drafts nothing, sends nothing and
     reopens nothing: the lead stays closed until a person reopens it (outreach.reopen_stopped). Who may do this is the route's job."""
-    from aime.automation import audit
+    from aime.automation import audit, return_to_person
 
     row = suppression_or_value
     if not isinstance(row, Suppression):
@@ -345,6 +371,15 @@ def lift_suppression(session: Session, suppression_or_value: Suppression | str, 
         if c.email_status == "bounced":
             c.email_status = "unchecked"  # the mail-server check reads it again before any gate counts it as usable
     audit(session, actor, "suppression_lifted", f"suppression #{row.id}", f"{row.kind}; it was: {row.reason}; why: {reason}")
+    # suppress() cancels by the contact's own address, so an email approved for another host of a listed company only waited behind the entry. That
+    # approval came before the no: a person looks again. It is not sent and not deleted. A reply is read by its address alone, as at the gate.
+    listed = canonical_address(row.value)
+    for f in session.execute(select(FollowUp).where(FollowUp.channel == "email", FollowUp.status == "approved")).scalars().all():
+        recipient = f.to_email or (f.contact.email if f.contact else None)
+        if listed in _covering_values(recipient, f.lead.company.domain if f.kind == "outreach" and f.lead else None):
+            return_to_person(f, "it was approved before a do-not-contact entry that covered it, and that entry was lifted")
+            log_activity(session, f"Follow-up #{f.id} went back to a person: it was approved before a do-not-contact entry that was lifted", actor,
+                         type_="followup", company_id=f.company_id, lead_id=f.lead_id)
     for company_id in {c.company_id for c in contacts} or {None}:
         log_activity(session, f"Do-not-contact entry lifted by {actor}: {row.value}. Nothing goes out by itself: a closed lead stays closed, and a lead never closed may get a new draft on the next run, which a person still approves",
                      actor, body=reason, company_id=company_id)
@@ -385,19 +420,28 @@ def erase_person(session: Session, email: str, actor: str) -> dict[str, int]:
     suppress(session, email, "Erased on the person's request")
     counts = {"contacts": 0, "inquiries": 0, "emails_received": 0, "emails_to_them": 0, "activity_lines": 0}
     names: set[str] = set()
+
+    def erase_email(f: FollowUp) -> None:
+        if f.status in ("pending", "awaiting_approval", "approved"):
+            f.status, f.blocked_reason = "cancelled", "Contact erased on request"
+        f.subject, f.body, f.to_email, f.evidence = ERASED, ERASED, None, None
+        counts["emails_to_them"] += 1
+
+    def scrub(text: str | None) -> str | None:
+        return re.sub(re.escape(email), "[erased]", text, flags=re.I) if text else text
+
     for c in session.execute(select(Contact).where(Contact.email == email)).scalars().all():
         names |= {n for n in (c.first_name, c.last_name) if n and len(n) > 2}
         if c.first_name or c.last_name:  # the name goes, and the company's pages still print it: the next re-read must know
             c.erased_name_hash = name_hash(f"{c.first_name or ''} {c.last_name or ''}")
         for f in session.execute(select(FollowUp).where(FollowUp.contact_id == c.id)).scalars():
-            if f.status in ("pending", "awaiting_approval", "approved"):
-                f.status, f.blocked_reason = "cancelled", "Contact erased on request"
-            f.subject, f.body, f.to_email, f.evidence = ERASED, ERASED, None, None
-            counts["emails_to_them"] += 1
+            erase_email(f)
         c.first_name = c.last_name = c.phone = c.title = c.evidence = c.evidence_url = None
         c.email, c.email_source_url, c.email_evidence = None, None, None
         c.consent_status, c.consent_source = "opted_out", ERASED
         counts["contacts"] += 1
+    for f in session.execute(select(FollowUp).where(func.lower(FollowUp.to_email) == email)).scalars():  # a reply draft may link no contact
+        erase_email(f)
     for inq in session.execute(select(InboundInquiry)).scalars():
         if str((inq.payload or {}).get("email") or "").strip().lower() == email:
             inq.payload = {"erased": True}
@@ -412,11 +456,17 @@ def erase_person(session: Session, email: str, actor: str) -> dict[str, int]:
         counts["emails_received"] += 1
     for a in session.execute(select(Activity).where(or_(Activity.subject.contains(email),
                                                         Activity.body.contains(email)))).scalars():
-        for text in (email, *names):
+        a.subject, a.body = scrub(a.subject), scrub(a.body)
+        for text in names:
             a.subject = a.subject.replace(text, "[erased]")
             a.body = a.body.replace(text, "[erased]") if a.body else a.body
         counts["activity_lines"] += 1
-    audit(session, actor, "person_erased", f"address #{hashlib.sha256(email.encode()).hexdigest()[:12]}",
+    # What a person typed about them, and older audit lines: the entry itself stays, only their address leaves the words.
+    for entry in session.execute(select(Suppression).where(or_(Suppression.lift_reason.contains(email), Suppression.reason.contains(email)))).scalars():
+        entry.lift_reason, entry.reason = scrub(entry.lift_reason), scrub(entry.reason)
+    for event in session.execute(select(AuditEvent).where(or_(AuditEvent.detail.contains(email), AuditEvent.target.contains(email)))).scalars():
+        event.detail, event.target = scrub(event.detail), scrub(event.target)
+    audit(session, actor, "person_erased", address_ref(email),
           ", ".join(f"{k} {v}" for k, v in counts.items()))
     return counts
 
@@ -481,6 +531,8 @@ def _merge_lead(session: Session, gone: Lead, survivor: Lead) -> None:
     if not theirs or (set(theirs) <= set(CLOSED) and any(x.stage not in CLOSED for x in deals)):
         for opp in deals:
             opp.lead_id = survivor.id
+            log_activity(session, f"{MOVED_BY_MERGE}{gone.id} to lead #{survivor.id}", "company merge", type_="merge",
+                         company_id=opp.company_id, lead_id=survivor.id, opportunity_id=opp.id)
 
 
 def _carry_competitor_word(session: Session, keeper: Company, dup: Company, keeper_domain: str | None, actor: str) -> None:
@@ -515,6 +567,23 @@ def _carry_competitor_word(session: Session, keeper: Company, dup: Company, keep
                      "company merge", type_="data_quality", company_id=keeper.id)
 
 
+def _first_emails_back_to_a_person(session: Session, keeper: Company, dup: Company, keeper_leads: list[Lead], dup_leads: list[Lead], actor: str) -> None:
+    """Two records become one company and one of them was already emailed: an open first email on the other would be a second first email
+    to that company, even at another address. It goes back to a person, with the reason, and is not deleted. Not after a dead address, as nobody got that email."""
+    from aime.automation import return_to_person
+
+    for still_open, other in ((keeper_leads, dup_leads), (dup_leads, keeper_leads)):
+        emailed = next((x for x in other if x.outreach_status != "bounced" and _was_worked(session, x)), None)
+        if emailed is None:
+            continue
+        for f in session.execute(select(FollowUp).where(FollowUp.lead_id.in_([x.id for x in still_open]), FollowUp.channel == "email", FollowUp.kind == "outreach",
+                                                        FollowUp.step == 1, FollowUp.status.in_(("awaiting_approval", "approved")))).scalars().all():
+            return_to_person(f, f"this company was merged with a record already emailed on lead {emailed.id}")
+            session.add(Alert(level="warning", source=actor[:60], message=(
+                f"{keeper.name} (#{keeper.id}), after merging duplicate #{dup.id}: first email #{f.id} on lead {f.lead_id} went back to a person, "
+                f"because lead {emailed.id} of this company was already emailed. Please decide.")[:500]))
+
+
 def merge_companies(session: Session, keeper: Company, dup: Company, actor: str) -> None:
     """Move everything from dup into keeper and mark dup as merged (no hard deletes)."""
     keeper_domain = keeper.domain
@@ -530,6 +599,8 @@ def merge_companies(session: Session, keeper: Company, dup: Company, actor: str)
     keeper_research = session.execute(select(Lead).where(
         Lead.company_id == keeper.id, Lead.source == "research", Lead.status.in_(OPEN_LEAD_STATUSES))).scalars().first()
     dup_leads = session.execute(select(Lead).where(Lead.company_id == dup.id)).scalars().all()
+    keeper_leads = session.execute(select(Lead).where(Lead.company_id == keeper.id)).scalars().all()
+    _first_emails_back_to_a_person(session, keeper, dup, keeper_leads, dup_leads, actor)
     if keeper_research is not None and not dup.is_competitor and _untouched(session, keeper_research) and not _reads_as_a_seller(session, keeper):
         # The lead someone was already emailed on goes on: the untouched one would write them a second first email. Not a lead
         # whose address is dead, as nobody got that email and the keeper's contact may be alive, and not over a keeper the next

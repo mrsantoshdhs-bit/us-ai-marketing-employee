@@ -95,7 +95,7 @@ def test_sales_performance_has_ten_real_series_and_honest_empty_views(make_ctx):
     names = [name for v in view["performance"] for name, _, _ in v["series"]]
     assert names == ["Companies discovered", "Leads generated", "Usable contacts", "Outreach drafts created",
                      "Emails sent", "Follow-ups completed", "Replies received", "Positive replies", "Meetings booked",
-                     "Qualified opportunities"]
+                     "Opportunities opened"]
     totals = {name: total for v in view["performance"] for name, total, _ in v["series"]}
     assert totals["Outreach drafts created"] == drafts_made >= 1 and totals["Emails sent"] == 0
     by_key = {v["key"]: v for v in view["performance"]}

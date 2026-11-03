@@ -88,11 +88,9 @@ def bar_list(rows: list[tuple[str, float, str | None]], title: str, empty_text: 
     return Markup("").join(parts)
 
 
-def daily_counts(dates: list[datetime | date | None], days: int, today: date | None = None, tz: tzinfo | None = None,
-                 keep_oldest: bool = False) -> list[int]:
+def daily_counts(dates: list[datetime | date | None], days: int, today: date | None = None, tz: tzinfo | None = None) -> list[int]:
     """Counts per day over the last `days` days, oldest first (today last). Tz: the zone whose days these are (times are
-    naive UTC). Keep_oldest: the dates are a rolling period already, which starts during the day before the first bar;
-    that part counts in the first bar, so the chart's total is the period's total."""
+    naive UTC)."""
     today = today or utcnow().date()
     start = today - timedelta(days=days - 1)
     counts = [0] * days
@@ -102,8 +100,6 @@ def daily_counts(dates: list[datetime | date | None], days: int, today: date | N
         if isinstance(d, datetime):
             d = (as_aware_utc(d).astimezone(tz) if tz else d).date()
         i = (d - start).days
-        if keep_oldest:
-            i = max(i, 0)
         if 0 <= i < days:
             counts[i] += 1
     return counts

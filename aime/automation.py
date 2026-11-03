@@ -78,6 +78,11 @@ def get_mode(session: Session) -> str:
     return mode if mode in MODES else DEFAULT_MODE
 
 
+def effective_mode(settings, session: Session) -> str:
+    """The mode that really decides: with the human-approval switch on every email needs a person, whatever mode is chosen."""
+    return "approval" if settings.require_human_approval else get_mode(session)
+
+
 def get_state(session: Session) -> str:
     state = kv_get(session, "automation.state")
     return state if state in STATES else "running"
