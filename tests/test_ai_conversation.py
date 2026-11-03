@@ -411,3 +411,11 @@ def test_a_later_step_refers_to_what_they_said_only_in_drafts_mode_and_under_the
         assert (f"Last time you mentioned: \"{quote}\"" in f.body) is expect
         assert (f.generator == cv.CONTEXT_GENERATOR) is expect
         assert "$5k" not in f.body
+
+
+def test_the_context_gives_the_conversation_engine_no_model_with_the_template_provider_or_a_refused_one(make_ctx):
+    ctx = make_ctx()  # LLM_PROVIDER=template in tests
+    assert ctx.conversation_llm is None
+    ctx.settings.ollama_url = "http://models.elsewhere.example:11434"  # prospect text would leave this PC
+    ctx.settings.llm_provider = "auto"
+    assert ctx.conversation_llm is None

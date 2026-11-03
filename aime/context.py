@@ -8,7 +8,7 @@ import socket
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import httpcore
 import httpx
@@ -109,6 +109,7 @@ class AppContext:
     http_transport: httpx.BaseTransport | None = None
     _llm: "LLMProvider | None" = field(default=None, repr=False)
     _llm_checked: bool = field(default=False, repr=False)
+    _conversation_llm: Any = field(default=None, repr=False)  # set explicitly (tests, or a caller that chose a model)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def http(self, public_only: bool = False, **kwargs) -> httpx.Client:
@@ -144,6 +145,29 @@ class AppContext:
         with self._lock:
             self._llm = None
             self._llm_checked = False
+
+    @property
+    def conversation_llm(self) -> "LLMProvider | None":
+        """The model the AI conversation engine may use (aime.llm.router, task "conversation"), or None: then the rules
+        carry the conversation alone. A refused provider (a paid one, or a model server that is not this PC) and one
+        that does not answer are both None, never an error that could stop the inbox."""
+        if self._conversation_llm is not None:
+            return self._conversation_llm
+        from aime.llm.base import ProviderRefused
+        from aime.llm.router import ModelRouter
+
+        try:
+            provider = ModelRouter(self.settings, transport=self.http_transport).provider_for("conversation")
+            return provider if provider is not None and provider.available() else None
+        except ProviderRefused as exc:
+            logging.getLogger(__name__).warning("Conversation model not used: %s", exc)
+            return None
+        except Exception:  # noqa: BLE001 -- no model is a safe answer
+            return None
+
+    @conversation_llm.setter
+    def conversation_llm(self, provider) -> None:
+        self._conversation_llm = provider
 
 
 class DataRoleMismatch(RuntimeError):
