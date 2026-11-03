@@ -253,12 +253,17 @@ APPROVALS = re.compile(r"/(followups/\d+/(approve|reconfirm|mark_sent|requeue)|c
 def required(method: str, path: str) -> str | None:
     """The permission a request needs, written out from the rules documented in aime/web/auth.py (lines 176-182) and
     aime/permissions.py, independently of the code that enforces them. None: anyone signed in."""
-    if path.startswith(("/admin/mailboxes", "/api/mailboxes", "/admin/settings", "/integrations/linkedin-leads")):
+    if path.startswith(("/admin/mailboxes", "/api/mailboxes", "/admin/settings", "/integrations/linkedin-leads", "/admin/reporting",
+                        "/handovers/notify")):
         return "configure_system"
     if path.startswith(("/admin/users", "/admin/teams", "/admin/roles")):
         return "manage_users"
     if path.startswith(("/integrations/linkedin/connect", "/integrations/linkedin/callback", "/integrations/oauth/")):
         return "admin_ops"
+    if method == "GET" and (path in ("/sales-manager", "/handovers") or path.startswith("/sales-manager/")):
+        return "rank:sales_manager"  # Option B: the Sales Manager's dashboard, its stored reports and the handovers list
+    if method == "GET" and path == "/deliverability":
+        return "view_all|approve_outbound|configure_system"
     if method == "GET":
         if path in ORG_PAGES or any(path == p or path.startswith(p + "/") for p in ORG_PREFIXES):
             return "view_all"
@@ -278,7 +283,17 @@ def required(method: str, path: str) -> str | None:
 
 
 def may(role: str, needed: str | None) -> bool:
-    return needed is None or set(needed.split("+")) <= effective(BUILTIN_ROLES[role]["permissions"])
+    """`a+b`: both; `a|b`: either; `rank:<role>`: a built-in role ranked at least that one."""
+    if needed is None:
+        return True
+    held = effective(BUILTIN_ROLES[role]["permissions"])
+    for token in needed.split("+"):
+        if token.startswith("rank:"):
+            if BUILTIN_ROLES[role]["rank"] < BUILTIN_ROLES[token[5:]]["rank"]:
+                return False
+        elif not set(token.split("|")) & held:
+            return False
+    return True
 
 
 PUBLIC = {("GET", "/login"), ("POST", "/login"), ("GET", "/setup"), ("POST", "/setup"), ("POST", "/api/inbound")}
@@ -341,7 +356,8 @@ def test_ok_every_route_with_an_id_is_classified_for_record_isolation(world):
                              "/meetings/requests/{"),
                   "company": ("/companies/{",),
                   "shared, no owner": ("/content/{", "/assets/{", "/campaigns/{", "/alerts/{", "/agents/", "/command-center/agents/",
-                                       "/jobs/", "/reports/{", "/automation/", "/admin/", "/api/mailboxes/", "/integrations/", "/suppressions/{")}
+                                       "/jobs/", "/reports/{", "/automation/", "/admin/", "/api/mailboxes/", "/integrations/", "/suppressions/{",
+                                       "/sales-manager/reports/{")}
     unknown = [t for _, t in endpoints(app) if "{" in t and not any(t.startswith(v) for vs in classified.values() for v in vs)]
     assert not unknown, unknown
 

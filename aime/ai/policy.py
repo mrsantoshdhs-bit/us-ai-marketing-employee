@@ -38,7 +38,7 @@ from pydantic import BaseModel, ValidationError
 from aime.ai import claims as claims_mod
 from aime.ai import state as state_mod
 from aime.ai.escalation import Escalation
-from aime.ai.guard import INJECTION, Floor
+from aime.ai.guard import INJECTION, Floor, hidden_characters, plain
 from aime.ai.schemas import EXTERNAL_KINDS, INTERNAL_KINDS, KINDS, PROPOSAL, FieldUpdate, MeetingOffer, proposal_text
 from aime.automation import SENSITIVE
 
@@ -246,10 +246,17 @@ def evaluate(raw: dict | BaseModel, pctx: PolicyContext) -> PolicyDecision:
         return block(f"the field {p.field!r} is not one the AI may propose (status, owner, consent and contact details are "
                      "a person's or the rules')", "field")
 
-    # 4. prices, contracts, guarantees, legal; prohibited topics
+    # 4. prices, contracts, guarantees, legal; prohibited topics. Read as a person reads it: a draft with characters the
+    # approver cannot see is blocked outright, and look-alike letters hide no word from the checks.
+    seen = plain(text)
     if external:
-        sensitive = SENSITIVE.search(text)
-        topics = _prohibited_topics(text, pctx.topics or {})
+        hidden = hidden_characters(text)
+        if hidden:
+            return block(f"contains characters a reader cannot see ({', '.join(hidden[:3])}): a person writes this answer",
+                         "hidden_characters")
+        checks["hidden_characters"] = "pass"
+        sensitive = SENSITIVE.search(seen)
+        topics = _prohibited_topics(seen, pctx.topics or {})
         if sensitive or topics:
             words = ([f'"{sensitive.group(0)}"'] if sensitive else []) + topics
             return block("mentions " + ", ".join(words[:3]) + ": prices, discounts, contracts, guarantees and legal matters "
@@ -258,7 +265,7 @@ def evaluate(raw: dict | BaseModel, pctx: PolicyContext) -> PolicyDecision:
 
     # 7. prompt injection: a proposal that repeats injected words; an external proposal answering a text that tries to
     # instruct the AI (whatever the draft says, a person writes that answer)
-    echoed = INJECTION.search(text)
+    echoed = INJECTION.search(seen)
     if echoed:
         return block(f'the proposal repeats an instruction-like phrase ("{echoed.group(0)[:60]}")', "injection")
     if pctx.injection and external:

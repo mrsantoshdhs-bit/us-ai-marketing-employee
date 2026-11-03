@@ -207,7 +207,9 @@ ADMIN_ONLY_PREFIXES = ("/jobs/", "/agents/", "/integrations/linkedin/connect", "
 
 
 # Mailbox configuration (servers, passwords, which mailbox sends): `configure_system` (Super Admin), viewing too.
-SUPER_ADMIN_PREFIXES = ("/admin/mailboxes", "/api/mailboxes", "/admin/settings", "/integrations/linkedin-leads")
+# The Sales Manager report's recipients and authorization, and the handover notification's (Option B): the same.
+SUPER_ADMIN_PREFIXES = ("/admin/mailboxes", "/api/mailboxes", "/admin/settings", "/integrations/linkedin-leads",
+                        "/admin/reporting", "/handovers/notify")
 # The sales organisation: accounts, teams, custom roles: `manage_users`, viewing too.
 TEAM_ADMIN_PREFIXES = ("/admin/users", "/admin/teams", "/admin/roles")
 
