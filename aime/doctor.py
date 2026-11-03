@@ -46,6 +46,9 @@ def run_checks(ctx: AppContext) -> list[dict]:
         _record_checks(ctx, add)
         _setup_checks(ctx, add)
         _discovery_check(ctx, add)
+        from aime.deliverability import doctor_checks
+
+        doctor_checks(ctx, add)  # the bounce/complaint pause and the SPF/DKIM/DMARC gate, from what is kept: no look-up
     except DatabaseError as exc:  # a damaged file: say so, and still report what needs no database
         add("Database readable", False, f"Records cannot be read, so their checks did not run: {redact(str(exc.orig))[:200]}. "
             f"{restore_advice(ctx.settings)}")
