@@ -11,7 +11,7 @@ import hashlib
 from dataclasses import dataclass
 from importlib import import_module
 
-TEMPLATES = ("reply_analysis", "reply_draft", "conversation")
+TEMPLATES = ("reply_analysis", "reply_draft", "conversation", "fact_extraction", "draft_polish")
 
 
 @dataclass(frozen=True)

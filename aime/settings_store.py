@@ -399,6 +399,29 @@ class RetentionSection(Strict):
         return v
 
 
+class ConversationSection(Strict):
+    """The AI conversation engine (aime.ai.conversation), Option B Phase 3. Off by default, and every message to a
+    prospect still waits for a person's approval in every mode:
+
+    - mode: off (nothing runs), shadow (the engine records the conversation, its facts with their evidence, the state,
+      the next step it would take and the draft it would write, in the AI decision log; no draft, alert or email
+      changes), drafts (the same, and a policy-approved draft may replace the template's suggested answer, still
+      waiting for approval);
+    - pricing_disclosure: never (no price is stated: the draft offers a call with the Sales Manager) or owner_statement
+      (the owner's own sentence below; it still passes the policy engine, which blocks any price, number or discount);
+    - at most two questions an email, and the model only when one is configured, within a per-run budget."""
+
+    mode: Literal["off", "shadow", "drafts"] = "off"
+    pricing_disclosure: Literal["never", "owner_statement"] = "never"
+    pricing_statement: str = Field(default="", max_length=300)
+    max_questions_per_email: int = Field(default=2, ge=1, le=2)
+    model_extraction: bool = True  # facts the model reads, on top of the rules', when a model is configured
+    model_polish: bool = False  # the model may reword a draft; the policy engine checks the result again
+    model_calls_per_run: int = Field(default=3, ge=0, le=20)
+    approved_languages: list[str] = Field(default_factory=lambda: ["en"], max_length=10)  # drafts only in these
+    escalation_alerts_in_shadow: bool = False
+
+
 class SalesOverrides(BaseModel):
     """The sales settings' overrides as aime.admin_settings stores them; that module validates each field."""
 
@@ -557,6 +580,10 @@ for _spec in (
                 "The AI provider and spending cap for the AI core (LLM_PROVIDER in .env still decides today)."),
     SectionSpec("retention", "Retention", RetentionSection, lambda s: RetentionSection().model_dump(mode="json"),
                 "How long records are kept (0 keeps everything). Nothing is deleted by these yet."),
+    SectionSpec("conversation", "AI conversations", ConversationSection, lambda s: ConversationSection().model_dump(mode="json"),
+                "The AI conversation engine: off, shadow (records only) or drafts (a checked draft may replace the "
+                "template's suggested answer). Every email still needs a person's approval. The objection playbook and "
+                "approved claims are on /admin/settings/conversation."),
     SectionSpec("sales", "Sales settings", SalesOverrides, lambda s: {"overrides": {}},
                 "The overrides saved on the Sales settings page, over config/business.toml.", editable=False),
 ):
