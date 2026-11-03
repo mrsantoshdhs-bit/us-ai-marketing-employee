@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Deliverability · AI Sales Employee{% endblock %}
+{% block content %}
+{%- macro pct(x, digits=1) -%}{{ ('%.' ~ digits ~ 'f') | format(x * 100) }}%{%- endmacro -%}
+<div class="page-head">
+  <div>
+    <h1>Deliverability</h1>
+    <p class="subtitle">Bounce and complaint rates, the sending domain's SPF, DKIM and DMARC, and each mailbox's caps. These rules only ever hold an email back or lower a cap: the send limits themselves are unchanged. Every pause and clear is in the <a href="/audit">audit log</a>.</p>
+  </div>
+  <div class="head-actions">
+    {% if pause %}<span class="chip bad"><span class="dot"></span>Outbound paused</span>
+    {% else %}<span class="chip ok"><span class="dot"></span>Not paused</span>{% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h3>Outbound pause</h3><span class="meta">automatic on {{ 'on' if cfg.auto_pause else 'off' }}; only an administrator clears it</span></div>
+  {% if pause %}
+    <div class="send-check bad"><b>Paused since {{ pause.since[:16]|replace('T', ' ') }} UTC</b>
+      <span>{{ pause.reason }}</span>
+      <span>Approved emails stay approved and wait. Reading the mailbox, monitoring, research and drafting go on.</span></div>
+    {% if may_clear %}
+    <form method="post" action="/deliverability/clear" class="row-actions" style="margin-top:10px">
+      <label>What was checked <input name="note" maxlength="300" placeholder="e.g. bad list removed, addresses verified"></label>
+      <button class="danger">Clear the pause</button>
+    </form>
+    {% else %}<p class="small muted">Ask an administrator to clear it once the cause is found.</p>{% endif %}
+  {% else %}
+    <div class="small">Not paused.{% if cleared %} Last cleared {{ cleared.at[:16]|replace('T', ' ') }} UTC by {{ cleared.by }}{% if cleared.note %} ({{ cleared.note }}){% endif %}: the rates count from then.{% endif %}</div>
+  {% endif %}
+  <p class="small muted" style="margin:10px 0 0">Pauses when, over {{ cfg.bounce_window_days }} days, at least {{ cfg.min_sends }} emails were attempted, at least {{ cfg.min_bounces }} bounced and the bounce rate reached {{ pct(cfg.bounce_rate_pause) }};
+    or when, over {{ cfg.complaint_window_days }} days, there were at least {{ cfg.min_complaints }} complaints and {{ pct(cfg.complaint_rate_pause, 2) }} or more of the emails attempted (at least {{ cfg.min_sends }} counted).
+    Overall: {{ overall.bounces }} bounced of {{ overall.sends }} ({{ pct(overall.bounce_rate) }}), {{ overall.complaints }} complaint(s) of {{ overall.complaint_sends }}.</p>
+</div>
+
+<div class="card">
+  <div class="card-head"><h3>Sending domain authentication</h3><span class="meta">gate: {{ cfg.auth_gate }}{% if cfg.auth_gate == 'warn' %} (alerts only){% elif cfg.auth_gate == 'block' %} (holds sending while it fails){% endif %}</span></div>
+  {% if cfg.auth_gate == 'off' %}<div class="small muted">The gate is off.</div>
+  {% elif not auth %}<div class="small">Not checked yet for {{ auth_domain or 'the sending domain' }}. The monitor job checks it once a day.</div>
+  {% else %}
+    <div class="small">{{ auth.domain or 'no domain' }}, checked {{ auth.checked_at[:16]|replace('T', ' ') }} UTC:
+      {% if auth_problem %}<span class="pill {{ 'bad' if cfg.auth_gate == 'block' else 'warn' }}">{{ auth_problem }}</span>{% else %}<span class="pill ok">SPF, DKIM and DMARC pass</span>{% endif %}</div>
+    {% if auth.checks %}<div class="table-wrap"><table>
+      <tr><th>Check</th><th>Result</th><th>Detail</th></tr>
+      {% for c in auth.checks %}<tr><td>{{ c.name }}</td><td><span class="pill {{ 'ok' if c.status == 'pass' else 'warn' if c.status == 'warn' else 'bad' if c.status == 'fail' else '' }}">{{ c.status }}</span></td><td class="small">{{ c.detail }}</td></tr>{% endfor %}
+    </table></div>{% endif %}
+  {% endif %}
+  {% if auth_hold %}<div class="send-check bad"><span>{{ auth_hold }}</span></div>{% endif %}
+  {% if may_clear and cfg.auth_gate != 'off' %}<form method="post" action="/deliverability/auth-check" class="row-actions" style="margin-top:10px"><button class="secondary">Check now</button></form>{% endif %}
+</div>
+
+<div class="card table-wrap">
+  <div class="card-head"><h3>Mailboxes</h3><span class="meta">all mailboxes together: {{ global_sent }} of {{ global_cap }} in 24 hours</span></div>
+  <table>
+    <tr><th>Mailbox</th><th>Sent 24 h</th><th>Cap</th><th>Last hour</th><th>Warm-up</th><th>Bounces ({{ cfg.bounce_window_days }} d)</th><th>Complaints ({{ cfg.complaint_window_days }} d)</th></tr>
+    {% for r in rows %}<tr>
+      <td><b>{{ r.label }}</b>{% if r.sending %} <span class="pill ok">sends</span>{% elif not r.active %} <span class="pill">disabled</span>{% endif %}<br><span class="small muted">{{ r.email or 'no address' }}</span></td>
+      <td>{{ r.sent_24h }}</td>
+      <td>{{ r.cap }}<br><span class="small muted">{{ r.cap_why }}</span></td>
+      <td>{{ r.sent_hour }}{% if cfg.hourly_cap %} of {{ cfg.hourly_cap }}{% endif %}</td>
+      <td class="small">{% if r.warmup %}day {{ r.warmup.day }}: {{ r.warmup.cap }} a day{% if r.warmup.complete %} (ramp complete){% endif %}<br><span class="muted">since {{ r.warmup.start }}</span>{% else %}<span class="muted">off</span>{% endif %}</td>
+      <td>{{ r.rates.bounces }} of {{ r.rates.sends }} ({{ pct(r.rates.bounce_rate) }}){% if r.rates.breach %}<br><span class="pill bad">over the line</span>{% endif %}</td>
+      <td>{{ r.rates.complaints }}</td>
+    </tr>{% else %}<tr><td colspan="7" class="muted">No sending mailbox is configured.</td></tr>{% endfor %}
+  </table>
+  <p class="small muted" style="margin:10px 0 0">Emails sent before mailboxes were recorded count for every mailbox's own cap. Per-mailbox caps and warm-up can only lower a cap.
+    Spacing between emails: {{ ('on, ' ~ cfg.jitter_min_seconds|int ~ '–' ~ cfg.jitter_max_seconds|int ~ ' s, at most ' ~ cfg.jitter_run_budget_seconds|int ~ ' s a run') if cfg.jitter_enabled else 'off' }}.
+    One-click unsubscribe (RFC 8058): {{ 'on, ' ~ cfg.one_click_unsubscribe_url if cfg.one_click_unsubscribe_url else 'off (mailto only)' }}.</p>
+</div>
+{% endblock %}

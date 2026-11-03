@@ -83,6 +83,7 @@ from aime.web.team_pages import assignment_history, next_email
 from aime.web.deal_pages import comma_problem
 from aime.web.team_pages import register as register_team_pages
 from aime.web.deal_pages import register as register_deal_pages
+from aime.web.deliverability_pages import register as register_deliverability_pages
 from aime.visibility import (EVERYTHING, ORG_PAGE_WORDS, can_see_lead, company_condition, contact_condition, lead_condition,
                              opportunity_condition, org_page, record_condition)
 from aime.web.auth import (COOKIE, LOGIN_LOCK, SESSION_SECONDS, AuthMiddleware, authenticate, current_username, form_id, make_cookie,
@@ -2662,6 +2663,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     register_team_pages(app, C, render, back, who)
     register_deal_pages(app, C, render, back, who)
+    register_deliverability_pages(app, C, render, back, who)
 
     @app.get("/api/leads")
     def api_leads(request: Request, status: str = "qualified", limit: int = 50):
