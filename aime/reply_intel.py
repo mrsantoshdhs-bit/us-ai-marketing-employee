@@ -1963,9 +1963,31 @@ def _hold_for_a_person(session: Session, row: InboundEmail, read: tuple | None, 
     session.commit()
 
 
-def process_pending(session: Session, settings, actor: str, llm=None) -> dict:
+def _conversation_turn(session: Session, settings, row: InboundEmail, llm, run: dict) -> None:
+    """The hand-off to the AI conversation engine (aime.ai.conversation), after the rules have acted on this email and
+    their outcome is committed. It only reads what they decided: what it records (the conversation, its facts, the
+    next step, a draft for a person to approve) can never undo an opt-out, a suppression or a stop. Off unless the
+    "conversation" settings section says shadow or drafts; a failure there is logged and rolled back, and the rules'
+    outcome stands."""
+    try:
+        from aime.ai import conversation
+
+        if conversation.mode(settings) == "off":
+            return
+        conversation.on_reply(session, settings, row, llm=llm, run=run)
+        session.commit()
+    except Exception:  # noqa: BLE001 -- the engine is an addition: the inbox carries on without it
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        log.exception("Reply %s: the conversation engine failed; the rules' outcome stands", getattr(row, "id", None))
+
+
+def process_pending(session: Session, settings, actor: str, llm=None, conversation_llm=None) -> dict:
     stats: dict[str, int] = {}
     ai_budget = AI_PER_RUN
+    conversation_run: dict = {}  # the conversation engine's model budget for this run
     for row in session.execute(select(InboundEmail).where(InboundEmail.status == "new").order_by(InboundEmail.id)).scalars().all():
         read = None
         try:
@@ -1998,5 +2020,7 @@ def process_pending(session: Session, settings, actor: str, llm=None) -> dict:
             session.commit()
         except Exception as exc:  # noqa: BLE001 -- one email must never stop the ones behind it, opt-outs included
             _hold_for_a_person(session, row, read, exc, actor)
+        else:
+            _conversation_turn(session, settings, row, conversation_llm, conversation_run)
         stats[row.category] = stats.get(row.category, 0) + 1
     return stats
