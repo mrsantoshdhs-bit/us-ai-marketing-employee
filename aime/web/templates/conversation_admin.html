@@ -1,0 +1,60 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}AI conversations · System settings · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+  <h1>{{ icon('sliders') }} AI conversations <span class="pill">Super Admin</span></h1>
+  <p class="subtitle">What the AI may say when it drafts an answer to a prospect: the objection playbook and the approved
+    claims. <a href="/admin/settings/system">All system settings</a></p>
+</div></div>
+
+<div class="card small">
+  Mode: <strong>{{ cfg.mode }}</strong>{% if cfg.mode == 'off' %} (nothing runs){% elif cfg.mode == 'shadow' %} (records the conversation, its facts and the draft it would write; no draft changes){% else %} (a checked draft may replace the template's suggested answer){% endif %}.
+  Pricing: <strong>{{ 'never state prices: offer a call with the Sales Manager' if cfg.pricing_disclosure == 'never' else 'the owner\'s statement' }}</strong>{% if cfg.pricing_disclosure == 'owner_statement' %} ("{{ cfg.pricing_statement }}", still checked by the policy engine, which blocks any price, number or discount){% endif %}.
+  At most {{ cfg.max_questions_per_email }} question{{ 's' if cfg.max_questions_per_email != 1 }} an email. Drafts only in: {{ cfg.approved_languages|join(', ') }}.
+  <a href="/admin/settings/section/conversation">Change the mode and the pricing rule</a> (versioned, with preview and restore).
+  <br>Approval: <span class="pill {{ 'ok' if require_approval else 'bad' }}">{{ 'every email needs a Sales Manager' if require_approval else 'REQUIRE_HUMAN_APPROVAL is off in .env, and AI drafts still need a person' }}</span>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Objection playbook</h2>
+  <p class="small muted">For each kind of objection: the points a draft may use, one per line, and what it may offer. An
+    objection that is switched off, or has no points, goes to a person. A point that names a price, a discount, a
+    contract, a guarantee, legal matters or a number is refused. Every draft is checked again before anyone sees it.</p>
+  <form method="post" action="/admin/settings/conversation/playbook">
+    <input type="hidden" name="playbook_form" value="1">
+    <table><tr><th>Objection</th><th>On</th><th>Response points (one per line)</th><th>May offer</th><th>Wording</th></tr>
+    {% for code, e in playbook.items() %}
+    <tr><td><b>{{ e.label }}</b><div class="small muted">{{ code }}</div></td>
+      <td><input type="checkbox" name="{{ code }}.enabled" value="yes" {{ 'checked' if e.enabled }}></td>
+      <td><textarea name="{{ code }}.points" rows="3" style="width:100%">{{ e.points|join('\n') }}</textarea></td>
+      <td class="small">{% for o in offers %}<label><input type="checkbox" name="{{ code }}.offer.{{ o }}" value="yes" {{ 'checked' if o in e.offers }}> {{ o|replace('_', ' ') }}</label><br>{% endfor %}</td>
+      <td class="small">{% if e.source == 'owner' %}saved by {{ e.approved_by }}{% if e.approved_at %}, {{ e.approved_at }}{% endif %}{% else %}<span class="pill warn">default, not yet approved</span>{% endif %}</td></tr>
+    {% endfor %}
+    </table>
+    <div class="row-actions" style="margin-top:8px"><button>Save the playbook</button></div>
+  </form>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Approved claims</h2>
+  <p class="small muted">A sentence a draft says about us must match one of these. The built-in ones name our services and
+    nothing more. Add your own, one per line, in your own words: no price, discount, contract term, guarantee or legal
+    matter.</p>
+  <ul class="small">{% for c in claims if c.source != 'owner' %}<li>{{ c.text }} <span class="muted">({{ c.source }})</span></li>{% endfor %}</ul>
+  <form method="post" action="/admin/settings/conversation/claims">
+    <input type="hidden" name="claims_form" value="1">
+    <label>The owner's claims (one per line)<textarea name="claims" rows="5" style="width:100%">{{ owner_claims }}</textarea></label>
+    <div class="row-actions" style="margin-top:8px"><button>Save the claims</button></div>
+  </form>
+  <p class="small muted">Never said in any draft: {% for code, t in topics.items() %}{{ t[0] }}{{ ', ' if not loop.last }}{% endfor %}.</p>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0">Open handover requests</h2>
+  <p class="small muted">Conversations the engine marked for the Sales Manager: prices, contracts, upset prospects, a request for a person, or anything it is unsure of.</p>
+  <table><tr><th>When</th><th>Lead</th><th>Why</th></tr>
+  {% for h in handovers %}<tr><td class="small">{{ h.at|local }}</td><td><a href="/leads/{{ h.lead_id }}">#{{ h.lead_id }}</a></td><td class="small">{{ h.reason }}{% for c in h.codes %} <span class="pill warn">{{ c|replace('_', ' ') }}</span>{% endfor %}</td></tr>
+  {% else %}<tr><td colspan="3" class="muted">None open.</td></tr>{% endfor %}
+  </table>
+</div>
+{% endblock %}

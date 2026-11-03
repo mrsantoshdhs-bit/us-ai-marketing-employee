@@ -251,6 +251,12 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             if line and len(first) == 3:
                 body = f"{first[0]}\n\n{line}\n\n{first[2]}"
                 generator = f"AI ({self.ctx.llm.label}) opening + template"
+        if step >= 2:  # mode drafts: the step refers to what they told us, in their words (aime.ai.conversation)
+            from aime.ai.conversation import CONTEXT_GENERATOR, followup_context, with_context
+
+            context = followup_context(session, self.settings, lead, step)
+            if context:
+                body, generator = with_context(body, context), CONTEXT_GENERATOR
         # Every draft waits for approval: a person's, or at send time an active campaign authorization (aime/automation.py).
         session.add(FollowUp(lead_id=lead.id, contact_id=lead.contact_id, company_id=lead.company_id,
                              channel="email", step=step, due_at=due, status="awaiting_approval",
@@ -327,13 +333,20 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         contact = lead.contact
         earlier = sent_earlier(session, lead.id, in_reply_to)
         subject, body = draft_outreach(self.settings, step, lead, contact, evidence, first_subject=earlier[0].subject if earlier else None)
+        generator = "template"
+        if step >= 2:  # mode drafts: the step refers to what they told us, in their words (aime.ai.conversation)
+            from aime.ai.conversation import CONTEXT_GENERATOR, followup_context, with_context
+
+            context = followup_context(session, self.settings, lead, step)
+            if context:
+                body, generator = with_context(body, context), CONTEXT_GENERATOR
         suppressed = is_suppressed(session, contact.email, lead.company.domain)
         qc = run_email_checks(subject, body, evidence_dicts, contact, suppressed, step=step, sent_subjects=[e.subject for e in earlier])
         # Every draft waits for approval: a person's, or at send time an active campaign authorization (aime/automation.py).
         session.add(FollowUp(lead_id=lead.id, contact_id=contact.id, company_id=lead.company_id, channel="email",
                              kind="outreach", step=step, due_at=due, status="awaiting_approval", subject=subject,
                              body=body, to_email=contact.email, evidence=evidence_dicts, quality={"qc": qc},
-                             in_reply_to=in_reply_to))
+                             in_reply_to=in_reply_to, generator=generator))
         out.outreach_drafts += 1
         log_activity(session, f"Drafted outreach email #{step} to {contact.email} (awaiting approval; checks "
                      f"{qc['status']})", self.name, type_="email_draft", company_id=lead.company_id, lead_id=lead.id)

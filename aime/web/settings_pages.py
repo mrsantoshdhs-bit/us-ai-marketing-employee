@@ -167,7 +167,7 @@ def register(app, C, render, back, who) -> None:
         data = ss.get(ctx.settings, name)
         view = {"section": name, "spec": spec, "data": data, "stored": ss.stored(ctx.settings, name),
                 "active_id": ss.active_version_id(ctx.settings, name), "history": ss.history(s, name),
-                "form_mark": FORM_MARK, "simple": simple_fields(data) if name in ("deliverability", "ai", "retention") else []}
+                "form_mark": FORM_MARK, "simple": simple_fields(data) if name in ("deliverability", "ai", "retention", "conversation") else []}
         if name == "countries":
             view["targets"] = countries.target_countries(ctx.settings)
             view["coverage"] = {c["code"]: countries.sources_for(ctx.settings, c["code"]) for c in data["countries"]}
@@ -237,7 +237,7 @@ def register(app, C, render, back, who) -> None:
                 view = section_view(s, ctx, name)
                 if result.ok:  # the page shows what was typed, not saved, beside what would change
                     view["data"] = ss.validate_shape(name, data)
-                    if name in ("deliverability", "ai", "retention"):
+                    if name in ("deliverability", "ai", "retention", "conversation"):
                         view["simple"] = simple_fields(view["data"])
                 return render(request, "settings_section.html", **view, preview=result)
             try:

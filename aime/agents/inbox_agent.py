@@ -454,7 +454,8 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
         remember_sent_subjects(session)
         session.info["sent_companies"] = _sent_companies(session)
         # What an earlier run stored and could not finish (it died on the email behind them) is handled first.
-        categories = process_pending(session, self.settings, self.name, llm=self.ctx.llm)
+        categories = process_pending(session, self.settings, self.name, llm=self.ctx.llm,
+                                     conversation_llm=getattr(self.ctx, "conversation_llm", None))
         forget_old_skipped_mail(session)
         session.commit()  # no database lock is held while the mailbox is read over the network
         sources = self._sources(session) if self.settings.network_enabled else []
@@ -477,7 +478,8 @@ class InboxAgent(BaseAgent[InboxInput, InboxOutput]):
                 session.rollback()
                 self.log.warning("Mailbox %s could not be read (%s)", name, type(exc).__name__)
                 failed.append(exc)
-        for category, count in process_pending(session, self.settings, self.name, llm=self.ctx.llm).items():
+        for category, count in process_pending(session, self.settings, self.name, llm=self.ctx.llm,
+                                                     conversation_llm=getattr(self.ctx, "conversation_llm", None)).items():
             categories[category] = categories.get(category, 0) + count
         out.categories = categories
         # An alert about an email in junk closes once a person has decided on it.

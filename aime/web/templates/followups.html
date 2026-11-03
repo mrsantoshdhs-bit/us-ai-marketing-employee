@@ -40,6 +40,17 @@
   {% if card.away %}<div class="small" style="margin-top:6px"><span class="pill warn">They replied that they are away</span></div>{% endif %}
   {% if card.emailed %}<div class="small" style="margin-top:6px"><span class="pill warn">This address was already emailed on {{ card.emailed.at|local(None, '%Y-%m-%d') }} (lead #{{ card.emailed.lead_id }})</span></div>{% endif %}
   {% if card.ai_seller %}<div class="small" style="margin-top:6px"><span class="pill warn">{{ card.ai_seller }}</span></div>{% endif %}
+  {% set ai = (ai_cards or {}).get(f.id) %}
+  {% if ai %}
+  <details class="small" open style="margin-top:8px" id="ai{{ f.id }}"><summary><b>Why the AI drafted this</b> <span class="pill">{{ ai.written_by }}</span> <span class="pill {{ 'warn' if ai.flags else 'ok' }}">policy: {{ ai.verdict|replace('_', ' ') }}</span></summary>
+    <div class="row-item">Next step: <b>{{ ai.action }}</b>. {{ ai.why }}</div>
+    {% if ai.flags %}<div class="row-item">Risk flags: {% for x in ai.flags %}<span class="pill warn">{{ x|replace('_', ' ') }}</span> {% endfor %}</div>{% endif %}
+    {% for r in ai.reasons %}<div class="row-item muted">{{ r }}</div>{% endfor %}
+    {% if ai.facts %}<div class="row-item"><b>Facts used</b>, in their own words:{% for x in ai.facts %}
+      <div>{{ x.kind|replace('_', ' ') }}: {{ x.value }} <span class="muted">(reply #{{ x.inbound_id }}{% if x.source == 'ai' %}, AI reading{% endif %}) "{{ x.quote }}"</span></div>{% endfor %}</div>{% endif %}
+    <div class="row-item muted">Nothing goes out until a Sales Manager approves it. The AI states no price, discount, guarantee or commitment, and says nothing about us that is not an approved claim.</div>
+  </details>
+  {% endif %}
   {% if later.get(f.id) %}
   <div class="flash" style="margin-top:8px"><b>They wrote again after this draft</b> <span class="small muted">{{ later[f.id].at|local }}</span>
     <div class="post small">{{ later[f.id].text }}</div>
