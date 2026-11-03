@@ -901,3 +901,34 @@ Index("ix_leads_contact_id", Lead.contact_id)
 Index("ix_companies_domain_lower", func.lower(Company.domain))
 Index("ix_inbound_emails_from_email_lower", func.lower(InboundEmail.from_email))
 Index("ix_opportunities_owner_stage", Opportunity.owner, Opportunity.stage)
+
+
+class AIDecision(Base):
+    """One AI proposal and what became of it (aime.ai.decisions): the model and prompt version that made it, the policy
+    verdict (auto_internal | human_review | block) with its reasons, and later a person's action on it. Text is
+    redacted (aime.redact) before it is stored. Shadow only in Phase 2: nothing here reached a customer."""
+
+    __tablename__ = "ai_decisions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    agent: Mapped[str] = mapped_column(String(60), index=True)
+    task: Mapped[str] = mapped_column(String(60))
+    prompt_version: Mapped[str | None] = mapped_column(String(80))
+    provider: Mapped[str] = mapped_column(String(30))  # ollama | template | none | fake ...
+    model: Mapped[str | None] = mapped_column(String(80))
+    lead_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    input_ref: Mapped[str | None] = mapped_column(String(120))  # e.g. inbound_email:12, eval:optout-3
+    proposal: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    kind: Mapped[str | None] = mapped_column(String(30))
+    verdict: Mapped[str] = mapped_column(String(20), index=True)
+    reasons: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    escalations: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    structured_ok: Mapped[bool | None] = mapped_column(Boolean)  # the model's answer was valid (None: no model asked)
+    error: Mapped[str | None] = mapped_column(String(300))
+    human_action: Mapped[str | None] = mapped_column(String(20))  # accepted | edited | rejected
+    human_actor: Mapped[str | None] = mapped_column(String(80))
+    human_at: Mapped[datetime | None] = mapped_column(DateTime)
+    edit_distance: Mapped[int | None] = mapped_column(Integer)
+    tokens: Mapped[int] = mapped_column(Integer, default=0)
+    ms: Mapped[int] = mapped_column(Integer, default=0)
