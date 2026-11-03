@@ -210,7 +210,20 @@ def check_health(session: Session, settings: Settings, llm_probe: Callable[[], b
             active.add(f"agent_rate:{row['agent']}")
             created += alert_once(session, "warning", "monitor", msg, settings, key=f"agent_rate:{row['agent']}")
     resolved = resolve_alerts(session, ("job_failing:", "job_stale:", "agent_rate:"), active)
+    issues += _deliverability(session, settings)
     return {"issues": issues, "alerts_created": created, "alerts_resolved": resolved}
+
+
+def _deliverability(session: Session, settings: Settings) -> list[str]:
+    """The daily SPF/DKIM/DMARC check and the bounce and complaint rates (aime.deliverability). Its own alerts; a failure
+    here is reported and never stops the rest of the health check."""
+    from aime import deliverability
+
+    try:
+        return deliverability.monitor(session, settings)["issues"]
+    except Exception as exc:  # noqa: BLE001 - the health check must finish whatever this part meets
+        logging.getLogger("aime.monitoring").warning("Deliverability check failed: %s", exc)
+        return [f"Deliverability check could not run ({type(exc).__name__})"]
 
 
 def heartbeat_path(settings: Settings) -> Path:

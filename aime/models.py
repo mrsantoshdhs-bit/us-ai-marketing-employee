@@ -315,6 +315,9 @@ class FollowUp(Timestamped, Base):
     # what an answer is for: booking_link | meeting_offer | meeting_confirmation | meeting_move | meeting_cancel |
     # meeting_reminder (aime.automation decides which may go out under a campaign)
     purpose: Mapped[str | None] = mapped_column(String(30))
+    # the Mailboxes-panel mailbox that sent it (aime.deliverability): empty for the .env mailbox and for every email sent
+    # before this was recorded, which then counts for every mailbox's own 24-hour cap
+    mail_account_id: Mapped[int | None] = mapped_column(Integer)
 
     lead: Mapped[Lead] = relationship()
     contact: Mapped[Contact | None] = relationship()

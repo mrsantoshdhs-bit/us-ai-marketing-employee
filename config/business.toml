@@ -158,3 +158,30 @@ holidays = ["new_years_day", "mlk_day", "presidents_day", "memorial_day", "junet
 draft_reminder_days = 2  # one reminder stays open while an email has waited this long for approval
 draft_fresh_days = 14  # after this it asks to be read again; an approval this old goes back to a person
 replies_per_run = 10  # approved replies that leave in one run, the rest on the next; notes about a booked meeting go first and are not counted
+
+# Deliverability safeguards (aime/deliverability.py). Every value below is the built-in default, so this section can stay
+# commented out. None of them can raise a send limit: they only pause, hold or lower a cap.
+# [deliverability]
+# auto_pause = true                # pause outbound email on a bounce or complaint storm; an administrator clears it
+# bounce_window_days = 7
+# bounce_rate_pause = 0.05         # with at least min_sends attempted and min_bounces bounced
+# min_sends = 20                   # never fewer than 10
+# min_bounces = 3
+# complaint_window_days = 30
+# complaint_rate_pause = 0.003     # 0.3% of the emails attempted (at least min_sends counted)
+# min_complaints = 2
+# auth_gate = "warn"               # off | warn (alert only) | block (hold sending while SPF/DKIM/DMARC fail)
+# auth_refresh_hours = 24          # the monitor job checks the sending domain this often
+# auth_max_age_hours = 48          # block mode holds sending when the last check is older than this
+# hourly_cap = 0                   # emails per mailbox in any 60 minutes; 0: none
+# jitter_enabled = false           # wait a random moment between two emails of one run
+# jitter_min_seconds = 20
+# jitter_max_seconds = 90          # never more than 120
+# jitter_run_budget_seconds = 600  # never more than 900; the rest goes out on the next run
+# warmup_enabled = false
+# warmup_schedule = [[1, 5], [4, 10], [8, 20], [15, 35], [22, 50]]   # [day, emails in 24 hours]
+# one_click_unsubscribe_url = ""   # https only; adds RFC 8058 List-Unsubscribe-Post. AIME does not serve it
+# [deliverability.mailbox_caps]    # only ever lower than outreach.mailbox_daily_limit
+# "sales@yourcompany.com" = 30
+# [deliverability.warmup_start]    # a mailbox's first warm-up day (default: the day it first sent)
+# "sales@yourcompany.com" = "2026-11-03"
