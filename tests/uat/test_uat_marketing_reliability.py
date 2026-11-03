@@ -1301,7 +1301,7 @@ def test_ok_report_escapes_public_company_name(ctx):
 # ================================================================================================= Every scheduled job
 def test_ok_every_configured_job_is_registered(ctx):
     names = {sp.name for sp in load_job_specs(ctx.settings)}
-    assert names == set(JOBS) and len(names) == 13
+    assert names == set(JOBS) and len(names) == 14
 
 
 @pytest.mark.parametrize("name", list(JOBS))
@@ -1572,7 +1572,7 @@ def test_ok_failing_job_does_not_stop_the_rest_of_the_tick(ctx, monkeypatch):
     fast_jobs(monkeypatch)
     monkeypatch.setitem(runner.JOBS, "db_maintenance", lambda ctx, job="x": (_ for _ in ()).throw(RuntimeError("disk")))
     ran = {r["job"]: r["status"] for r in tick(ctx)["ran"]}
-    assert ran["db_maintenance"] == "failed" and ran["monitor"] == "success" and len(ran) == 13
+    assert ran["db_maintenance"] == "failed" and ran["monitor"] == "success" and len(ran) == 14
 
 
 def test_defect_next_run_ignores_retry_backoff_and_giving_up(ctx):

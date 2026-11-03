@@ -201,6 +201,8 @@ def create_context(settings: Settings | None = None, http_transport: httpx.BaseT
     with db.session() as s:  # the Super Admin's sales settings, laid over config/business.toml
         from aime import admin_settings
         admin_settings.load(s, settings)
+        from aime import manager_report
+        manager_report.load_schedule(s, settings)  # the report's time and zone, as the Super Admin set them
     return AppContext(settings=settings, db=db, http_transport=http_transport)
 
 

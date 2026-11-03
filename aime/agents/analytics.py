@@ -42,6 +42,14 @@ NOT_DECIDING = ("former%", "% former%", "%(former%", "ex-%", "% ex-%", "%assista
 DECIDING_ANYWAY = ("%assistant vice president%", "%assistant vp%", "%(formerly at%", "%formerly at %", "%formerly with %", "%formerly of %")
 
 
+def deciding_title():
+    """SQL for: this contact's title is one that decides (no title counts too: an officer named in a filing). The one
+    definition of a decision-maker's title, used by the reports here and by the Sales Manager's report."""
+    title = func.lower(Contact.title)
+    return or_(Contact.title.is_(None), not_(or_(*(title.like(p) for p in NOT_DECIDING))),
+               and_(or_(*(title.like(p) for p in DECIDING_ANYWAY)), not_(title.like("former %"))))
+
+
 def _rate(part: int, whole: int) -> str:
     return f"{round(100 * part / whole)}% ({part}/{whole})" if whole else "—"
 
@@ -49,9 +57,7 @@ def _rate(part: int, whole: int) -> str:
 def sales_kpis(count, since) -> dict:
     """Sales pipeline counts from records only. Simulated replies and meetings are kept apart."""
     researched = (Contact.source.in_(("website", "sec_filing")),)
-    title = func.lower(Contact.title)
-    deciding = or_(Contact.title.is_(None), not_(or_(*(title.like(p) for p in NOT_DECIDING))),
-                   and_(or_(*(title.like(p) for p in DECIDING_ANYWAY)), not_(title.like("former %"))))
+    deciding = deciding_title()
     # a draft cancelled before any person approved it was never part of the work
     drafted = (FollowUp.kind == "outreach", or_(FollowUp.status != "cancelled", FollowUp.approved_at.is_not(None)))
     real = (InboundEmail.is_simulated.is_(False),)
