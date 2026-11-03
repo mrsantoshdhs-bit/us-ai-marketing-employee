@@ -78,9 +78,14 @@ def load(session: Session | None) -> dict[str, dict]:
 def problems(text: str) -> list[str]:
     """Why a point may not be in the playbook: the words the policy engine blocks in anything a prospect reads."""
     from aime.ai.claims import DEFAULT_PROHIBITED_TOPICS
+    from aime.ai.guard import hidden_characters, plain
     from aime.automation import SENSITIVE
 
     out = []
+    hidden = hidden_characters(text)
+    if hidden:
+        out.append(f"characters a reader cannot see ({', '.join(hidden[:3])})")
+    text = plain(text)  # look-alike letters and invisible characters hide no word
     m = SENSITIVE.search(text or "")
     if m:
         out.append(f'"{m.group(0)}"')
