@@ -78,9 +78,12 @@ def register(app, C, render, back, who) -> None:
             assignees = owner_choices(s, sc, opp.owner)
             # a note's words go with its lead: the owner of a deal on someone else's lead reads the lines, not the notes
             show_notes = sc is None or not opp.lead_id or can_see_lead(s, sc, opp.lead_id)
+            from aime.web.handover_pages import deal_view
+
+            handover = deal_view(s, C().settings, opp, getattr(request.state, "user", None))
             return render(request, "deal.html", opp=opp, history=history, quotes=quotes, files=files, owners=owners,
                           acts=acts, show_notes=show_notes, stages=stage_names(C().settings), assignees=assignees, allowed=", ".join(ALLOWED),
-                          max_mb=MAX_BYTES // (1024 * 1024))
+                          max_mb=MAX_BYTES // (1024 * 1024), **handover)
 
     @app.post("/opportunities/{opp_id}/quotes")
     def add_quote(request: Request, opp_id: int, amount: str = Form(...), currency: str = Form("USD"),

@@ -40,7 +40,8 @@
                         ('/agents', 'AI Agents', 'cpu', None, ''), ('/jobs', 'Jobs', 'clock', None, ''),
                         ('/audit', 'Audit Logs', 'list', None, '')]),
         ('Analytics', [('/reports', 'Sales Analytics', 'chart', None, ''), ('/performance', 'Sales performance', 'users', None, '')]
-                      + ([('/sales-manager', 'Sales Manager report', 'chart', None, '')] if can_manager_report else [])),
+                      + ([('/sales-manager', 'Sales Manager report', 'chart', None, ''),
+                          ('/handovers', 'Handovers', 'users', None, '')] if can_manager_report else [])),
         ('Settings', [('/integrations', 'Integrations', 'plug', None, ''), ('/system', 'System health', 'server', None, ''),
                       ('/settings', 'Settings', 'gear', None, '')]
                      + ([('/deliverability', 'Deliverability', 'shield', None, '')] if can_view_all or can_approve or is_super_admin else [])

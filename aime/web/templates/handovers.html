@@ -1,0 +1,36 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}Handovers · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+  <h1>{{ icon('users') }} Handovers</h1>
+  <p class="subtitle">Deals handed to a Sales Manager with a cited handover package. Open a deal to read it, then accept it (AI drafting for that lead pauses) or return it to the AI with a reason.</p>
+</div></div>
+
+<div class="card filters small">{% for st in statuses %}<a href="/handovers?status={{ st }}" class="{{ 'pill' if st == status }}">{{ st|title }}</a> {% endfor %}</div>
+<div class="card table-wrap"><table>
+  <tr><th>Deal</th><th>Owner</th><th>Version</th><th>Status</th><th>Why</th><th>Waiting since</th><th>Email</th></tr>
+  {% for p, o in rows %}<tr><td><a href="/opportunities/{{ o.id }}#handover">{{ o.name }}</a></td><td>{{ o.owner or 'unassigned' }}</td>
+    <td>{{ p.version }}</td><td>{{ p.status }}{% if p.sla_escalated_at %} · escalated{% endif %}</td>
+    <td class="small">{% for c in p.conditions %}{{ c.why }}{% if not loop.last %}; {% endif %}{% endfor %}</td>
+    <td class="small">{{ p.waiting_since|local }}</td><td class="small">{{ p.notify_status or '—' }}</td></tr>
+  {% else %}<tr><td colspan="7" class="muted">No {{ '' if status == 'all' else status }} handovers.</td></tr>{% endfor %}
+</table></div>
+<p class="small muted">A handover needs one of the rules in <a href="/admin/settings/section/handover_rules">Settings › Handover rules</a>{% if rules.accept_within_hours %}; one not accepted within {{ rules.accept_within_hours }} hours is escalated to the owner's manager{% endif %}.</p>
+
+{% if notify %}
+<h2>Email to the Sales Manager <span class="pill">Super Admin</span></h2>
+<form class="card form-grid mbx-form" method="post" action="/handovers/notify">
+  <label style="grid-column:1/-1">Internal address of each person who may receive it, one per line as <code>username = address</code>
+    <textarea name="addresses" rows="3">{{ notify_lines }}</textarea></label>
+  <label style="grid-column:1/-1">Allow-list: addresses or company domains that count as internal besides the sending mailbox's own domain
+    <textarea name="allowlist" rows="2">{{ notify.allowlist|join('\n') }}</textarea></label>
+  <label style="grid-column:1/-1"><span><input type="checkbox" name="email_enabled" value="yes" {{ 'checked' if notify.email_enabled }}> Email the deal's owner about each new handover package (still needs the authorization below, OUTBOUND_EMAIL_ENABLED and a ready sending mailbox)</span></label>
+  <button style="grid-column:1/-1">Save</button>
+</form>
+<div class="card"><p>{% if notify_auth[0] %}<b>Authorized</b>: {{ notify_auth[1] }}.{% else %}<b>Not authorized</b>: {{ notify_auth[1] }}.{% endif %}</p>
+  <p class="small muted">Authorizing records your name and the time in the audit log, for exactly these addresses. Changing them withdraws it. Never a prospect: an address of a contact or a prospect company, or on the do-not-contact list, is refused.</p>
+  <form method="post" action="/handovers/notify/authorize"><button {{ 'disabled' if not notify.addresses }}>Authorize these addresses</button></form>
+  {% if notify.authorized_by %}<form method="post" action="/handovers/notify/revoke"><button class="secondary">Withdraw the authorization</button></form>{% endif %}
+</div>
+{% endif %}
+{% endblock %}

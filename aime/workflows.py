@@ -168,7 +168,23 @@ def job_followups(ctx: AppContext, job: str = "followups") -> JobOutcome:
     agent = SalesWorkflowAgent(ctx)
     agent.read_hold = lambda: mailbox_hold(ctx)
     out.add(agent.run({"hold_sends": mailbox_hold(ctx)}, job=job))
+    _handover_emails(ctx, out)
     return out
+
+
+def _handover_emails(ctx: AppContext, out: JobOutcome) -> None:
+    """The internal emails to the Sales Manager about handover packages (aime.handover_notify): off by default, and then
+    this adds nothing to the run. A failed one is recorded as this step's error; it does not fail the sending job."""
+    from aime import handover_notify
+
+    try:
+        result = handover_notify.run(ctx)
+    except Exception as exc:  # noqa: BLE001 - recorded; the approved emails above are not affected
+        out.steps.append({"agent": "handover_notify", "status": "failed", "error": redact(f"{type(exc).__name__}: {exc}")[:500]})
+        return
+    if result["results"]:
+        out.steps.append({"agent": "handover_notify", "status": "failed" if result.get("failed") else "success",
+                          "output": result})
 
 
 def job_publish(ctx: AppContext, job: str = "publish") -> JobOutcome:

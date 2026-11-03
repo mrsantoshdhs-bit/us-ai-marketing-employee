@@ -2,7 +2,9 @@
 (aime.assignment: the Sales Managers chosen in Settings, or everyone whose role receives leads; by workload, round
 robin or skill; skipping people who are unavailable or at capacity). The owner is told on the dashboard and, when
 signed in at the PC, with a desktop notification, and the deal stays with them. Every handover is in the audit log,
-the assignment history and the lead's activity. Nothing is sent to the prospect."""
+the assignment history and the lead's activity. Nothing is sent to the prospect. When a handover rule is met
+(settings section "handover_rules") the deal also gets a handover package with every line cited, for the Sales Manager to
+accept or return (aime.handover_package); the internal email about it is off by default (aime.handover_notify)."""
 
 from __future__ import annotations
 
@@ -41,4 +43,7 @@ def handover(session: Session, settings, opp: Opportunity, reason: str, actor: s
                  opportunity_id=opp.id)
     audit(session, actor, "handover", f"opportunity #{opp.id}", f"to {opp.owner or 'unassigned'}: {reason}"[:300])
     notify_event(settings, message)
+    from aime.handover_package import on_handover
+
+    on_handover(session, settings, opp, actor)  # the cited package, when a handover rule is met (aime.handover_package)
     return who

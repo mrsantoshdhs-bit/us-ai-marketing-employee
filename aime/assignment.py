@@ -247,3 +247,36 @@ def escalations(session: Session, settings, now: datetime, actor: str) -> int:
                           message=f"Escalated to {to}: {opp.name}: {reason}"[:500]))
         count += 1
     return count
+
+
+def handover_sla(session: Session, settings, now: datetime, actor: str) -> int:
+    """Alert the owner's manager (or the administrators) about a handover package nobody accepted within
+    `[handover_rules] accept_within_hours` (0 = never), the way `escalations` does for an untouched deal: once per wait, on
+    record in the assignment history, and the deal stays with its owner. A newer version of a package that is still waiting
+    keeps the clock and the escalation."""
+    from aime import settings_store
+    from aime.automation import audit
+    from aime.models import HandoverPackage
+
+    rules = settings_store.get(settings, "handover_rules")
+    hours = int(rules.get("accept_within_hours", 0) or 0)
+    if hours <= 0 or not rules.get("enabled"):
+        return 0
+    count = 0
+    for pkg in session.execute(select(HandoverPackage).where(
+            HandoverPackage.status == "open", HandoverPackage.sla_escalated_at.is_(None),
+            HandoverPackage.waiting_since <= now - timedelta(hours=hours))).scalars().all():
+        opp = session.get(Opportunity, pkg.opportunity_id)
+        if opp is None or opp.stage in OPEN:
+            continue
+        boss = manager_of(session, opp.owner) if opp.owner else None
+        to = boss or "the administrators"
+        reason = (f"handover package version {pkg.version} not accepted by {opp.owner or 'anyone (no owner)'} in {hours} h; "
+                  f"{to} told")
+        record(session, lead_id=opp.lead_id, opportunity_id=opp.id, from_owner=opp.owner, to_owner=opp.owner,
+               method="escalation", reason=reason, actor=actor)
+        session.add(Alert(level="warning", source="handover", message=f"Escalated to {to}: {opp.name}: {reason}"[:500]))
+        audit(session, actor, "handover_escalated", f"opportunity #{opp.id}", reason[:300])
+        pkg.sla_escalated_at = now
+        count += 1
+    return count
