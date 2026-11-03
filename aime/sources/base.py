@@ -35,6 +35,7 @@ class CompanyCandidate:
     state: str | None = None
     city: str | None = None
     is_us: bool | None = None
+    country: str | None = None  # two-letter code when the source names a country other than (or as well as) the US
     industry: str | None = None
     description: str | None = None
     signal_text: str | None = None
@@ -63,7 +64,9 @@ class ResearchFocus:
 
 
 class Source(ABC):
-    countries: tuple[str, ...] = ("US",)  # where this source finds companies ("*": any, e.g. your own list)
+    # Where this source finds companies ("*": any, e.g. your own list). Discovery uses it only for the enabled target
+    # countries (aime.countries), and the Lead sources settings may narrow it, never widen it.
+    countries: tuple[str, ...] = ("US",)
     name: str = "source"
     title: str = "Source"
     description: str = ""

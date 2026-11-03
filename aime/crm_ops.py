@@ -77,9 +77,13 @@ SOURCE_LABELS = {"hn_hiring": "Hacker News hiring post", "sec_edgar": "SEC filin
                  "csv_import": "your imported list", "inbound": "the inquiry form", "manual": "entered by hand"}
 
 
-def us_location_evidence(source: str | None, state: str | None, location_text: str | None) -> str | None:
-    """Why the company counts as a US company, in words: the US state, or the location text that names the US."""
+def us_location_evidence(source: str | None, state: str | None, location_text: str | None, country: str | None = "US") -> str | None:
+    """Why the company counts as a company of its country, in words: the US state, or the location text that names the US;
+    for another country, the country its source gave."""
     label = SOURCE_LABELS.get(source or "", source or "source")
+    if country and country != "US":
+        where = f": {location_text.strip()[:150]}" if location_text else ""
+        return f"country {country} ({label}){where}"[:300]
     if state:
         return f"US state {state} ({label})"[:300]
     if location_text:
@@ -87,7 +91,10 @@ def us_location_evidence(source: str | None, state: str | None, location_text: s
     return None
 
 
-def upsert_company(session: Session, cand: CompanyCandidate) -> tuple[Company, bool]:
+def upsert_company(session: Session, cand: CompanyCandidate, default_country: str = "US") -> tuple[Company, bool]:
+    """The company on file for this candidate (gaps filled), or a new one. Its country comes from the evidence (the source's
+    country, as the research agent resolved it) and otherwise is the target country, which before Option B was always the US."""
+    country = (cand.country or default_country or "US").upper()[:2]
     existing = find_duplicate(session, cand.name, cand.domain, cand.state, cand.source_record_id, cand.source)
     if existing:
         # Fill gaps only; never overwrite verified data with weaker data.
@@ -101,7 +108,7 @@ def upsert_company(session: Session, cand: CompanyCandidate) -> tuple[Company, b
         if cand.description and not existing.description:
             existing.description = cand.description
         if not existing.location_evidence:
-            existing.location_evidence = us_location_evidence(existing.source, existing.state, existing.location_text)
+            existing.location_evidence = us_location_evidence(existing.source, existing.state, existing.location_text, existing.country)
         # a company on file is judged by CRMManagementAgent._flag_competitors, which has the guards and logs what it read
         return existing, False
     company = Company(
@@ -112,9 +119,9 @@ def upsert_company(session: Session, cand: CompanyCandidate) -> tuple[Company, b
         industry=cand.industry,
         state=cand.state,
         city=cand.city,
-        country="US",
+        country=country,
         location_text=cand.location_text,
-        location_evidence=us_location_evidence(cand.source, cand.state, cand.location_text),
+        location_evidence=us_location_evidence(cand.source, cand.state, cand.location_text, country),
         employee_range=cand.employee_range,
         description=cand.description,
         phone=cand.phone if cand.verified else None,

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from aime import countries
 from aime.agents.base import BaseAgent, TransientAgentError
 from aime.agents.contracts import SourceReport
 from aime.agents.qualification import NOT_A_PERSON
@@ -23,7 +24,7 @@ from aime.outreach import _merged_family, company_opted_out
 from aime.pipeline import _task
 from aime.redact import redact
 from aime.sources.base import ResearchFocus
-from aime.sources.registry import get_sources
+from aime.sources.registry import ordered_sources
 from aime.validation import validate_candidate
 
 EVIDENCE_ONLY_SOURCES = ("sec_edgar",)  # the owner's decision of 1 Nov 2026: a filing is market evidence and makes no lead
@@ -114,10 +115,18 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         file_sources = []  # sources whose files are archived only after this run commits
         stale_alerts = []
 
-        country = str(self.settings.section("targeting").get("country") or "US").upper()
-        for src in get_sources(self.ctx, inp.sources):
-            covers = getattr(src, "countries", ("US",))
-            if country not in covers and "*" not in covers:  # discovery follows the configured target country
+        # Discovery follows the enabled target countries (aime.countries); with no saved country settings that is the
+        # sales settings' Target country, as before. Each source is used for the countries it covers, by priority.
+        wanted = countries.discovery_countries(self.settings)
+        targets = countries.target_countries(self.settings)
+        country = "/".join(wanted) or "no enabled"
+        for src, conf in ordered_sources(self.ctx, inp.sources):
+            covers = conf["countries"]
+            if not conf["enabled"]:
+                out.sources.append(SourceReport(name=src.name, configured=False, ok=False,
+                                                message="switched off in Settings › Lead sources"))
+                continue
+            if "*" not in covers and not set(wanted) & set(covers):
                 out.sources.append(SourceReport(name=src.name, configured=False, ok=False,
                                                 message=f"no {country} coverage: this source finds {', '.join(covers)} companies"))
                 continue
@@ -164,16 +173,20 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
 
         public_created = 0  # the per-run cap applies to public-source discovery, not to your own CSV lists
         kept_as_evidence: set[int] = set()
+        us_only = targets == ["US"]
         for cand in candidates:
             out.candidates_seen += 1
-            if cand.is_us is False:
-                out.non_us_skipped += 1
-                left_out(cand, "outside the US")
-                continue
-            if cand.is_us is None:
+            where = countries.candidate_country(cand)
+            if where is None:
                 out.unknown_location_skipped += 1
-                left_out(cand, "without a US state (add a state column)")
+                left_out(cand, "without a US state (add a state column)" if us_only
+                         else "without a US state or a country (add a state or country column)")
                 continue
+            if where not in targets:
+                out.non_us_skipped += 1
+                left_out(cand, "outside the US" if us_only else "outside the enabled target countries")
+                continue
+            cand.country = where
             problems, fixes = validate_candidate(cand)
             if problems:
                 out.invalid_skipped += 1

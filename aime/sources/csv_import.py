@@ -1,7 +1,10 @@
 """User-provided company lists (e.g. an export from your own CRM or an opted-in event list).
 
 Drop CSV files in data/imports/. Columns (header names are case-insensitive):
-name (required), website, state, city, industry, notes, source_url
+name (required), website, state, city, industry, notes, source_url, country
+
+A US company needs its state. `country` counts only for a row with no US state and a country that is an enabled target
+country other than the US (Settings › Countries, after its legal review); otherwise the column is ignored, as it always was.
 
 A bad row does not lose the good rows: it is left out and an alert says which and why. A file none of whose rows
 can be used (no name column, or no row that can be imported) goes to rejected/, with an alert.
@@ -17,6 +20,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from aime.countries import normalize_country, target_countries
 from aime.dedupe import domain_from_url
 from aime.intake import IntakeBatch, file_sha256, mark, move_aside, seen
 from aime.knowledge.geo import normalize_state
@@ -37,8 +41,9 @@ class MissingNameColumn(ValueError):
     pass
 
 
-def read_company_csv(path: Path, problems: list[str] | None = None) -> list[CompanyCandidate]:
-    """The usable rows of a file. Each row left out is described in `problems`."""
+def read_company_csv(path: Path, problems: list[str] | None = None, countries: tuple[str, ...] = ()) -> list[CompanyCandidate]:
+    """The usable rows of a file. Each row left out is described in `problems`. `countries`: the enabled target countries
+    other than the US, whose rows are read by their country column."""
     problems = [] if problems is None else problems
     out: list[CompanyCandidate] = []
     with path.open(newline="", encoding="utf-8-sig") as fh:
@@ -58,6 +63,8 @@ def read_company_csv(path: Path, problems: list[str] | None = None) -> list[Comp
                 continue
             website = row.get("website") or None
             state = normalize_state(row.get("state"))
+            abroad = None if state else normalize_country(row.get("country"))
+            abroad = abroad if abroad in countries and abroad != "US" else None
             notes = row.get("notes") or ""
             industry = row.get("industry") or None
             if industry not in INDUSTRIES:
@@ -71,7 +78,9 @@ def read_company_csv(path: Path, problems: list[str] | None = None) -> list[Comp
                 domain=domain_from_url(website),
                 state=state,
                 city=row.get("city") or None,
-                is_us=True if state else None,
+                location_text=", ".join(x for x in (row.get("city"), row.get("state"), row.get("country")) if x)[:200] if abroad else None,
+                is_us=True if state else (False if abroad else None),
+                country=abroad,
                 industry=industry,
                 description=notes or None,
                 signal_text=notes or None,
@@ -99,6 +108,7 @@ class CSVImportSource(Source):
         self.loaded: list[tuple[Path, str, int, list[str]]] = []
         self.unusable: list[Path] = []  # moved to rejected/ with the archive step, once their alert is committed
         self.notices: list[str] = []  # files imported, but with rows left out
+        abroad = tuple(c for c in target_countries(self.settings) if c != "US")
         for path in sorted(self.settings.imports_dir.glob("*.csv")):
             sha = file_sha256(path)
             with self.ctx.db.session() as s:
@@ -108,7 +118,7 @@ class CSVImportSource(Source):
                 continue
             problems: list[str] = []
             try:
-                rows = read_company_csv(path, problems)
+                rows = read_company_csv(path, problems, abroad)
             except MissingNameColumn as exc:
                 self._reject(path, str(exc))
                 continue
