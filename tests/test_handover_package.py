@@ -533,6 +533,9 @@ def _close(gate, ctx, ids):
             s.add(Suppression(value=MANAGER_ADDR, kind="email", reason="asked"))
         elif gate == "outside":
             ctx.settings.smtp_from = "sales@another.example"
+        elif gate == "deliverability_pause":  # the mailbox's reputation is shared with outreach
+            from aime import deliverability
+            deliverability.pause(s, ctx.settings, "a bounce storm", "overall", {}, now=NOW)
         elif gate == "mailbox_limit":
             ctx.settings.business.setdefault("outreach", {})["mailbox_daily_limit"] = 1
             s.add(FollowUp(lead_id=ids["lead"], company_id=ids["company"], channel="email", kind="outreach", step=1,
@@ -543,7 +546,7 @@ def _close(gate, ctx, ids):
 GATES = {"enabled": None, "address": "no internal address", "owner": "no owner", "authorization": "authorized",
          "outbound": "OUTBOUND_EMAIL_ENABLED", "mailbox": "sending mailbox", "emergency_stop": "emergency stop",
          "prospect": "prospect", "suppressed": "do-not-contact", "outside": "not an internal address",
-         "mailbox_limit": "daily limit"}
+         "mailbox_limit": "daily limit", "deliverability_pause": "paused for deliverability"}
 
 
 @pytest.mark.parametrize("gate", list(GATES))

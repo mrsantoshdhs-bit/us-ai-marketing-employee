@@ -182,6 +182,11 @@ def blockers(session: Session, settings, pkg: HandoverPackage, now: datetime, cf
     state = am.get_state(session)
     if state in ("stopped", "emergency_stop"):
         reasons.append(f"the automation is {am.STATES[state].split(':')[0].lower()}")
+    from aime import deliverability
+
+    held = deliverability.sending_hold(session, settings, now)  # the mailbox's reputation is shared with outreach
+    if held:
+        reasons.append(held)
     if addr:
         reasons += [f"{a} {why}" for a, why in problems(session, settings, cfg, [addr])]
         limit = int(settings.section("outreach").get("mailbox_daily_limit", 50))

@@ -949,6 +949,11 @@ def blockers(session: Session, settings, cfg: dict, now: datetime) -> list[str]:
     state = am.get_state(session)
     if state in ("stopped", "emergency_stop"):
         reasons.append(f"the automation is {am.STATES[state].split(':')[0].lower()}")
+    from aime import deliverability
+
+    held = deliverability.sending_hold(session, settings, now)  # the mailbox's reputation is shared with outreach
+    if held:
+        reasons.append(held)
     for addr, why in recipient_problems(session, settings, cfg):
         reasons.append(f"{addr} {why}")
     if cfg["recipients"]:

@@ -437,6 +437,9 @@ def _close(gate, ctx):
             contact(s, s.execute(select(Company)).scalars().first(), MANAGER, "Man", "Ager", "CEO")
         elif gate == "suppressed":
             s.add(Suppression(value=MANAGER, kind="email", reason="asked"))
+        elif gate == "deliverability_pause":  # the mailbox's reputation is shared with outreach
+            from aime import deliverability
+            deliverability.pause(s, ctx.settings, "a bounce storm", "overall", {}, now=NOW)
         elif gate == "mailbox_limit":
             ctx.settings.business.setdefault("outreach", {})["mailbox_daily_limit"] = 1
             ld = lead(s, company(s, "Busy"))
@@ -445,7 +448,8 @@ def _close(gate, ctx):
 
 GATES = {"enabled": "switched off", "recipients": "no recipient", "authorization": "authorized",
          "outbound": "OUTBOUND_EMAIL_ENABLED", "mailbox": "sending mailbox", "emergency_stop": "emergency stop",
-         "prospect": "prospect", "suppressed": "do-not-contact", "mailbox_limit": "daily limit"}
+         "prospect": "prospect", "suppressed": "do-not-contact", "mailbox_limit": "daily limit",
+         "deliverability_pause": "paused for deliverability"}
 
 
 @pytest.mark.parametrize("gate", list(GATES))
