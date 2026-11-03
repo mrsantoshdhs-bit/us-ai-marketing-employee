@@ -995,6 +995,9 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         mailbox_sent = session.execute(select(func.count(FollowUp.id)).where(
             FollowUp.channel == "email", FollowUp.status.in_(COUNTS_AS_SENT),
             func.coalesce(FollowUp.sent_at, FollowUp.send_started_at) >= now - timedelta(hours=24))).scalar_one()
+        from aime.manager_report import mailbox_sends_since  # the manager's report emails use the same mailbox
+
+        mailbox_sent += mailbox_sends_since(session, now - timedelta(hours=24))
         return {"sent_today": len(sent), "domains": domains, "run": 0, "mailbox_sent": mailbox_sent,
                 "mailbox_daily": int(pol.get("mailbox_daily_limit", 50)),
                 "daily": int(pol.get("daily_send_limit", 20)), "per_domain": int(pol.get("per_domain_daily_limit", 1)),
