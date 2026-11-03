@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from aime import countries
+from aime import countries, settings_store
 from aime.agents.base import BaseAgent, TransientAgentError
 from aime.agents.contracts import SourceReport
 from aime.agents.qualification import NOT_A_PERSON
@@ -24,7 +24,7 @@ from aime.outreach import _merged_family, company_opted_out
 from aime.pipeline import _task
 from aime.redact import redact
 from aime.sources.base import ResearchFocus
-from aime.sources.registry import ordered_sources
+from aime.sources.registry import get_sources, source_settings
 from aime.validation import validate_candidate
 
 EVIDENCE_ONLY_SOURCES = ("sec_edgar",)  # the owner's decision of 1 Nov 2026: a filing is market evidence and makes no lead
@@ -120,7 +120,13 @@ class USBusinessResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         wanted = countries.discovery_countries(self.settings)
         targets = countries.target_countries(self.settings)
         country = "/".join(wanted) or "no enabled"
-        for src, conf in ordered_sources(self.ctx, inp.sources):
+        confs = {r["name"]: r for r in source_settings(self.settings)}  # by priority
+        found_sources = get_sources(self.ctx, inp.sources)
+        if settings_store.stored(self.settings, "sources"):  # with no saved source settings the order is as it always was
+            rank = {n: i for i, n in enumerate(confs)}
+            found_sources.sort(key=lambda x: rank.get(x.name, len(rank)))
+        for src in found_sources:
+            conf = confs.get(src.name) or {"enabled": True, "countries": list(getattr(src, "countries", ("US",)))}
             covers = conf["countries"]
             if not conf["enabled"]:
                 out.sources.append(SourceReport(name=src.name, configured=False, ok=False,
