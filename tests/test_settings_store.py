@@ -74,8 +74,12 @@ def enable(ctx, code="CA", **extra):
     ("reporting", {"manager_report": {"time": "25:00"}}, "08:00"),
     ("reporting", {"manager_report": {"timezone": "Mars/Base"}}, "time zone"),
     ("retention", {"audit_events_days": 30}, "at least a year"),
-    ("deliverability", {"per_hour_send_limit": 500}, "less than or equal to 50"),
-    ("deliverability", {"warmup_daily_plan": [5, 500]}, "1 to 50"),
+    ("deliverability", {"min_sends": 5}, "greater than or equal to 10"),
+    ("deliverability", {"auth_gate": "loose"}, "'off', 'warn' or 'block'"),
+    ("deliverability", {"jitter_max_seconds": 600}, "less than or equal to 120"),
+    ("deliverability", {"warmup_schedule": [[0, 5]]}, "day from 1"),
+    ("deliverability", {"one_click_unsubscribe_url": "http://plain.example/u"}, "plain https address"),
+    ("deliverability", {"per_hour_send_limit": 5}, "Extra inputs are not permitted"),
     ("targets", {"targets": [{"country": "US", "daily_verified_leads": -1}]}, "greater than or equal to 0"),
     ("targets", {"targets": [{"country": "US"}, {"country": "US"}]}, "one target per country"),
     ("targets", {"targets": [{"country": "ZZ"}]}, "no such country"),
@@ -560,3 +564,12 @@ def test_a_database_from_before_option_b_gets_the_table_additively_and_keeps_its
         assert s.execute(select(Company.name)).scalars().all() == ["Kept Co"]
     save(ctx, "ai", {"model": "llama3.2:latest"})
     assert versions(ctx, "ai") == 1
+
+
+def test_the_deliverability_section_holds_exactly_the_keys_the_deliverability_module_reads():
+    """A form field nothing reads, or a real setting the form refuses, would mislead the person changing it."""
+    from aime import deliverability
+
+    defaults = ss.DeliverabilitySection().model_dump(mode="json")
+    assert set(defaults) == set(deliverability.DEFAULTS)
+    assert defaults == {k: [list(x) for x in v] if k == "warmup_schedule" else v for k, v in deliverability.DEFAULTS.items()}

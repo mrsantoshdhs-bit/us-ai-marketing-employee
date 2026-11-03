@@ -321,21 +321,54 @@ class AgentsSection(Strict):
 # --------------------------------------------------------------------------- read by other teams later (no behaviour now)
 
 class DeliverabilitySection(Strict):
-    """Placeholders for the deliverability work: nothing reads them yet, and none can raise a sending limit."""
+    """The keys aime.deliverability reads, with its own bounds: a pause always needs a real sample, waits stay far below
+    the send run's own checks, and every cap here can only lower what the outreach limits already allow."""
 
-    per_hour_send_limit: int = Field(default=0, ge=0, le=50)  # 0: no per-hour limit beyond today's daily ones
+    auto_pause: bool = True
+    bounce_window_days: int = Field(default=7, ge=1, le=90)
+    bounce_rate_pause: float = Field(default=0.05, ge=0.005, le=0.5)  # a share: 0.05 is 5%
+    min_sends: int = Field(default=20, ge=10, le=1000)  # never below the module's sample floor
+    min_bounces: int = Field(default=3, ge=1, le=100)
+    complaint_window_days: int = Field(default=30, ge=1, le=180)
+    complaint_rate_pause: float = Field(default=0.003, ge=0.0005, le=0.5)
+    min_complaints: int = Field(default=2, ge=1, le=100)
+    auth_gate: Literal["off", "warn", "block"] = "warn"
+    auth_refresh_hours: int = Field(default=24, ge=1, le=168)
+    auth_max_age_hours: int = Field(default=48, ge=1, le=336)
+    mailbox_caps: dict[str, int] = Field(default_factory=dict)  # address -> emails a day, only ever lower than the global cap
+    hourly_cap: int = Field(default=0, ge=0, le=1000)  # 0: none
+    jitter_enabled: bool = False
+    jitter_min_seconds: float = Field(default=20, ge=0, le=120)
+    jitter_max_seconds: float = Field(default=90, ge=0, le=120)
+    jitter_run_budget_seconds: float = Field(default=600, ge=0, le=900)
     warmup_enabled: bool = False
-    warmup_daily_plan: list[int] = Field(default_factory=list, max_length=60)  # emails per day while warming a mailbox
-    bounce_rate_pause_pct: float = Field(default=0.0, ge=0, le=100)  # 0: not used yet
-    complaint_rate_pause_pct: float = Field(default=0.0, ge=0, le=100)
-    notes: str = Field(default="", max_length=500)
+    warmup_schedule: list[list[int]] = Field(default_factory=lambda: [[1, 5], [4, 10], [8, 20], [15, 35], [22, 50]],
+                                             max_length=60)  # [day, emails a day] steps
+    warmup_start: dict[str, str] = Field(default_factory=dict)  # address -> first day of its warm-up (YYYY-MM-DD)
+    one_click_unsubscribe_url: str = Field(default="", max_length=300)  # https only; empty keeps the mailto header alone
 
-    @field_validator("warmup_daily_plan")
+    @field_validator("mailbox_caps")
     @classmethod
-    def check_plan(cls, v: list[int]) -> list[int]:
-        if any(not 1 <= int(x) <= 50 for x in v):
-            raise ValueError("each day of the warm-up plan must be 1 to 50 emails")
-        return [int(x) for x in v]
+    def check_caps(cls, v: dict[str, int]) -> dict[str, int]:
+        if any(not 0 <= int(x) <= 10_000 for x in v.values()):
+            raise ValueError("a mailbox cap must be 0 to 10000 emails a day")
+        return {str(k).strip().lower(): int(x) for k, x in v.items()}
+
+    @field_validator("warmup_schedule")
+    @classmethod
+    def check_schedule(cls, v: list[list[int]]) -> list[list[int]]:
+        if any(len(step) != 2 or int(step[0]) < 1 or int(step[1]) < 0 for step in v):
+            raise ValueError("each warm-up step is [day from 1, emails a day from 0]")
+        return [[int(a), int(b)] for a, b in v]
+
+    @field_validator("one_click_unsubscribe_url")
+    @classmethod
+    def check_url(cls, v: str) -> str:
+        from aime.deliverability import HTTPS_URL
+
+        if v and not HTTPS_URL.match(v):
+            raise ValueError("the one-click unsubscribe address must be a plain https address")
+        return v
 
 
 class ManagerReport(Strict):
