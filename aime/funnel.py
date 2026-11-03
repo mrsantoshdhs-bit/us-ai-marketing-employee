@@ -36,7 +36,7 @@ DECISION_MAKER_SOURCES = ("website", "sec_filing", "companies_house")
 # "published" as above; "verified" (and the older "valid") from an approved verification service (aime.verification).
 # Never "role_address", "unchecked", "mx_ok", "risky", "no_mail_server" or "bounced".
 VERIFIED_EMAIL_STATUSES = ("published", "verified", "valid")
-NOT_CONTACTABLE_STATUSES = ("bounced", "no_mail_server")
+NOT_CONTACTABLE_STATUSES = ("bounced", "no_mail_server", "invalid")  # every status aime.verification reads as INVALID
 
 
 @dataclass(frozen=True)

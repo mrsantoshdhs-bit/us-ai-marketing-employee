@@ -206,3 +206,11 @@ def test_a_register_officer_counts_as_a_decision_maker_in_both_reports(ctx):
         kpis = sales_kpis(count, datetime(2000, 1, 1))
     assert v["decision_makers"]["value"] == 1 == kpis["decision_makers_total"]
     assert v["verified_decision_makers"]["value"] == 0  # a name from a register has no verified address
+
+
+def test_every_status_the_verifier_reads_as_invalid_is_not_contactable():
+    """A verifier writes "invalid" (aime.verification): such an address must never be counted as one we may write to."""
+    from aime import funnel, verification
+
+    invalid = {k for k, v in verification._STORED.items() if v == verification.INVALID}
+    assert invalid <= set(funnel.NOT_CONTACTABLE_STATUSES)
