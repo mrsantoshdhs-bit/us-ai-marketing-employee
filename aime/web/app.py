@@ -82,6 +82,8 @@ from aime.stages import move as move_stage
 from aime.web.team_pages import assignment_history, next_email
 from aime.web.deal_pages import comma_problem
 from aime.web.team_pages import register as register_team_pages
+from aime.countries import target_countries
+from aime.web.settings_pages import register as register_settings_pages
 from aime.web.deal_pages import register as register_deal_pages
 from aime.visibility import (EVERYTHING, ORG_PAGE_WORDS, can_see_lead, company_condition, contact_condition, lead_condition,
                              opportunity_condition, org_page, record_condition)
@@ -422,7 +424,7 @@ def report_page(html: str) -> str:
             .replace("</style>", f"{REPORT_STYLE}</style>", 1).replace("<body>", f"<body>{REPORT_BACK}", 1))
 
 
-def status_would_not_hold(s, lead: Lead) -> str | None:
+def status_would_not_hold(s, lead: Lead, targets: tuple[str, ...] = ("US",)) -> str | None:
     """Why the next scoring run would close this lead again whatever a person sets, in plain words with what they can do. The
     scoring rule itself is not changed here: this only says so at the moment of the click, not the morning after."""
     company = lead.company
@@ -430,7 +432,7 @@ def status_would_not_hold(s, lead: Lead) -> str | None:
         return ("This company is flagged as a possible competitor, so the next scoring run would close it again. If it does not sell "
                 "software or AI work to clients, use the \"Not a competitor\" button on this page: that clears the flag for good.")
     signals = s.execute(select(Signal).where(Signal.company_id == company.id)).scalars().all()
-    if read_company(company, signals)["country"] != "US":
+    if read_company(company, signals)["country"] not in targets:  # the enabled target countries (aime.countries)
         said = f" (its location reads: {company.location_text[:80]})" if company.location_text else ""
         return (f"This company is outside the US market we sell to{said}, so the next scoring run would close it again. That rule has "
                 "no exception, and a company's location cannot be changed in AIME. A note on this page is kept with the lead.")
@@ -973,7 +975,8 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             take_write_lock(s)  # beside the send job: an approved email is either claimed already or cancelled here
             lead = s.get(Lead, lead_id) or _404()
             old = lead.status
-            refused = status_would_not_hold(s, lead) if status in ("new", "qualified", "nurture") else None
+            refused = (status_would_not_hold(s, lead, tuple(target_countries(C().settings)))
+                       if status in ("new", "qualified", "nurture") else None)
             if refused:  # the next scoring run would put it back without a word: say so now, and leave it as it is
                 if note.strip():  # what the person typed is not lost with the refused click
                     log_activity(s, "Note", who(request), type_="note", body=note, company_id=lead.company_id, lead_id=lead.id)
@@ -2305,8 +2308,6 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
     @app.get("/admin/settings", response_class=HTMLResponse)
     def sales_settings_page(request: Request):
         from aime import admin_settings
-        from aime.knowledge.industries import INDUSTRIES
-        from aime.knowledge.services import SERVICES
         ctx = C()
         with ctx.db.session() as s:
             users = [(u.username, u.role) for u in s.execute(select(User).where(User.active.is_(True))
@@ -2314,8 +2315,11 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
             overridden = {f"{sec}.{k}" for sec, keys in admin_settings.overrides(s).items() for k in keys}
         values = admin_settings.current(ctx.settings)
         country = str(values["targeting.country"] or "US").upper()
+        from aime.catalogue import enabled  # the editable catalogue's enabled entries (the code's own lists by default)
+        industries = {k: {"label": v} for k, v in enabled(ctx.settings, "industries").items()}
+        services = {k: {"label": v} for k, v in enabled(ctx.settings, "services").items()}
         return render(request, "admin_settings.html", fields=admin_settings.FIELDS, values=values, users=users,
-                      overridden=overridden, industries=INDUSTRIES, services=SERVICES,
+                      overridden=overridden, industries=industries, services=services,
                       coverage=admin_settings.COUNTRY_SOURCES.get(country))
 
     @app.post("/admin/settings")
@@ -2662,6 +2666,7 @@ def create_app(ctx: AppContext | None = None) -> FastAPI:
 
     register_team_pages(app, C, render, back, who)
     register_deal_pages(app, C, render, back, who)
+    register_settings_pages(app, C, render, back, who)
 
     @app.get("/api/leads")
     def api_leads(request: Request, status: str = "qualified", limit: int = 50):

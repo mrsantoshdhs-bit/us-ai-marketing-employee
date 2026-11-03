@@ -1,0 +1,28 @@
+{% extends "base.html" %}{% from "_icons.html" import icon %}
+{% block title %}System settings · AI Sales Employee{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+  <h1>{{ icon('sliders') }} System settings <span class="pill">Super Admin</span></h1>
+  <p class="subtitle">Every business control in one place. Each section is validated and saved as a version: the change is in the <a href="/audit">audit log</a>, you can preview it before saving, and any earlier version can be restored with one click. With nothing saved, a section reads exactly what the AI employee used before these settings existed.</p>
+</div></div>
+
+<div class="send-check warn"><b>{{ icon('lock') }} Set in .env only, never here</b>
+  <span>{% for k, v in env.items() %}<code>{{ k }}</code> = <strong>{{ 'on' if v else 'off' }}</strong>{% if not loop.last %} · {% endif %}{% endfor %}</span>
+  <span>Suppression, opt-out, the compliance footer and the pricing block are in code and cannot be switched off.</span></div>
+
+<div class="card small">Target countries now: <strong>{{ targets|join(', ') or 'none' }}</strong> · discovery asks the sources for: <strong>{{ discovery|join(', ') or 'none' }}</strong>.
+  The sales settings (target industries, qualification, sending limits, sequence, meetings, handover) are on <a href="/admin/settings">Sales settings</a>.</div>
+
+<div class="card table-wrap"><table>
+  <tr><th>Section</th><th>In effect</th><th>Last saved</th><th></th></tr>
+  {% for r in sections %}
+  <tr><td><strong>{{ r.spec.title }}</strong><div class="small muted">{{ r.spec.description }}</div></td>
+      <td class="small">{% if r.stored %}<span class="pill">version {{ r.active_id }}</span>{% else %}defaults{% endif %}</td>
+      <td class="small">{% if r.last %}{{ r.last.created_at|local }} by {{ r.last.created_by }}{% else %}never{% endif %}</td>
+      <td>{% if r.name == 'sales' %}<a class="btn secondary" href="/admin/settings">Open</a>{% else %}<a class="btn secondary" href="/admin/settings/section/{{ r.name }}">{{ 'Open' if r.spec.editable else 'View' }}</a>{% endif %}</td></tr>
+  {% endfor %}
+</table></div>
+
+<h2>{{ icon('target') }} Today's progress towards the daily targets</h2>
+{% include "_targets_progress.html" %}
+{% endblock %}
