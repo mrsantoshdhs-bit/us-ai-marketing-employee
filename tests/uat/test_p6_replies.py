@@ -168,3 +168,19 @@ def test_probe_vendor_footer_in_the_middle_of_a_chain(make_ctx):
     body = ("Thanks.\n\nFrom: Bob Vendor <bob@vendor.example>\nSent: Monday\nTo: David\nSubject: fyi\n\nSee our new catalog.\nUnsubscribe from this list\n\nFrom: Sales <sales@us.example>\nSent: Tuesday\nTo: David\nSubject: x\n\n{B}\n")
     r = H.run_one(make_ctx, lambda s: H.raw_mail(s, body, whole=True))
     assert not r["susp"], r
+
+
+# The review's false opt-outs: business words that only look like the new spellings
+@pytest.mark.parametrize("text", ["We follow DNC lists for our outbound team. How does your tool handle that?", "We need to remove em dashes from our templates, can you help?",
+                                  "How many times a week would the truck stop at our warehouse?", "How many times have you helped a firm like ours stop losing leads?",
+                                  "Please don't lose this address, it is my new one. Happy to talk next week.", "Si pudieran mandarme una demo, mejor."])
+def test_review_business_words_are_not_an_opt_out(make_ctx, text):
+    assert not go(make_ctx, text)["susp"]
+
+
+def test_review_how_many_times_must_i_tell_you_to_stop_still_is(make_ctx):
+    assert go(make_ctx, "How many times do I have to tell you to stop emailing me?")["susp"]
+
+
+def test_review_call_me_never_is_no_interest(make_ctx):
+    assert go(make_ctx, "Call me never.")["cat"] != "interested"

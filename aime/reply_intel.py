@@ -75,7 +75,7 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
     # Opt-outs in everyday wording and with typos ("unsubcribe", "remove my email from your list", "no more emails").
     # "drop me a line", "take us through it" and "one from the list you sent" are not opt-outs.
     ("unsubscribe", re.compile(
-        r"\b(un-?su[bs]{1,2}c?r?i?b?e?d?|unsubscirbe|dnc|rmeove me|remove em|(do not|don'?t|dont) emial|pleas stop|no more emial|lose this address|un su[bs]{1,2}cri?b\w*|un?s?c?u?s?b?s?cri?be?d?|"
+        r"\b(un-?su[bs]{1,2}c?r?i?b?e?d?|unsubscirbe|rmeove me|(?<!n't )(?<!not )(?:dnc|remove em|lose this address)(?=\W*$)|(do not|don'?t|dont) emial|pleas stop|no more emial|un su[bs]{1,2}cri?b\w*|un?s?c?u?s?b?s?cri?be?d?|"
         rf"(remove|remoev|remvoe|delete|erase|unlist) {_OBJECT}|"
         rf"drop {_OBJECT}(?! (a|an|the|some|any|your|our|my|one|in|by|at|to)\b)|"
         rf"(take|get) {_OBJECT} (off|out( of| from)?)(?! (topic|guard|to|for|on|and)\b)|"
@@ -262,7 +262,7 @@ SPAM_ASIDE = re.compile(r"\bspam[ -](folders?|filters?|box(es)?|traps?|checks?|c
                         r"\b(in|to|into|from|under|out of|check\w*) (my |the |our |your |their )?spam\b", re.I)
 _LAWYER = r"(lawyers?|attorneys?|legal (team|counsel|department))"
 COMPLAINT = re.compile(r"\b((?<!can-)spam\w*|report(ed|ing)? (you|this)|legal action|lawsuit|sue you|suing|harass\w*|"
-                       r"cease and desist|(i|we)('ll| will| shall) sue|(f+u+c*k+|f|piss) off(?=\W*$)|get off my back|for the (last|final) time,? (please )?stop|how many times[^.?!]{0,40}\b(stop|quit)|asked you[^.?!]{0,30}\bquit|"
+                       r"cease and desist|(i|we)('ll| will| shall) sue|(f+u+c*k+|f|piss) off(?=\W*$)|get off my back|for the (last|final) time,? (please )?stop|how many times (do|must|have|should) (i|we) (have to |need to )?(tell|ask) you\b[^.?!]{0,30}\b(stop|quit|remove)|asked you[^.?!]{0,30}\bquit|"
                        r"(further|any) (contact|e-?mails?|communications?) (will|must|should)? ?(be )?(referred|directed|go(es)?) (to|through) (our |my )?(legal )?(counsel|attorney|lawyer)|direct all further communications? to (our|my) (legal )?(counsel|attorney|lawyer)|file a complaint with the (attorney general|ftc|fcc)|"
                        rf"(contact\w*|call\w*|hear from|involv\w*|(forward|send|report|refer|hand)\w* (this|it|these|you|your \w+)( over)? to) "
                        rf"(my|our|a|an) {_LAWYER}|"
@@ -308,7 +308,7 @@ MEETING = re.compile(
     rf"|(let'?s|lets|let us) ({_TALK}|schedule|arrange|set ?up|book|do|have)"
     rf"|(would|i'?d|we'?d|i|we) (really )?(like|love|want|be happy|be glad|be keen) (to )?(see |get |have |book |schedule |set up )?"
     rf"(a |an )?(demo|call|meeting|chat|walkthrough|presentation|quote|proposal|trial)"
-    rf"|(send|share|show) (me |us )?(a |an |the )?(demo|deck|proposal|quote|calendar invite)|(?:^|(?<=[.!?,] )|(?<=please ))call me(?! (crazy|old|if|when))"
+    rf"|(send|share|show) (me |us )?(a |an |the )?(demo|deck|proposal|quote|calendar invite)|(?:^|(?<=[.!?,] )|(?<=please ))call me(?! (crazy|old|if|when|never|an?\b))"
     rf"|{_TALK}\b[^.?!\n]{{0,40}}\b{_WHEN})\b", re.I)
 # "not", "never", "don't", "nobody" ... up to four words before an interest phrase: "not really interested", "don't send me more info",
 # "I doubt we'd be interested". "but", "so" and the like end it ("not now but we are interested"), and "no doubt" is a yes.
@@ -634,7 +634,7 @@ _STRONG_ENGLISH = re.compile(r"\b(yes|okay|ok|sure|thanks|thank you|great|sounds
 _ENGLISH_WORDS = re.compile(r"\b(the|this|that|is|are|was|will|would|can|could|have|has|our|your|you|we|i|i'm|i'll|to|and|for|of|on|at|with|from|it|she|he|they|my|me|us|send|please|call|again|next|week|but|not|just|try)\b", re.I)
 
 
-_FOREIGN_YES = re.compile(r"^\W*(oui|s[ií]|ja|haan|हाँ|हां)\b|(?<!no )(?<!pas )\b(me interesa|m'int[eé]resse)\b|(?<!नहीं )दिलचस्पी है", re.I)
+_FOREIGN_YES = re.compile(r"^\W*(oui|sí|ja|haan|हाँ|हां)\b|(?<!no )(?<!pas )\b(me interesa|m'int[eé]resse)\b|(?<!नहीं )दिलचस्पी है", re.I)
 
 
 def _cannot_be_read(text: str) -> bool:
@@ -781,7 +781,7 @@ def _classify(row: InboundEmail, text: str | None = None, *, own_addresses: froz
                 return "unsubscribe", "medium", [f'"{mild.group(0)}" above a legal notice: a person checks']
             if only_a_notice and opt_out_alone:  # the notice was all that stood behind words that end the message
                 return "unsubscribe", "high" if category == "other" else "medium", [f'"{opt_out_alone.group(0)}"']
-            if category in ("other", "not_interested") and only_a_notice and theirs and _cannot_be_read(theirs):  # it may be their no, in words the rules do not know
+            if category == "other" and only_a_notice and theirs and _cannot_be_read(theirs):  # it may be their no, in words the rules do not know
                 return "unsubscribe", "medium", ["their own words above a legal notice cannot be read here, and they may be a refusal: a person checks"]
             return category, "low", [*why, f'{FOOTER_REASON}: "{word}". The sequence stops; a person reads it']
     negated = None
