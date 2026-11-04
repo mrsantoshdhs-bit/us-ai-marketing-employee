@@ -162,6 +162,28 @@ def test_waking_sends_at_most_the_per_run_limit(make_ctx, monkeypatch, clock):
     assert len(FakeSMTP.sent) == 5
 
 
+@pytest.mark.parametrize("action", ["emergency_stop", "pause", "stop"])
+def test_a_stop_pressed_between_two_emails_of_a_run_keeps_the_rest_approved(make_ctx, monkeypatch, clock, action):
+    """The Control Center used to be read once, when the run began, so the rest of the batch still went out."""
+    from aime import automation
+    ctx = mail_world(make_ctx, monkeypatch)
+    clock(IN_WINDOW)
+    ids = [add_mail(ctx, add_lead(ctx, stage="approved")) for _ in range(3)]
+    workflows.job_inbox(ctx)
+    real = FakeSMTP.send_message
+
+    def press(self, msg):
+        real(self, msg)
+        with ctx.db.session() as s:
+            if automation.get_state(s) == "running":
+                automation.change_state(s, action, "owner", "pressed during the run")
+    monkeypatch.setattr(FakeSMTP, "send_message", press)
+    workflows.job_followups(ctx)
+    assert len(FakeSMTP.sent) == 1
+    left = [status_of(ctx, i) for i in ids if status_of(ctx, i)[0] != "sent"]
+    assert len(left) == 2 and all(st == "approved" and "Automation Control Center" in (why or "") for st, why in left), left
+
+
 # ------------------------------------------------------------------ the holiday rule
 def test_holiday_dates_follow_the_calendar():
     assert us_holidays(2026)["thanksgiving"][1] == date(2026, 11, 26)

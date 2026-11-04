@@ -678,6 +678,15 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
             return LEFT_THE_WINDOW
         return self.read_hold() if self.read_hold else None
 
+    @staticmethod
+    def _stopped_since(session: Session) -> str | None:
+        """Paused, stopped or the emergency stop pressed in the Automation Control Center while this run was sending: the
+        rest of the run stays approved. Read again before each email, as the run-start check reads it once."""
+        state = automation.get_state(session)
+        if state == "running":
+            return None
+        return f"Not sent: automation {automation.STATES[state].split(':')[0].lower()} in the Automation Control Center"
+
     def _stop_before_handing_over(self, last_look: datetime, now: datetime, cfg: dict, in_window: bool) -> None:
         """The same judgement at the last moment: the PC can sleep between the claim and the mail server too."""
         stop = self._why_stop_the_run(last_look, now, cfg, in_window)
@@ -702,7 +711,7 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         order = sorted(approved, key=lambda f: f.purpose not in automation.MEETING_NOTES)
         last_look = utcnow()
         for turn, f in enumerate(order):
-            stop = self._why_stop_the_run(last_look, now, cfg, in_window)
+            stop = self._why_stop_the_run(last_look, now, cfg, in_window) or self._stopped_since(session)
             if stop:  # the rest stay approved, for the next proper run
                 self.log.warning("Send run stopped with %s email(s) left: %s", len(order) - turn, stop)
                 for rest in order[turn:]:
