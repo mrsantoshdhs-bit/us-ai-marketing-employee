@@ -71,8 +71,8 @@ from aime.crm_ops import is_suppressed
 from aime.db import kv_get, kv_set
 from aime.dedupe import FREE_EMAIL_DOMAINS
 from aime.knowledge.industries import industry_label
-from aime.models import (Activity, AgentRun, Alert, Company, Contact, FollowUp, InboundEmail, JobRun, Lead, Meeting,
-                         Opportunity, Report, ReportDelivery, StageChange, Suppression)
+from aime.models import (Activity, AgentRun, Alert, Company, Contact, FollowUp, HandoverPackage, InboundEmail, JobRun, Lead,
+                         Meeting, Opportunity, Report, ReportDelivery, StageChange, Suppression)
 from aime.outreach import REACHED_PROSPECT
 from aime.performance import NOT_SIMULATED_DEAL
 from aime.timeutil import as_aware_utc, fmt_local, to_naive_utc, utcnow
@@ -557,6 +557,10 @@ def build(session: Session, settings, period: Period, now: datetime | None = Non
             InboundEmail.id, *human, InboundEmail.category.in_(REAL_REPLY), w(InboundEmail.received_at))
     t.count("interested_replies", "Interested replies", "Replies in the period classified as interested.",
             InboundEmail.id, *human, InboundEmail.category == "interested", w(InboundEmail.received_at))
+    t.count("negative_replies", "Negative replies (not interested)", "Replies in the period classified as not interested.",
+            InboundEmail.id, *human, InboundEmail.category == "not_interested", w(InboundEmail.received_at))
+    t.count("objection_replies", "Objections", "Replies in the period classified as an objection (too expensive, not now, "
+            "already have someone, ...).", InboundEmail.id, *human, InboundEmail.category == "objection", w(InboundEmail.received_at))
     t.count("leads_replied", "Leads that replied", "Leads with a reply (as above) in the period, each lead once.",
             InboundEmail.lead_id, *human, InboundEmail.category.in_(REAL_REPLY), w(InboundEmail.received_at))
     contacted = t.full_ids["leads_contacted"]
@@ -599,6 +603,21 @@ def build(session: Session, settings, period: Period, now: datetime | None = Non
             Meeting.id, *real_meeting, Meeting.status == "completed", w(Meeting.starts_at))
     t.count("simulated_meetings", "Simulated meetings (not counted)", "Meetings from simulated replies recorded in the period.",
             Meeting.id, Meeting.is_simulated.is_(True), w(Meeting.created_at))
+    t.rate("meeting_conversion", "Meeting conversion", "meetings_booked", "leads_replied",
+           "Meetings booked in the period divided by leads that replied in the period.")
+
+    # ---- handovers to the Sales Manager (aime.handover_package; deals from simulated replies left out)
+    real_handover = HandoverPackage.opportunity_id.in_(select(Opportunity.id).where(NOT_SIMULATED_DEAL))
+    t.count("handovers", "Handovers to the Sales Manager",
+            "Deals whose first handover package was written in the period (a later version of the same deal is not a new "
+            "handover), each deal once.", HandoverPackage.opportunity_id, HandoverPackage.version == 1,
+            w(HandoverPackage.created_at), real_handover)
+    t.count("handovers_accepted", "Handovers accepted",
+            "Deals whose handover the Sales Manager accepted in the period, each deal once.",
+            HandoverPackage.opportunity_id, w(HandoverPackage.accepted_at), real_handover)
+    t.count("handovers_waiting", "Handovers waiting for the Sales Manager",
+            "Deals whose latest handover package is still open (not accepted or returned), as they stand now.",
+            HandoverPackage.opportunity_id, HandoverPackage.status == "open", real_handover, snapshot=True)
 
     # ---- pipeline
     real_deal = Opportunity.id.in_(select(Opportunity.id).where(NOT_SIMULATED_DEAL))
@@ -627,6 +646,9 @@ def build(session: Session, settings, period: Period, now: datetime | None = Non
     held = defaultdict(list)
     for fid, _status, reason in held_rows:
         held[_reason_group(reason)].append(fid)
+    t.count("pending_approvals", "Emails waiting for approval",
+            "Emails a person still has to approve, as they stand now.",
+            FollowUp.id, FollowUp.channel == "email", FollowUp.status == "awaiting_approval", snapshot=True)
     t.count("uncertain_sends", "Sends of unknown outcome", "Emails whose sending was cut off: a person checks the Sent folder.",
             FollowUp.id, FollowUp.channel == "email", FollowUp.status == "uncertain", snapshot=True)
     t.count("suppressions_added", "Added to the do-not-contact list",
@@ -665,7 +687,7 @@ def build(session: Session, settings, period: Period, now: datetime | None = Non
     goals = _targets(settings)
     breakdown_keys = ("companies_discovered", "verified_decision_makers", "contactable_prospects", "qualified_leads",
                       "outreach_sent", "replies", "meetings_booked")
-    country_of, industry_of = {}, {}
+    country_of, industry_of, source_of = {}, {}, {}
     company_ids: set[int] = set()
     record_company: dict[str, dict[int, int | None]] = {}
     for key in breakdown_keys:
@@ -674,16 +696,19 @@ def build(session: Session, settings, period: Period, now: datetime | None = Non
         record_company[key] = _company_of(session, table, t.full_ids[key])
         company_ids |= {c for c in record_company[key].values() if c is not None}
     if company_ids:
-        for cid, country, industry in session.execute(select(Company.id, Company.country, Company.industry)
-                                                      .where(Company.id.in_(company_ids))).all():
+        for cid, country, industry, source in session.execute(select(Company.id, Company.country, Company.industry, Company.source)
+                                                              .where(Company.id.in_(company_ids))).all():
             country_of[cid] = (country or "unknown").upper()
             industry_of[cid] = industry or "unknown"
+            source_of[cid] = source or "unknown"
     by_country: dict[str, Counter] = defaultdict(Counter)
     by_industry: dict[str, Counter] = defaultdict(Counter)
+    by_source: dict[str, Counter] = defaultdict(Counter)
     for key in breakdown_keys:
         for _rid, cid in record_company[key].items():
             by_country[country_of.get(cid, "unknown")][key] += 1
             by_industry[industry_of.get(cid, "unknown")][key] += 1
+            by_source[source_of.get(cid, "unknown")][key] += 1
     countries = []
     for code in sorted(set(by_country) | set(goals)):
         row = {"country": code, "figures": {}}
@@ -697,6 +722,8 @@ def build(session: Session, settings, period: Period, now: datetime | None = Non
     industries = [{"industry": k, "label": industry_label(k) if k != "unknown" else "Unknown",
                    "figures": {key: by_industry[k][key] for key in breakdown_keys}}
                   for k in sorted(by_industry, key=lambda x: -sum(by_industry[x].values()))]
+    sources = [{"source": k, "figures": {key: by_source[k][key] for key in breakdown_keys}}
+               for k in sorted(by_source, key=lambda x: -sum(by_source[x].values()))]
 
     period_keys = [k for k, m in t.metrics.items() if not m.get("snapshot") and not m.get("rate")
                    and k not in ("decided_leads",) and "value" in m]
@@ -718,7 +745,7 @@ def build(session: Session, settings, period: Period, now: datetime | None = Non
                     "automation_state": am.get_state(session), "automation_mode": am.get_mode(session),
                     "failed_jobs_by_job": dict(failed_by_job), "ai_decisions": _ai_decisions(session, period)},
         "agents": agents,
-        "countries": countries, "industries": industries,
+        "countries": countries, "industries": industries, "sources": sources,
         "targets_set": bool(goals),
         "breakdown_keys": list(breakdown_keys),
         **({"full_ids": t.full_ids} if full_ids else {}),  # for the dashboard's charts; never stored
@@ -749,13 +776,15 @@ ORDER = [
                                 "verified_decision_makers", "role_addresses", "verification_rate", "dm_verification_rate"]),
     ("Qualification", ["qualified_leads", "disqualified_leads", "qualification_rate"]),
     ("Outreach", ["outreach_drafted", "outreach_approved", "outreach_sent", "leads_contacted", "emails_sent"]),
-    ("Replies", ["replies", "interested_replies", "leads_replied", "engagement_rate", "simulated_replies"]),
+    ("Replies", ["replies", "interested_replies", "negative_replies", "objection_replies", "leads_replied", "engagement_rate",
+                 "simulated_replies"]),
     ("Follow-ups", ["followup_emails_sent", "answers_sent", "tasks_completed", "tasks_overdue"]),
-    ("Meetings", ["meetings_booked", "meetings_held", "simulated_meetings"]),
+    ("Meetings", ["meetings_booked", "meetings_held", "meeting_conversion", "simulated_meetings"]),
+    ("Sales Manager handovers", ["handovers", "handovers_accepted", "handovers_waiting"]),
     ("Pipeline", ["opportunities_opened", "deals_won", "deals_lost"]),
     ("Deliverability", ["bounces", "bounce_rate", "unsubscribes", "test_mode_deliveries", "suppressions_added",
                         "suppressions_active"]),
-    ("Blocked activities", ["uncertain_sends", "failed_jobs", "error_alerts"]),
+    ("Blocked activities", ["pending_approvals", "uncertain_sends", "failed_jobs", "error_alerts"]),
     ("Agent performance", ["agent_runs", "agent_failures"]),
 ]
 LABELS = {"companies_discovered": "Companies", "verified_decision_makers": "Verified DMs", "contactable_prospects": "Contactable",
@@ -789,6 +818,9 @@ BY COUNTRY (achieved / target)
 {% endfor %}{% endif %}{% if industries %}
 BY INDUSTRY
 {% for i in industries %}  {{ i.label }}: {% for key in breakdown_keys %}{{ labels[key] }} {{ i.figures[key] }}{{ ', ' if not loop.last }}{% endfor %}
+{% endfor %}{% endif %}{% if sources %}
+BY SOURCE
+{% for i in sources %}  {{ i.source }}: {% for key in breakdown_keys %}{{ labels[key] }} {{ i.figures[key] }}{{ ', ' if not loop.last }}{% endfor %}
 {% endfor %}{% endif %}{% endif %}
 AS THINGS STAND NOW
   Deals by stage: {% if pipeline.by_stage_now %}{% for r in pipeline.by_stage_now %}{{ r.stage }} {{ r.value }}{{ ', ' if not loop.last }}{% endfor %}{% else %}none{% endif %}
@@ -830,6 +862,10 @@ HTML_TEMPLATE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><m
 {% if industries %}<h2 style="font-size:16px;margin:22px 0 6px;border-bottom:2px solid #e6e9f0;padding-bottom:4px">By industry</h2>
 <table style="border-collapse:collapse;width:100%"><tr><th style="{{ cell }};text-align:left">Industry</th>{% for key in breakdown_keys %}<th style="{{ cell }};text-align:right">{{ labels[key] }}</th>{% endfor %}</tr>
 {% for i in industries %}<tr><td style="{{ cell }}">{{ i.label }}</td>{% for key in breakdown_keys %}<td style="{{ cell }};text-align:right">{{ i.figures[key] }}</td>{% endfor %}</tr>
+{% endfor %}</table>{% endif %}
+{% if sources %}<h2 style="font-size:16px;margin:22px 0 6px;border-bottom:2px solid #e6e9f0;padding-bottom:4px">By source</h2>
+<table style="border-collapse:collapse;width:100%"><tr><th style="{{ cell }};text-align:left">Source</th>{% for key in breakdown_keys %}<th style="{{ cell }};text-align:right">{{ labels[key] }}</th>{% endfor %}</tr>
+{% for i in sources %}<tr><td style="{{ cell }}">{{ i.source }}</td>{% for key in breakdown_keys %}<td style="{{ cell }};text-align:right">{{ i.figures[key] }}</td>{% endfor %}</tr>
 {% endfor %}</table>{% endif %}
 {% endif %}
 <h2 style="font-size:16px;margin:22px 0 6px;border-bottom:2px solid #e6e9f0;padding-bottom:4px">As things stand now</h2>

@@ -628,3 +628,50 @@ def test_the_ai_section_counts_the_decision_log_by_policy_verdict(make_ctx):
         got = mr._ai_decisions(s, period)
     assert got["total"] == 4 and got["by"] == {"auto_internal": 1, "human_review": 2, "block": 1}
     assert (got["blocked"], got["human_review"], got["escalated"], got["escalated_or_blocked"]) == (1, 2, 2, 2)
+
+
+def test_negative_replies_objections_handovers_pending_approvals_and_sources_are_counted_from_the_records(ctx):
+    from aime.models import HandoverPackage
+
+    seed(ctx)
+    with ctx.db.session() as s:
+        a = s.execute(select(Company).where(Company.name == "Acme")).scalar_one()
+        a.source = "hn_hiring"
+        la = s.execute(select(Lead).where(Lead.company_id == a.id)).scalars().first()
+        mail(s, la, "not_interested")
+        mail(s, la, "objection")
+        mail(s, la, "not_interested", simulated=True)  # simulated: never counted
+        mail(s, la, "not_interested", when=BEFORE)  # before the period
+        o1 = s.execute(select(Opportunity).where(Opportunity.name == "Acme deal")).scalar_one()
+        o3 = s.execute(select(Opportunity).where(Opportunity.name == "Simulated deal")).scalar_one()
+        pkg = dict(summary="s", sections={}, conditions=[], content_hash="h", created_by="t")
+        s.add_all([HandoverPackage(opportunity_id=o1.id, version=1, status="superseded", created_at=IN, **pkg),
+                   HandoverPackage(opportunity_id=o1.id, version=2, status="accepted", created_at=IN, accepted_at=IN,
+                                   accepted_by="manager", **pkg),  # a second version of the same deal: one handover
+                   HandoverPackage(opportunity_id=o3.id, version=1, status="open", created_at=IN, **pkg)])  # simulated deal
+    with ctx.db.session() as s:
+        data = mr.build(s, ctx.settings, DAILY, NOW)
+    v = values(data)
+    assert (v["negative_replies"], v["objection_replies"]) == (1, 1)
+    assert (v["handovers"], v["handovers_accepted"], v["handovers_waiting"]) == (1, 1, 0)
+    assert v["pending_approvals"] == 1  # the step-2 email still awaiting approval
+    assert data["metrics"]["meeting_conversion"]["text"] == "50% (1 of 2)"  # one meeting, two leads replied
+    sources = {r["source"]: r["figures"]["companies_discovered"] for r in data["sources"]}
+    assert sources == {"hn_hiring": 1, "test": 2}
+    subject, plain, html = mr.render(data, ctx.settings)
+    for text in ("Negative replies (not interested): 1", "Handovers to the Sales Manager: 1", "Emails waiting for approval: 1",
+                 "BY SOURCE", "Meeting conversion: 50% (1 of 2)"):
+        assert text in plain, text
+    assert "By source" in html and "Sales Manager handovers" in html
+
+
+def test_a_report_stored_before_the_new_figures_still_renders(ctx):
+    seed(ctx)
+    with ctx.db.session() as s:
+        data = mr.build(s, ctx.settings, DAILY, NOW)
+    for key in ("negative_replies", "objection_replies", "handovers", "handovers_accepted", "handovers_waiting",
+                "pending_approvals", "meeting_conversion"):
+        data["metrics"].pop(key)
+    data.pop("sources")
+    subject, plain, html = mr.render(data, ctx.settings)
+    assert "Replies from prospects" in plain and "BY SOURCE" not in plain and "By source" not in html

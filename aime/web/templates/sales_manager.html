@@ -56,6 +56,12 @@
   {% for i in data.industries %}<tr><td>{{ i.label }}</td>{% for k in data.breakdown_keys %}<td class="n">{{ i.figures[k] }}</td>{% endfor %}</tr>{% endfor %}</table>
   {% else %}<p class="muted">No data for this period.</p>{% endif %}</div>
 
+<div class="card table-wrap"><h2>Source</h2>
+  {% if data.sources %}<table><tr><th>Source</th>{% for k in data.breakdown_keys %}<th class="n">{{ labels[k] }}</th>{% endfor %}</tr>
+  {% for i in data.sources %}<tr><td>{{ i.source }}</td>{% for k in data.breakdown_keys %}<td class="n">{{ i.figures[k] }}</td>{% endfor %}</tr>{% endfor %}</table>
+  {% else %}<p class="muted">No data for this period.</p>{% endif %}
+  <p class="small muted">Where the company came from (companies.source).</p></div>
+
 <div class="card table-wrap"><h2>Agent productivity</h2>
   {% if data.agents %}<table><tr><th>Agent</th><th class="n">Runs</th><th class="n">Succeeded</th><th class="n">Failed</th><th class="n">Success rate</th><th class="n">Average s</th><th class="n">Longest s</th><th class="n">AI calls (failed)</th></tr>
   {% for a in data.agents %}<tr><td>{{ a.agent }}</td><td class="n">{{ a.runs }}</td><td class="n">{{ a.success }}</td><td class="n">{{ a.failed }}</td><td class="n">{{ a.success_rate }}%</td>
