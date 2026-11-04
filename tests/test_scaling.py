@@ -97,7 +97,8 @@ def test_an_item_claimed_too_often_without_finishing_goes_to_the_dead_letters(ct
         assert work_queue.claim(s, "k", 1, W1, now=now + timedelta(days=1)) == []
         assert s.execute(select(WorkItem.status)).scalar_one() == "dead"
         assert work_queue.status(s)[0] | {"next_at": None, "last_done_at": None} == {
-            "kind": "k", "pending": 0, "claimed": 0, "done": 0, "dead": 1, "next_at": None, "last_done_at": None, "leased_by": []}
+            "kind": "k", "pending": 0, "claimed": 0, "done": 0, "dead": 1, "blocked": 0, "cancelled": 0, "retrying": 0, "stuck": 0,
+            "next_at": None, "last_done_at": None, "leased_by": []}
 
 
 # ------------------------------------------------------------------ company research through the queue

@@ -209,9 +209,25 @@ def check_health(session: Session, settings: Settings, llm_probe: Callable[[], b
             issues.append(msg)
             active.add(f"agent_rate:{row['agent']}")
             created += alert_once(session, "warning", "monitor", msg, settings, key=f"agent_rate:{row['agent']}")
-    resolved = resolve_alerts(session, ("job_failing:", "job_stale:", "agent_rate:"), active)
+    for key, msg in _work_queue(session, settings):
+        issues.append(msg)
+        active.add(key)
+        created += alert_once(session, "warning", "monitor", msg, settings, key=key)
+    resolved = resolve_alerts(session, ("job_failing:", "job_stale:", "agent_rate:", "queue_"), active)
     issues += _deliverability(session, settings)
     return {"issues": issues, "alerts_created": created, "alerts_resolved": resolved}
+
+
+def _work_queue(session: Session, settings: Settings) -> list[tuple[str, str]]:
+    """Dead letters, abandoned leases and a queue that does not move (aime.work_queue.health)."""
+    from aime import work_queue
+
+    on = {"company_research": bool(settings.section("enrichment").get("work_queue", False))}
+    try:
+        return work_queue.health(session, on)
+    except Exception as exc:  # noqa: BLE001 - the health check must finish whatever this part meets
+        logging.getLogger("aime.monitoring").warning("Work queue check failed: %s", exc)
+        return []
 
 
 def _deliverability(session: Session, settings: Settings) -> list[str]:

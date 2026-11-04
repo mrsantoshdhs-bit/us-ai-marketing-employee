@@ -1125,7 +1125,7 @@ class WorkItem(Base):
     key: Mapped[str] = mapped_column(String(200))
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict)
     priority: Mapped[int] = mapped_column(Integer, default=0)  # lower first, then the oldest
-    status: Mapped[str] = mapped_column(String(12), default="pending")  # pending | claimed | done | dead
+    status: Mapped[str] = mapped_column(String(12), default="pending")  # pending | claimed | done | dead | blocked | cancelled
     attempts: Mapped[int] = mapped_column(Integer, default=0)  # claims so far
     available_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)  # not claimed before this (retry backoff)
     locked_by: Mapped[str | None] = mapped_column(String(80))

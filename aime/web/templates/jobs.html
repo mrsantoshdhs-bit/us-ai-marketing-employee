@@ -23,14 +23,15 @@
 <h2>Work queue</h2>
 <div class="card table-wrap">
   <p class="small muted">Chunked work that takes several runs. Company research takes the next companies from here at each run
-  (at most companies_per_run), in the order the last scan ranked them{% if not queue_on %}; it is switched off now ([enrichment] work_queue = false), so every run scans instead{% endif %}.</p>
+  (at most companies_per_run), in the order the last scan ranked them{% if not queue_on %}; it is switched off now (Sales settings: "Company research works through the work queue"), so every run scans instead{% endif %}.
+  Retrying: waiting out a backoff after a failure. Dead letters failed 5 times and wait for a person (<code>aime queue</code>).</p>
   <table>
-  <tr><th>Kind</th><th class="n">Waiting</th><th class="n">Being worked</th><th class="n">Done</th><th class="n">Dead letters</th><th>Next available</th><th>Last finished</th><th>Held by</th></tr>
+  <tr><th>Kind</th><th class="n">Waiting</th><th class="n">Retrying</th><th class="n">Being worked</th><th class="n">Done</th><th class="n">Dead letters</th><th class="n">Blocked</th><th class="n">Cancelled</th><th>Next available</th><th>Last finished</th><th>Held by</th></tr>
   {% for q in queue %}
-  <tr><td><strong>{{ q.kind }}</strong></td><td class="n">{{ q.pending }}</td><td class="n">{{ q.claimed }}</td><td class="n">{{ q.done }}</td>
-      <td class="n">{{ q.dead }}</td><td class="small">{{ q.next_at|local }}</td><td class="small">{{ q.last_done_at|local }}</td>
+  <tr><td><strong>{{ q.kind }}</strong></td><td class="n">{{ q.pending }}</td><td class="n">{{ q.retrying }}</td><td class="n">{{ q.claimed }}{% if q.stuck %} <span class="small muted">({{ q.stuck }} past lease)</span>{% endif %}</td><td class="n">{{ q.done }}</td>
+      <td class="n">{{ q.dead }}</td><td class="n">{{ q.blocked }}</td><td class="n">{{ q.cancelled }}</td><td class="small">{{ q.next_at|local }}</td><td class="small">{{ q.last_done_at|local }}</td>
       <td class="small">{{ q.leased_by|join(', ') or '—' }}</td></tr>
-  {% else %}<tr><td colspan="8" class="muted">Nothing queued yet.</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="11" class="muted">Nothing queued yet.</td></tr>{% endfor %}
 </table></div>
 <h2>History</h2>
 <div class="card table-wrap"><table>

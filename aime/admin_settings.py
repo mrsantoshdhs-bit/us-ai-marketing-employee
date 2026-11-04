@@ -141,6 +141,7 @@ FIELDS: list[tuple[str, str, str, Any, str]] = [
     ("handover", "strategy", "Assignment rule: workload, round_robin or skill", _strategy, "text"),
     ("handover", "escalate_after_hours", "Tell the owner's manager when a deal is untouched for (hours, 0 = never)",
      _int(0, 336), "number"),
+    ("enrichment", "work_queue", "Company research works through the work queue (off: every run scans)", _bool, "bool"),
 ]
 
 

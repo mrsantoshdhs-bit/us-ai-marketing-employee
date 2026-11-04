@@ -654,6 +654,41 @@ def cmd_maintenance(args, ctx) -> int:
     return 0
 
 
+def cmd_queue(args, ctx) -> int:
+    """The work queue: its state, or a person's hand on one item (audited). Contacts no one."""
+    from aime import work_queue
+    from aime.automation import audit
+    from aime.models import WorkItem
+
+    with ctx.db.session() as s:
+        if args.action == "status":
+            for k in work_queue.status(s):
+                if args.kind and k["kind"] != args.kind:
+                    continue
+                print(f"{k['kind']}: waiting {k['pending']} (retrying {k['retrying']}), running {k['claimed']} "
+                      f"(past lease {k['stuck']}), done {k['done']}, dead {k['dead']}, blocked {k['blocked']}, cancelled {k['cancelled']}")
+            q = select(WorkItem).where(WorkItem.status.in_(("dead", "blocked", "claimed")))
+            if args.kind:
+                q = q.where(WorkItem.kind == args.kind)
+            for item in s.execute(q.order_by(WorkItem.id).limit(50)).scalars():
+                print(f"  #{item.id} {item.kind} {item.key}: {work_queue.state_of(item)}, {item.attempts} attempt(s)"
+                      f"{': ' + item.last_error if item.last_error else ''}")
+            return 0
+        if args.id is None:
+            print("--id is needed")
+            return 2
+        reason = args.reason or "by a person"
+        done = {"cancel": lambda: work_queue.cancel(s, args.id, reason), "block": lambda: work_queue.block(s, args.id, reason),
+                "unblock": lambda: work_queue.unblock(s, args.id), "revive": lambda: work_queue.revive(s, args.id)}[args.action]()
+        if not done:
+            item = s.get(WorkItem, args.id)
+            print(f"Nothing changed: item #{args.id} is {work_queue.state_of(item) if item else 'not in the queue'}")
+            return 1
+        audit(s, "cli", f"work_queue_{args.action}", f"work item #{args.id}", reason[:300])
+        print(f"Item #{args.id} is now {work_queue.state_of(s.get(WorkItem, args.id))}")
+    return 0
+
+
 def cmd_refresh_graphics(args, ctx) -> int:
     """Re-render images for posts that are not published yet (e.g. after a brand change). Old files are kept."""
     from aime.models import ContentItem
@@ -783,6 +818,11 @@ def build_parser() -> argparse.ArgumentParser:
     mt.add_argument("action", choices=["on", "off", "status"])
     mt.add_argument("--hours", type=float, default=2.0)
     mt.add_argument("--reason", default="Manual maintenance")
+    qu = sub.add_parser("queue", help="The work queue: status, or cancel / block / unblock / revive one item (audited)")
+    qu.add_argument("action", choices=["status", "cancel", "block", "unblock", "revive"])
+    qu.add_argument("--id", type=int)
+    qu.add_argument("--kind")
+    qu.add_argument("--reason")
     ec = sub.add_parser("email-check", help="Check the sales mailbox: settings, SPF/DKIM/DMARC, SMTP/IMAP sign-in")
     ec.add_argument("--domain", help="sending domain to check (default: the SMTP_FROM domain)")
     ec.add_argument("--connect", action="store_true", help="sign in to SMTP and IMAP (read-only); sends nothing")
@@ -823,7 +863,7 @@ COMMANDS = {
     "email-check": cmd_email_check,
     "scheduler": cmd_scheduler, "automation": cmd_automation, "llm-check": cmd_llm_check, "inbound": cmd_inbound, "suppress": cmd_suppress,
     "erase": cmd_erase,
-    "seed-demo": cmd_seed_demo, "doctor": cmd_doctor, "backup": cmd_backup, "maintenance": cmd_maintenance,
+    "seed-demo": cmd_seed_demo, "doctor": cmd_doctor, "backup": cmd_backup, "maintenance": cmd_maintenance, "queue": cmd_queue,
     "refresh-graphics": cmd_refresh_graphics, "backup-verify": cmd_backup_verify, "restore-drill": cmd_restore_drill,
     "user": cmd_user, "policy": cmd_policy, "simulate-reply": cmd_simulate_reply, "research-recheck": cmd_research_recheck,
     "acceptance-report": cmd_acceptance_report, "confirm-sending": cmd_confirm_sending, "confirm-clock": cmd_confirm_clock,

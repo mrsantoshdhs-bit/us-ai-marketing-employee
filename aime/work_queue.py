@@ -7,6 +7,13 @@
   worker per kind at a time (`one_worker`): two runs never read the same sources in parallel.
 - complete / fail / release: done with a result; failed, retried after an exponential backoff, dead after
   `max_attempts`; or handed back untouched (the run stopped early), without counting the attempt.
+- block / unblock / cancel / revive: a person's hands. A blocked item is held (never claimed) until unblocked; a
+  cancelled one is closed for good, and enqueueing the same work again leaves it closed; a dead one is retried.
+- health: what the monitor job alerts on: dead letters, a lease whose worker stopped, a queue that does not move.
+
+States, in the roadmap's words (`state_of`): PENDING (pending), RETRYING (pending again after a failure, waiting out
+its backoff), RUNNING (claimed), COMPLETED (done), FAILED (dead: the dead letters), BLOCKED (blocked), CANCELLED
+(cancelled).
 
 Every call works inside the caller's session and commits nothing itself, so the work and its queue item change in
 one transaction. The queue holds no secrets and contacts no one.
@@ -31,6 +38,10 @@ LEASE = timedelta(minutes=45)  # longer than a job's 30-minute budget: a slow ru
 MAX_ATTEMPTS = 5
 BACKOFF = timedelta(minutes=30)
 MAX_BACKOFF = timedelta(hours=24)
+STALLED = timedelta(hours=48)  # work available this long and never taken: the queue is not moving
+STATES = {"pending": "PENDING", "claimed": "RUNNING", "done": "COMPLETED", "dead": "FAILED", "blocked": "BLOCKED",
+          "cancelled": "CANCELLED"}
+CLOSED = ("done", "dead", "cancelled")
 
 
 def worker_id() -> str:
@@ -167,6 +178,42 @@ def revive(session: Session, item_id: int) -> bool:
     return True
 
 
+def block(session: Session, item_id: int, reason: str, now: datetime | None = None) -> bool:
+    """Hold a waiting item: it is not claimed until unblocked. A running one is left to finish."""
+    item = session.get(WorkItem, item_id)
+    if item is None or item.status != "pending":
+        return False
+    item.status, item.last_error, item.updated_at = "blocked", f"blocked: {reason}"[:500], now or utcnow()
+    return True
+
+
+def unblock(session: Session, item_id: int, now: datetime | None = None) -> bool:
+    item = session.get(WorkItem, item_id)
+    if item is None or item.status != "blocked":
+        return False
+    now = now or utcnow()
+    item.status, item.available_at, item.last_error, item.updated_at = "pending", now, None, now
+    return True
+
+
+def cancel(session: Session, item_id: int, reason: str, now: datetime | None = None) -> bool:
+    """Close an item that is not finished. A worker still holding it records nothing afterwards (its lease is gone)."""
+    item = session.get(WorkItem, item_id)
+    if item is None or item.status in ("done", "cancelled"):
+        return False
+    now = now or utcnow()
+    item.status, item.finished_at, item.last_error = "cancelled", now, f"cancelled: {reason}"[:500]
+    item.locked_by = item.locked_at = item.lease_until = None
+    return True
+
+
+def state_of(item: WorkItem) -> str:
+    """The item's state in the roadmap's words."""
+    if item.status == "pending" and item.attempts and item.last_error:
+        return "RETRYING"
+    return STATES.get(item.status, item.status.upper())
+
+
 def pending_count(session: Session, kind: str) -> int:
     return session.execute(select(func.count(WorkItem.id)).where(WorkItem.kind == kind, WorkItem.status.in_(("pending", "claimed")))).scalar_one()
 
@@ -178,7 +225,8 @@ def status(session: Session, now: datetime | None = None) -> list[dict[str, Any]
                                   func.max(WorkItem.finished_at)).group_by(WorkItem.kind, WorkItem.status)).all()
     kinds: dict[str, dict[str, Any]] = {}
     for kind, st, n, first_at, last_done in rows:
-        k = kinds.setdefault(kind, {"kind": kind, "pending": 0, "claimed": 0, "done": 0, "dead": 0, "next_at": None, "last_done_at": None})
+        k = kinds.setdefault(kind, {"kind": kind, "pending": 0, "claimed": 0, "done": 0, "dead": 0, "blocked": 0, "cancelled": 0,
+                                    "retrying": 0, "stuck": 0, "next_at": None, "last_done_at": None})
         k[st] = n
         if st == "pending":
             k["next_at"] = first_at
@@ -187,4 +235,30 @@ def status(session: Session, now: datetime | None = None) -> list[dict[str, Any]
     for k in kinds.values():
         k["leased_by"] = session.execute(select(WorkItem.locked_by).where(WorkItem.kind == k["kind"], WorkItem.status == "claimed",
                                                                          WorkItem.lease_until >= now).distinct()).scalars().all()
+        k["retrying"] = session.execute(select(func.count(WorkItem.id)).where(
+            WorkItem.kind == k["kind"], WorkItem.status == "pending", WorkItem.attempts > 0, WorkItem.last_error.is_not(None))).scalar_one()
+        k["stuck"] = session.execute(select(func.count(WorkItem.id)).where(
+            WorkItem.kind == k["kind"], WorkItem.status == "claimed", WorkItem.lease_until < now)).scalar_one()
     return sorted(kinds.values(), key=lambda k: k["kind"])
+
+
+def health(session: Session, queue_on: dict[str, bool] | None = None, now: datetime | None = None) -> list[tuple[str, str]]:
+    """(alert key, message) for each problem: dead letters, leases whose worker stopped, and, for a kind whose queue is on
+    (`queue_on`; a kind not named counts as on), work that has been available for STALLED without anyone taking it."""
+    now = now or utcnow()
+    out: list[tuple[str, str]] = []
+    for k in status(session, now):
+        kind = k["kind"]
+        if k["dead"]:
+            out.append((f"queue_dead:{kind}", f"Work queue '{kind}': {k['dead']} item(s) failed {MAX_ATTEMPTS} times and wait for a "
+                                              f"person (dead letters; `aime queue status --kind {kind}`)"))
+        if k["stuck"]:
+            out.append((f"queue_stuck:{kind}", f"Work queue '{kind}': {k['stuck']} item(s) held past their lease (the worker "
+                                               "stopped); the next run takes them again"))
+        if (queue_on or {}).get(kind, True) and k["pending"]:
+            oldest = session.execute(select(func.min(WorkItem.available_at)).where(WorkItem.kind == kind,
+                                                                                   WorkItem.status == "pending")).scalar_one()
+            if oldest is not None and now - oldest > STALLED:
+                out.append((f"queue_stalled:{kind}", f"Work queue '{kind}': work has waited since {oldest:%Y-%m-%d %H:%M} UTC "
+                                                     "without being taken"))
+    return out
