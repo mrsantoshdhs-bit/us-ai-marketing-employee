@@ -72,7 +72,7 @@ from aime.db import kv_get, kv_set
 from aime.dedupe import FREE_EMAIL_DOMAINS
 from aime.knowledge.industries import industry_label
 from aime.models import (Activity, AgentRun, Alert, Company, Contact, FollowUp, HandoverPackage, InboundEmail, JobRun, Lead,
-                         Meeting, Opportunity, Report, ReportDelivery, StageChange, Suppression)
+                         Meeting, Opportunity, Report, ReportDelivery, StageChange, Suppression, WorkItem)
 from aime.outreach import REACHED_PROSPECT
 from aime.performance import NOT_SIMULATED_DEAL
 from aime.timeutil import as_aware_utc, fmt_local, to_naive_utc, utcnow
@@ -660,6 +660,14 @@ def build(session: Session, settings, period: Period, now: datetime | None = Non
             "or were cut off.", JobRun.id, w(JobRun.started_at), JobRun.status.in_(("failed", "partial", "abandoned")))
     t.count("error_alerts", "Error alerts raised", "Error-level alerts raised in the period.", Alert.id,
             Alert.level == "error", w(Alert.created_at))
+    t.count("queue_done", "Work queue items completed", "Work items (company research and the like) finished in the period.",
+            WorkItem.id, WorkItem.status == "done", w(WorkItem.finished_at))
+    t.count("queue_retried", "Work queue items retried", "Work items finished or waiting in the period that needed more than "
+            "one attempt.", WorkItem.id, WorkItem.attempts > 1, w(WorkItem.updated_at))
+    t.count("queue_dead", "Work queue dead letters now", "Work items that failed every attempt and wait for a person, as "
+            "they stand now.", WorkItem.id, WorkItem.status == "dead", snapshot=True)
+    t.count("queue_waiting", "Work queue items waiting now", "Work items pending or blocked, as they stand now.",
+            WorkItem.id, WorkItem.status.in_(("pending", "blocked")), snapshot=True)
     failed_by_job = Counter(session.execute(select(JobRun.job).where(
         JobRun.id.in_(t.full_ids["failed_jobs"] or [-1]))).scalars())
     # ---- agents
@@ -786,6 +794,7 @@ ORDER = [
                         "suppressions_active"]),
     ("Blocked activities", ["pending_approvals", "uncertain_sends", "failed_jobs", "error_alerts"]),
     ("Agent performance", ["agent_runs", "agent_failures"]),
+    ("Work queue", ["queue_done", "queue_retried", "queue_dead", "queue_waiting"]),
 ]
 LABELS = {"companies_discovered": "Companies", "verified_decision_makers": "Verified DMs", "contactable_prospects": "Contactable",
           "qualified_leads": "Qualified", "outreach_sent": "Outreach sent", "replies": "Replies", "meetings_booked": "Meetings"}

@@ -675,3 +675,22 @@ def test_a_report_stored_before_the_new_figures_still_renders(ctx):
     data.pop("sources")
     subject, plain, html = mr.render(data, ctx.settings)
     assert "Replies from prospects" in plain and "BY SOURCE" not in plain and "By source" not in html
+
+
+def test_the_work_queue_figures_are_counted_from_the_queue_records(ctx):
+    from aime.models import WorkItem
+
+    seed(ctx)
+    with ctx.db.session() as s:
+        s.add_all([WorkItem(kind="company_research", key="1", status="done", attempts=1, finished_at=IN, updated_at=IN),
+                   WorkItem(kind="company_research", key="2", status="done", attempts=2, finished_at=IN, updated_at=IN),
+                   WorkItem(kind="company_research", key="3", status="done", attempts=1, finished_at=BEFORE, updated_at=BEFORE),
+                   WorkItem(kind="company_research", key="4", status="dead", attempts=3, updated_at=IN, last_error="site down"),
+                   WorkItem(kind="company_research", key="5", status="pending", attempts=0, updated_at=IN),
+                   WorkItem(kind="company_research", key="6", status="blocked", attempts=0, updated_at=IN)])
+    with ctx.db.session() as s:
+        data = mr.build(s, ctx.settings, DAILY, NOW)
+    v = values(data)
+    assert (v["queue_done"], v["queue_retried"], v["queue_dead"], v["queue_waiting"]) == (2, 2, 1, 2)
+    subject, plain, html = mr.render(data, ctx.settings)
+    assert "Work queue items completed: 2" in plain and "Work queue dead letters now: 1" in plain

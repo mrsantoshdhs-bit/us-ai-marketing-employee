@@ -589,3 +589,22 @@ def test_the_new_column_is_added_to_an_existing_database(make_ctx):
     with ctx.db.session() as s:
         assert s.execute(select(FollowUp.mail_account_id)).all() == []
         assert s.execute(select(MailAccount.id)).all() == []
+
+
+def test_a_spacing_wait_that_crosses_the_end_of_the_send_window_sends_nothing_after_it(world, monkeypatch, clock):
+    """OB-001: the window is judged before the spacing wait, so the last-moment check must judge it again after it.
+    The run starts 15 seconds before 18:00 New York; one 20-second wait later the window is closed."""
+    ctx = world
+    clock(datetime(2026, 11, 4, 22, 59, 45))  # Wednesday 17:59:45 New York
+
+    def sleep(seconds):  # the wait passes on the application's clock
+        aime.timeutil.CLOCK_OFFSET += timedelta(seconds=seconds)
+
+    monkeypatch.setattr(dv, "SLEEP", sleep)
+    monkeypatch.setattr(dv.RANDOM, "uniform", lambda low, high: high)
+    configure(ctx, jitter_enabled=True, jitter_min_seconds=10, jitter_max_seconds=20, jitter_run_budget_seconds=120)
+    fids = approved(ctx, 3)
+    followups_run(ctx)
+    states = [status_of(ctx, f) for f in fids]
+    assert [st for st, _ in states].count("sent") == 1 and len(FakeSMTP.sent) == 1, states
+    assert [st for st, _ in states].count("approved") == 2, states  # kept for the next window, never dropped

@@ -310,7 +310,12 @@ MEETING = re.compile(
     rf"|(would|i'?d|we'?d|i|we) (really )?(like|love|want|be happy|be glad|be keen) (to )?(see |get |have |book |schedule |set up )?"
     rf"(a |an )?(demo|call|meeting|chat|walkthrough|presentation|quote|proposal|trial)"
     rf"|(send|share|show) (me |us )?(a |an |the )?(demo|deck|proposal|quote|calendar invite)|(?:^|(?<=[.!?,] )|(?<=please ))call me(?! (crazy|old|if|when|never|an?\b))"
-    rf"|{_TALK}\b[^.?!\n]{{0,40}}\b{_WHEN})\b", re.I)
+    rf"|{_TALK}\b[^.?!\n]{{0,40}}\b{_WHEN}"
+    # "Can we do a call Wednesday?", "Tuesday at 10am works for me", "Please send the invite"
+    rf"|(can|could|shall|should|would|may) (we|you|i) (please )?(do|have|get|hop on|jump on|set) (a |an )?(quick |short |brief )?"
+    rf"(call|meeting|chat|demo|zoom|video call)"
+    rf"|{_WHEN}[^.?!\n]{{0,30}}\b(works|suits|is good|is fine|fits) (for )?(me|us)"
+    rf"|(send|share) (me |us )?(the |an? )?(calendar |meeting |zoom |teams )?invite)\b", re.I)
 # "not", "never", "don't", "nobody" ... up to four words before an interest phrase: "not really interested", "don't send me more info",
 # "I doubt we'd be interested". "but", "so" and the like end it ("not now but we are interested"), and "no doubt" is a yes.
 NEGATED = re.compile(r"(\bnot|\bnever(?! (got|received|saw)\b)|\bno longer|\bcannot|\bdont|\b\w+n['\u2019]t|\bwhy would|\bnobody|\bno one|\bnone|(?<!\bno )(?<!\ba )\bdoubt|\bhardly|"
