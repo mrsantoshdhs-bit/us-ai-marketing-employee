@@ -10,6 +10,11 @@ from aime.knowledge.industries import INDUSTRIES
 from aime.knowledge.services import SERVICES
 
 WIDTH, HEIGHT = 1200, 627
+# LinkedIn's mobile feed shows the card at about a third of its size (375px-wide screen: 0.31x),
+# so footer text starts large and only shrinks as far as 28px (about 9px on that screen).
+FOOTER_TOP = HEIGHT - 150
+FOOTER_NAME_SIZES = (38, 34, 30)
+FOOTER_TAGLINE_SIZES = (34, 32, 30, 28)
 PALETTES = {
     "custom_crm": ((17, 45, 78), (63, 136, 197)),
     "ai_agents": ((32, 18, 77), (124, 92, 255)),
@@ -49,6 +54,18 @@ def _wrap(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> list[st
     return lines
 
 
+def _fit(draw: ImageDraw.ImageDraw, text: str, candidates: list[str], sizes: tuple[int, ...],
+         max_width: int) -> tuple[ImageFont.FreeTypeFont | ImageFont.ImageFont, str]:
+    """Largest size at which `text` fits on one line; below the smallest size, shorten it with an ellipsis."""
+    for size in sizes:
+        font = _font(candidates, size)
+        if draw.textlength(text, font=font) <= max_width:
+            return font, text
+    while text and draw.textlength(text + "…", font=font) > max_width:
+        text = text[:-1]
+    return font, text.rstrip() + "…"
+
+
 def render_card(path: Path, title: str, service_id: str, industry_id: str, company: str,
                 tagline: str | None = None) -> Path:
     dark, accent = PALETTES.get(service_id, ((25, 25, 35), (90, 120, 200)))
@@ -61,15 +78,13 @@ def render_card(path: Path, title: str, service_id: str, industry_id: str, compa
     draw.rectangle([0, 0, 18, HEIGHT], fill=accent)
     dot = tuple(int(c * 0.55 + 255 * 0.12) for c in accent)
     for gx in range(WIDTH - 360, WIDTH - 60, 28):  # subtle dot grid
-        for gy in range(330, HEIGHT - 150, 28):
+        for gy in range(330, FOOTER_TOP - 20, 28):
             draw.ellipse([gx, gy, gx + 3, gy + 3], fill=dot)
     draw.ellipse([WIDTH - 330, -140, WIDTH + 130, 320], outline=accent, width=6)
     draw.ellipse([WIDTH - 250, -60, WIDTH + 50, 240], outline=accent, width=2)
 
     tag_font = _font(_FONT_CANDIDATES_BOLD, 24)
-    foot_font = _font(_FONT_CANDIDATES_BOLD, 24)
-    small_font = _font(_FONT_CANDIDATES, 20)
-    badge_font = _font(_FONT_CANDIDATES_BOLD, 26)
+    badge_font = _font(_FONT_CANDIDATES_BOLD, 34)
 
     tag = f"{SERVICES[service_id].name.upper()}  ·  {INDUSTRIES[industry_id].label.upper()}"
     draw.text((80, 64), tag, font=tag_font, fill=accent)
@@ -85,14 +100,16 @@ def render_card(path: Path, title: str, service_id: str, industry_id: str, compa
         draw.text((80, y), line, font=title_font, fill=(255, 255, 255))
         y += int(size * 1.27)
 
-    draw.line([(80, HEIGHT - 118), (WIDTH - 80, HEIGHT - 118)], fill=accent, width=2)
-    initials = monogram(company)
-    draw.rounded_rectangle([80, HEIGHT - 96, 80 + 64, HEIGHT - 32], radius=12, fill=accent)
-    tw = draw.textlength(initials, font=badge_font)
-    draw.text((80 + (64 - tw) / 2, HEIGHT - 82), initials, font=badge_font, fill=dark)
-    draw.text((162, HEIGHT - 90), company, font=foot_font, fill=(240, 240, 248))
+    draw.line([(80, FOOTER_TOP), (WIDTH - 80, FOOTER_TOP)], fill=accent, width=2)
+    badge, top = 84, FOOTER_TOP + 22
+    draw.rounded_rectangle([80, top, 80 + badge, top + badge], radius=14, fill=accent)
+    draw.text((80 + badge / 2, top + badge / 2), monogram(company), font=badge_font, fill=dark, anchor="mm")
+    text_x = 80 + badge + 24
+    name_font, name = _fit(draw, company, _FONT_CANDIDATES_BOLD, FOOTER_NAME_SIZES, WIDTH - 80 - text_x)
+    draw.text((text_x, top - 4), name, font=name_font, fill=(240, 240, 248))
     if tagline:
-        draw.text((162, HEIGHT - 58), tagline[:90], font=small_font, fill=(190, 196, 214))
+        line_font, line = _fit(draw, tagline, _FONT_CANDIDATES, FOOTER_TAGLINE_SIZES, WIDTH - 80 - text_x)
+        draw.text((text_x, top + 44), line, font=line_font, fill=(206, 211, 226))
     path.parent.mkdir(parents=True, exist_ok=True)
     img.save(path, "PNG", optimize=True)
     return path
