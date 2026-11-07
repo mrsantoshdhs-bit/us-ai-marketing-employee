@@ -72,6 +72,17 @@ TIME_JUMPED = ("Waiting: the PC slept or its clock changed during the send run, 
 LEFT_THE_WINDOW = "Waiting for the business-hours send window"
 
 
+def _window_open(now: datetime, cfg: dict) -> bool:
+    """A weekday, not a holiday, between the start and end of the window, in the window's own time zone."""
+    tz = ZoneInfo(cfg.get("send_window_timezone", "America/New_York"))
+    local = as_aware_utc(now).astimezone(tz)
+    if local.weekday() >= 5 or holiday_on(local.date(), cfg.get("holidays")):
+        return False
+    start = time.fromisoformat(cfg.get("send_window_start", "08:00"))
+    end = time.fromisoformat(cfg.get("send_window_end", "18:00"))
+    return start <= local.time() <= end
+
+
 class SalesInput(BaseModel):
     now: datetime | None = None
     lead_ids: list[int] | None = None
@@ -575,13 +586,23 @@ class SalesWorkflowAgent(BaseAgent[SalesInput, SalesOutput]):
         return (found["name"], found.get("title"), found.get("url")) if found else (None, None, None)
 
     def _in_send_window(self, now: datetime, cfg: dict) -> bool:
-        tz = ZoneInfo(cfg.get("send_window_timezone", "America/New_York"))
-        local = as_aware_utc(now).astimezone(tz)
-        if local.weekday() >= 5 or holiday_on(local.date(), cfg.get("holidays")):
+        """The follow-up window, and the window, time zone and holidays of every enabled target country (settings
+        section "countries"). The country windows only ever narrow sending: by default the US entry is the follow-up
+        window itself, so nothing changes until the owner saves a country window. A country window that cannot be read
+        closes the window (nothing goes out) rather than letting an email out at the wrong hour."""
+        if not _window_open(now, cfg):
             return False
-        start = time.fromisoformat(cfg.get("send_window_start", "08:00"))
-        end = time.fromisoformat(cfg.get("send_window_end", "18:00"))
-        return start <= local.time() <= end
+        try:
+            from aime import countries
+
+            entries = [c for c in countries.registry(self.settings) if c.get("enabled") and countries.cleared(c)]
+            return all(_window_open(now, {"send_window_timezone": c.get("timezone") or "America/New_York",
+                                          "send_window_start": c.get("send_window_start") or "08:00",
+                                          "send_window_end": c.get("send_window_end") or "18:00",
+                                          "holidays": c.get("holidays") or []}) for c in entries)
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            self.log.warning("Send window closed: the country send windows cannot be read (%s)", type(exc).__name__)
+            return False
 
     def _send_approved(self, session: Session, now: datetime, cfg: dict, out: SalesOutput, send: bool = True,
                        hold: str | None = None) -> None:

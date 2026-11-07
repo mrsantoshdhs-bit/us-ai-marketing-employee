@@ -608,3 +608,27 @@ def test_a_spacing_wait_that_crosses_the_end_of_the_send_window_sends_nothing_af
     states = [status_of(ctx, f) for f in fids]
     assert [st for st, _ in states].count("sent") == 1 and len(FakeSMTP.sent) == 1, states
     assert [st for st, _ in states].count("approved") == 2, states  # kept for the next window, never dropped
+
+
+def test_a_saved_country_send_window_narrows_sending_and_the_default_changes_nothing(world, clock):
+    """Settings section "countries": the US entry's window is enforced when sending. By default it is the follow-up
+    window itself, so an unsaved registry sends exactly as before; a narrower saved window holds the email."""
+    from aime import settings_store
+
+    ctx = world
+    clock(datetime(2026, 11, 4, 18, 0))  # Wednesday 13:00 New York, inside 08:00-18:00
+    with ctx.db.session() as s:
+        data = settings_store.get(ctx.settings, "countries")
+        us = next(c for c in data["countries"] if c["code"] == "US")
+        assert (us["send_window_start"], us["send_window_end"]) == ("08:00", "18:00")  # the default follows the follow-up window
+        us["send_window_start"], us["send_window_end"] = "09:00", "12:00"
+        settings_store.save(s, ctx.settings, "countries", data, "owner")
+    fids = approved(ctx, 1)
+    followups_run(ctx)
+    assert status_of(ctx, fids[0])[0] == "approved" and not FakeSMTP.sent  # 13:00 is outside the saved 09:00-12:00
+    with ctx.db.session() as s:
+        data = settings_store.get(ctx.settings, "countries")
+        next(c for c in data["countries"] if c["code"] == "US")["send_window_end"] = "14:00"
+        settings_store.save(s, ctx.settings, "countries", data, "owner")
+    followups_run(ctx)
+    assert status_of(ctx, fids[0])[0] == "sent" and len(FakeSMTP.sent) == 1
