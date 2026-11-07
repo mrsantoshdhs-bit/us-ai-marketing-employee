@@ -99,6 +99,7 @@ COUNTS_AS_SENT = ("sent", "sending", "uncertain")  # as the send limits count: a
 PAUSE_KEY = "deliverability.pause"
 CLEARED_KEY = "deliverability.cleared"
 AUTH_KEY = "deliverability.auth"
+AUTH_ERROR_RETRY = timedelta(minutes=55)  # a check that could not run is tried again at the next monitor run after this
 PAUSE_ALERT = "deliverability:paused"
 AUTH_ALERT = "deliverability:auth"
 SOURCE = "deliverability"
@@ -574,8 +575,11 @@ def monitor(session: Session, settings, now: datetime | None = None,
         state = auth_state(session)
         _, sender = sending_mailbox(session, settings)
         domain = sender.rsplit("@", 1)[-1] if "@" in sender else None
+        # a check that could not run (a DNS time-out) is tried again within the hour, not a day later: in block mode one
+        # network blip would otherwise hold sending until the next daily check
+        every = AUTH_ERROR_RETRY if state and state.get("error") else timedelta(hours=cfg["auth_refresh_hours"])
         stale = (state is None or state.get("domain") != domain or not state.get("checked_at")
-                 or now - datetime.fromisoformat(state["checked_at"]) >= timedelta(hours=cfg["auth_refresh_hours"]))
+                 or now - datetime.fromisoformat(state["checked_at"]) >= every)
         if stale:
             state = refresh_auth(session, settings, resolve, now) or state
         problem = auth_problem(state, domain, now, cfg) if state else None

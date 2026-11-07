@@ -632,3 +632,24 @@ def test_a_saved_country_send_window_narrows_sending_and_the_default_changes_not
         settings_store.save(s, ctx.settings, "countries", data, "owner")
     followups_run(ctx)
     assert status_of(ctx, fids[0])[0] == "sent" and len(FakeSMTP.sent) == 1
+
+
+def test_a_check_that_could_not_run_is_tried_again_within_the_hour_not_the_next_day(world, monkeypatch):
+    """7 Nov 2026: one DNS time-out was kept as the day's answer, so the warning (and in block mode, the hold) lasted until
+    the next daily check. A check that could not run is tried again at a monitor run about an hour later."""
+    ctx = world
+    monkeypatch.setattr(dv, "RESOLVER", dns_down)
+    with ctx.db.session() as s:
+        dv.monitor(s, ctx.settings)
+        assert dv.auth_state(s)["error"]
+    calls = []
+    monkeypatch.setattr(dv, "RESOLVER", resolver(PASSING, calls))
+    with ctx.db.session() as s:
+        dv.monitor(s, ctx.settings, now=utcnow() + timedelta(minutes=30))  # too soon: no look-up yet
+        assert calls == [] and dv.auth_state(s)["error"]
+        dv.monitor(s, ctx.settings, now=utcnow() + timedelta(minutes=60))
+        assert calls and dv.auth_state(s)["error"] is None and dv.auth_state(s)["failing"] == []
+        calls.clear()
+        dv.monitor(s, ctx.settings, now=utcnow() + timedelta(hours=3))  # a passing check keeps the daily rhythm
+        assert calls == []
+    assert open_alert(ctx, dv.AUTH_ALERT) is None
